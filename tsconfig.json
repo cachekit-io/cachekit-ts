@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "declarationMap": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "lib": ["ES2022"]
+  },
+  "ts-node": {
+    "esm": true,
+    "experimentalEsm": true
+  },
+  "compileOnSave": false,
+  "include": [],
+  "references": [
+    { "path": "./packages/cachekit" },
+    { "path": "./packages/cachekit-core-ts" }
+  ]
+}

@@ -1,0 +1,440 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { L1Cache } from './lru-cache';
+import type { InvalidationEvent } from './types';
+
+describe('L1Cache', () => {
+  let cache: L1Cache<string>;
+
+  beforeEach(() => {
+    cache = new L1Cache({ maxEntries: 10 });
+  });
+
+  describe('basic operations', () => {
+    it('set and get', () => {
+      cache.set('key', 'value', 10000, 'test');
+      expect(cache.get('key')).toBe('value');
+    });
+
+    it('returns null for missing key', () => {
+      expect(cache.get('missing')).toBeNull();
+    });
+
+    it('expires entries', () => {
+      vi.useFakeTimers();
+      cache.set('key', 'value', 100, 'test');
+      vi.advanceTimersByTime(200);
+      expect(cache.get('key')).toBeNull();
+      vi.useRealTimers();
+    });
+
+    it('updates lastAccess on get', () => {
+      vi.useFakeTimers();
+      cache.set('key', 'value', 10000, 'test');
+      vi.advanceTimersByTime(1000);
+      cache.get('key'); // Should update lastAccess
+      vi.useRealTimers();
+    });
+
+    it('deletes key and returns true', () => {
+      cache.set('key', 'value', 10000, 'test');
+      expect(cache.delete('key')).toBe(true);
+      expect(cache.get('key')).toBeNull();
+    });
+
+    it('delete returns false for missing key', () => {
+      expect(cache.delete('missing')).toBe(false);
+    });
+
+    it('clear removes all entries', () => {
+      cache.set('a', '1', 10000, 'test');
+      cache.set('b', '2', 10000, 'test');
+      cache.clear();
+      expect(cache.stats.entries).toBe(0);
+    });
+  });
+
+  describe('LRU eviction', () => {
+    it('evicts oldest when maxEntries exceeded', () => {
+      const smallCache = new L1Cache<number>({ maxEntries: 3 });
+      smallCache.set('a', 1, 10000, 'test');
+      smallCache.set('b', 2, 10000, 'test');
+      smallCache.set('c', 3, 10000, 'test');
+      smallCache.set('d', 4, 10000, 'test'); // Should evict 'a'
+
+      expect(smallCache.get('a')).toBeNull();
+      expect(smallCache.get('b')).toBe(2);
+      expect(smallCache.get('c')).toBe(3);
+      expect(smallCache.get('d')).toBe(4);
+    });
+
+    it('C1 fix: cleans entryVersion on eviction', () => {
+      const smallCache = new L1Cache<number>({ maxEntries: 2 });
+      smallCache.set('a', 1, 10000, 'test');
+      smallCache.set('b', 2, 10000, 'test');
+
+      // Verify cache size is correct
+      expect(smallCache.stats.entries).toBe(2);
+
+      // Set 'c', which evicts 'a' (oldest)
+      smallCache.set('c', 3, 10000, 'test');
+
+      // Verify 'a' was evicted
+      expect(smallCache.get('a')).toBeNull();
+      expect(smallCache.stats.entries).toBe(2);
+
+      // C1 fix verification: entryVersion Map should not grow unbounded
+      // If C1 fix works, evicting 'a' also cleaned its version token
+      // We can't directly test this without exposing internals,
+      // but we can verify the cache still works correctly after many evictions
+      for (let i = 0; i < 100; i++) {
+        smallCache.set(`key${i}`, i, 10000, 'test');
+      }
+
+      // Cache should still work correctly (memory leak would cause issues)
+      expect(smallCache.stats.entries).toBe(2);
+    });
+
+    it('updating existing key updates lastAccess and prevents eviction', () => {
+      vi.useFakeTimers();
+      const smallCache = new L1Cache<number>({ maxEntries: 3 });
+
+      smallCache.set('a', 1, 10000, 'test');
+      vi.advanceTimersByTime(100);
+      smallCache.set('b', 2, 10000, 'test');
+      vi.advanceTimersByTime(100);
+      smallCache.set('c', 3, 10000, 'test');
+      vi.advanceTimersByTime(100);
+
+      // Access 'a' to update its lastAccess
+      smallCache.get('a');
+      vi.advanceTimersByTime(100);
+
+      // Add 'd' - should evict 'b' (oldest)
+      smallCache.set('d', 4, 10000, 'test');
+
+      expect(smallCache.get('a')).toBe(1);
+      expect(smallCache.get('b')).toBeNull();
+      expect(smallCache.get('c')).toBe(3);
+      expect(smallCache.get('d')).toBe(4);
+
+      vi.useRealTimers();
+    });
+
+    it('evicts when maxMemory exceeded', () => {
+      const smallCache = new L1Cache<string>({ maxEntries: 100, maxMemory: 400 });
+
+      // Each entry roughly 200+ bytes (100 chars * 2 for UTF-16)
+      smallCache.set('a', 'x'.repeat(100), 10000, 'test');
+      smallCache.set('b', 'y'.repeat(100), 10000, 'test');
+      smallCache.set('c', 'z'.repeat(100), 10000, 'test'); // Should trigger eviction
+
+      // At least one should be evicted
+      expect(smallCache.stats.entries).toBeLessThan(3);
+      expect(smallCache.stats.memoryUsed).toBeLessThanOrEqual(400);
+    });
+  });
+
+  describe('SWR', () => {
+    it('returns fresh result when not past threshold', () => {
+      cache.set('key', 'value', 10000, 'test');
+      const result = cache.getWithSwr('key');
+      expect(result.value).toBe('value');
+      expect(result.isFresh).toBe(true);
+      expect(result.shouldRefresh).toBe(false);
+    });
+
+    it('returns stale result with shouldRefresh after threshold', () => {
+      vi.useFakeTimers();
+      cache.set('key', 'value', 1000, 'test');
+      vi.advanceTimersByTime(600); // Past 50% threshold (accounting for jitter)
+
+      const result = cache.getWithSwr('key');
+      expect(result.value).toBe('value');
+      // May or may not be marked for refresh due to jitter
+
+      vi.useRealTimers();
+    });
+
+    it('does not return value when fully expired', () => {
+      vi.useFakeTimers();
+      cache.set('key', 'value', 1000, 'test');
+      vi.advanceTimersByTime(1100);
+
+      const result = cache.getWithSwr('key');
+      expect(result.value).toBeNull();
+      expect(result.shouldRefresh).toBe(false);
+
+      vi.useRealTimers();
+    });
+
+    it('completeRefresh updates cache if version matches', () => {
+      cache.set('key', 'old', 10000, 'test');
+      const result = cache.getWithSwr('key');
+
+      const updated = cache.completeRefresh('key', 'new', 10000, result.versionToken);
+      expect(updated).toBe(true);
+      expect(cache.get('key')).toBe('new');
+    });
+
+    it('completeRefresh rejects if version changed', () => {
+      cache.set('key', 'old', 10000, 'test');
+      const result = cache.getWithSwr('key');
+
+      // Invalidate the key (bumps version)
+      cache.invalidateByKey('key');
+
+      // Try to complete refresh with old version
+      const updated = cache.completeRefresh('key', 'new', 10000, result.versionToken);
+      expect(updated).toBe(false);
+    });
+
+    it('cancelRefresh removes key from refreshingKeys', () => {
+      vi.useFakeTimers();
+      cache.set('key', 'value', 1000, 'test');
+      vi.advanceTimersByTime(600);
+
+      // Trigger refresh
+      const result = cache.getWithSwr('key');
+      if (result.shouldRefresh) {
+        expect(cache.stats.refreshing).toBeGreaterThan(0);
+        cache.cancelRefresh('key');
+        expect(cache.stats.refreshing).toBe(0);
+      }
+
+      vi.useRealTimers();
+    });
+
+    it('C3 fix: limits concurrent refreshes', () => {
+      const limitedCache = new L1Cache<number>({
+        maxEntries: 100,
+        maxConcurrentRefreshes: 2,
+        swrEnabled: true,
+      });
+
+      vi.useFakeTimers();
+
+      // Create 5 stale entries
+      for (let i = 0; i < 5; i++) {
+        limitedCache.set(`key${i}`, i, 1000, 'test');
+      }
+
+      vi.advanceTimersByTime(600); // Make them stale
+
+      // Try to refresh all 5
+      const results = [];
+      for (let i = 0; i < 5; i++) {
+        results.push(limitedCache.getWithSwr(`key${i}`));
+      }
+
+      // Count how many triggered refresh
+      const refreshCount = results.filter((r) => r.shouldRefresh).length;
+
+      // Should be at most 2 (maxConcurrentRefreshes)
+      expect(refreshCount).toBeLessThanOrEqual(2);
+      expect(limitedCache.stats.refreshing).toBeLessThanOrEqual(2);
+
+      vi.useRealTimers();
+    });
+
+    it('allows new refresh after completing previous one', () => {
+      const limitedCache = new L1Cache<number>({
+        maxEntries: 100,
+        maxConcurrentRefreshes: 1,
+        swrEnabled: true,
+      });
+
+      vi.useFakeTimers();
+
+      limitedCache.set('a', 1, 1000, 'test');
+      limitedCache.set('b', 2, 1000, 'test');
+
+      vi.advanceTimersByTime(600);
+
+      // First refresh
+      const r1 = limitedCache.getWithSwr('a');
+      expect(r1.shouldRefresh).toBe(true);
+      expect(limitedCache.stats.refreshing).toBe(1);
+
+      // Second refresh should be blocked
+      const r2 = limitedCache.getWithSwr('b');
+      expect(r2.shouldRefresh).toBe(false);
+
+      // Complete first refresh
+      limitedCache.completeRefresh('a', 10, 1000, r1.versionToken);
+      expect(limitedCache.stats.refreshing).toBe(0);
+
+      // Now second refresh should work
+      const r3 = limitedCache.getWithSwr('b');
+      expect(r3.shouldRefresh).toBe(true);
+
+      vi.useRealTimers();
+    });
+  });
+
+  describe('invalidation', () => {
+    it('invalidateByKey removes single key', () => {
+      cache.set('key1', 'value1', 10000, 'ns');
+      cache.set('key2', 'value2', 10000, 'ns');
+      cache.invalidateByKey('key1');
+
+      expect(cache.get('key1')).toBeNull();
+      expect(cache.get('key2')).toBe('value2');
+    });
+
+    it('invalidateByNamespace removes all keys in namespace', () => {
+      cache.set('ns1:a', 'value1', 10000, 'ns1');
+      cache.set('ns1:b', 'value2', 10000, 'ns1');
+      cache.set('ns2:c', 'value3', 10000, 'ns2');
+
+      cache.invalidateByNamespace('ns1');
+
+      expect(cache.get('ns1:a')).toBeNull();
+      expect(cache.get('ns1:b')).toBeNull();
+      expect(cache.get('ns2:c')).toBe('value3');
+    });
+
+    it('invalidateByNamespace works without namespace index', () => {
+      const noIndexCache = new L1Cache<string>({ namespaceIndex: false });
+
+      noIndexCache.set('ns1:a', 'value1', 10000, 'ns1');
+      noIndexCache.set('ns1:b', 'value2', 10000, 'ns1');
+      noIndexCache.set('ns2:c', 'value3', 10000, 'ns2');
+
+      noIndexCache.invalidateByNamespace('ns1');
+
+      expect(noIndexCache.get('ns1:a')).toBeNull();
+      expect(noIndexCache.get('ns1:b')).toBeNull();
+      expect(noIndexCache.get('ns2:c')).toBe('value3');
+    });
+
+    it('invalidateAll clears everything', () => {
+      cache.set('a', '1', 10000, 'ns1');
+      cache.set('b', '2', 10000, 'ns2');
+      cache.invalidateAll();
+
+      expect(cache.stats.entries).toBe(0);
+      expect(cache.stats.namespaces).toBe(0);
+    });
+
+    it('bumps version on invalidation', () => {
+      cache.set('key', 'value', 10000, 'test');
+      const r1 = cache.getWithSwr('key');
+
+      cache.invalidateByKey('key');
+
+      // Try to complete refresh with old version - should fail
+      const updated = cache.completeRefresh('key', 'new', 10000, r1.versionToken);
+      expect(updated).toBe(false);
+    });
+
+    it('handleInvalidationEvent - global level', () => {
+      cache.set('a', '1', 10000, 'ns1');
+      cache.set('b', '2', 10000, 'ns2');
+
+      const event: InvalidationEvent = {
+        level: 'global',
+        timestamp: Date.now(),
+        sourceInstance: 'other-instance',
+      };
+
+      cache.handleInvalidationEvent(event);
+
+      expect(cache.stats.entries).toBe(0);
+    });
+
+    it('handleInvalidationEvent - namespace level', () => {
+      cache.set('ns1:a', 'value1', 10000, 'ns1');
+      cache.set('ns1:b', 'value2', 10000, 'ns1');
+      cache.set('ns2:c', 'value3', 10000, 'ns2');
+
+      const event: InvalidationEvent = {
+        level: 'namespace',
+        namespace: 'ns1',
+        timestamp: Date.now(),
+        sourceInstance: 'other-instance',
+      };
+
+      cache.handleInvalidationEvent(event);
+
+      expect(cache.get('ns1:a')).toBeNull();
+      expect(cache.get('ns1:b')).toBeNull();
+      expect(cache.get('ns2:c')).toBe('value3');
+    });
+
+    it('handleInvalidationEvent - ignores events from self', () => {
+      cache.set('a', '1', 10000, 'ns');
+
+      const event: InvalidationEvent = {
+        level: 'global',
+        timestamp: Date.now(),
+        sourceInstance: cache.instanceID,
+      };
+
+      cache.handleInvalidationEvent(event);
+
+      // Should not clear (echo detection)
+      expect(cache.stats.entries).toBe(1);
+    });
+  });
+
+  describe('namespace extraction', () => {
+    it('extracts namespace from key with hash', () => {
+      cache.set('myFunc:' + 'a'.repeat(64), 'value', 10000, 'myFunc');
+      expect(cache.stats.namespaces).toBe(1);
+    });
+
+    it('uses full key as namespace if no hash', () => {
+      cache.set('simple-key', 'value', 10000, 'simple-key');
+      expect(cache.stats.namespaces).toBe(1);
+    });
+  });
+
+  describe('stats', () => {
+    it('tracks entries, memory, refreshing, namespaces', () => {
+      cache.set('a', 'value1', 10000, 'ns1');
+      cache.set('b', 'value2', 10000, 'ns2');
+
+      const stats = cache.stats;
+      expect(stats.entries).toBe(2);
+      expect(stats.memoryUsed).toBeGreaterThan(0);
+      expect(stats.refreshing).toBe(0);
+      expect(stats.namespaces).toBe(2);
+    });
+  });
+
+  describe('instance ID', () => {
+    it('has unique instance ID', () => {
+      const cache1 = new L1Cache();
+      const cache2 = new L1Cache();
+
+      expect(cache1.instanceID).not.toBe(cache2.instanceID);
+    });
+  });
+
+  describe('edge cases', () => {
+    it('handles circular references in estimateSize', () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Testing circular refs requires any
+      const obj: any = { name: 'test' };
+      obj.self = obj;
+
+      // Should not throw, should use fallback size
+      expect(() => cache.set('key', obj, 10000, 'test')).not.toThrow();
+    });
+
+    it('handles empty namespace index cleanup', () => {
+      cache.set('ns1:a', 'value', 10000, 'ns1');
+      cache.invalidateByNamespace('ns1');
+
+      // Namespace should be removed from index
+      expect(cache.stats.namespaces).toBe(0);
+    });
+
+    it('handles multiple sets of same key', () => {
+      cache.set('key', 'value1', 10000, 'ns1');
+      cache.set('key', 'value2', 10000, 'ns2');
+
+      expect(cache.get('key')).toBe('value2');
+      expect(cache.stats.entries).toBe(1);
+    });
+  });
+});

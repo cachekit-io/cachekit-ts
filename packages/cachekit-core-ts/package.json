@@ -1,0 +1,64 @@
+{
+  "name": "@cachekit-io/cachekit-core-ts",
+  "version": "0.1.0",
+  "description": "Native Rust bindings for CacheKit TypeScript SDK (serialization, compression, encryption)",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "napi": {
+    "name": "cachekit-core-ts",
+    "triples": {
+      "defaults": false,
+      "additional": [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc"
+      ]
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "*.node"
+  ],
+  "scripts": {
+    "artifacts": "napi artifacts",
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "prepublishOnly": "napi prepublish -t npm",
+    "universal": "napi universal",
+    "version": "napi version",
+    "clean": "rm -rf target/ *.node"
+  },
+  "keywords": [
+    "napi",
+    "rust",
+    "native",
+    "bindings",
+    "serialization",
+    "compression",
+    "encryption"
+  ],
+  "author": "CacheKit",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cachekit-io/cachekit-ts.git",
+    "directory": "packages/cachekit-core-ts"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0",
+    "@types/node": "^20.16.0"
+  },
+  "optionalDependencies": {
+    "@cachekit-io/cachekit-core-ts-linux-x64-gnu": "0.1.0",
+    "@cachekit-io/cachekit-core-ts-linux-arm64-gnu": "0.1.0",
+    "@cachekit-io/cachekit-core-ts-darwin-x64": "0.1.0",
+    "@cachekit-io/cachekit-core-ts-darwin-arm64": "0.1.0",
+    "@cachekit-io/cachekit-core-ts-win32-x64-msvc": "0.1.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
