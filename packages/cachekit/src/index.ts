@@ -1,6 +1,8 @@
 // ============ Main API ============
 export { createCache } from './cache.js';
 export { redis } from './backends/redis.js';
+export { cachekitio, cachekitioWithLocking, cachekitioWithTTL, cachekitioFull } from './backends/cachekitio-factory.js';
+export { CachekitIOCore } from './backends/cachekitio.js';
 
 // ============ Types ============
 export type {
@@ -14,7 +16,9 @@ export type {
   InvalidationConfig,
 } from './types/cache.js';
 
-export type { Backend, RedisBackendConfig } from './backends/types.js';
+export type { Backend, RedisBackendConfig, CachekitIOBackendConfig, LockableBackend, TTLBackend, L1Metrics } from './backends/types.js';
+
+export type { ErrorClassification } from './backends/error-classifier.js';
 
 export type {
   L1Config,

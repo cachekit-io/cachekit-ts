@@ -80,3 +80,49 @@ export interface RedisBackendConfig {
   /** Key prefix for namespacing */
   keyPrefix?: string;
 }
+
+/**
+ * Configuration for CachekitIO (SaaS HTTP) backend.
+ *
+ * Connects to api.cachekit.io (or custom endpoint) via HTTPS.
+ *
+ * @example
+ * ```typescript
+ * const backend = cachekitio({
+ *   apiKey: process.env.CACHEKIT_API_KEY!,
+ *   apiUrl: 'https://api.cachekit.io',
+ *   defaultTtl: 3600,
+ * });
+ * ```
+ */
+export interface CachekitIOBackendConfig {
+  /** API key for authentication (required, e.g., "ck_live_...") */
+  apiKey: string;
+  /** API endpoint URL (default: "https://api.cachekit.io"). Must be HTTPS. */
+  apiUrl?: string;
+  /** Default TTL in seconds for set operations without explicit TTL */
+  defaultTtl?: number;
+  /** Request timeout in milliseconds (default: 30000) */
+  timeout?: number;
+  /** Allow non-standard API hostnames (custom proxies, etc.) */
+  allowCustomHost?: boolean;
+  /** Provider function for L1 cache metrics (used in request headers) */
+  metricsProvider?: () => L1Metrics | null;
+}
+
+export interface L1Metrics {
+  l1Hits: number;
+  l2Hits: number;
+  misses: number;
+  l1Enabled: boolean;
+}
+
+export interface LockableBackend extends Backend {
+  acquireLock(key: string, timeoutMs?: number): Promise<string | null>;
+  releaseLock(key: string, lockId: string): Promise<boolean>;
+}
+
+export interface TTLBackend extends Backend {
+  getTTL(key: string): Promise<number | null>;
+  refreshTTL(key: string, ttl: number): Promise<boolean>;
+}

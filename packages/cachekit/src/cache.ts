@@ -1,6 +1,7 @@
 import type { CacheOptions, SetOptions, WrapOptions, SecureCache, InvalidationConfig } from './types/cache.js';
-import type { Backend, RedisBackendConfig } from './backends/types.js';
+import type { Backend, RedisBackendConfig, CachekitIOBackendConfig } from './backends/types.js';
 import { redis } from './backends/redis.js';
+import { cachekitio } from './backends/cachekitio-factory.js';
 import { L1Cache } from './l1/lru-cache.js';
 import { ReliabilityExecutor } from './reliability/executor.js';
 import { BackgroundRefreshManager } from './cache/background-refresh.js';
@@ -30,6 +31,8 @@ class CacheImpl implements SecureCache {
     // Initialize backend
     if ('get' in options.backend) {
       this.backend = options.backend;
+    } else if ('apiKey' in options.backend) {
+      this.backend = cachekitio(options.backend as CachekitIOBackendConfig);
     } else {
       this.backend = redis(options.backend as RedisBackendConfig);
     }
