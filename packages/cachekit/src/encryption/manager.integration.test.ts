@@ -9,7 +9,7 @@
  * Note: These tests are integration tests because they exercise the real native module.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { EncryptionManager } from './manager.js';
 import { ConfigurationError, EncryptionError, NonceExhaustedError } from '../errors.js';
 
