@@ -19,8 +19,6 @@ jobs:
 
       - name: Install pnpm
         uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
-        with:
-          version: 9
 
       - name: Install dependencies
         run: pnpm install
@@ -49,8 +47,6 @@ jobs:
 
       - name: Install pnpm
         uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
-        with:
-          version: 9
 
       - name: Install dependencies
         run: pnpm install
@@ -87,8 +83,6 @@ jobs:
 
       - name: Install pnpm
         uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
-        with:
-          version: 9
 
       - name: Install dependencies
         run: pnpm install
@@ -114,8 +108,6 @@ jobs:
 
       - name: Install pnpm
         uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
-        with:
-          version: 9
 
       - name: Install dependencies
         run: pnpm install
