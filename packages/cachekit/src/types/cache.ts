@@ -1,4 +1,4 @@
-import type { Backend, RedisBackendConfig } from '../backends/types.js';
+import type { Backend, RedisBackendConfig, CachekitIOBackendConfig } from '../backends/types.js';
 import type { L1Config } from '../l1/types.js';
 import type { CircuitBreakerConfig } from '../reliability/circuit-breaker.js';
 import type { RetryConfig } from '../reliability/retry.js';
@@ -64,7 +64,7 @@ export interface ReliabilityConfig {
  */
 export interface CacheOptions {
   /** Backend configuration or instance */
-  backend: Backend | RedisBackendConfig;
+  backend: Backend | RedisBackendConfig | CachekitIOBackendConfig;
 
   /** Default TTL in seconds for cache entries (default: 3600) */
   defaultTtl?: number;

@@ -35,7 +35,7 @@ describe('Error types', () => {
 
   it('supports cause chain', () => {
     const cause = new Error('root cause');
-    const err = new BackendError('connection failed', { cause });
+    const err = new BackendError('connection failed', 'permanent', { cause });
     expect(err.cause).toBe(cause);
   });
 

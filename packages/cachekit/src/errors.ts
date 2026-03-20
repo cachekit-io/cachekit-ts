@@ -51,9 +51,15 @@ export class IntegrityError extends CachekitError {
  * Examples: Redis connection error, network timeout.
  */
 export class BackendError extends CachekitError {
-  constructor(message: string, options?: ErrorOptions) {
+  readonly classification: import('./backends/error-classifier.js').ErrorClassification;
+  constructor(
+    message: string,
+    classification: import('./backends/error-classifier.js').ErrorClassification = 'permanent',
+    options?: ErrorOptions,
+  ) {
     super(message, options);
     this.name = 'BackendError';
+    this.classification = classification;
   }
 }
 

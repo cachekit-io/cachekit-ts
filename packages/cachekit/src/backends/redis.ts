@@ -148,7 +148,7 @@ export class RedisBackend implements Backend {
       if (error.message.includes('ETIMEDOUT') || error.message.includes('timeout')) {
         return new TimeoutError(`Redis ${operation} timed out: ${error.message}`, { cause: error });
       }
-      return new BackendError(`Redis ${operation} failed: ${error.message}`, { cause: error });
+      return new BackendError(`Redis ${operation} failed: ${error.message}`, 'transient', { cause: error });
     }
     return new BackendError(`Redis ${operation} failed: Unknown error`);
   }
