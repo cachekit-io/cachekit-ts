@@ -2,6 +2,16 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import Redis from 'ioredis';
 import { redis } from '../../src/backends/redis.js';
 import { RedisContainer, type StartedRedisContainer } from '@testcontainers/redis';
+import { execSync } from 'node:child_process';
+
+// Skip if Docker is not available (macOS CI runners, etc.)
+let dockerAvailable = false;
+try {
+  execSync('docker info', { stdio: 'ignore', timeout: 5000 });
+  dockerAvailable = true;
+} catch {
+  dockerAvailable = false;
+}
 
 /**
  * Redis Integration Tests using Testcontainers
@@ -9,7 +19,7 @@ import { RedisContainer, type StartedRedisContainer } from '@testcontainers/redi
  * These tests spin up a real Redis instance in Docker, similar to pytest-redis.
  * Requires Docker to be running.
  */
-describe('RedisBackend Integration (Testcontainers)', () => {
+describe.skipIf(!dockerAvailable)('RedisBackend Integration (Testcontainers)', () => {
   let container: StartedRedisContainer;
   let client: Redis;
   let backend: ReturnType<typeof redis>;
