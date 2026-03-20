@@ -4,7 +4,7 @@ import type { SecureCache } from '../../src/types/cache';
 
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379';
 
-describe.skipIf(!process.env.CI && !process.env.REDIS_URL)('Cache E2E Integration', () => {
+describe.skipIf(!process.env.REDIS_URL)('Cache E2E Integration', () => {
   let cache: SecureCache;
 
   beforeAll(() => {
