@@ -4,11 +4,13 @@ import { redis } from '../../src/backends/redis.js';
 import { RedisContainer, type StartedRedisContainer } from '@testcontainers/redis';
 import { execSync } from 'node:child_process';
 
-// Skip if Docker is not available (macOS CI runners, etc.)
+// Skip if Docker is not available or on Windows (Testcontainers volume mount issues)
 let dockerAvailable = false;
 try {
-  execSync('docker info', { stdio: 'ignore', timeout: 5000 });
-  dockerAvailable = true;
+  if (process.platform !== 'win32') {
+    execSync('docker info', { stdio: 'ignore', timeout: 5000 });
+    dockerAvailable = true;
+  }
 } catch {
   dockerAvailable = false;
 }
