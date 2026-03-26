@@ -14,21 +14,21 @@ function isPrivateIp(hostname: string): boolean {
   if (bare.includes(':')) {
     const lower = bare.toLowerCase();
     if (lower === '::1') return true;
-    if (lower.startsWith('fe80:')) return true;                    // Link-local
+    if (lower.startsWith('fe80:')) return true; // Link-local
     if (lower.startsWith('fc') || lower.startsWith('fd')) return true; // Unique local fc00::/7
-    if (lower.startsWith('::ffff:')) return true;                  // IPv4-mapped
+    if (lower.startsWith('::ffff:')) return true; // IPv4-mapped
     return false;
   }
 
   // IPv4 standard dotted-decimal (validated by isIP)
   if (isIP(hostname) === 4) {
     const nums = hostname.split('.').map(Number);
-    if (nums[0] === 127) return true;                                    // 127.0.0.0/8
-    if (nums[0] === 10) return true;                                     // 10.0.0.0/8
+    if (nums[0] === 127) return true; // 127.0.0.0/8
+    if (nums[0] === 10) return true; // 10.0.0.0/8
     if (nums[0] === 172 && nums[1] >= 16 && nums[1] <= 31) return true; // 172.16.0.0/12
-    if (nums[0] === 192 && nums[1] === 168) return true;                // 192.168.0.0/16
-    if (nums[0] === 169 && nums[1] === 254) return true;                // 169.254.0.0/16
-    if (nums[0] === 0) return true;                                      // 0.0.0.0/8
+    if (nums[0] === 192 && nums[1] === 168) return true; // 192.168.0.0/16
+    if (nums[0] === 169 && nums[1] === 254) return true; // 169.254.0.0/16
+    if (nums[0] === 0) return true; // 0.0.0.0/8
     return false;
   }
 

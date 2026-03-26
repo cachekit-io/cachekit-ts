@@ -155,12 +155,7 @@ export class MessagePackSerializer implements Serializer {
    */
   encode<T>(value: T): Uint8Array {
     // Normalize for deterministic output (also checks depth and collection size)
-    const normalized = normalize(
-      value,
-      0,
-      this.config.maxDepth,
-      this.config.maxCollectionSize
-    );
+    const normalized = normalize(value, 0, this.config.maxDepth, this.config.maxCollectionSize);
 
     // Encode to MessagePack
     const encoded = encode(normalized);
@@ -180,7 +175,9 @@ export class MessagePackSerializer implements Serializer {
    */
   private validateDepth(value: unknown, depth: number): void {
     if (depth > this.config.maxDepth) {
-      throw new SerializationError(`Deserialized object exceeds max depth of ${this.config.maxDepth}`);
+      throw new SerializationError(
+        `Deserialized object exceeds max depth of ${this.config.maxDepth}`
+      );
     }
 
     if (Array.isArray(value)) {

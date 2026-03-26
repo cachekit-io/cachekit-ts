@@ -8,7 +8,9 @@ vi.mock('prom-client', () => ({
   },
   Histogram: class MockHistogram {
     observe() {}
-    startTimer() { return () => 0; }
+    startTimer() {
+      return () => 0;
+    }
   },
   Gauge: class MockGauge {
     set() {}

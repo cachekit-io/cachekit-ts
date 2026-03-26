@@ -324,12 +324,17 @@ export class NoopMetrics implements MetricsCollector {
   async recordHit(): Promise<void> {}
   async recordMiss(): Promise<void> {}
   async recordError(): Promise<void> {}
-  async startTimer(): Promise<() => void> { return () => {}; }
+  async startTimer(): Promise<() => void> {
+    return () => {};
+  }
   async updateL1Stats(): Promise<void> {}
   async updateCircuitBreakerState(): Promise<void> {}
 }
 
 /** Create metrics instance based on configuration */
-export function createMetrics(enabled: boolean, config?: MetricsConfig): CacheMetrics | NoopMetrics {
+export function createMetrics(
+  enabled: boolean,
+  config?: MetricsConfig
+): CacheMetrics | NoopMetrics {
   return enabled ? new CacheMetrics(config) : new NoopMetrics();
 }

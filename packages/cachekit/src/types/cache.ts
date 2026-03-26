@@ -155,7 +155,9 @@ export interface Cache {
    * const getUser = cachedUser((id) => db.users.find(id));
    * ```
    */
-  with(options: WrapOptions): <TArgs extends unknown[], TResult>(
+  with(
+    options: WrapOptions
+  ): <TArgs extends unknown[], TResult>(
     fn: (...args: TArgs) => Promise<TResult>
   ) => (...args: TArgs) => Promise<TResult>;
 

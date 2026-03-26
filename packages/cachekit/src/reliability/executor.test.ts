@@ -44,17 +44,18 @@ describe('ReliabilityExecutor', () => {
 
     it('should return fallback on failure with degradation enabled', async () => {
       const executor = new ReliabilityExecutor({ degradation: true });
-      const result = await executor.execute(
-        async () => { throw new Error('fail'); },
-        'fallback'
-      );
+      const result = await executor.execute(async () => {
+        throw new Error('fail');
+      }, 'fallback');
       expect(result).toBe('fallback');
     });
 
     it('should throw on failure with degradation disabled', async () => {
       const executor = new ReliabilityExecutor({ degradation: false });
       await expect(
-        executor.execute(async () => { throw new Error('fail'); }, 'fallback')
+        executor.execute(async () => {
+          throw new Error('fail');
+        }, 'fallback')
       ).rejects.toThrow('fail');
     });
 
@@ -84,7 +85,9 @@ describe('ReliabilityExecutor', () => {
       // Fail twice to open circuit
       for (let i = 0; i < 2; i++) {
         try {
-          await executor.execute(async () => { throw new Error('fail'); }, null);
+          await executor.execute(async () => {
+            throw new Error('fail');
+          }, null);
         } catch {
           // expected
         }
@@ -93,9 +96,9 @@ describe('ReliabilityExecutor', () => {
       expect(executor.getCircuitBreakerState()).toBe('open');
 
       // Next call should fail fast with CircuitBreakerOpenError
-      await expect(
-        executor.execute(async () => 'success', null)
-      ).rejects.toThrow(CircuitBreakerOpenError);
+      await expect(executor.execute(async () => 'success', null)).rejects.toThrow(
+        CircuitBreakerOpenError
+      );
     });
 
     it('should combine retry and circuit breaker', async () => {
@@ -124,7 +127,9 @@ describe('ReliabilityExecutor', () => {
       });
 
       // Trigger circuit breaker open
-      await executor.execute(async () => { throw new Error('fail'); }, null);
+      await executor.execute(async () => {
+        throw new Error('fail');
+      }, null);
       expect(executor.getCircuitBreakerState()).toBe('open');
 
       // Should degrade to fallback
@@ -142,7 +147,9 @@ describe('ReliabilityExecutor', () => {
 
       // Open circuit
       try {
-        await executor.execute(async () => { throw new Error('fail'); }, null);
+        await executor.execute(async () => {
+          throw new Error('fail');
+        }, null);
       } catch {
         // expected
       }
@@ -162,17 +169,18 @@ describe('ReliabilityExecutor', () => {
   describe('degradation defaults', () => {
     it('should enable degradation by default', async () => {
       const executor = new ReliabilityExecutor({});
-      const result = await executor.execute(
-        async () => { throw new Error('fail'); },
-        'fallback'
-      );
+      const result = await executor.execute(async () => {
+        throw new Error('fail');
+      }, 'fallback');
       expect(result).toBe('fallback');
     });
 
     it('should respect explicit degradation: false', async () => {
       const executor = new ReliabilityExecutor({ degradation: false });
       await expect(
-        executor.execute(async () => { throw new Error('fail'); }, 'fallback')
+        executor.execute(async () => {
+          throw new Error('fail');
+        }, 'fallback')
       ).rejects.toThrow('fail');
     });
   });

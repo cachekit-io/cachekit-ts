@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { classifyHttpError, classifyNetworkError, type ErrorClassification } from './error-classifier.js';
+import {
+  classifyHttpError,
+  classifyNetworkError,
+  type ErrorClassification,
+} from './error-classifier.js';
 
 describe('Error Classifier', () => {
   const ERROR_MAP: Record<number, ErrorClassification> = {

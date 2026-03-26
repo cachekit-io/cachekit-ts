@@ -43,7 +43,14 @@ describe('BackgroundRefreshManager', () => {
       });
       const computeFn = vi.fn().mockReturnValue(computePromise);
 
-      manager.scheduleRefresh('key1', computeFn, { ttl: 60, namespace: 'test' }, 0, null, persistToL2);
+      manager.scheduleRefresh(
+        'key1',
+        computeFn,
+        { ttl: 60, namespace: 'test' },
+        0,
+        null,
+        persistToL2
+      );
 
       // Key should be tracked while computing
       expect(manager.isRefreshing('key1')).toBe(true);
@@ -112,7 +119,14 @@ describe('BackgroundRefreshManager', () => {
       const computeFn = vi.fn().mockResolvedValue('value');
 
       manager.close();
-      manager.scheduleRefresh('key1', computeFn, { ttl: 60, namespace: 'test' }, 0, null, persistToL2);
+      manager.scheduleRefresh(
+        'key1',
+        computeFn,
+        { ttl: 60, namespace: 'test' },
+        0,
+        null,
+        persistToL2
+      );
 
       // Give it a tick to potentially execute
       await new Promise((r) => setTimeout(r, 10));
@@ -124,7 +138,14 @@ describe('BackgroundRefreshManager', () => {
     it('should clean up tracking even after error', async () => {
       const computeFn = vi.fn().mockRejectedValue(new Error('fail'));
 
-      manager.scheduleRefresh('key1', computeFn, { ttl: 60, namespace: 'test' }, 0, null, persistToL2);
+      manager.scheduleRefresh(
+        'key1',
+        computeFn,
+        { ttl: 60, namespace: 'test' },
+        0,
+        null,
+        persistToL2
+      );
 
       await vi.waitFor(() => {
         expect(manager.isRefreshing('key1')).toBe(false);
@@ -142,7 +163,14 @@ describe('BackgroundRefreshManager', () => {
     it('should clear all refreshing keys', async () => {
       // Start a long-running refresh
       const computeFn = vi.fn().mockReturnValue(new Promise(() => {})); // Never resolves
-      manager.scheduleRefresh('key1', computeFn, { ttl: 60, namespace: 'test' }, 0, null, persistToL2);
+      manager.scheduleRefresh(
+        'key1',
+        computeFn,
+        { ttl: 60, namespace: 'test' },
+        0,
+        null,
+        persistToL2
+      );
 
       expect(manager.refreshingCount).toBe(1);
 
@@ -168,7 +196,14 @@ describe('BackgroundRefreshManager', () => {
     it('should work without L1 cache', async () => {
       const computeFn = vi.fn().mockResolvedValue('value');
 
-      manager.scheduleRefresh('key1', computeFn, { ttl: 60, namespace: 'test' }, 0, null, persistToL2);
+      manager.scheduleRefresh(
+        'key1',
+        computeFn,
+        { ttl: 60, namespace: 'test' },
+        0,
+        null,
+        persistToL2
+      );
 
       await vi.waitFor(() => {
         expect(persistToL2).toHaveBeenCalled();

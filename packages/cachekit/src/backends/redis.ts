@@ -47,7 +47,10 @@ export class RedisBackend implements Backend {
       commandTimeout: this.config.commandTimeout,
       retryStrategy: (times: number) => {
         // Exponential backoff: 100ms, 200ms, 400ms, ... up to 30s
-        const delay = Math.min(REDIS_RETRY_BASE_DELAY * Math.pow(2, times - 1), REDIS_RETRY_MAX_DELAY);
+        const delay = Math.min(
+          REDIS_RETRY_BASE_DELAY * Math.pow(2, times - 1),
+          REDIS_RETRY_MAX_DELAY
+        );
         return delay;
       },
       maxRetriesPerRequest: DEFAULT_REDIS_MAX_RETRIES,
@@ -148,7 +151,9 @@ export class RedisBackend implements Backend {
       if (error.message.includes('ETIMEDOUT') || error.message.includes('timeout')) {
         return new TimeoutError(`Redis ${operation} timed out: ${error.message}`, { cause: error });
       }
-      return new BackendError(`Redis ${operation} failed: ${error.message}`, 'transient', { cause: error });
+      return new BackendError(`Redis ${operation} failed: ${error.message}`, 'transient', {
+        cause: error,
+      });
     }
     return new BackendError(`Redis ${operation} failed: Unknown error`);
   }

@@ -13,8 +13,16 @@ interface NativeBindings {
   // TenantKeys pattern (recommended - keys stay in Rust memory)
   TenantKeys: new () => NativeTenantKeys;
   deriveTenantKeys(masterKey: Uint8Array, tenantId: string): NativeTenantKeys;
-  encryptWithTenantKeys(plaintext: Uint8Array, aad: Uint8Array, tenantKeys: NativeTenantKeys): Uint8Array;
-  decryptWithTenantKeys(ciphertext: Uint8Array, aad: Uint8Array, tenantKeys: NativeTenantKeys): Uint8Array;
+  encryptWithTenantKeys(
+    plaintext: Uint8Array,
+    aad: Uint8Array,
+    tenantKeys: NativeTenantKeys
+  ): Uint8Array;
+  decryptWithTenantKeys(
+    ciphertext: Uint8Array,
+    aad: Uint8Array,
+    tenantKeys: NativeTenantKeys
+  ): Uint8Array;
 }
 
 /**
@@ -124,16 +132,17 @@ export class EncryptionManager {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       // Detect nonce exhaustion from Rust error message
-      if (message.includes('Nonce counter exhausted') || message.includes('NonceCounterExhausted')) {
-        throw new NonceExhaustedError(
-          `Nonce counter exhausted. Key rotation required.`,
-          { cause: error instanceof Error ? error : undefined }
-        );
+      if (
+        message.includes('Nonce counter exhausted') ||
+        message.includes('NonceCounterExhausted')
+      ) {
+        throw new NonceExhaustedError(`Nonce counter exhausted. Key rotation required.`, {
+          cause: error instanceof Error ? error : undefined,
+        });
       }
-      throw new EncryptionError(
-        `Encryption failed: ${message}`,
-        { cause: error instanceof Error ? error : undefined }
-      );
+      throw new EncryptionError(`Encryption failed: ${message}`, {
+        cause: error instanceof Error ? error : undefined,
+      });
     }
   }
 
@@ -188,7 +197,7 @@ export class EncryptionManager {
    */
   dispose(): void {
     this.disposed = true;
-    this.tenantKeys = null;  // Releases reference, triggers ZeroizeOnDrop in Rust
+    this.tenantKeys = null; // Releases reference, triggers ZeroizeOnDrop in Rust
     this.native = null;
   }
 
@@ -218,7 +227,7 @@ export class EncryptionManager {
       encoder.encode(this.tenantId ?? ''),
       encoder.encode(cacheKey),
       encoder.encode(format),
-      encoder.encode(compressed ? 'True' : 'False'),  // Python str(bool) format
+      encoder.encode(compressed ? 'True' : 'False'), // Python str(bool) format
     ];
 
     // Calculate total length: version byte + (4-byte length + data) for each component
@@ -233,7 +242,7 @@ export class EncryptionManager {
 
     // Each component: 4-byte big-endian length + data
     for (const component of components) {
-      view.setUint32(offset, component.length, false);  // false = big-endian
+      view.setUint32(offset, component.length, false); // false = big-endian
       offset += 4;
       aad.set(component, offset);
       offset += component.length;
