@@ -1,10 +1,4 @@
-import {
-  L1Config,
-  DEFAULT_L1_CONFIG,
-  CacheEntry,
-  SwrResult,
-  InvalidationEvent,
-} from './types.js';
+import { L1Config, DEFAULT_L1_CONFIG, CacheEntry, SwrResult, InvalidationEvent } from './types.js';
 import { secureRandomFloat } from '../utils/random.js';
 import { extractNamespace } from '../serialization/key-generator.js';
 import { SWR_JITTER_MIN, SWR_JITTER_RANGE, DEFAULT_L1_FALLBACK_SIZE } from '../constants.js';

@@ -23,7 +23,9 @@ describe('TTLCachekitIO', () => {
     ttlBackend = new TTLCachekitIO(core);
   });
 
-  afterEach(() => { vi.restoreAllMocks(); });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
 
   it('getTTL returns seconds remaining', async () => {
     fetchSpy.mockResolvedValueOnce(mockResponse(200, { ttl: 3500 }));

@@ -180,9 +180,7 @@ describe('m3: RetryPolicy Cancellable Sleep', () => {
       jitter: false,
     });
 
-    const fn = vi.fn()
-      .mockRejectedValueOnce(new Error('fail'))
-      .mockResolvedValue('success');
+    const fn = vi.fn().mockRejectedValueOnce(new Error('fail')).mockResolvedValue('success');
 
     const executePromise = policy.execute(fn);
 

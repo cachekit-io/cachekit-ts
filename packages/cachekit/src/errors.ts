@@ -55,7 +55,7 @@ export class BackendError extends CachekitError {
   constructor(
     message: string,
     classification: import('./backends/error-classifier.js').ErrorClassification = 'permanent',
-    options?: ErrorOptions,
+    options?: ErrorOptions
   ) {
     super(message, options);
     this.name = 'BackendError';

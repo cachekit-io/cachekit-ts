@@ -173,7 +173,7 @@ export class CachekitIOCore implements Backend {
   private async request(
     method: string,
     url: string,
-    opts?: { body?: Uint8Array; headers?: Record<string, string> },
+    opts?: { body?: Uint8Array; headers?: Record<string, string> }
   ): Promise<Response> {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
@@ -210,14 +210,17 @@ export class CachekitIOCore implements Backend {
     if (error instanceof Error) {
       const classification = classifyNetworkError(error);
       if (classification === 'timeout') {
-        return new TimeoutError(`CachekitIO ${operation} timed out: ${this.sanitize(error.message)}`, {
-          cause: error,
-        });
+        return new TimeoutError(
+          `CachekitIO ${operation} timed out: ${this.sanitize(error.message)}`,
+          {
+            cause: error,
+          }
+        );
       }
       return new BackendError(
         `CachekitIO ${operation} failed: ${this.sanitize(error.message)}`,
         classification,
-        { cause: error },
+        { cause: error }
       );
     }
     return new BackendError(`CachekitIO ${operation} failed: Unknown error`);

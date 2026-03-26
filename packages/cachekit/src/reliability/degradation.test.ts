@@ -15,7 +15,10 @@ describe('withDegradation', () => {
 
 describe('withDegradationFn', () => {
   it('returns result on success', async () => {
-    const result = await withDegradationFn(() => Promise.resolve('value'), () => 'fallback');
+    const result = await withDegradationFn(
+      () => Promise.resolve('value'),
+      () => 'fallback'
+    );
     expect(result).toBe('value');
   });
 

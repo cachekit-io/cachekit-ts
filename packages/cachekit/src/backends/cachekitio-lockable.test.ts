@@ -24,7 +24,9 @@ describe('LockableCachekitIO', () => {
     lockable = new LockableCachekitIO(core);
   });
 
-  afterEach(() => { vi.restoreAllMocks(); });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
 
   it('acquireLock returns lock_id on success', async () => {
     fetchSpy.mockResolvedValueOnce(mockResponse(200, { lock_id: 'uuid-123' }));

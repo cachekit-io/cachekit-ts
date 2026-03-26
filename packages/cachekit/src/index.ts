@@ -1,7 +1,12 @@
 // ============ Main API ============
 export { createCache } from './cache.js';
 export { redis } from './backends/redis.js';
-export { cachekitio, cachekitioWithLocking, cachekitioWithTTL, cachekitioFull } from './backends/cachekitio-factory.js';
+export {
+  cachekitio,
+  cachekitioWithLocking,
+  cachekitioWithTTL,
+  cachekitioFull,
+} from './backends/cachekitio-factory.js';
 export { CachekitIOCore } from './backends/cachekitio.js';
 
 // ============ Types ============
@@ -16,15 +21,18 @@ export type {
   InvalidationConfig,
 } from './types/cache.js';
 
-export type { Backend, RedisBackendConfig, CachekitIOBackendConfig, LockableBackend, TTLBackend, L1Metrics } from './backends/types.js';
+export type {
+  Backend,
+  RedisBackendConfig,
+  CachekitIOBackendConfig,
+  LockableBackend,
+  TTLBackend,
+  L1Metrics,
+} from './backends/types.js';
 
 export type { ErrorClassification } from './backends/error-classifier.js';
 
-export type {
-  L1Config,
-  InvalidationLevel,
-  InvalidationEvent,
-} from './l1/types.js';
+export type { L1Config, InvalidationLevel, InvalidationEvent } from './l1/types.js';
 
 export type { CircuitBreakerConfig, CircuitState } from './reliability/circuit-breaker.js';
 export type { RetryConfig } from './reliability/retry.js';
@@ -51,14 +59,14 @@ export { CircuitBreaker } from './reliability/circuit-breaker.js';
 export { RetryPolicy } from './reliability/retry.js';
 export { withDegradation, withDegradationFn } from './reliability/degradation.js';
 export { MessagePackSerializer, defaultSerializer } from './serialization/serializer.js';
-export { generateKey, generateParamsHash, extractNamespace } from './serialization/key-generator.js';
+export {
+  generateKey,
+  generateParamsHash,
+  extractNamespace,
+} from './serialization/key-generator.js';
 export { EncryptionManager } from './encryption/manager.js';
 export { RedisInvalidationChannel } from './invalidation/redis-channel.js';
-export {
-  serializeEvent,
-  deserializeEvent,
-  createInvalidationEvent,
-} from './invalidation/event.js';
+export { serializeEvent, deserializeEvent, createInvalidationEvent } from './invalidation/event.js';
 export type { RedisInvalidationChannelConfig } from './invalidation/redis-channel.js';
 
 // ============ Constants ============

@@ -14,7 +14,8 @@ describe('RetryPolicy', () => {
 
   it('retries on failure', async () => {
     const policy = new RetryPolicy({ maxAttempts: 3, baseDelay: 1 });
-    const fn = vi.fn()
+    const fn = vi
+      .fn()
       .mockRejectedValueOnce(new Error('fail1'))
       .mockRejectedValueOnce(new Error('fail2'))
       .mockResolvedValue('success');

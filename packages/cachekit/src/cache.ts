@@ -1,4 +1,10 @@
-import type { CacheOptions, SetOptions, WrapOptions, SecureCache, InvalidationConfig } from './types/cache.js';
+import type {
+  CacheOptions,
+  SetOptions,
+  WrapOptions,
+  SecureCache,
+  InvalidationConfig,
+} from './types/cache.js';
 import type { Backend, RedisBackendConfig, CachekitIOBackendConfig } from './backends/types.js';
 import { redis } from './backends/redis.js';
 import { cachekitio } from './backends/cachekitio-factory.js';
@@ -6,7 +12,11 @@ import { L1Cache } from './l1/lru-cache.js';
 import { ReliabilityExecutor } from './reliability/executor.js';
 import { BackgroundRefreshManager } from './cache/background-refresh.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
-import { generateKey, generateParamsHash, extractNamespace } from './serialization/key-generator.js';
+import {
+  generateKey,
+  generateParamsHash,
+  extractNamespace,
+} from './serialization/key-generator.js';
 import { EncryptionManager } from './encryption/manager.js';
 import { RedisInvalidationChannel } from './invalidation/redis-channel.js';
 import { createInvalidationEvent } from './invalidation/event.js';
@@ -241,12 +251,13 @@ class CacheImpl implements SecureCache {
     };
   }
 
-  with(options: WrapOptions): <TArgs extends unknown[], TResult>(
+  with(
+    options: WrapOptions
+  ): <TArgs extends unknown[], TResult>(
     fn: (...args: TArgs) => Promise<TResult>
   ) => (...args: TArgs) => Promise<TResult> {
-    return <TArgs extends unknown[], TResult>(
-      fn: (...args: TArgs) => Promise<TResult>
-    ) => this.wrap(fn, options);
+    return <TArgs extends unknown[], TResult>(fn: (...args: TArgs) => Promise<TResult>) =>
+      this.wrap(fn, options);
   }
 
   secure = {
@@ -328,7 +339,6 @@ class CacheImpl implements SecureCache {
     // Close backend
     await this.backend.close();
   }
-
 
   private ensureNotClosed(): void {
     if (this.closed) {

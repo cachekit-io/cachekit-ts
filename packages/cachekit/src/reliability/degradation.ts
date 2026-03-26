@@ -38,10 +38,16 @@ export async function withDegradationFn<T>(
  */
 export const degradationBehaviors = {
   /** get() fails → return null (cache miss) */
-  getFailsNull: <T>() => withDegradation<T | null>(async () => { throw new Error(); }, null),
+  getFailsNull: <T>() =>
+    withDegradation<T | null>(async () => {
+      throw new Error();
+    }, null),
 
   /** set() fails → skip silently */
-  setFailsSkip: () => withDegradation(async () => { throw new Error(); }, undefined),
+  setFailsSkip: () =>
+    withDegradation(async () => {
+      throw new Error();
+    }, undefined),
 
   /** wrap() fails → execute compute function */
   wrapFailsCompute: <T>(computeFn: () => Promise<T>) => computeFn,

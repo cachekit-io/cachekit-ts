@@ -5,7 +5,7 @@ import { ConfigurationError, EncryptionError } from '../errors.js';
 // Mock TenantKeys class with nonce counter (matches Rust implementation)
 class MockTenantKeys {
   readonly tenantId: string;
-  private nonceCounter = 0;  // Track nonce usage like Rust encryptor
+  private nonceCounter = 0; // Track nonce usage like Rust encryptor
 
   constructor(tenantId: string) {
     this.tenantId = tenantId;
@@ -33,7 +33,11 @@ vi.mock('@cachekit-io/cachekit-core-ts', () => ({
     if (!tenantId) throw new Error('tenant_id cannot be empty');
     return new MockTenantKeys(tenantId);
   },
-  encryptWithTenantKeys: (plaintext: Uint8Array, aad: Uint8Array, tenantKeys: MockTenantKeys): Uint8Array => {
+  encryptWithTenantKeys: (
+    plaintext: Uint8Array,
+    aad: Uint8Array,
+    tenantKeys: MockTenantKeys
+  ): Uint8Array => {
     // Increment nonce counter like Rust encryptor does
     tenantKeys.incrementNonce();
     // Simple mock: prepend full AAD + plaintext
@@ -42,7 +46,11 @@ vi.mock('@cachekit-io/cachekit-core-ts', () => ({
     result.set(plaintext, aad.length);
     return result;
   },
-  decryptWithTenantKeys: (ciphertext: Uint8Array, aad: Uint8Array, _tenantKeys: MockTenantKeys): Uint8Array => {
+  decryptWithTenantKeys: (
+    ciphertext: Uint8Array,
+    aad: Uint8Array,
+    _tenantKeys: MockTenantKeys
+  ): Uint8Array => {
     // Verify AAD matches completely
     if (ciphertext.length < aad.length) {
       throw new Error('AAD mismatch - ciphertext too short');

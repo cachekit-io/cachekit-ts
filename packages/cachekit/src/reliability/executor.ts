@@ -32,13 +32,9 @@ export class ReliabilityExecutor {
   private readonly degradationEnabled: boolean;
 
   constructor(config: ReliabilityExecutorConfig = {}) {
-    this.circuitBreaker = config.circuitBreaker
-      ? new CircuitBreaker(config.circuitBreaker)
-      : null;
+    this.circuitBreaker = config.circuitBreaker ? new CircuitBreaker(config.circuitBreaker) : null;
 
-    this.retryPolicy = config.retry
-      ? new RetryPolicy(config.retry)
-      : null;
+    this.retryPolicy = config.retry ? new RetryPolicy(config.retry) : null;
 
     this.degradationEnabled = config.degradation !== false;
   }

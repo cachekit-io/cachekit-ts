@@ -4,8 +4,13 @@ import type { Backend, CachekitIOBackendConfig } from './types.js';
 import { BackendError, ConfigurationError, TimeoutError } from '../errors.js';
 
 // Helper to create a mock Response
-function mockResponse(status: number, body?: Uint8Array | string | null, headers?: Record<string, string>): Response {
-  const responseBody = body instanceof Uint8Array ? body : body ? new TextEncoder().encode(body) : null;
+function mockResponse(
+  status: number,
+  body?: Uint8Array | string | null,
+  headers?: Record<string, string>
+): Response {
+  const responseBody =
+    body instanceof Uint8Array ? body : body ? new TextEncoder().encode(body) : null;
   return new Response(responseBody, { status, headers });
 }
 
@@ -37,8 +42,12 @@ describe('CachekitIO Backend', () => {
     });
 
     it('rejects HTTP URLs', () => {
-      expect(() => cachekitio({ apiKey: 'key', apiUrl: 'http://api.cachekit.io' })).toThrow(ConfigurationError);
-      expect(() => cachekitio({ apiKey: 'key', apiUrl: 'http://api.cachekit.io' })).toThrow(/HTTPS/);
+      expect(() => cachekitio({ apiKey: 'key', apiUrl: 'http://api.cachekit.io' })).toThrow(
+        ConfigurationError
+      );
+      expect(() => cachekitio({ apiKey: 'key', apiUrl: 'http://api.cachekit.io' })).toThrow(
+        /HTTPS/
+      );
     });
 
     it('accepts valid HTTPS URL', () => {
@@ -51,7 +60,7 @@ describe('CachekitIO Backend', () => {
       b.get('test'); // triggers fetch
       expect(fetchSpy).toHaveBeenCalledWith(
         expect.stringContaining('https://api.cachekit.io/v1/cache/'),
-        expect.anything(),
+        expect.anything()
       );
     });
   });
@@ -67,7 +76,7 @@ describe('CachekitIO Backend', () => {
       expect(result).toEqual(data);
       expect(fetchSpy).toHaveBeenCalledWith(
         'https://api.test.cachekit.io/v1/cache/my-key',
-        expect.objectContaining({ method: 'GET' }),
+        expect.objectContaining({ method: 'GET' })
       );
     });
 
@@ -233,7 +242,11 @@ describe('CachekitIO Backend', () => {
 
       // This should not throw — it should detect apiKey and use cachekitio()
       const cache = createCache({
-        backend: { apiKey: 'ck_test_xyz', apiUrl: 'https://api.test.cachekit.io', allowCustomHost: true },
+        backend: {
+          apiKey: 'ck_test_xyz',
+          apiUrl: 'https://api.test.cachekit.io',
+          allowCustomHost: true,
+        },
         l1: { enabled: false },
       });
 
