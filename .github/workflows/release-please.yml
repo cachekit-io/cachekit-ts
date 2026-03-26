@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: 'Force release build (use existing tag)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      # cachekit outputs
+      cachekit--release_created: ${{ steps.release.outputs['packages/cachekit--release_created'] }}
+      cachekit--tag_name: ${{ steps.release.outputs['packages/cachekit--tag_name'] }}
+      cachekit--version: ${{ steps.release.outputs['packages/cachekit--version'] }}
+      # cachekit-core-ts outputs (triggers build-native.yml via tag)
+      core-ts--release_created: ${{ steps.release.outputs['packages/cachekit-core-ts--release_created'] }}
+      core-ts--tag_name: ${{ steps.release.outputs['packages/cachekit-core-ts--tag_name'] }}
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        if: ${{ vars.USE_APP_TOKEN == 'true' }}
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@c3fc4de07084f75a2b61a5b933069bda6edf3d5c # v4
+        with:
+          manifest-file: .release-please-manifest.json
+          config-file: release-please-config.json
+          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+
+  publish-cachekit:
+    name: Publish @cachekit-io/cachekit
+    needs: release-please
+    if: needs.release-please.outputs.cachekit--release_created == 'true' || github.event.inputs.force_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.release-please.outputs.cachekit--tag_name || github.sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+
+      - name: Publish to npm
+        working-directory: packages/cachekit
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
