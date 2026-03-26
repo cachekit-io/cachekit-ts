@@ -96,9 +96,9 @@ checksum = "b35204fbdc0b3f4446b89fc1ac2cf84a8a68971995d0bf2e925ec7cd960f9cb3"
 
 [[package]]
 name = "cachekit-core"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b9e5157ec40b76658edade127d988318cc96a4046ab760def46b01ffa1806de"
+checksum = "3e264be91367e582a103017104f2fcc6f6f12ca59ded81f53016bc60752a94ae"
 dependencies = [
  "byteorder",
  "bytes",
