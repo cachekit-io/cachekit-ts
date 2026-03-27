@@ -49,6 +49,10 @@
     "url": "https://github.com/cachekit-io/cachekit-ts.git",
     "directory": "packages/cachekit"
   },
+  "homepage": "https://cachekit.io",
+  "bugs": {
+    "url": "https://github.com/cachekit-io/cachekit-ts/issues"
+  },
   "dependencies": {
     "@cachekit-io/cachekit-core-ts": "workspace:*",
     "@msgpack/msgpack": "^3.1.2",
@@ -67,7 +71,7 @@
     "vitest": "^2.1.0"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "peerDependencies": {
     "prom-client": ">=14.0.0"
