@@ -120,10 +120,40 @@ jobs:
           files: ./packages/cachekit/coverage/lcov.info
           fail_ci_if_error: false
 
+  security:
+    runs-on: cachekit-lean
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Audit npm production dependencies
+        run: pnpm audit --prod --audit-level=high
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+        env:
+          CARGO_HOME: /tmp/cargo
+
+      - name: Audit Cargo dependencies
+        working-directory: packages/cachekit-core-ts
+        run: cargo audit
+        env:
+          CARGO_HOME: /tmp/cargo
+
   ci-success:
     name: CI Success
     runs-on: cachekit-lean
-    needs: [lint, test, test-integration, coverage]
+    needs: [lint, test, test-integration, coverage, security]
     if: always()
     steps:
       - name: Check all jobs succeeded
@@ -131,7 +161,8 @@ jobs:
           if [[ "${{ needs.lint.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.test-integration.result }}" != "success" ]] || \
-             [[ "${{ needs.coverage.result }}" != "success" ]]; then
+             [[ "${{ needs.coverage.result }}" != "success" ]] || \
+             [[ "${{ needs.security.result }}" != "success" ]]; then
             echo "One or more jobs failed"
             exit 1
           fi
