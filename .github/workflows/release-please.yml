@@ -35,7 +35,6 @@ jobs:
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
-        if: ${{ vars.USE_APP_TOKEN == 'true' }}
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -46,7 +45,7 @@ jobs:
         with:
           manifest-file: .release-please-manifest.json
           config-file: release-please-config.json
-          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
 
   publish-cachekit:
     name: Publish @cachekit-io/cachekit
