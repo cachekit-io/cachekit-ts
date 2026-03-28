@@ -24,11 +24,11 @@ importers:
         specifier: ^2.8.21
         version: 2.8.21
       typescript:
-        specifier: ~5.9.3
-        version: 5.9.3
+        specifier: ~6.0.2
+        version: 6.0.2
       typescript-eslint:
         specifier: ^8.57.2
-        version: 8.57.2(eslint@10.1.0)(typescript@5.9.3)
+        version: 8.57.2(eslint@10.1.0)(typescript@6.0.2)
 
   packages/cachekit:
     dependencies:
@@ -77,7 +77,7 @@ importers:
     devDependencies:
       '@napi-rs/cli':
         specifier: ^3.5.1
-        version: 3.6.0(@types/node@25.5.0)
+        version: 3.6.0(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(@types/node@25.5.0)
       '@types/node':
         specifier: ^25.5.0
         version: 25.5.0
@@ -134,7 +134,6 @@ packages:
     dependencies:
       tslib: 2.8.1
     dev: true
-    optional: true
 
   /@emnapi/wasi-threads@1.2.0:
     resolution: {integrity: sha512-N10dEJNSsUx41Z6pZsXU8FjPjpBEplgH24sfkmITrBED1/U2Esum9F3lfLrMjKHHjmi557zQn7kR9R+XWXu5Rg==}
@@ -544,7 +543,7 @@ packages:
     engines: {node: '>= 18'}
     dev: false
 
-  /@napi-rs/cli@3.6.0(@types/node@25.5.0):
+  /@napi-rs/cli@3.6.0(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(@types/node@25.5.0):
     resolution: {integrity: sha512-aA8m4+9XxnK1+0sr4GplZP0Ze90gkzO8sMKaplOK0zXbLnzsLl6O2BQQt6rTCcTRzIN24wrrByakr/imM+CxhA==}
     engines: {node: '>= 16'}
     hasBin: true
@@ -554,9 +553,10 @@ packages:
       '@emnapi/runtime':
         optional: true
     dependencies:
+      '@emnapi/runtime': 1.9.1
       '@inquirer/prompts': 8.3.2(@types/node@25.5.0)
-      '@napi-rs/cross-toolchain': 1.0.3
-      '@napi-rs/wasm-tools': 1.0.1
+      '@napi-rs/cross-toolchain': 1.0.3(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)
+      '@napi-rs/wasm-tools': 1.0.1(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)
       '@octokit/rest': 22.0.1
       clipanion: 4.0.0-rc.4(typanion@3.14.0)
       colorette: 2.0.20
@@ -567,6 +567,7 @@ packages:
       semver: 7.7.3
       typanion: 3.14.0
     transitivePeerDependencies:
+      - '@emnapi/core'
       - '@napi-rs/cross-toolchain-arm64-target-aarch64'
       - '@napi-rs/cross-toolchain-arm64-target-armv7'
       - '@napi-rs/cross-toolchain-arm64-target-ppc64le'
@@ -582,7 +583,7 @@ packages:
       - supports-color
     dev: true
 
-  /@napi-rs/cross-toolchain@1.0.3:
+  /@napi-rs/cross-toolchain@1.0.3(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1):
     resolution: {integrity: sha512-ENPfLe4937bsKVTDA6zdABx4pq9w0tHqRrJHyaGxgaPq03a2Bd1unD5XSKjXJjebsABJ+MjAv1A2OvCgK9yehg==}
     peerDependencies:
       '@napi-rs/cross-toolchain-arm64-target-aarch64': ^1.0.3
@@ -617,10 +618,12 @@ packages:
       '@napi-rs/cross-toolchain-x64-target-x86_64':
         optional: true
     dependencies:
-      '@napi-rs/lzma': 1.4.5
-      '@napi-rs/tar': 1.1.0
+      '@napi-rs/lzma': 1.4.5(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)
+      '@napi-rs/tar': 1.1.0(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)
       debug: 4.4.3
     transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
       - supports-color
     dev: true
 
@@ -741,13 +744,16 @@ packages:
     dev: true
     optional: true
 
-  /@napi-rs/lzma-wasm32-wasi@1.4.5:
+  /@napi-rs/lzma-wasm32-wasi@1.4.5(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1):
     resolution: {integrity: sha512-+VyHHlr68dvey6fXc2hehw9gHVFIW3TtGF1XkcbAu65qVXsA9D/T+uuoRVqhE+JCyFHFrO0ixRbZDRK1XJt1sA==}
     engines: {node: '>=14.0.0'}
     cpu: [wasm32]
     requiresBuild: true
     dependencies:
-      '@napi-rs/wasm-runtime': 1.1.1
+      '@napi-rs/wasm-runtime': 1.1.2(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)
+    transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
     dev: true
     optional: true
 
@@ -778,7 +784,7 @@ packages:
     dev: true
     optional: true
 
-  /@napi-rs/lzma@1.4.5:
+  /@napi-rs/lzma@1.4.5(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1):
     resolution: {integrity: sha512-zS5LuN1OBPAyZpda2ZZgYOEDC+xecUdAGnrvbYzjnLXkrq/OBC3B9qcRvlxbDR3k5H/gVfvef1/jyUqPknqjbg==}
     engines: {node: '>= 10'}
     optionalDependencies:
@@ -795,10 +801,13 @@ packages:
       '@napi-rs/lzma-linux-s390x-gnu': 1.4.5
       '@napi-rs/lzma-linux-x64-gnu': 1.4.5
       '@napi-rs/lzma-linux-x64-musl': 1.4.5
-      '@napi-rs/lzma-wasm32-wasi': 1.4.5
+      '@napi-rs/lzma-wasm32-wasi': 1.4.5(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)
       '@napi-rs/lzma-win32-arm64-msvc': 1.4.5
       '@napi-rs/lzma-win32-ia32-msvc': 1.4.5
       '@napi-rs/lzma-win32-x64-msvc': 1.4.5
+    transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
     dev: true
 
   /@napi-rs/tar-android-arm-eabi@1.1.0:
@@ -909,13 +918,16 @@ packages:
     dev: true
     optional: true
 
-  /@napi-rs/tar-wasm32-wasi@1.1.0:
+  /@napi-rs/tar-wasm32-wasi@1.1.0(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1):
     resolution: {integrity: sha512-jIa9nb2HzOrfH0F8QQ9g3WE4aMH5vSI5/1NYVNm9ysCmNjCCtMXCAhlI3WKCdm/DwHf0zLqdrrtDFXODcNaqMw==}
     engines: {node: '>=14.0.0'}
     cpu: [wasm32]
     requiresBuild: true
     dependencies:
-      '@napi-rs/wasm-runtime': 1.1.1
+      '@napi-rs/wasm-runtime': 1.1.2(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)
+    transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
     dev: true
     optional: true
 
@@ -946,7 +958,7 @@ packages:
     dev: true
     optional: true
 
-  /@napi-rs/tar@1.1.0:
+  /@napi-rs/tar@1.1.0(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1):
     resolution: {integrity: sha512-7cmzIu+Vbupriudo7UudoMRH2OA3cTw67vva8MxeoAe5S7vPFI7z0vp0pMXiA25S8IUJefImQ90FeJjl8fjEaQ==}
     engines: {node: '>= 10'}
     optionalDependencies:
@@ -962,15 +974,21 @@ packages:
       '@napi-rs/tar-linux-s390x-gnu': 1.1.0
       '@napi-rs/tar-linux-x64-gnu': 1.1.0
       '@napi-rs/tar-linux-x64-musl': 1.1.0
-      '@napi-rs/tar-wasm32-wasi': 1.1.0
+      '@napi-rs/tar-wasm32-wasi': 1.1.0(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)
       '@napi-rs/tar-win32-arm64-msvc': 1.1.0
       '@napi-rs/tar-win32-ia32-msvc': 1.1.0
       '@napi-rs/tar-win32-x64-msvc': 1.1.0
+    transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
     dev: true
 
-  /@napi-rs/wasm-runtime@1.1.1:
-    resolution: {integrity: sha512-p64ah1M1ld8xjWv3qbvFwHiFVWrq1yFvV4f7w+mzaqiR4IlSgkqhcRdHwsGgomwzBH51sRY4NEowLxnaBjcW/A==}
+  /@napi-rs/wasm-runtime@1.1.2(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1):
+    resolution: {integrity: sha512-sNXv5oLJ7ob93xkZ1XnxisYhGYXfaG9f65/ZgYuAu3qt7b3NadcOEhLvx28hv31PgX8SZJRYrAIPQilQmFpLVw==}
     requiresBuild: true
+    peerDependencies:
+      '@emnapi/core': ^1.7.1
+      '@emnapi/runtime': ^1.7.1
     dependencies:
       '@emnapi/core': 1.9.1
       '@emnapi/runtime': 1.9.1
@@ -1059,13 +1077,16 @@ packages:
     dev: true
     optional: true
 
-  /@napi-rs/wasm-tools-wasm32-wasi@1.0.1:
+  /@napi-rs/wasm-tools-wasm32-wasi@1.0.1(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1):
     resolution: {integrity: sha512-/nQVSTrqSsn7YdAc2R7Ips/tnw5SPUcl3D7QrXCNGPqjbatIspnaexvaOYNyKMU6xPu+pc0BTnKVmqhlJJCPLA==}
     engines: {node: '>=14.0.0'}
     cpu: [wasm32]
     requiresBuild: true
     dependencies:
-      '@napi-rs/wasm-runtime': 1.1.1
+      '@napi-rs/wasm-runtime': 1.1.2(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)
+    transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
     dev: true
     optional: true
 
@@ -1096,7 +1117,7 @@ packages:
     dev: true
     optional: true
 
-  /@napi-rs/wasm-tools@1.0.1:
+  /@napi-rs/wasm-tools@1.0.1(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1):
     resolution: {integrity: sha512-enkZYyuCdo+9jneCPE/0fjIta4wWnvVN9hBo2HuiMpRF0q3lzv1J6b/cl7i0mxZUKhBrV3aCKDBQnCOhwKbPmQ==}
     engines: {node: '>= 10'}
     optionalDependencies:
@@ -1109,10 +1130,13 @@ packages:
       '@napi-rs/wasm-tools-linux-arm64-musl': 1.0.1
       '@napi-rs/wasm-tools-linux-x64-gnu': 1.0.1
       '@napi-rs/wasm-tools-linux-x64-musl': 1.0.1
-      '@napi-rs/wasm-tools-wasm32-wasi': 1.0.1
+      '@napi-rs/wasm-tools-wasm32-wasi': 1.0.1(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)
       '@napi-rs/wasm-tools-win32-arm64-msvc': 1.0.1
       '@napi-rs/wasm-tools-win32-ia32-msvc': 1.0.1
       '@napi-rs/wasm-tools-win32-x64-msvc': 1.0.1
+    transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
     dev: true
 
   /@noble/hashes@2.0.1:
@@ -1390,13 +1414,16 @@ packages:
     dev: true
     optional: true
 
-  /@rolldown/binding-wasm32-wasi@1.0.0-rc.12:
+  /@rolldown/binding-wasm32-wasi@1.0.0-rc.12(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1):
     resolution: {integrity: sha512-ykGiLr/6kkiHc0XnBfmFJuCjr5ZYKKofkx+chJWDjitX+KsJuAmrzWhwyOMSHzPhzOHOy7u9HlFoa5MoAOJ/Zg==}
     engines: {node: '>=14.0.0'}
     cpu: [wasm32]
     requiresBuild: true
     dependencies:
-      '@napi-rs/wasm-runtime': 1.1.1
+      '@napi-rs/wasm-runtime': 1.1.2(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)
+    transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
     dev: true
     optional: true
 
@@ -1571,7 +1598,7 @@ packages:
       '@types/node': 18.19.130
     dev: true
 
-  /@typescript-eslint/eslint-plugin@8.57.2(@typescript-eslint/parser@8.57.2)(eslint@10.1.0)(typescript@5.9.3):
+  /@typescript-eslint/eslint-plugin@8.57.2(@typescript-eslint/parser@8.57.2)(eslint@10.1.0)(typescript@6.0.2):
     resolution: {integrity: sha512-NZZgp0Fm2IkD+La5PR81sd+g+8oS6JwJje+aRWsDocxHkjyRw0J5L5ZTlN3LI1LlOcGL7ph3eaIUmTXMIjLk0w==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
     peerDependencies:
@@ -1580,21 +1607,21 @@ packages:
       typescript: '>=4.8.4 <6.0.0'
     dependencies:
       '@eslint-community/regexpp': 4.12.2
-      '@typescript-eslint/parser': 8.57.2(eslint@10.1.0)(typescript@5.9.3)
+      '@typescript-eslint/parser': 8.57.2(eslint@10.1.0)(typescript@6.0.2)
       '@typescript-eslint/scope-manager': 8.57.2
-      '@typescript-eslint/type-utils': 8.57.2(eslint@10.1.0)(typescript@5.9.3)
-      '@typescript-eslint/utils': 8.57.2(eslint@10.1.0)(typescript@5.9.3)
+      '@typescript-eslint/type-utils': 8.57.2(eslint@10.1.0)(typescript@6.0.2)
+      '@typescript-eslint/utils': 8.57.2(eslint@10.1.0)(typescript@6.0.2)
       '@typescript-eslint/visitor-keys': 8.57.2
       eslint: 10.1.0
       ignore: 7.0.5
       natural-compare: 1.4.0
-      ts-api-utils: 2.5.0(typescript@5.9.3)
-      typescript: 5.9.3
+      ts-api-utils: 2.5.0(typescript@6.0.2)
+      typescript: 6.0.2
     transitivePeerDependencies:
       - supports-color
     dev: true
 
-  /@typescript-eslint/parser@8.57.2(eslint@10.1.0)(typescript@5.9.3):
+  /@typescript-eslint/parser@8.57.2(eslint@10.1.0)(typescript@6.0.2):
     resolution: {integrity: sha512-30ScMRHIAD33JJQkgfGW1t8CURZtjc2JpTrq5n2HFhOefbAhb7ucc7xJwdWcrEtqUIYJ73Nybpsggii6GtAHjA==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
     peerDependencies:
@@ -1603,25 +1630,25 @@ packages:
     dependencies:
       '@typescript-eslint/scope-manager': 8.57.2
       '@typescript-eslint/types': 8.57.2
-      '@typescript-eslint/typescript-estree': 8.57.2(typescript@5.9.3)
+      '@typescript-eslint/typescript-estree': 8.57.2(typescript@6.0.2)
       '@typescript-eslint/visitor-keys': 8.57.2
       debug: 4.4.3
       eslint: 10.1.0
-      typescript: 5.9.3
+      typescript: 6.0.2
     transitivePeerDependencies:
       - supports-color
     dev: true
 
-  /@typescript-eslint/project-service@8.57.2(typescript@5.9.3):
+  /@typescript-eslint/project-service@8.57.2(typescript@6.0.2):
     resolution: {integrity: sha512-FuH0wipFywXRTHf+bTTjNyuNQQsQC3qh/dYzaM4I4W0jrCqjCVuUh99+xd9KamUfmCGPvbO8NDngo/vsnNVqgw==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
     peerDependencies:
       typescript: '>=4.8.4 <6.0.0'
     dependencies:
-      '@typescript-eslint/tsconfig-utils': 8.57.2(typescript@5.9.3)
+      '@typescript-eslint/tsconfig-utils': 8.57.2(typescript@6.0.2)
       '@typescript-eslint/types': 8.57.2
       debug: 4.4.3
-      typescript: 5.9.3
+      typescript: 6.0.2
     transitivePeerDependencies:
       - supports-color
     dev: true
@@ -1634,16 +1661,16 @@ packages:
       '@typescript-eslint/visitor-keys': 8.57.2
     dev: true
 
-  /@typescript-eslint/tsconfig-utils@8.57.2(typescript@5.9.3):
+  /@typescript-eslint/tsconfig-utils@8.57.2(typescript@6.0.2):
     resolution: {integrity: sha512-3Lm5DSM+DCowsUOJC+YqHHnKEfFh5CoGkj5Z31NQSNF4l5wdOwqGn99wmwN/LImhfY3KJnmordBq/4+VDe2eKw==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
     peerDependencies:
       typescript: '>=4.8.4 <6.0.0'
     dependencies:
-      typescript: 5.9.3
+      typescript: 6.0.2
     dev: true
 
-  /@typescript-eslint/type-utils@8.57.2(eslint@10.1.0)(typescript@5.9.3):
+  /@typescript-eslint/type-utils@8.57.2(eslint@10.1.0)(typescript@6.0.2):
     resolution: {integrity: sha512-Co6ZCShm6kIbAM/s+oYVpKFfW7LBc6FXoPXjTRQ449PPNBY8U0KZXuevz5IFuuUj2H9ss40atTaf9dlGLzbWZg==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
     peerDependencies:
@@ -1651,12 +1678,12 @@ packages:
       typescript: '>=4.8.4 <6.0.0'
     dependencies:
       '@typescript-eslint/types': 8.57.2
-      '@typescript-eslint/typescript-estree': 8.57.2(typescript@5.9.3)
-      '@typescript-eslint/utils': 8.57.2(eslint@10.1.0)(typescript@5.9.3)
+      '@typescript-eslint/typescript-estree': 8.57.2(typescript@6.0.2)
+      '@typescript-eslint/utils': 8.57.2(eslint@10.1.0)(typescript@6.0.2)
       debug: 4.4.3
       eslint: 10.1.0
-      ts-api-utils: 2.5.0(typescript@5.9.3)
-      typescript: 5.9.3
+      ts-api-utils: 2.5.0(typescript@6.0.2)
+      typescript: 6.0.2
     transitivePeerDependencies:
       - supports-color
     dev: true
@@ -1666,27 +1693,27 @@ packages:
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
     dev: true
 
-  /@typescript-eslint/typescript-estree@8.57.2(typescript@5.9.3):
+  /@typescript-eslint/typescript-estree@8.57.2(typescript@6.0.2):
     resolution: {integrity: sha512-2MKM+I6g8tJxfSmFKOnHv2t8Sk3T6rF20A1Puk0svLK+uVapDZB/4pfAeB7nE83uAZrU6OxW+HmOd5wHVdXwXA==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
     peerDependencies:
       typescript: '>=4.8.4 <6.0.0'
     dependencies:
-      '@typescript-eslint/project-service': 8.57.2(typescript@5.9.3)
-      '@typescript-eslint/tsconfig-utils': 8.57.2(typescript@5.9.3)
+      '@typescript-eslint/project-service': 8.57.2(typescript@6.0.2)
+      '@typescript-eslint/tsconfig-utils': 8.57.2(typescript@6.0.2)
       '@typescript-eslint/types': 8.57.2
       '@typescript-eslint/visitor-keys': 8.57.2
       debug: 4.4.3
       minimatch: 10.2.4
       semver: 7.7.3
       tinyglobby: 0.2.15
-      ts-api-utils: 2.5.0(typescript@5.9.3)
-      typescript: 5.9.3
+      ts-api-utils: 2.5.0(typescript@6.0.2)
+      typescript: 6.0.2
     transitivePeerDependencies:
       - supports-color
     dev: true
 
-  /@typescript-eslint/utils@8.57.2(eslint@10.1.0)(typescript@5.9.3):
+  /@typescript-eslint/utils@8.57.2(eslint@10.1.0)(typescript@6.0.2):
     resolution: {integrity: sha512-krRIbvPK1ju1WBKIefiX+bngPs+odIQUtR7kymzPfo1POVw3jlF+nLkmexdSSd4UCbDcQn+wMBATOOmpBbqgKg==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
     peerDependencies:
@@ -1696,9 +1723,9 @@ packages:
       '@eslint-community/eslint-utils': 4.9.1(eslint@10.1.0)
       '@typescript-eslint/scope-manager': 8.57.2
       '@typescript-eslint/types': 8.57.2
-      '@typescript-eslint/typescript-estree': 8.57.2(typescript@5.9.3)
+      '@typescript-eslint/typescript-estree': 8.57.2(typescript@6.0.2)
       eslint: 10.1.0
-      typescript: 5.9.3
+      typescript: 6.0.2
     transitivePeerDependencies:
       - supports-color
     dev: true
@@ -1758,7 +1785,7 @@ packages:
       '@vitest/spy': 4.1.2
       estree-walker: 3.0.3
       magic-string: 0.30.21
-      vite: 8.0.3(@types/node@25.5.0)
+      vite: 8.0.3(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(@types/node@25.5.0)
     dev: true
 
   /@vitest/pretty-format@4.1.2:
@@ -3159,7 +3186,7 @@ packages:
     engines: {node: '>= 4'}
     dev: true
 
-  /rolldown@1.0.0-rc.12:
+  /rolldown@1.0.0-rc.12(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1):
     resolution: {integrity: sha512-yP4USLIMYrwpPHEFB5JGH1uxhcslv6/hL0OyvTuY+3qlOSJvZ7ntYnoWpehBxufkgN0cvXxppuTu5hHa/zPh+A==}
     engines: {node: ^20.19.0 || >=22.12.0}
     hasBin: true
@@ -3179,9 +3206,12 @@ packages:
       '@rolldown/binding-linux-x64-gnu': 1.0.0-rc.12
       '@rolldown/binding-linux-x64-musl': 1.0.0-rc.12
       '@rolldown/binding-openharmony-arm64': 1.0.0-rc.12
-      '@rolldown/binding-wasm32-wasi': 1.0.0-rc.12
+      '@rolldown/binding-wasm32-wasi': 1.0.0-rc.12(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)
       '@rolldown/binding-win32-arm64-msvc': 1.0.0-rc.12
       '@rolldown/binding-win32-x64-msvc': 1.0.0-rc.12
+    transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
     dev: true
 
   /safe-buffer@5.1.2:
@@ -3440,20 +3470,19 @@ packages:
     engines: {node: '>=14.14'}
     dev: true
 
-  /ts-api-utils@2.5.0(typescript@5.9.3):
+  /ts-api-utils@2.5.0(typescript@6.0.2):
     resolution: {integrity: sha512-OJ/ibxhPlqrMM0UiNHJ/0CKQkoKF243/AEmplt3qpRgkW8VG7IfOS41h7V8TjITqdByHzrjcS/2si+y4lIh8NA==}
     engines: {node: '>=18.12'}
     peerDependencies:
       typescript: '>=4.8.4'
     dependencies:
-      typescript: 5.9.3
+      typescript: 6.0.2
     dev: true
 
   /tslib@2.8.1:
     resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
     requiresBuild: true
     dev: true
-    optional: true
 
   /turbo@2.8.21:
     resolution: {integrity: sha512-FlJ8OD5Qcp0jTAM7E4a/RhUzRNds2GzKlyxHKA6N247VLy628rrxAGlMpIXSz6VB430+TiQDJ/SMl6PL1lu6wQ==}
@@ -3482,27 +3511,21 @@ packages:
       prelude-ls: 1.2.1
     dev: true
 
-  /typescript-eslint@8.57.2(eslint@10.1.0)(typescript@5.9.3):
+  /typescript-eslint@8.57.2(eslint@10.1.0)(typescript@6.0.2):
     resolution: {integrity: sha512-VEPQ0iPgWO/sBaZOU1xo4nuNdODVOajPnTIbog2GKYr31nIlZ0fWPoCQgGfF3ETyBl1vn63F/p50Um9Z4J8O8A==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
     peerDependencies:
       eslint: ^8.57.0 || ^9.0.0 || ^10.0.0
       typescript: '>=4.8.4 <6.0.0'
     dependencies:
-      '@typescript-eslint/eslint-plugin': 8.57.2(@typescript-eslint/parser@8.57.2)(eslint@10.1.0)(typescript@5.9.3)
-      '@typescript-eslint/parser': 8.57.2(eslint@10.1.0)(typescript@5.9.3)
-      '@typescript-eslint/typescript-estree': 8.57.2(typescript@5.9.3)
-      '@typescript-eslint/utils': 8.57.2(eslint@10.1.0)(typescript@5.9.3)
+      '@typescript-eslint/eslint-plugin': 8.57.2(@typescript-eslint/parser@8.57.2)(eslint@10.1.0)(typescript@6.0.2)
+      '@typescript-eslint/parser': 8.57.2(eslint@10.1.0)(typescript@6.0.2)
+      '@typescript-eslint/typescript-estree': 8.57.2(typescript@6.0.2)
+      '@typescript-eslint/utils': 8.57.2(eslint@10.1.0)(typescript@6.0.2)
       eslint: 10.1.0
-      typescript: 5.9.3
+      typescript: 6.0.2
     transitivePeerDependencies:
       - supports-color
-    dev: true
-
-  /typescript@5.9.3:
-    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
-    engines: {node: '>=14.17'}
-    hasBin: true
     dev: true
 
   /typescript@6.0.2:
@@ -3543,7 +3566,7 @@ packages:
     hasBin: true
     dev: true
 
-  /vite@8.0.3(@types/node@25.5.0):
+  /vite@8.0.3(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(@types/node@25.5.0):
     resolution: {integrity: sha512-B9ifbFudT1TFhfltfaIPgjo9Z3mDynBTJSUYxTjOQruf/zHH+ezCQKcoqO+h7a9Pw9Nm/OtlXAiGT1axBgwqrQ==}
     engines: {node: ^20.19.0 || >=22.12.0}
     hasBin: true
@@ -3590,10 +3613,13 @@ packages:
       lightningcss: 1.32.0
       picomatch: 4.0.4
       postcss: 8.5.8
-      rolldown: 1.0.0-rc.12
+      rolldown: 1.0.0-rc.12(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)
       tinyglobby: 0.2.15
     optionalDependencies:
       fsevents: 2.3.3
+    transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
     dev: true
 
   /vitest@4.1.2(@types/node@25.5.0)(vite@8.0.3):
@@ -3650,7 +3676,7 @@ packages:
       tinyexec: 1.0.4
       tinyglobby: 0.2.15
       tinyrainbow: 3.1.0
-      vite: 8.0.3(@types/node@25.5.0)
+      vite: 8.0.3(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(@types/node@25.5.0)
       why-is-node-running: 2.3.0
     transitivePeerDependencies:
       - msw
