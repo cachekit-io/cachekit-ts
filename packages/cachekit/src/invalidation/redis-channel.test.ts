@@ -186,10 +186,7 @@ describe('RedisInvalidationChannel', () => {
       };
       channel.publish(event);
 
-      expect(mockRedis.publish).toHaveBeenCalledWith(
-        'cachekit:invalidate',
-        expect.any(Buffer)
-      );
+      expect(mockRedis.publish).toHaveBeenCalledWith('cachekit:invalidate', expect.any(Buffer));
     });
 
     it('logs but does not throw on publish error', async () => {
@@ -251,10 +248,7 @@ describe('RedisInvalidationChannel', () => {
       };
       const serialized = serializeEvent(event);
 
-      messageHandler(
-        Buffer.from('cachekit:invalidate'),
-        Buffer.from(serialized)
-      );
+      messageHandler(Buffer.from('cachekit:invalidate'), Buffer.from(serialized));
 
       expect(received).toHaveLength(1);
       expect((received[0] as { namespace: string }).namespace).toBe('users');
@@ -354,10 +348,7 @@ describe('RedisInvalidationChannel', () => {
         sourceInstance: 'inst-1',
       };
 
-      messageHandler(
-        Buffer.from('cachekit:invalidate'),
-        Buffer.from(serializeEvent(event))
-      );
+      messageHandler(Buffer.from('cachekit:invalidate'), Buffer.from(serializeEvent(event)));
 
       expect(consoleError).toHaveBeenCalledWith(
         expect.stringContaining('callback error'),

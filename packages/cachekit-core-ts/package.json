@@ -5,17 +5,14 @@
   "main": "./index.js",
   "types": "./index.d.ts",
   "napi": {
-    "name": "cachekit-core-ts",
-    "triples": {
-      "defaults": false,
-      "additional": [
-        "x86_64-unknown-linux-gnu",
-        "aarch64-unknown-linux-gnu",
-        "x86_64-apple-darwin",
-        "aarch64-apple-darwin",
-        "x86_64-pc-windows-msvc"
-      ]
-    }
+    "binaryName": "cachekit-core-ts",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc"
+    ]
   },
   "files": [
     "index.js",
@@ -52,7 +49,7 @@
     "url": "https://github.com/cachekit-io/cachekit-ts/issues"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.4",
+    "@napi-rs/cli": "^3.5.1",
     "@types/node": "^25.5.0"
   },
   "engines": {
