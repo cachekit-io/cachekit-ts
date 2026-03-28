@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 napi = { version = "2", features = ["napi6"] }
 napi-derive = "2"
-cachekit-core = { version = "0.1.1", features = ["encryption"] }
+cachekit-core = { version = "0.2.0", features = ["encryption"] }
 zeroize = "1.8"
 
 [build-dependencies]

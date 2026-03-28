@@ -64,4 +64,89 @@ describe('LockableCachekitIO', () => {
     const headers = opts.headers as Record<string, string>;
     expect(headers['Content-Type']).toBe('application/json');
   });
+
+  // ── Missing branch coverage: error paths ───────────────────
+
+  describe('acquireLock error paths', () => {
+    it('throws TimeoutError on timeout network error', async () => {
+      const { TimeoutError } = await import('../errors.js');
+      const timeoutErr = new DOMException('signal timed out', 'TimeoutError');
+      fetchSpy.mockRejectedValueOnce(timeoutErr);
+      await expect(lockable.acquireLock('key')).rejects.toThrow(TimeoutError);
+    });
+
+    it('throws BackendError on generic network error', async () => {
+      fetchSpy.mockRejectedValueOnce(new TypeError('fetch failed'));
+      await expect(lockable.acquireLock('key')).rejects.toThrow(BackendError);
+    });
+
+    it('throws BackendError on unknown (non-Error) throw', async () => {
+      fetchSpy.mockRejectedValueOnce('string error');
+      await expect(lockable.acquireLock('key')).rejects.toThrow(BackendError);
+    });
+
+    it('re-throws BackendError directly', async () => {
+      fetchSpy.mockResolvedValueOnce(mockResponse(401));
+      const err = await lockable.acquireLock('key').catch((e: Error) => e);
+      expect(err).toBeInstanceOf(BackendError);
+      expect((err as Error).message).toContain('HTTP 401');
+    });
+  });
+
+  describe('releaseLock error paths', () => {
+    it('throws BackendError on HTTP error', async () => {
+      fetchSpy.mockResolvedValueOnce(mockResponse(500));
+      await expect(lockable.releaseLock('key', 'lock-id')).rejects.toThrow(BackendError);
+    });
+
+    it('throws TimeoutError on timeout network error', async () => {
+      const { TimeoutError } = await import('../errors.js');
+      const timeoutErr = new DOMException('signal timed out', 'TimeoutError');
+      fetchSpy.mockRejectedValueOnce(timeoutErr);
+      await expect(lockable.releaseLock('key', 'lock-id')).rejects.toThrow(TimeoutError);
+    });
+
+    it('throws BackendError on generic network error', async () => {
+      fetchSpy.mockRejectedValueOnce(new TypeError('fetch failed'));
+      await expect(lockable.releaseLock('key', 'lock-id')).rejects.toThrow(BackendError);
+    });
+
+    it('throws BackendError on unknown (non-Error) throw', async () => {
+      fetchSpy.mockRejectedValueOnce('string error');
+      await expect(lockable.releaseLock('key', 'lock-id')).rejects.toThrow(BackendError);
+    });
+
+    it('re-throws BackendError directly from catch', async () => {
+      fetchSpy.mockResolvedValueOnce(mockResponse(403));
+      const err = await lockable.releaseLock('key', 'lock-id').catch((e: Error) => e);
+      expect(err).toBeInstanceOf(BackendError);
+      expect((err as Error).message).toContain('HTTP 403');
+    });
+  });
+
+  describe('delegate methods', () => {
+    it('delegates set to inner backend', async () => {
+      fetchSpy.mockResolvedValueOnce(new Response(null, { status: 200 }));
+      await lockable.set('key', new Uint8Array([1, 2, 3]), 300);
+      const [url, opts] = fetchSpy.mock.calls[0];
+      expect(url).toContain('/v1/cache/key');
+      expect(opts.method).toBe('PUT');
+    });
+
+    it('delegates delete to inner backend', async () => {
+      fetchSpy.mockResolvedValueOnce(new Response(null, { status: 200 }));
+      expect(await lockable.delete('key')).toBe(true);
+    });
+
+    it('delegates exists to inner backend', async () => {
+      fetchSpy.mockResolvedValueOnce(new Response(null, { status: 200 }));
+      expect(await lockable.exists('key')).toBe(true);
+    });
+
+    it('delegates close to inner backend', async () => {
+      await lockable.close();
+      // After close, operations should throw
+      await expect(lockable.get('key')).rejects.toThrow(BackendError);
+    });
+  });
 });

@@ -42,4 +42,69 @@ describe('URL Validator', () => {
       expect(msg).not.toContain('api.staging.cachekit.io');
     }
   });
+
+  // ── Missing branch coverage: IPv6, more private ranges, edge cases ──
+
+  describe('IPv6 private address blocking', () => {
+    it('blocks IPv6 loopback ::1', () => {
+      expect(() => validateCachekitUrl('https://[::1]', true)).toThrow('private IP');
+    });
+
+    it('blocks IPv6 link-local fe80::', () => {
+      expect(() => validateCachekitUrl('https://[fe80::1]', true)).toThrow('private IP');
+    });
+
+    it('blocks IPv6 unique local fc00::/fd00::', () => {
+      expect(() => validateCachekitUrl('https://[fc00::1]', true)).toThrow('private IP');
+      expect(() => validateCachekitUrl('https://[fd12::1]', true)).toThrow('private IP');
+    });
+
+    it('blocks IPv4-mapped IPv6 (::ffff:)', () => {
+      expect(() => validateCachekitUrl('https://[::ffff:127.0.0.1]', true)).toThrow('private IP');
+    });
+  });
+
+  describe('additional IPv4 private ranges', () => {
+    it('blocks 172.16.0.0/12 range', () => {
+      expect(() => validateCachekitUrl('https://172.16.0.1', true)).toThrow('private IP');
+      expect(() => validateCachekitUrl('https://172.31.255.255', true)).toThrow('private IP');
+    });
+
+    it('blocks 169.254.0.0/16 link-local', () => {
+      expect(() => validateCachekitUrl('https://169.254.169.254', true)).toThrow('private IP');
+    });
+
+    it('blocks 0.0.0.0/8 range', () => {
+      expect(() => validateCachekitUrl('https://0.0.0.0', true)).toThrow('private IP');
+    });
+
+    it('allows public IPv4 with allowCustomHost', () => {
+      expect(() => validateCachekitUrl('https://8.8.8.8', true)).not.toThrow();
+    });
+  });
+
+  describe('SSRF bypass prevention', () => {
+    it('blocks numeric hostname bypass (octal/hex encodings)', () => {
+      expect(() => validateCachekitUrl('https://0177.0.0.1', true)).toThrow('private IP');
+      expect(() => validateCachekitUrl('https://0x7f.0.0.1', true)).toThrow('private IP');
+      expect(() => validateCachekitUrl('https://2130706433', true)).toThrow('private IP');
+    });
+
+    it('blocks localhost and localhost.', () => {
+      expect(() => validateCachekitUrl('https://localhost', true)).toThrow('private IP');
+      expect(() => validateCachekitUrl('https://localhost.', true)).toThrow('private IP');
+    });
+  });
+
+  describe('malformed URL', () => {
+    it('rejects malformed URL', () => {
+      expect(() => validateCachekitUrl('https://not a valid url')).toThrow('malformed');
+    });
+  });
+
+  describe('public IPv6 allowed', () => {
+    it('allows public IPv6 addresses with allowCustomHost', () => {
+      expect(() => validateCachekitUrl('https://[2001:db8::1]', true)).not.toThrow();
+    });
+  });
 });

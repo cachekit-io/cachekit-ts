@@ -151,4 +151,164 @@ describe('EncryptionManager', () => {
       manager.dispose();
     });
   });
+
+  describe('encryption count', () => {
+    it('returns 0 before initialization', async () => {
+      const manager = new EncryptionManager(validKey, 'test-tenant');
+      expect(await manager.getEncryptionCount()).toBe(0);
+      manager.dispose();
+    });
+  });
+
+  describe('nonce exhaustion', () => {
+    it('throws NonceExhaustedError when nonce counter exhausted', async () => {
+      const { NonceExhaustedError } = await import('../errors.js');
+
+      // We need to override the mock to throw nonce exhaustion
+      const mod = await import('@cachekit-io/cachekit-core-ts');
+      const origFn = mod.encryptWithTenantKeys;
+      // @ts-expect-error - overriding mock for test
+      mod.encryptWithTenantKeys = () => {
+        throw new Error('Nonce counter exhausted');
+      };
+
+      const manager = new EncryptionManager(validKey, 'test-tenant');
+      // Initialize first with a successful encrypt
+      // @ts-expect-error - restore for init
+      mod.encryptWithTenantKeys = origFn;
+      await manager.encrypt(new Uint8Array([1]), 'key');
+
+      // Now make it throw nonce exhaustion
+      // @ts-expect-error - overriding mock for test
+      mod.encryptWithTenantKeys = () => {
+        throw new Error('NonceCounterExhausted');
+      };
+
+      await expect(manager.encrypt(new Uint8Array([1]), 'key')).rejects.toThrow(
+        NonceExhaustedError
+      );
+
+      // Restore
+      // @ts-expect-error - restoring mock
+      mod.encryptWithTenantKeys = origFn;
+      manager.dispose();
+    });
+  });
+
+  describe('encrypt error wrapping', () => {
+    it('wraps non-nonce errors as EncryptionError', async () => {
+      const mod = await import('@cachekit-io/cachekit-core-ts');
+      const origFn = mod.encryptWithTenantKeys;
+
+      const manager = new EncryptionManager(validKey, 'test-tenant');
+      // Initialize
+      await manager.encrypt(new Uint8Array([1]), 'key');
+
+      // @ts-expect-error - overriding mock for test
+      mod.encryptWithTenantKeys = () => {
+        throw new Error('some crypto failure');
+      };
+
+      await expect(manager.encrypt(new Uint8Array([1]), 'key')).rejects.toThrow(EncryptionError);
+      await expect(manager.encrypt(new Uint8Array([1]), 'key')).rejects.toThrow(
+        /Encryption failed/
+      );
+
+      // @ts-expect-error - restoring mock
+      mod.encryptWithTenantKeys = origFn;
+      manager.dispose();
+    });
+
+    it('handles non-Error throws during encryption', async () => {
+      const mod = await import('@cachekit-io/cachekit-core-ts');
+      const origFn = mod.encryptWithTenantKeys;
+
+      const manager = new EncryptionManager(validKey, 'test-tenant');
+      await manager.encrypt(new Uint8Array([1]), 'key');
+
+      // @ts-expect-error - overriding mock for test
+      mod.encryptWithTenantKeys = () => {
+        throw 'string error';
+      };
+
+      await expect(manager.encrypt(new Uint8Array([1]), 'key')).rejects.toThrow(EncryptionError);
+      await expect(manager.encrypt(new Uint8Array([1]), 'key')).rejects.toThrow(/Unknown error/);
+
+      // @ts-expect-error - restoring mock
+      mod.encryptWithTenantKeys = origFn;
+      manager.dispose();
+    });
+  });
+
+  describe('decrypt error wrapping', () => {
+    it('handles non-Error throws during decryption', async () => {
+      const mod = await import('@cachekit-io/cachekit-core-ts');
+      const origFn = mod.decryptWithTenantKeys;
+
+      const manager = new EncryptionManager(validKey, 'test-tenant');
+      await manager.encrypt(new Uint8Array([1]), 'key');
+
+      // @ts-expect-error - overriding mock for test
+      mod.decryptWithTenantKeys = () => {
+        throw 'string error';
+      };
+
+      await expect(manager.decrypt(new Uint8Array([1]), 'key')).rejects.toThrow(EncryptionError);
+      await expect(manager.decrypt(new Uint8Array([1]), 'key')).rejects.toThrow(/Unknown error/);
+
+      // @ts-expect-error - restoring mock
+      mod.decryptWithTenantKeys = origFn;
+      manager.dispose();
+    });
+  });
+
+  describe('initialization error handling', () => {
+    it('wraps non-ConfigurationError/EncryptionError init errors', async () => {
+      const mod = await import('@cachekit-io/cachekit-core-ts');
+      const origFn = mod.deriveTenantKeys;
+
+      // @ts-expect-error - overriding mock for test
+      mod.deriveTenantKeys = () => {
+        throw new TypeError('unexpected init error');
+      };
+
+      const manager = new EncryptionManager(validKey, 'test-tenant');
+      await expect(manager.encrypt(new Uint8Array([1]), 'key')).rejects.toThrow(EncryptionError);
+      await expect(manager.encrypt(new Uint8Array([1]), 'key')).rejects.toThrow(
+        /Failed to initialize/
+      );
+
+      // @ts-expect-error - restoring mock
+      mod.deriveTenantKeys = origFn;
+      manager.dispose();
+    });
+
+    it('handles non-Error throws during init', async () => {
+      const mod = await import('@cachekit-io/cachekit-core-ts');
+      const origFn = mod.deriveTenantKeys;
+
+      // @ts-expect-error - overriding mock for test
+      mod.deriveTenantKeys = () => {
+        throw 'string init error';
+      };
+
+      const manager = new EncryptionManager(validKey, 'test-tenant');
+      await expect(manager.encrypt(new Uint8Array([1]), 'key')).rejects.toThrow(EncryptionError);
+
+      // @ts-expect-error - restoring mock
+      mod.deriveTenantKeys = origFn;
+      manager.dispose();
+    });
+  });
+
+  describe('default tenant ID', () => {
+    it('uses "default" tenant ID when none provided', async () => {
+      const manager = new EncryptionManager(validKey);
+      const data = new Uint8Array([1, 2, 3]);
+      const encrypted = await manager.encrypt(data, 'test-key');
+      const decrypted = await manager.decrypt(encrypted, 'test-key');
+      expect(decrypted).toEqual(data);
+      manager.dispose();
+    });
+  });
 });

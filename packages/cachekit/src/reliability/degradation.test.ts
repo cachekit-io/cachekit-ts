@@ -29,6 +29,22 @@ describe('withDegradationFn', () => {
     );
     expect(result).toBe('caught: test error');
   });
+
+  it('wraps non-Error throws into Error for fallback', async () => {
+    const result = await withDegradationFn(
+      () => Promise.reject('string error'),
+      (err) => `caught: ${err.message}`
+    );
+    expect(result).toBe('caught: string error');
+  });
+
+  it('supports async fallback function', async () => {
+    const result = await withDegradationFn(
+      () => Promise.reject(new Error('fail')),
+      async (err) => `async caught: ${err.message}`
+    );
+    expect(result).toBe('async caught: fail');
+  });
 });
 
 describe('degradationBehaviors', () => {
