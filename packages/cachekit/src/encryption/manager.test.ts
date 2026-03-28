@@ -165,10 +165,6 @@ describe('EncryptionManager', () => {
       const { NonceExhaustedError } = await import('../errors.js');
 
       // We need to override the mock to throw nonce exhaustion
-      const { encryptWithTenantKeys } = await import('@cachekit-io/cachekit-core-ts');
-      const originalEncrypt = encryptWithTenantKeys;
-
-      // Temporarily replace the encrypt function via the module mock
       const mod = await import('@cachekit-io/cachekit-core-ts');
       const origFn = mod.encryptWithTenantKeys;
       // @ts-expect-error - overriding mock for test
