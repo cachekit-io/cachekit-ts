@@ -231,6 +231,118 @@ describe('CachekitIO Backend', () => {
         expect((e as Error).message).toContain('***');
       }
     });
+
+    it('wraps unknown (non-Error) throws as BackendError', async () => {
+      fetchSpy.mockRejectedValueOnce('string error');
+      await expect(backend.get('key')).rejects.toThrow(BackendError);
+    });
+
+    it('wraps network errors on set', async () => {
+      fetchSpy.mockRejectedValueOnce(new TypeError('fetch failed'));
+      await expect(backend.set('key', new Uint8Array([1]))).rejects.toThrow(BackendError);
+    });
+
+    it('wraps timeout on set', async () => {
+      const timeoutError = new DOMException('signal timed out', 'TimeoutError');
+      fetchSpy.mockRejectedValueOnce(timeoutError);
+      await expect(backend.set('key', new Uint8Array([1]))).rejects.toThrow(TimeoutError);
+    });
+
+    it('wraps network errors on delete', async () => {
+      fetchSpy.mockRejectedValueOnce(new TypeError('fetch failed'));
+      await expect(backend.delete('key')).rejects.toThrow(BackendError);
+    });
+
+    it('wraps network errors on exists', async () => {
+      fetchSpy.mockRejectedValueOnce(new TypeError('fetch failed'));
+      await expect(backend.exists('key')).rejects.toThrow(BackendError);
+    });
+
+    it('throws BackendError on non-ok delete response', async () => {
+      fetchSpy.mockResolvedValueOnce(mockResponse(500, 'Server Error'));
+      await expect(backend.delete('key')).rejects.toThrow(BackendError);
+    });
+
+    it('throws BackendError on non-ok exists response', async () => {
+      fetchSpy.mockResolvedValueOnce(mockResponse(500, 'Server Error'));
+      await expect(backend.exists('key')).rejects.toThrow(BackendError);
+    });
+
+    it('falls back to statusText when response.text() fails in httpError', async () => {
+      // Create a response where .text() throws
+      const brokenResponse = {
+        ok: false,
+        status: 502,
+        statusText: 'Bad Gateway',
+        text: () => Promise.reject(new Error('body unavailable')),
+        arrayBuffer: () => Promise.reject(new Error('body unavailable')),
+      } as unknown as Response;
+      fetchSpy.mockResolvedValueOnce(brokenResponse);
+      await expect(backend.get('key')).rejects.toThrow(/Bad Gateway/);
+    });
+  });
+
+  // ── Health Check ────────────────────────────────────────────
+
+  describe('health', () => {
+    it('returns healthy with version on 200', async () => {
+      fetchSpy.mockResolvedValueOnce(
+        new Response(JSON.stringify({ version: '1.0.0' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+      const result = await (backend as import('./cachekitio.js').CachekitIOCore).health();
+      expect(result.healthy).toBe(true);
+      expect(result.version).toBe('1.0.0');
+      expect(result.latencyMs).toBeGreaterThanOrEqual(0);
+    });
+
+    it('returns unhealthy on 429', async () => {
+      fetchSpy.mockResolvedValueOnce(mockResponse(429));
+      const result = await (backend as import('./cachekitio.js').CachekitIOCore).health();
+      expect(result.healthy).toBe(false);
+    });
+
+    it('returns unhealthy on 500', async () => {
+      fetchSpy.mockResolvedValueOnce(mockResponse(500));
+      const result = await (backend as import('./cachekitio.js').CachekitIOCore).health();
+      expect(result.healthy).toBe(false);
+    });
+
+    it('returns unhealthy on network error', async () => {
+      fetchSpy.mockRejectedValueOnce(new Error('network down'));
+      const result = await (backend as import('./cachekitio.js').CachekitIOCore).health();
+      expect(result.healthy).toBe(false);
+      expect(result.latencyMs).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  // ── Set edge cases ─────────────────────────────────────────
+
+  describe('set edge cases', () => {
+    it('omits X-TTL header when TTL is 0', async () => {
+      fetchSpy.mockResolvedValueOnce(mockResponse(200));
+      await backend.set('key', new Uint8Array([1]), 0);
+      const [, opts] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      const headers = opts.headers as Record<string, string>;
+      expect(headers['X-TTL']).toBeUndefined();
+    });
+
+    it('closed state rejects set', async () => {
+      await backend.close();
+      await expect(backend.set('key', new Uint8Array([1]))).rejects.toThrow(/closed/);
+    });
+
+    it('closed state rejects delete', async () => {
+      await backend.close();
+      await expect(backend.delete('key')).rejects.toThrow(/closed/);
+    });
+
+    it('closed state rejects exists', async () => {
+      await backend.close();
+      await expect(backend.exists('key')).rejects.toThrow(/closed/);
+    });
   });
 
   // ── createCache integration ───────────────────────────────

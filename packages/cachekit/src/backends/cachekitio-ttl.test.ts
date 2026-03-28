@@ -58,4 +58,107 @@ describe('TTLCachekitIO', () => {
     const headers = opts.headers as Record<string, string>;
     expect(headers['Content-Type']).toBe('application/json');
   });
+
+  // ── Missing branch coverage: error paths ───────────────────
+
+  describe('getTTL error paths', () => {
+    it('throws BackendError on HTTP error', async () => {
+      const { BackendError } = await import('../errors.js');
+      fetchSpy.mockResolvedValueOnce(mockResponse(500));
+      await expect(ttlBackend.getTTL('key')).rejects.toThrow(BackendError);
+    });
+
+    it('throws TimeoutError on timeout network error', async () => {
+      const { TimeoutError } = await import('../errors.js');
+      const timeoutErr = new DOMException('signal timed out', 'TimeoutError');
+      fetchSpy.mockRejectedValueOnce(timeoutErr);
+      await expect(ttlBackend.getTTL('key')).rejects.toThrow(TimeoutError);
+    });
+
+    it('throws BackendError on generic network error', async () => {
+      const { BackendError } = await import('../errors.js');
+      fetchSpy.mockRejectedValueOnce(new TypeError('fetch failed'));
+      await expect(ttlBackend.getTTL('key')).rejects.toThrow(BackendError);
+    });
+
+    it('throws BackendError on unknown (non-Error) throw', async () => {
+      const { BackendError } = await import('../errors.js');
+      fetchSpy.mockRejectedValueOnce('string error');
+      await expect(ttlBackend.getTTL('key')).rejects.toThrow(BackendError);
+    });
+
+    it('re-throws BackendError directly', async () => {
+      const { BackendError } = await import('../errors.js');
+      fetchSpy.mockResolvedValueOnce(mockResponse(401));
+      const err = await ttlBackend.getTTL('key').catch((e: Error) => e);
+      expect(err).toBeInstanceOf(BackendError);
+      expect((err as Error).message).toContain('HTTP 401');
+    });
+  });
+
+  describe('refreshTTL error paths', () => {
+    it('throws BackendError on HTTP error', async () => {
+      const { BackendError } = await import('../errors.js');
+      fetchSpy.mockResolvedValueOnce(mockResponse(500));
+      await expect(ttlBackend.refreshTTL('key', 3600)).rejects.toThrow(BackendError);
+    });
+
+    it('throws TimeoutError on timeout network error', async () => {
+      const { TimeoutError } = await import('../errors.js');
+      const timeoutErr = new DOMException('signal timed out', 'TimeoutError');
+      fetchSpy.mockRejectedValueOnce(timeoutErr);
+      await expect(ttlBackend.refreshTTL('key', 3600)).rejects.toThrow(TimeoutError);
+    });
+
+    it('throws BackendError on generic network error', async () => {
+      const { BackendError } = await import('../errors.js');
+      fetchSpy.mockRejectedValueOnce(new TypeError('fetch failed'));
+      await expect(ttlBackend.refreshTTL('key', 3600)).rejects.toThrow(BackendError);
+    });
+
+    it('throws BackendError on unknown (non-Error) throw', async () => {
+      const { BackendError } = await import('../errors.js');
+      fetchSpy.mockRejectedValueOnce('string error');
+      await expect(ttlBackend.refreshTTL('key', 3600)).rejects.toThrow(BackendError);
+    });
+
+    it('re-throws BackendError directly', async () => {
+      const { BackendError } = await import('../errors.js');
+      fetchSpy.mockResolvedValueOnce(mockResponse(403));
+      const err = await ttlBackend.refreshTTL('key', 3600).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(BackendError);
+      expect((err as Error).message).toContain('HTTP 403');
+    });
+  });
+
+  describe('delegate methods', () => {
+    it('delegates get to inner backend', async () => {
+      fetchSpy.mockResolvedValueOnce(new Response(null, { status: 404 }));
+      expect(await ttlBackend.get('missing')).toBeNull();
+    });
+
+    it('delegates set to inner backend', async () => {
+      fetchSpy.mockResolvedValueOnce(new Response(null, { status: 200 }));
+      await ttlBackend.set('key', new Uint8Array([1, 2, 3]), 300);
+      const [url, opts] = fetchSpy.mock.calls[0];
+      expect(url).toContain('/v1/cache/key');
+      expect(opts.method).toBe('PUT');
+    });
+
+    it('delegates delete to inner backend', async () => {
+      fetchSpy.mockResolvedValueOnce(new Response(null, { status: 200 }));
+      expect(await ttlBackend.delete('key')).toBe(true);
+    });
+
+    it('delegates exists to inner backend', async () => {
+      fetchSpy.mockResolvedValueOnce(new Response(null, { status: 200 }));
+      expect(await ttlBackend.exists('key')).toBe(true);
+    });
+
+    it('delegates close to inner backend', async () => {
+      await ttlBackend.close();
+      const { BackendError } = await import('../errors.js');
+      await expect(ttlBackend.get('key')).rejects.toThrow(BackendError);
+    });
+  });
 });
