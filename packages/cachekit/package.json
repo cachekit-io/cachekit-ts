@@ -55,9 +55,9 @@
   },
   "dependencies": {
     "@cachekit-io/cachekit-core-ts": "workspace:*",
-    "@msgpack/msgpack": "^3.1.2",
+    "@msgpack/msgpack": "^3.1.3",
     "@noble/hashes": "^2.0.1",
-    "ioredis": "^5.8.2"
+    "ioredis": "^5.10.1"
   },
   "devDependencies": {
     "@testcontainers/redis": "^11.13.0",
