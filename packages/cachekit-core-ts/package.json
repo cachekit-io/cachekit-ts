@@ -52,8 +52,8 @@
     "url": "https://github.com/cachekit-io/cachekit-ts/issues"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.4",
-    "@types/node": "^20.19.37"
+    "@napi-rs/cli": "^3.5.1",
+    "@types/node": "^25.5.0"
   },
   "engines": {
     "node": ">=22.0.0"
