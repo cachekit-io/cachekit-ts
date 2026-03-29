@@ -577,8 +577,6 @@ if (!nativeBinding) {
 
 module.exports = nativeBinding
 module.exports.ByteStorage = nativeBinding.ByteStorage
-module.exports.Encryptor = nativeBinding.Encryptor
-module.exports.KeyRotationState = nativeBinding.KeyRotationState
 module.exports.TenantKeys = nativeBinding.TenantKeys
 module.exports.decryptWithTenantKeys = nativeBinding.decryptWithTenantKeys
 module.exports.deriveKey = nativeBinding.deriveKey
