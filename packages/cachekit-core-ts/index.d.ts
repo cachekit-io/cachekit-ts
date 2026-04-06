@@ -59,111 +59,6 @@ export declare class ByteStorage {
 }
 
 /**
- * AES-256-GCM encryption with AAD binding.
- *
- * Key is stored at construction time and used for all operations.
- * This is a thin wrapper around cachekit-core's ZeroKnowledgeEncryptor.
- *
- * # Security
- * - Key must be exactly 32 bytes (256 bits)
- * - Nonce is auto-generated per encryption (never reuse)
- * - AAD binds ciphertext to context (prevents substitution attacks)
- *
- * # Example
- * ```javascript
- * const key = crypto.randomBytes(32);
- * const encryptor = new Encryptor(key);
- * const aad = Buffer.from('cache:my-key');
- * const ciphertext = encryptor.encrypt(plaintext, aad);
- * const decrypted = encryptor.decrypt(ciphertext, aad);
- * ```
- */
-export declare class Encryptor {
-  /**
-   * Create a new Encryptor with the given 32-byte key.
-   *
-   * # Arguments
-   * * `key` - Exactly 32 bytes (256 bits) encryption key
-   *
-   * # Errors
-   * Returns InvalidArg if key is not exactly 32 bytes
-   */
-  constructor(key: Uint8Array)
-  /**
-   * Encrypt plaintext with AAD binding.
-   *
-   * # Arguments
-   * * `plaintext` - Data to encrypt (max 100 MB)
-   * * `aad` - Additional Authenticated Data (bound to ciphertext, max 64 KB)
-   *
-   * # Returns
-   * Ciphertext containing: [nonce][tag][encrypted_data]
-   *
-   * # Errors
-   * Returns GenericFailure if encryption fails
-   *
-   * # CRITICAL: Signature is encrypt(plaintext, aad) NOT encrypt(key, plaintext, aad)
-   */
-  encrypt(plaintext: Uint8Array, aad: Uint8Array): Uint8Array
-  /**
-   * Decrypt ciphertext and verify AAD.
-   *
-   * # Arguments
-   * * `ciphertext` - Previously encrypted data
-   * * `aad` - Must match AAD used during encryption
-   *
-   * # Returns
-   * Original plaintext
-   *
-   * # Errors
-   * Returns GenericFailure if:
-   * - Decryption fails
-   * - AAD verification fails (wrong context)
-   */
-  decrypt(ciphertext: Uint8Array, aad: Uint8Array): Uint8Array
-  /**
-   * Get the current nonce counter value.
-   *
-   * Useful for monitoring nonce exhaustion (should rotate key before 2^32).
-   */
-  getNonceCounter(): number
-}
-
-/**
- * State machine for zero-downtime key rotation.
- *
- * During rotation:
- * - New data is encrypted with the new key
- * - Old data can still be decrypted with the old key
- * - After rotation completes, only new key is used
- */
-export declare class KeyRotationState {
-  /** Create a new KeyRotationState with the current key. */
-  constructor(key: Uint8Array)
-  /**
-   * Start rotation to a new key.
-   *
-   * The old key is preserved for decryption during transition.
-   */
-  startRotation(newKey: Uint8Array): void
-  /** Complete the rotation, discarding the old key. */
-  completeRotation(): void
-  /** Check if rotation is in progress. */
-  isRotating(): boolean
-  /** Get the key to use for encryption (always the current key). */
-  encryptionKey(): Uint8Array
-  /**
-   * Get the key to try for decryption.
-   * Returns current key, or previous key if rotation is in progress.
-   *
-   * During rotation, try current key first, then previous key.
-   */
-  decryptionKey(): Uint8Array
-  /** Get the previous key (if rotation is in progress). */
-  previousDecryptionKey(): Uint8Array | null
-}
-
-/**
  * Per-tenant derived keys with automatic zeroization.
  *
  * This wraps cachekit-core's TenantKeys which has `#[derive(ZeroizeOnDrop)]`.
@@ -220,7 +115,7 @@ export declare function decryptWithTenantKeys(ciphertext: Uint8Array, aad: Uint8
  * # Arguments
  * * `master_key` - 32-byte master encryption key
  * * `domain` - Domain label (e.g., "cachekit:encryption") - cannot be empty
- * * `tenant_salt` - Per-tenant salt for isolation - REQUIRED for multi-tenant security
+ * * `tenant_salt` - Per-tenant salt for isolation
  *
  * # Returns
  * 32-byte derived key
@@ -229,7 +124,7 @@ export declare function decryptWithTenantKeys(ciphertext: Uint8Array, aad: Uint8
  * Returns InvalidArg if:
  * - master_key is not 32 bytes
  * - domain is empty
- * - tenant_salt is null/undefined or empty string
+ * - tenant_salt is empty
  *
  * # Example
  * ```javascript
@@ -237,7 +132,7 @@ export declare function decryptWithTenantKeys(ciphertext: Uint8Array, aad: Uint8
  * const derivedKey = deriveKey(masterKey, 'cachekit:encryption', 'tenant-123');
  * ```
  */
-export declare function deriveKey(masterKey: Uint8Array, domain: string, tenantSalt?: string | undefined | null): Uint8Array
+export declare function deriveKey(masterKey: Uint8Array, domain: string, tenantSalt: string): Uint8Array
 
 /**
  * Derive per-tenant keys using HKDF-SHA256.

@@ -274,7 +274,64 @@ describe('Cross-SDK Interoperability (Python <-> TypeScript)', () => {
       expect(bytesToHex(aadTrue)).not.toBe(bytesToHex(aadFalse));
     });
   });
+
+  describe('TypeScript decrypts Python compressed=True ciphertext', () => {
+    it('decrypts compressed_basic vector', () => {
+      const v = PYTHON_COMPRESSED_FIXTURE.vector;
+      const ciphertext = hexToBytes(v.ciphertextHex);
+      const expectedPlaintext = hexToBytes(v.plaintextHex);
+      const aad = hexToBytes(v.aadHex);
+
+      const decrypted = decryptWithTenantKeys(ciphertext, aad, tsKeys);
+
+      expect(bytesToHex(decrypted)).toBe(v.plaintextHex);
+      expect(Array.from(decrypted)).toEqual(Array.from(expectedPlaintext));
+    });
+
+    it('produces identical AAD as Python for compressed=True', () => {
+      const v = PYTHON_COMPRESSED_FIXTURE.vector;
+      const tsAAD = buildAAD(PYTHON_COMPRESSED_FIXTURE.tenantId, v.cacheKey, 'msgpack', true);
+      const pythonAAD = hexToBytes(v.aadHex);
+
+      expect(bytesToHex(tsAAD)).toBe(v.aadHex);
+      expect(Array.from(tsAAD)).toEqual(Array.from(pythonAAD));
+    });
+
+    it('fails to decrypt compressed vector with compressed=False AAD', () => {
+      const v = PYTHON_COMPRESSED_FIXTURE.vector;
+      const ciphertext = hexToBytes(v.ciphertextHex);
+      // Wrong: using compressed=False for data encrypted with compressed=True
+      const wrongAAD = buildAAD(PYTHON_COMPRESSED_FIXTURE.tenantId, v.cacheKey, 'msgpack', false);
+
+      expect(() => {
+        decryptWithTenantKeys(ciphertext, wrongAAD, tsKeys);
+      }).toThrow();
+    });
+  });
 });
+
+/**
+ * Python-generated test fixture with compressed=True in AAD.
+ *
+ * Generated with:
+ * ```python
+ * aad = create_aad_v03(tenant_id, cache_key, 'msgpack', compressed=True)
+ * ciphertext = encryptor.encrypt_with_keys(plaintext, aad, tenant_keys)
+ * ```
+ */
+const PYTHON_COMPRESSED_FIXTURE = {
+  masterKeyHex: '6161616161616161616161616161616161616161616161616161616161616161',
+  tenantId: 'cross-sdk-test',
+  keyFingerprintHex: '96179a9bc881aa7ca83f04b78a66afd3',
+  vector: {
+    name: 'compressed_basic',
+    plaintextHex: 'deadbeefcafe',
+    cacheKey: 'test:compressed:vector',
+    aadHex:
+      '030000000e63726f73732d73646b2d7465737400000016746573743a636f6d707265737365643a766563746f72000000076d73677061636b0000000454727565',
+    ciphertextHex: '44cc06e600000000000000000eb8450c4aac2337265323f7f1b03fc3966deaa515f7',
+  },
+};
 
 describe('Python AAD Format Verification', () => {
   /**

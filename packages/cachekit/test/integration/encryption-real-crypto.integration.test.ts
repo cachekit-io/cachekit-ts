@@ -13,7 +13,6 @@ import {
   encryptWithTenantKeys,
   decryptWithTenantKeys,
   TenantKeys,
-  Encryptor,
 } from '@cachekit-io/cachekit-core-ts';
 import { AAD_VERSION, MIN_MASTER_KEY_BYTES } from '../../src/constants.js';
 
@@ -198,27 +197,6 @@ describe('Real Crypto Integration (No Mocks)', () => {
       expect(decrypted[0]).toBe(0);
       expect(decrypted[1023]).toBe(1023 % 256);
       expect(decrypted[1024 * 1024 - 1]).toBe((1024 * 1024 - 1) % 256);
-    });
-  });
-
-  describe('Direct Encryptor API', () => {
-    it('encrypts and decrypts with Encryptor class', () => {
-      const key = new Uint8Array(32).fill(0x42);
-      const encryptor = new Encryptor(key);
-
-      const plaintext = new Uint8Array([1, 2, 3, 4, 5]);
-      const aad = new Uint8Array([0xAA, 0xBB, 0xCC]);
-
-      const ciphertext = encryptor.encrypt(plaintext, aad);
-      const decrypted = encryptor.decrypt(ciphertext, aad);
-
-      expect(Array.from(decrypted)).toEqual(Array.from(plaintext));
-    });
-
-    it('rejects key that is not 32 bytes', () => {
-      expect(() => new Encryptor(new Uint8Array(16))).toThrow(/32 bytes/);
-      expect(() => new Encryptor(new Uint8Array(31))).toThrow(/32 bytes/);
-      expect(() => new Encryptor(new Uint8Array(33))).toThrow(/32 bytes/);
     });
   });
 

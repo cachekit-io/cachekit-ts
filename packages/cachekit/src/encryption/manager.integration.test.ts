@@ -22,7 +22,7 @@ describe('EncryptionManager Integration - Error Paths', () => {
       // 30 bytes = 60 hex chars (less than 32 bytes = 64 hex chars)
       const shortKey = 'a'.repeat(60);
       expect(() => new EncryptionManager(shortKey)).toThrow(ConfigurationError);
-      expect(() => new EncryptionManager(shortKey)).toThrow(/at least 32 bytes/);
+      expect(() => new EncryptionManager(shortKey)).toThrow(/exactly 32 bytes/);
     });
 
     it('rejects non-hex master key', () => {
@@ -40,9 +40,10 @@ describe('EncryptionManager Integration - Error Paths', () => {
       expect(() => new EncryptionManager(VALID_HEX_KEY)).not.toThrow();
     });
 
-    it('accepts longer hex keys (e.g., 48 bytes = 96 hex chars)', () => {
-      const longerKey = 'b'.repeat(96);
-      expect(() => new EncryptionManager(longerKey)).not.toThrow();
+    it('rejects longer hex keys (Rust requires exactly 32 bytes)', () => {
+      const longerKey = 'b'.repeat(96); // 48 bytes
+      expect(() => new EncryptionManager(longerKey)).toThrow(ConfigurationError);
+      expect(() => new EncryptionManager(longerKey)).toThrow(/exactly 32 bytes/);
     });
   });
 

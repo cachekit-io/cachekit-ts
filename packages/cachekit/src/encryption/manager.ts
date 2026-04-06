@@ -70,9 +70,9 @@ export class EncryptionManager {
     if (!/^[0-9a-fA-F]+$/.test(masterKey)) {
       throw new ConfigurationError('Master key must be hex-encoded');
     }
-    if (masterKey.length < MIN_MASTER_KEY_HEX_LENGTH) {
+    if (masterKey.length !== MIN_MASTER_KEY_HEX_LENGTH) {
       throw new ConfigurationError(
-        `Master key must be at least ${MIN_MASTER_KEY_BYTES} bytes (${MIN_MASTER_KEY_HEX_LENGTH} hex characters)`
+        `Master key must be exactly ${MIN_MASTER_KEY_BYTES} bytes (${MIN_MASTER_KEY_HEX_LENGTH} hex characters), got ${masterKey.length} hex characters`
       );
     }
   }
@@ -123,11 +123,11 @@ export class EncryptionManager {
    * @throws {NonceExhaustedError} if nonce counter reaches 2^32 (rotate key)
    * @throws {EncryptionError} if encryption fails
    */
-  async encrypt(data: Uint8Array, cacheKey: string): Promise<Uint8Array> {
+  async encrypt(data: Uint8Array, cacheKey: string, compressed = false): Promise<Uint8Array> {
     await this.ensureInitialized();
 
     try {
-      const aad = this.buildAAD(cacheKey);
+      const aad = this.buildAAD(cacheKey, 'msgpack', compressed);
       return this.native!.encryptWithTenantKeys(data, aad, this.tenantKeys!);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
@@ -156,11 +156,11 @@ export class EncryptionManager {
    * @returns Decrypted plaintext
    * @throws {EncryptionError} if decryption or AAD verification fails
    */
-  async decrypt(ciphertext: Uint8Array, cacheKey: string): Promise<Uint8Array> {
+  async decrypt(ciphertext: Uint8Array, cacheKey: string, compressed = false): Promise<Uint8Array> {
     await this.ensureInitialized();
 
     try {
-      const aad = this.buildAAD(cacheKey);
+      const aad = this.buildAAD(cacheKey, 'msgpack', compressed);
       return this.native!.decryptWithTenantKeys(ciphertext, aad, this.tenantKeys!);
     } catch (error) {
       throw new EncryptionError(

@@ -81,6 +81,9 @@ export interface CacheOptions {
   /** Serializer configuration */
   serializer?: Partial<SerializerConfig>;
 
+  /** Enable ByteStorage wire format (LZ4 compression + xxHash3-64 integrity). Default: true */
+  compression?: boolean;
+
   /** Enable Prometheus metrics */
   metrics?: boolean;
 
