@@ -70,9 +70,9 @@ export class EncryptionManager {
     if (!/^[0-9a-fA-F]+$/.test(masterKey)) {
       throw new ConfigurationError('Master key must be hex-encoded');
     }
-    if (masterKey.length < MIN_MASTER_KEY_HEX_LENGTH) {
+    if (masterKey.length !== MIN_MASTER_KEY_HEX_LENGTH) {
       throw new ConfigurationError(
-        `Master key must be at least ${MIN_MASTER_KEY_BYTES} bytes (${MIN_MASTER_KEY_HEX_LENGTH} hex characters)`
+        `Master key must be exactly ${MIN_MASTER_KEY_BYTES} bytes (${MIN_MASTER_KEY_HEX_LENGTH} hex characters), got ${masterKey.length} hex characters`
       );
     }
   }

@@ -359,7 +359,7 @@ describe('Cache Integration', () => {
       await cache.close();
     });
 
-    it('should fail when reading compressed data with compression disabled (mismatch)', async () => {
+    it('should return null when reading compressed data with compression disabled (mismatch)', async () => {
       const sharedBackend = new InMemoryBackend();
 
       // Write with compression enabled
@@ -371,21 +371,17 @@ describe('Cache Integration', () => {
       await writer.set('test:mismatch', { data: 'compressed' });
       await writer.close();
 
-      // Read with compression disabled — ByteStorage envelope hits MessagePack decoder
+      // Read with compression disabled — ByteStorage envelope hits serializer.decode()
+      // which fails (envelope structure doesn't match expected types), caught by
+      // ReliabilityExecutor → degrades to null (cache miss).
+      // KNOWN LIMITATION: compression config must be consistent within a deployment.
       const reader = createCache({
         backend: sharedBackend,
         compression: false,
         l1: { enabled: false },
       });
-      // The ByteStorage envelope bytes go directly to serializer.decode().
-      // This produces either null (deserialization error caught by ReliabilityExecutor)
-      // or a garbage-decoded value that won't match the original.
       const result = await reader.get('test:mismatch');
-      expect(result).not.toEqual({ data: 'compressed' });
-      // If it's not null, it decoded the envelope structure as a value (garbage but valid msgpack)
-      if (result !== null) {
-        expect(typeof result).not.toBe('undefined');
-      }
+      expect(result).toBeNull();
       await reader.close();
     });
   });
