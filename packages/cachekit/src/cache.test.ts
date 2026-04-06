@@ -5,6 +5,10 @@ import type { Backend } from './backends/types.js';
 
 /**
  * Simple in-memory backend for testing cache integration.
+ *
+ * NOTE: All tests that don't explicitly set `compression: false` exercise ByteStorage
+ * compression by default (CacheOptions.compression defaults to true). This is intentional —
+ * it ensures the compression pipeline is continuously validated across all cache operations.
  */
 class InMemoryBackend implements Backend {
   private store = new Map<string, Uint8Array>();
@@ -229,6 +233,160 @@ describe('Cache Integration', () => {
       expect(attempts).toBe(2); // First failed, second succeeded
 
       await retryCache.close();
+    });
+  });
+
+  describe('Compression (ByteStorage)', () => {
+    it('should round-trip with compression enabled (default)', async () => {
+      const compressedCache = createCache({
+        backend: new InMemoryBackend(),
+        l1: { enabled: false },
+      });
+
+      const payload = { data: 'a'.repeat(1000) }; // Compressible
+      await compressedCache.set('test:compressed', payload);
+      const result = await compressedCache.get<typeof payload>('test:compressed');
+
+      expect(result).toEqual(payload);
+      await compressedCache.close();
+    });
+
+    it('should round-trip with compression disabled', async () => {
+      const uncompressedCache = createCache({
+        backend: new InMemoryBackend(),
+        compression: false,
+        l1: { enabled: false },
+      });
+
+      await uncompressedCache.set('test:uncompressed', { data: 'value' });
+      const result = await uncompressedCache.get<{ data: string }>('test:uncompressed');
+
+      expect(result).toEqual({ data: 'value' });
+      await uncompressedCache.close();
+    });
+
+    it('should produce smaller output for compressible data', async () => {
+      const compressedBackend = new InMemoryBackend();
+      const uncompressedBackend = new InMemoryBackend();
+
+      const compressedCache = createCache({
+        backend: compressedBackend,
+        compression: true,
+        l1: { enabled: false },
+      });
+      const uncompressedCache = createCache({
+        backend: uncompressedBackend,
+        compression: false,
+        l1: { enabled: false },
+      });
+
+      // Highly compressible: repeated data
+      const payload = { data: 'hello world '.repeat(500) };
+      await compressedCache.set('test:key', payload);
+      await uncompressedCache.set('test:key', payload);
+
+      const compressedBytes = await compressedBackend.get('test:key');
+      const uncompressedBytes = await uncompressedBackend.get('test:key');
+
+      expect(compressedBytes).not.toBeNull();
+      expect(uncompressedBytes).not.toBeNull();
+      expect(compressedBytes!.length).toBeLessThan(uncompressedBytes!.length);
+
+      await compressedCache.close();
+      await uncompressedCache.close();
+    });
+
+    it('should round-trip with compression + encryption', async () => {
+      const cache = createCache({
+        backend: new InMemoryBackend(),
+        compression: true,
+        encryption: {
+          masterKey: '0'.repeat(64),
+          tenantId: 'test-tenant',
+        },
+        l1: { enabled: false },
+      });
+
+      const payload = { sensitive: 'data', repeated: 'x'.repeat(500) };
+      await cache.set('secure:key', payload);
+      const result = await cache.get<typeof payload>('secure:key');
+
+      expect(result).toEqual(payload);
+      await cache.close();
+    });
+
+    it('should round-trip with encryption only (no compression)', async () => {
+      const cache = createCache({
+        backend: new InMemoryBackend(),
+        compression: false,
+        encryption: {
+          masterKey: '0'.repeat(64),
+          tenantId: 'test-tenant',
+        },
+        l1: { enabled: false },
+      });
+
+      await cache.set('secure:key', { data: 'value' });
+      const result = await cache.get<{ data: string }>('secure:key');
+
+      expect(result).toEqual({ data: 'value' });
+      await cache.close();
+    });
+  });
+
+  describe('Compression Error Handling', () => {
+    it('should return null when backend returns corrupted compressed data (graceful degradation)', async () => {
+      const corruptBackend = new InMemoryBackend();
+      const cache = createCache({
+        backend: corruptBackend,
+        compression: true,
+        l1: { enabled: false },
+      });
+
+      // Write valid data
+      await cache.set('test:key', { data: 'value' });
+
+      // Corrupt the stored bytes
+      const stored = await corruptBackend.get('test:key');
+      expect(stored).not.toBeNull();
+      const corrupted = new Uint8Array(stored!);
+      corrupted[Math.floor(corrupted.length / 2)] ^= 0xff;
+      await corruptBackend.set('test:key', corrupted, 3600);
+
+      // ReliabilityExecutor catches the unpack error and degrades to null (cache miss)
+      const result = await cache.get('test:key');
+      expect(result).toBeNull();
+      await cache.close();
+    });
+
+    it('should fail when reading compressed data with compression disabled (mismatch)', async () => {
+      const sharedBackend = new InMemoryBackend();
+
+      // Write with compression enabled
+      const writer = createCache({
+        backend: sharedBackend,
+        compression: true,
+        l1: { enabled: false },
+      });
+      await writer.set('test:mismatch', { data: 'compressed' });
+      await writer.close();
+
+      // Read with compression disabled — ByteStorage envelope hits MessagePack decoder
+      const reader = createCache({
+        backend: sharedBackend,
+        compression: false,
+        l1: { enabled: false },
+      });
+      // The ByteStorage envelope bytes go directly to serializer.decode().
+      // This produces either null (deserialization error caught by ReliabilityExecutor)
+      // or a garbage-decoded value that won't match the original.
+      const result = await reader.get('test:mismatch');
+      expect(result).not.toEqual({ data: 'compressed' });
+      // If it's not null, it decoded the envelope structure as a value (garbage but valid msgpack)
+      if (result !== null) {
+        expect(typeof result).not.toBe('undefined');
+      }
+      await reader.close();
     });
   });
 

@@ -18,6 +18,7 @@ import {
   extractNamespace,
 } from './serialization/key-generator.js';
 import { EncryptionManager } from './encryption/manager.js';
+import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 import { RedisInvalidationChannel } from './invalidation/redis-channel.js';
 import { createInvalidationEvent } from './invalidation/event.js';
 import { BackendError, ConfigurationError } from './errors.js';
@@ -32,6 +33,7 @@ class CacheImpl implements SecureCache {
   private readonly reliabilityExecutor: ReliabilityExecutor;
   private readonly backgroundRefresh: BackgroundRefreshManager;
   private readonly encryption: EncryptionManager | null;
+  private readonly byteStorage: ByteStorage | null;
   private readonly serializer: MessagePackSerializer;
   private readonly defaultTtl: number;
   private readonly invalidationChannel: RedisInvalidationChannel | null = null;
@@ -68,6 +70,9 @@ class CacheImpl implements SecureCache {
     this.encryption = options.encryption
       ? new EncryptionManager(options.encryption.masterKey, options.encryption.tenantId)
       : null;
+
+    // Initialize ByteStorage (LZ4 compression + xxHash3-64 integrity)
+    this.byteStorage = (options.compression ?? true) ? new ByteStorage() : null;
 
     // Initialize serializer
     this.serializer = new MessagePackSerializer(options.serializer);
@@ -124,7 +129,12 @@ class CacheImpl implements SecureCache {
       // Decrypt if encryption enabled
       let plaintext = data;
       if (this.encryption) {
-        plaintext = await this.encryption.decrypt(data, key);
+        plaintext = await this.encryption.decrypt(data, key, !!this.byteStorage);
+      }
+
+      // Decompress with ByteStorage (after decryption)
+      if (this.byteStorage) {
+        plaintext = this.byteStorage.unpack(plaintext);
       }
 
       // Deserialize
@@ -158,10 +168,12 @@ class CacheImpl implements SecureCache {
       // Serialize
       const serialized = this.serializer.encode(value);
 
+      // Compress with ByteStorage (before encryption)
+      let data: Uint8Array = this.byteStorage ? this.byteStorage.pack(serialized) : serialized;
+
       // Encrypt if encryption enabled
-      let data = serialized;
       if (this.encryption) {
-        data = await this.encryption.encrypt(serialized, key);
+        data = await this.encryption.encrypt(data, key, !!this.byteStorage);
       }
 
       // Store in backend

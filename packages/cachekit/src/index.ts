@@ -65,6 +65,7 @@ export {
   extractNamespace,
 } from './serialization/key-generator.js';
 export { EncryptionManager } from './encryption/manager.js';
+export { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 export { RedisInvalidationChannel } from './invalidation/redis-channel.js';
 export { serializeEvent, deserializeEvent, createInvalidationEvent } from './invalidation/event.js';
 export type { RedisInvalidationChannelConfig } from './invalidation/redis-channel.js';
