@@ -9,8 +9,6 @@ on:
 
 env:
   CARGO_INCREMENTAL: 0
-  RUSTUP_HOME: /tmp/rustup
-  CARGO_HOME: /tmp/cargo
 
 jobs:
   build:
@@ -21,7 +19,7 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: cachekit-lean
           - target: aarch64-unknown-linux-gnu
-            os: cachekit-lean
+            os: ubuntu-latest
           - target: x86_64-apple-darwin
             os: macos-latest
           - target: aarch64-apple-darwin
@@ -33,6 +31,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Configure Rust paths (self-hosted)
+        if: matrix.os == 'cachekit-lean'
+        run: |
+          echo "RUSTUP_HOME=/tmp/rustup" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=/tmp/cargo" >> "$GITHUB_ENV"
 
       - name: Setup Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
