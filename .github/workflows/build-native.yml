@@ -139,23 +139,21 @@ jobs:
 
       - name: List platform packages
         working-directory: packages/cachekit-core-ts
-        run: |
-          for dir in npm/*/; do
-            echo "=== $dir ==="
-            ls -la "$dir"
-          done
+        run: ls -la npm/*/
 
       - name: Publish platform packages
         working-directory: packages/cachekit-core-ts
         run: |
-          for dir in npm/*/; do
-            npm publish "$dir" --access public --provenance
-          done
+          find npm -mindepth 1 -maxdepth 1 -type d -exec npm publish {} --access public --provenance \;
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: Prepare main package
+        working-directory: packages/cachekit-core-ts
+        run: npx napi prepublish -t npm --skip-gh-release
+
       - name: Publish main package
         working-directory: packages/cachekit-core-ts
-        run: npm publish --access public --provenance
+        run: npm publish --access public --provenance --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
