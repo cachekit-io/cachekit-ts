@@ -28,7 +28,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:integration": "vitest run test/integration --passWithNoTests",
+    "test:integration": "vitest run --config vitest.integration.config.ts --passWithNoTests",
     "test:protocol": "vitest run test/protocol",
     "lint": "eslint src/",
     "type-check": "tsc --noEmit",

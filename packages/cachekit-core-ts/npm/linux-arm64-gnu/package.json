@@ -1,0 +1,41 @@
+{
+  "name": "@cachekit-io/cachekit-core-ts-linux-arm64-gnu",
+  "version": "0.1.0",
+  "cpu": [
+    "arm64"
+  ],
+  "main": "cachekit-core-ts.linux-arm64-gnu.node",
+  "files": [
+    "cachekit-core-ts.linux-arm64-gnu.node"
+  ],
+  "description": "Native Rust bindings for CacheKit TypeScript SDK (serialization, compression, encryption)",
+  "keywords": [
+    "napi",
+    "rust",
+    "native",
+    "bindings",
+    "serialization",
+    "compression",
+    "encryption"
+  ],
+  "author": "CacheKit",
+  "homepage": "https://cachekit.io",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cachekit-io/cachekit-ts.git",
+    "directory": "packages/cachekit-core-ts"
+  },
+  "bugs": {
+    "url": "https://github.com/cachekit-io/cachekit-ts/issues"
+  },
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "glibc"
+  ]
+}

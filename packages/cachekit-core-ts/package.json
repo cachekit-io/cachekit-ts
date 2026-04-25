@@ -54,5 +54,12 @@
   },
   "engines": {
     "node": ">=22.0.0"
+  },
+  "optionalDependencies": {
+    "@cachekit-io/cachekit-core-ts-linux-x64-gnu": "0.1.0",
+    "@cachekit-io/cachekit-core-ts-linux-arm64-gnu": "0.1.0",
+    "@cachekit-io/cachekit-core-ts-darwin-x64": "0.1.0",
+    "@cachekit-io/cachekit-core-ts-darwin-arm64": "0.1.0",
+    "@cachekit-io/cachekit-core-ts-win32-x64-msvc": "0.1.0"
   }
 }

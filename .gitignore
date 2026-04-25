@@ -12,6 +12,8 @@ build/
 # Native modules
 *.node
 prebuilds/
+# But allow NAPI-RS platform package scaffolding (no binaries)
+!packages/cachekit-core-ts/npm/
 
 # Testing
 coverage/
