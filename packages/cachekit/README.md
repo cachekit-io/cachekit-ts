@@ -22,13 +22,10 @@ pnpm add @cachekit-io/cachekit
 ## Quick Start
 
 ```typescript
-import { createCache, redis } from '@cachekit-io/cachekit';
+import { createCache } from '@cachekit-io/cachekit';
 
-// Create cache with Redis backend
-const cache = createCache({
-  backend: { url: 'redis://localhost:6379' },
-  defaultTtl: 3600, // 1 hour
-});
+// Create a production cache in one line
+const cache = createCache.production({ url: 'redis://localhost:6379' });
 
 // Direct key-value operations
 await cache.set('user:123', { name: 'Alice', email: 'alice@example.com' });
@@ -49,7 +46,52 @@ const user = await getUser(123);
 await cache.close();
 ```
 
-## Configuration
+## Intent-Based API
+
+Instead of manually wiring backends, reliability, and encryption, declare what you want:
+
+```typescript
+import { createCache } from '@cachekit-io/cachekit';
+
+// Speed-first — no circuit breaker, no retry (product catalogs, public APIs)
+const fast = createCache.minimal({
+  url: 'redis://localhost:6379',
+  ttl: 300,
+});
+
+// Reliability-first — circuit breaker + retry + degradation (production services)
+const reliable = createCache.production({
+  url: 'redis://localhost:6379',
+  ttl: 600,
+});
+
+// Zero-knowledge encryption — production reliability + AES-256-GCM (PII, GDPR)
+const encrypted = createCache.secure({
+  url: 'redis://localhost:6379',
+  masterKey: process.env.CACHEKIT_MASTER_KEY!, // or set CACHEKIT_MASTER_KEY env var
+});
+
+// SaaS backend — zero infrastructure via cachekit.io
+const managed = createCache.io({
+  apiKey: process.env.CACHEKIT_API_KEY!, // or set CACHEKIT_API_KEY env var
+  ttl: 3600,
+});
+```
+
+Each intent pre-configures the full stack with sensible defaults:
+
+| Intent | Backend | Circuit Breaker | Retry | L1 SWR | Encryption | Default TTL |
+|--------|---------|----------------|-------|--------|------------|-------------|
+| `minimal` | Redis | Off | Off | Off | No | 300s |
+| `production` | Redis | On (threshold: 5) | On | On | No | 600s |
+| `secure` | Redis | On (threshold: 5) | On | On | AES-256-GCM | 600s |
+| `io` | cachekit.io | On (threshold: 5) | On | On | Optional | 3600s |
+
+All defaults are overridable — pass `reliability`, `l1`, or `metrics` to customize.
+
+## Manual Configuration
+
+The original `createCache(options)` API is still available for full control:
 
 ```typescript
 const cache = createCache({

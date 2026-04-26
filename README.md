@@ -32,7 +32,8 @@ cachekit-ts/
 ├── packages/
 │   ├── cachekit/           # TypeScript SDK
 │   │   ├── src/
-│   │   │   ├── cache.ts          # Main cache implementation
+│   │   │   ├── cache.ts          # Core cache implementation
+│   │   │   ├── intents.ts        # Intent-based API (.minimal, .production, .secure, .io)
 │   │   │   ├── backends/         # Redis backend
 │   │   │   ├── l1/               # In-memory LRU cache
 │   │   │   ├── reliability/      # Circuit breaker, retry
