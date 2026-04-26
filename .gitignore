@@ -46,3 +46,12 @@ tmp/
 temp/
 *.tmp
 packages/cachekit-core-ts/target/
+
+# AI agent configs (never commit to public repos)
+CLAUDE.md
+AGENTS.md
+.claude/
+.caliber/
+CALIBER_LEARNINGS.md
+.cursor/
+.cursorrules
