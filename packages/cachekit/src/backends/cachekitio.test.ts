@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { cachekitio } from './cachekitio.js';
+import { cachekitio } from './cachekitio-factory.js';
 import type { Backend, CachekitIOBackendConfig } from './types.js';
 import { BackendError, ConfigurationError, TimeoutError } from '../errors.js';
 

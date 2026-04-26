@@ -237,28 +237,3 @@ export class CachekitIOCore implements Backend {
     }
   }
 }
-
-/**
- * Factory function to create a CachekitIO (SaaS HTTP) backend.
- *
- * @param config - CachekitIO connection configuration
- * @returns Configured CachekitIO backend
- *
- * @example
- * ```typescript
- * import { cachekitio, createCache } from '@cachekit-io/cachekit';
- *
- * // Standalone
- * const backend = cachekitio({
- *   apiKey: process.env.CACHEKIT_API_KEY!,
- * });
- *
- * // With createCache
- * const cache = createCache({
- *   backend: { apiKey: process.env.CACHEKIT_API_KEY! },
- * });
- * ```
- */
-export function cachekitio(config: CachekitIOBackendConfig): Backend {
-  return new CachekitIOCore(config);
-}

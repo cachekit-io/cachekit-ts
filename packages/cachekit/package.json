@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "TypeScript SDK for CacheKit - Production-ready Redis caching with zero-knowledge encryption",
   "type": "module",
-  "main": "./dist/index.cjs",
+  "main": "./dist/cjs/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -13,8 +13,8 @@
         "default": "./dist/index.js"
       },
       "require": {
-        "types": "./dist/index.d.cts",
-        "default": "./dist/index.cjs"
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
       }
     }
   },
@@ -24,11 +24,11 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && tsc -p tsconfig.cjs.json",
+    "build": "tsc && tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist/cjs/package.json','{\\\"type\\\":\\\"commonjs\\\"}\\n')\"",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:integration": "vitest run test/integration --passWithNoTests",
+    "test:integration": "vitest run --config vitest.integration.config.ts --passWithNoTests",
     "test:protocol": "vitest run test/protocol",
     "lint": "eslint src/",
     "type-check": "tsc --noEmit",

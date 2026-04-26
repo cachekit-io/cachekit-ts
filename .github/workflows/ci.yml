@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: cachekit-lean
@@ -150,10 +153,71 @@ jobs:
         env:
           CARGO_HOME: /tmp/cargo
 
+  smoke-test:
+    name: Package smoke test (ESM + CJS)
+    runs-on: cachekit-lean
+    needs: [test]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: '22'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build
+        run: pnpm build
+
+      - name: Verify ESM import
+        run: |
+          node --input-type=module -e "
+            import { createCache, ConfigurationError } from './packages/cachekit/dist/index.js';
+            const checks = [
+              ['createCache', typeof createCache === 'function'],
+              ['createCache.minimal', typeof createCache.minimal === 'function'],
+              ['createCache.production', typeof createCache.production === 'function'],
+              ['createCache.secure', typeof createCache.secure === 'function'],
+              ['createCache.io', typeof createCache.io === 'function'],
+              ['ConfigurationError', typeof ConfigurationError === 'function'],
+            ];
+            const failed = checks.filter(([, ok]) => !ok);
+            if (failed.length) {
+              console.error('ESM export check failed:', failed.map(([n]) => n));
+              process.exit(1);
+            }
+            console.log('ESM: all exports verified');
+          "
+
+      - name: Verify CJS require
+        run: |
+          node -e "
+            const m = require('./packages/cachekit/dist/cjs/index.js');
+            const checks = [
+              ['createCache', typeof m.createCache === 'function'],
+              ['createCache.minimal', typeof m.createCache.minimal === 'function'],
+              ['createCache.production', typeof m.createCache.production === 'function'],
+              ['createCache.secure', typeof m.createCache.secure === 'function'],
+              ['createCache.io', typeof m.createCache.io === 'function'],
+              ['ConfigurationError', typeof m.ConfigurationError === 'function'],
+            ];
+            const failed = checks.filter(([, ok]) => !ok);
+            if (failed.length) {
+              console.error('CJS export check failed:', failed.map(([n]) => n));
+              process.exit(1);
+            }
+            console.log('CJS: all exports verified');
+          "
+
   ci-success:
     name: CI Success
     runs-on: cachekit-lean
-    needs: [lint, test, test-integration, coverage, security]
+    needs: [lint, test, test-integration, coverage, security, smoke-test]
     if: always()
     steps:
       - name: Check all jobs succeeded
@@ -162,7 +226,8 @@ jobs:
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.test-integration.result }}" != "success" ]] || \
              [[ "${{ needs.coverage.result }}" != "success" ]] || \
-             [[ "${{ needs.security.result }}" != "success" ]]; then
+             [[ "${{ needs.security.result }}" != "success" ]] || \
+             [[ "${{ needs.smoke-test.result }}" != "success" ]]; then
             echo "One or more jobs failed"
             exit 1
           fi

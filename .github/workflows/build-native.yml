@@ -7,10 +7,11 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 env:
   CARGO_INCREMENTAL: 0
-  RUSTUP_HOME: /tmp/rustup
-  CARGO_HOME: /tmp/cargo
 
 jobs:
   build:
@@ -20,20 +21,25 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: cachekit-lean
-          # TODO: re-enable when cross-compilers baked into runner image
-          # - target: aarch64-unknown-linux-gnu
-          #   os: cachekit-lean
-          # - target: x86_64-apple-darwin
-          #   os: macos-latest
-          # - target: aarch64-apple-darwin
-          #   os: macos-latest
-          # - target: x86_64-pc-windows-msvc
-          #   os: windows-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
 
     runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Configure Rust paths (self-hosted)
+        if: matrix.os == 'cachekit-lean'
+        run: |
+          echo "RUSTUP_HOME=/tmp/rustup" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=/tmp/cargo" >> "$GITHUB_ENV"
 
       - name: Setup Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
@@ -49,6 +55,12 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
+      - name: Install aarch64 cross-compiler
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
       - name: Install dependencies
         run: pnpm install
 
@@ -56,6 +68,8 @@ jobs:
         working-directory: packages/cachekit-core-ts
         run: |
           pnpm build --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-gcc' || '' }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
@@ -84,8 +98,8 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
+          name: bindings-x86_64-unknown-linux-gnu
           path: packages/cachekit-core-ts
-          merge-multiple: true
 
       - name: Install pnpm
         uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
@@ -120,16 +134,33 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          path: packages/cachekit-core-ts
+          path: packages/cachekit-core-ts/artifacts
           merge-multiple: true
 
       - name: Install dependencies
         run: pnpm install
 
-      - name: Publish to npm
+      - name: Move artifacts to platform packages
+        working-directory: packages/cachekit-core-ts
+        run: npx napi artifacts --artifacts-dir artifacts
+
+      - name: List platform packages
+        working-directory: packages/cachekit-core-ts
+        run: ls -la npm/*/
+
+      - name: Publish platform packages
         working-directory: packages/cachekit-core-ts
         run: |
-          pnpm artifacts
-          npm publish --access public --provenance
+          find npm -mindepth 1 -maxdepth 1 -type d -exec npm publish {} --access public --provenance \;
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Prepare main package
+        working-directory: packages/cachekit-core-ts
+        run: npx napi prepublish -t npm --skip-gh-release
+
+      - name: Publish main package
+        working-directory: packages/cachekit-core-ts
+        run: npm publish --access public --provenance --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
