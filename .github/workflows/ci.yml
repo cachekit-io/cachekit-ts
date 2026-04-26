@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: cachekit-lean
@@ -223,7 +226,8 @@ jobs:
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.test-integration.result }}" != "success" ]] || \
              [[ "${{ needs.coverage.result }}" != "success" ]] || \
-             [[ "${{ needs.security.result }}" != "success" ]]; then
+             [[ "${{ needs.security.result }}" != "success" ]] || \
+             [[ "${{ needs.smoke-test.result }}" != "success" ]]; then
             echo "One or more jobs failed"
             exit 1
           fi
