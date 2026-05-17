@@ -164,7 +164,8 @@ jobs:
 
       - name: Move artifacts to platform packages
         working-directory: packages/cachekit-core-ts
-        run: npx napi artifacts --artifacts-dir artifacts
+        # @napi-rs/cli v3 renamed --artifacts-dir to --output-dir.
+        run: npx napi artifacts --output-dir artifacts
 
       - name: List platform packages
         working-directory: packages/cachekit-core-ts
