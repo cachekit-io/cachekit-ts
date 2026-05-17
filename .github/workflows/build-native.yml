@@ -193,7 +193,9 @@ jobs:
 
       - name: Prepare main package
         working-directory: packages/cachekit-core-ts
-        run: npx napi prepublish -t npm --skip-gh-release
+        # @napi-rs/cli v3 removed --skip-gh-release; the default is
+        # already "no GH release" (opt in via --gh-release if desired).
+        run: npx napi prepublish -t npm
 
       - name: Publish main package
         working-directory: packages/cachekit-core-ts
