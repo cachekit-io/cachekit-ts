@@ -20,7 +20,13 @@
  * ```
  */
 
-import type { CacheOptions, SecureCache, ReliabilityConfig, EncryptionConfig, InvalidationConfig } from './types/cache.js';
+import type {
+  CacheOptions,
+  SecureCache,
+  ReliabilityConfig,
+  EncryptionConfig,
+  InvalidationConfig,
+} from './types/cache.js';
 import type { L1Config } from './l1/types.js';
 import type { SerializerConfig } from './serialization/serializer.js';
 import { createCache as _createCache } from './cache.js';
@@ -221,7 +227,7 @@ function createSecure(options: SecureOptions): SecureCache {
   if (!masterKey) {
     throw new ConfigurationError(
       'createCache.secure() requires a master key. ' +
-      'Provide masterKey in options or set CACHEKIT_MASTER_KEY environment variable.',
+        'Provide masterKey in options or set CACHEKIT_MASTER_KEY environment variable.'
     );
   }
 
@@ -256,7 +262,7 @@ function createIO(options: IOOptions): SecureCache {
   if (!apiKey) {
     throw new ConfigurationError(
       'createCache.io() requires an API key. ' +
-      'Provide apiKey in options or set CACHEKIT_API_KEY environment variable.',
+        'Provide apiKey in options or set CACHEKIT_API_KEY environment variable.'
     );
   }
 
@@ -302,16 +308,14 @@ export const createCache = Object.assign(_createCache, {
 
 function mergeReliability(
   defaults: ReliabilityConfig,
-  overrides?: Partial<ReliabilityConfig>,
+  overrides?: Partial<ReliabilityConfig>
 ): ReliabilityConfig {
   if (!overrides) return defaults;
   return {
     circuitBreaker: overrides.circuitBreaker
       ? { ...defaults.circuitBreaker, ...overrides.circuitBreaker }
       : defaults.circuitBreaker,
-    retry: overrides.retry
-      ? { ...defaults.retry, ...overrides.retry }
-      : defaults.retry,
+    retry: overrides.retry ? { ...defaults.retry, ...overrides.retry } : defaults.retry,
     degradation: overrides.degradation ?? defaults.degradation,
   };
 }

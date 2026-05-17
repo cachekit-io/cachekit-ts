@@ -34,7 +34,7 @@ describe.skipIf(!dockerAvailable)('RedisBackend Integration (Testcontainers)', (
 
     client = new Redis(redisUrl);
     backend = redis({ url: redisUrl, keyPrefix: testPrefix });
-  }, 60000);  // 60s timeout for container startup
+  }, 60000); // 60s timeout for container startup
 
   afterAll(async () => {
     // Cleanup

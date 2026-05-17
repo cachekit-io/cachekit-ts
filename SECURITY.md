@@ -11,7 +11,7 @@ Instead, use [GitHub's private vulnerability reporting](https://github.com/cache
 ## Supported Versions
 
 | Version | Supported |
-|---------|-----------|
+| ------- | --------- |
 | 0.x     | Yes       |
 
 ## Scope

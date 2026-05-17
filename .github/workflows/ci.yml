@@ -60,7 +60,7 @@ jobs:
         run: pnpm test
 
   test-integration:
-    runs-on: cachekit  # needs DinD for Redis service container
+    runs-on: cachekit # needs DinD for Redis service container
     services:
       redis:
         image: redis:7-alpine

@@ -1,5 +1,3 @@
 import { defineWorkspace } from 'vitest/config';
 
-export default defineWorkspace([
-  'packages/cachekit',
-]);
+export default defineWorkspace(['packages/cachekit']);
