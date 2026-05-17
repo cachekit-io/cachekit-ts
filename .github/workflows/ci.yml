@@ -61,8 +61,11 @@ jobs:
 
   test-integration:
     # Fork PRs fall back to ubuntu-latest (GHA disables self-hosted runners
-    # for forks by security policy). The redis service container below works
-    # on either runner — the original DinD note was misleading.
+    # for fork PRs by security policy). Internal/push runs use 'cachekit'
+    # (NOT 'cachekit-lean') because the redis service container below
+    # requires Docker on the host: cachekit-lean is a locked-down rootless
+    # pod with no DOCKER_HOST and no docker socket, so services would fail
+    # to start. ubuntu-latest has Docker preinstalled.
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit' }}
     services:
       redis:
