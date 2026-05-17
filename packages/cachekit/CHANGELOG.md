@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.2](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.1.1...cachekit-v0.1.2) (2026-05-17)
+
+### Release notes
+
+- **0.1.1 was tagged but never published to npm** due to a CI auth failure (`ENEEDAUTH`) in the `Publish @cachekit-io/cachekit` job. Fixed in [#45](https://github.com/cachekit-io/cachekit-ts/pull/45). 0.1.2 is the first published release containing the post-0.1.0 changes.
+
+### Documentation
+
+- Correct Node.js requirement (18+ → 22+) to match `engines.node` ([#52](https://github.com/cachekit-io/cachekit-ts/pull/52))
+- Add version-history note explaining the 0.1.0 → 0.1.2 jump on npm ([#52](https://github.com/cachekit-io/cachekit-ts/pull/52))
+
+### Miscellaneous
+
+- Patch transitive devDependency CVEs via `pnpm.overrides` (no runtime impact) ([#46](https://github.com/cachekit-io/cachekit-ts/pull/46))
+
 ## [0.1.1](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.1.0...cachekit-v0.1.1) (2026-04-26)
 
 ### Features
