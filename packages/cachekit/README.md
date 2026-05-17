@@ -2,6 +2,8 @@
 
 Production-ready Redis caching for TypeScript/Node.js. Hybrid TypeScript-Rust design with L1 in-memory cache, SWR, circuit breaker, and optional client-side encryption.
 
+> **Version note**: 0.1.1 was tagged in git but never published to npm (a CI auth bug, fixed in #45). Published versions on npm jump 0.1.0 → 0.1.2. If you're pinning, use 0.1.2 or later.
+
 ## Features
 
 - **Dual-layer caching**: L1 in-memory (~50ns) + L2 Redis (~2-50ms)
@@ -225,7 +227,7 @@ const cache = createCache({
 
 ## Requirements
 
-- Node.js 18+
+- Node.js 22+
 - Redis 6+
 
 ## License
