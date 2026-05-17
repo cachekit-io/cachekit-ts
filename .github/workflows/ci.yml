@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   lint:
-    runs-on: cachekit-lean
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -33,7 +33,7 @@ jobs:
         run: pnpm type-check
 
   test:
-    runs-on: cachekit-lean
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
     strategy:
       fail-fast: false
       matrix:
@@ -60,7 +60,13 @@ jobs:
         run: pnpm test
 
   test-integration:
-    runs-on: cachekit # needs DinD for Redis service container
+    # Fork PRs fall back to ubuntu-latest (GHA disables self-hosted runners
+    # for fork PRs by security policy). Internal/push runs use 'cachekit'
+    # (NOT 'cachekit-lean') because the redis service container below
+    # requires Docker on the host: cachekit-lean is a locked-down rootless
+    # pod with no DOCKER_HOST and no docker socket, so services would fail
+    # to start. ubuntu-latest has Docker preinstalled.
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit' }}
     services:
       redis:
         image: redis:7-alpine
@@ -96,7 +102,7 @@ jobs:
           CI: true
 
   coverage:
-    runs-on: cachekit-lean
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -124,7 +130,7 @@ jobs:
           fail_ci_if_error: false
 
   security:
-    runs-on: cachekit-lean
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -158,7 +164,7 @@ jobs:
 
   smoke-test:
     name: Package smoke test (ESM + CJS)
-    runs-on: cachekit-lean
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
     needs: [test]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -219,7 +225,7 @@ jobs:
 
   ci-success:
     name: CI Success
-    runs-on: cachekit-lean
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
     needs: [lint, test, test-integration, coverage, security, smoke-test]
     if: always()
     steps:
