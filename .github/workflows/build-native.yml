@@ -193,9 +193,10 @@ jobs:
 
       - name: Prepare main package
         working-directory: packages/cachekit-core-ts
-        # @napi-rs/cli v3 removed --skip-gh-release; the default is
-        # already "no GH release" (opt in via --gh-release if desired).
-        run: npx napi prepublish -t npm
+        # @napi-rs/cli v3 removed --skip-gh-release. The negation is now
+        # the clipanion-auto-generated --no-gh-release. Stated explicitly
+        # so a future default flip can't change behavior silently.
+        run: npx napi prepublish -t npm --no-gh-release
 
       - name: Publish main package
         working-directory: packages/cachekit-core-ts
