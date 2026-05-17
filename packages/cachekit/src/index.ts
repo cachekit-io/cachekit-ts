@@ -1,6 +1,12 @@
 // ============ Main API ============
 export { createCache } from './intents.js';
-export type { CreateCacheFn, MinimalOptions, ProductionOptions, SecureOptions, IOOptions } from './intents.js';
+export type {
+  CreateCacheFn,
+  MinimalOptions,
+  ProductionOptions,
+  SecureOptions,
+  IOOptions,
+} from './intents.js';
 export { redis } from './backends/redis.js';
 export {
   cachekitio,

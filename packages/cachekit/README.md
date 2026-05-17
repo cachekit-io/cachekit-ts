@@ -80,12 +80,12 @@ const managed = createCache.io({
 
 Each intent pre-configures the full stack with sensible defaults:
 
-| Intent | Backend | Circuit Breaker | Retry | L1 SWR | Encryption | Default TTL |
-|--------|---------|----------------|-------|--------|------------|-------------|
-| `minimal` | Redis | Off | Off | Off | No | 300s |
-| `production` | Redis | On (threshold: 5) | On | On | No | 600s |
-| `secure` | Redis | On (threshold: 5) | On | On | AES-256-GCM | 600s |
-| `io` | cachekit.io | On (threshold: 5) | On | On | Optional | 3600s |
+| Intent       | Backend     | Circuit Breaker   | Retry | L1 SWR | Encryption  | Default TTL |
+| ------------ | ----------- | ----------------- | ----- | ------ | ----------- | ----------- |
+| `minimal`    | Redis       | Off               | Off   | Off    | No          | 300s        |
+| `production` | Redis       | On (threshold: 5) | On    | On     | No          | 600s        |
+| `secure`     | Redis       | On (threshold: 5) | On    | On     | AES-256-GCM | 600s        |
+| `io`         | cachekit.io | On (threshold: 5) | On    | On     | Optional    | 3600s       |
 
 All defaults are overridable — pass `reliability`, `l1`, or `metrics` to customize.
 
@@ -158,10 +158,10 @@ Delete a key. Returns `true` if existed.
 Wrap an async function with caching.
 
 ```typescript
-const cachedFn = cache.wrap(
-  async (id: number) => fetchData(id),
-  { namespace: 'api:getData', ttl: 300 }
-);
+const cachedFn = cache.wrap(async (id: number) => fetchData(id), {
+  namespace: 'api:getData',
+  ttl: 300,
+});
 ```
 
 ### cache.invalidate(level, options?)

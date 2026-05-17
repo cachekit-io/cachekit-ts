@@ -3,12 +3,11 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use cachekit_core::ByteStorage as CoreByteStorage;
-use cachekit_core::encryption::{ZeroKnowledgeEncryptor, derive_domain_key};
 use cachekit_core::encryption::key_derivation::{
-    TenantKeys as CoreTenantKeys,
-    derive_tenant_keys as core_derive_tenant_keys,
+    derive_tenant_keys as core_derive_tenant_keys, TenantKeys as CoreTenantKeys,
 };
+use cachekit_core::encryption::{derive_domain_key, ZeroKnowledgeEncryptor};
+use cachekit_core::ByteStorage as CoreByteStorage;
 
 // Security limits to prevent DoS
 const MAX_PLAINTEXT_SIZE: usize = 100 * 1024 * 1024; // 100 MB
@@ -20,7 +19,10 @@ fn validate_encryption_input(plaintext_len: usize, aad_len: usize) -> Result<()>
     if plaintext_len > MAX_PLAINTEXT_SIZE {
         return Err(Error::new(
             Status::InvalidArg,
-            format!("Plaintext exceeds maximum size of {} bytes", MAX_PLAINTEXT_SIZE),
+            format!(
+                "Plaintext exceeds maximum size of {} bytes",
+                MAX_PLAINTEXT_SIZE
+            ),
         ));
     }
     if aad_len > MAX_AAD_SIZE {
@@ -37,7 +39,10 @@ fn validate_decryption_input(ciphertext_len: usize, aad_len: usize) -> Result<()
     if ciphertext_len > MAX_CIPHERTEXT_SIZE {
         return Err(Error::new(
             Status::InvalidArg,
-            format!("Ciphertext exceeds maximum size of {} bytes", MAX_CIPHERTEXT_SIZE),
+            format!(
+                "Ciphertext exceeds maximum size of {} bytes",
+                MAX_CIPHERTEXT_SIZE
+            ),
         ));
     }
     if aad_len > MAX_AAD_SIZE {
@@ -61,6 +66,12 @@ pub fn version() -> String {
 #[napi]
 pub struct ByteStorage {
     inner: CoreByteStorage,
+}
+
+impl Default for ByteStorage {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[napi]
@@ -189,7 +200,9 @@ pub fn derive_key(
         ));
     }
 
-    let key_arr: [u8; 32] = master_key.as_ref().try_into()
+    let key_arr: [u8; 32] = master_key
+        .as_ref()
+        .try_into()
         .map_err(|_| Error::new(Status::InvalidArg, "Master key must be 32 bytes"))?;
 
     derive_domain_key(&key_arr, &domain, tenant_salt.as_bytes())
@@ -270,15 +283,15 @@ pub fn derive_tenant_keys(master_key: Uint8Array, tenant_id: String) -> Result<T
     if master_key.len() != 32 {
         return Err(Error::new(
             Status::InvalidArg,
-            format!("Master key must be exactly 32 bytes, got {}", master_key.len()),
+            format!(
+                "Master key must be exactly 32 bytes, got {}",
+                master_key.len()
+            ),
         ));
     }
 
     if tenant_id.is_empty() {
-        return Err(Error::new(
-            Status::InvalidArg,
-            "tenant_id cannot be empty",
-        ));
+        return Err(Error::new(Status::InvalidArg, "tenant_id cannot be empty"));
     }
 
     let inner = core_derive_tenant_keys(&master_key, &tenant_id)
@@ -311,7 +324,8 @@ pub fn encrypt_with_tenant_keys(
 ) -> Result<Uint8Array> {
     validate_encryption_input(plaintext.len(), aad.len())?;
 
-    tenant_keys.encryptor
+    tenant_keys
+        .encryptor
         .encrypt_aes_gcm(&plaintext, &tenant_keys.inner.encryption_key, &aad)
         .map(|ciphertext| ciphertext.into())
         .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
@@ -336,7 +350,8 @@ pub fn decrypt_with_tenant_keys(
 ) -> Result<Uint8Array> {
     validate_decryption_input(ciphertext.len(), aad.len())?;
 
-    tenant_keys.encryptor
+    tenant_keys
+        .encryptor
         .decrypt_aes_gcm(&ciphertext, &tenant_keys.inner.encryption_key, &aad)
         .map(|plaintext| plaintext.into())
         .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))

@@ -28,7 +28,7 @@ function buildAAD(
     encoder.encode(tenantId),
     encoder.encode(cacheKey),
     encoder.encode(format),
-    encoder.encode(compressed ? 'True' : 'False'),  // Python str(bool) format
+    encoder.encode(compressed ? 'True' : 'False'), // Python str(bool) format
   ];
 
   // Calculate total length: version byte + (4-byte length + data) for each component
@@ -43,7 +43,7 @@ function buildAAD(
 
   // Each component: 4-byte big-endian length + data
   for (const component of components) {
-    view.setUint32(offset, component.length, false);  // false = big-endian
+    view.setUint32(offset, component.length, false); // false = big-endian
     offset += 4;
     aad.set(component, offset);
     offset += component.length;
@@ -70,7 +70,7 @@ function parseAAD(aad: Uint8Array): {
 
   const components: string[] = [];
   while (offset < aad.length) {
-    const length = view.getUint32(offset, false);  // big-endian
+    const length = view.getUint32(offset, false); // big-endian
     offset += 4;
     const component = decoder.decode(aad.slice(offset, offset + length));
     components.push(component);
@@ -101,15 +101,15 @@ describe('AAD v0x03 Protocol Compatibility', () => {
     expect(parsed.tenantId).toBe('tenant-123');
     expect(parsed.cacheKey).toBe('cache:users:42');
     expect(parsed.format).toBe('msgpack');
-    expect(parsed.compressed).toBe('False');  // Python str(False) format
+    expect(parsed.compressed).toBe('False'); // Python str(False) format
   });
 
   it('uses Python str(bool) format for compressed', () => {
     const aadFalse = buildAAD('t', 'k', 'msgpack', false);
     const aadTrue = buildAAD('t', 'k', 'msgpack', true);
 
-    expect(parseAAD(aadFalse).compressed).toBe('False');  // Not 'false'
-    expect(parseAAD(aadTrue).compressed).toBe('True');    // Not 'true'
+    expect(parseAAD(aadFalse).compressed).toBe('False'); // Not 'false'
+    expect(parseAAD(aadTrue).compressed).toBe('True'); // Not 'true'
   });
 
   it('uses 4-byte big-endian length prefixes', () => {
@@ -117,10 +117,10 @@ describe('AAD v0x03 Protocol Compatibility', () => {
     const view = new DataView(aad.buffer);
 
     // After version byte (offset 0), first length at offset 1
-    expect(view.getUint32(1, false)).toBe(2);  // 'AB' = 2 bytes
+    expect(view.getUint32(1, false)).toBe(2); // 'AB' = 2 bytes
 
     // After 'AB' (offset 1 + 4 + 2 = 7), second length
-    expect(view.getUint32(7, false)).toBe(2);  // 'CD' = 2 bytes
+    expect(view.getUint32(7, false)).toBe(2); // 'CD' = 2 bytes
   });
 
   /**
@@ -147,13 +147,11 @@ describe('AAD v0x03 Protocol Compatibility', () => {
     const aad = buildAAD('test', 'mykey', 'msgpack', false);
 
     // Expected bytes from Python (spaces removed for comparison)
-    const expectedHex = '03000000047465737400000005' +
-                        '6d796b657900000007' +
-                        '6d73677061636b00000005' +
-                        '46616c7365';
+    const expectedHex =
+      '03000000047465737400000005' + '6d796b657900000007' + '6d73677061636b00000005' + '46616c7365';
 
     const actualHex = Array.from(aad)
-      .map(b => b.toString(16).padStart(2, '0'))
+      .map((b) => b.toString(16).padStart(2, '0'))
       .join('');
 
     expect(actualHex).toBe(expectedHex);

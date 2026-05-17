@@ -78,7 +78,12 @@ function bytesToHex(bytes: Uint8Array): string {
  *
  * Format: [version_byte(0x03)][len1(4)][tenant_id][len2(4)][cache_key][len3(4)][format][len4(4)][compressed]
  */
-function buildAAD(tenantId: string, cacheKey: string, format = 'msgpack', compressed = false): Uint8Array {
+function buildAAD(
+  tenantId: string,
+  cacheKey: string,
+  format = 'msgpack',
+  compressed = false
+): Uint8Array {
   const encoder = new TextEncoder();
 
   const components = [
@@ -211,7 +216,10 @@ describe('Cross-SDK Interoperability (Python <-> TypeScript)', () => {
       const aad = buildAAD(PYTHON_FIXTURES.tenantId, 'nonce:test');
 
       // Fresh keys for deterministic nonce testing
-      const freshKeys = deriveTenantKeys(hexToBytes(PYTHON_FIXTURES.masterKeyHex), 'nonce-test-tenant');
+      const freshKeys = deriveTenantKeys(
+        hexToBytes(PYTHON_FIXTURES.masterKeyHex),
+        'nonce-test-tenant'
+      );
 
       const ct1 = encryptWithTenantKeys(plaintext, aad, freshKeys);
       const ct2 = encryptWithTenantKeys(plaintext, aad, freshKeys);

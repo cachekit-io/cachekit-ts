@@ -206,9 +206,11 @@ describe('Intent-based Cache API', () => {
       createCache.io({ apiKey: 'ck_live_test123' });
 
       expect(capturedOptions).not.toBeNull();
-      expect(capturedOptions!.backend).toEqual(expect.objectContaining({
-        apiKey: 'ck_live_test123',
-      }));
+      expect(capturedOptions!.backend).toEqual(
+        expect.objectContaining({
+          apiKey: 'ck_live_test123',
+        })
+      );
       expect(capturedOptions!.defaultTtl).toBe(3600);
     });
 
@@ -219,11 +221,13 @@ describe('Intent-based Cache API', () => {
         timeout: 10000,
       });
 
-      expect(capturedOptions!.backend).toEqual(expect.objectContaining({
-        apiKey: 'ck_live_test123',
-        apiUrl: 'https://custom.endpoint.io',
-        timeout: 10000,
-      }));
+      expect(capturedOptions!.backend).toEqual(
+        expect.objectContaining({
+          apiKey: 'ck_live_test123',
+          apiUrl: 'https://custom.endpoint.io',
+          timeout: 10000,
+        })
+      );
     });
 
     it('enables production-grade reliability', () => {
@@ -239,9 +243,11 @@ describe('Intent-based Cache API', () => {
 
       createCache.io({});
 
-      expect(capturedOptions!.backend).toEqual(expect.objectContaining({
-        apiKey: 'ck_live_from_env',
-      }));
+      expect(capturedOptions!.backend).toEqual(
+        expect.objectContaining({
+          apiKey: 'ck_live_from_env',
+        })
+      );
     });
 
     it('throws ConfigurationError without apiKey', () => {

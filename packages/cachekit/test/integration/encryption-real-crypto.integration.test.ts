@@ -202,7 +202,7 @@ describe('Real Crypto Integration (No Mocks)', () => {
 
   describe('Ciphertext structure (AES-GCM format)', () => {
     it('produces ciphertext with [nonce(12)][tag(16)][encrypted_data] format', () => {
-      const plaintext = new Uint8Array([0xDE, 0xAD, 0xBE, 0xEF]);
+      const plaintext = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
       const aad = buildAAD(TEST_TENANT_ID, 'structure-test');
 
       const ciphertext = encryptWithTenantKeys(plaintext, aad, tenantKeys);

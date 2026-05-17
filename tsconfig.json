@@ -18,8 +18,5 @@
   },
   "compileOnSave": false,
   "include": [],
-  "references": [
-    { "path": "./packages/cachekit" },
-    { "path": "./packages/cachekit-core-ts" }
-  ]
+  "references": [{ "path": "./packages/cachekit" }, { "path": "./packages/cachekit-core-ts" }]
 }

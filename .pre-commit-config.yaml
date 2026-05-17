@@ -1,0 +1,98 @@
+# Pre-commit hooks for cachekit-ts
+#
+# Install (one time):   prek install --install-hooks
+# Run on all files:     prek run --all-files
+# Run on staged only:   prek run
+# Update hook versions: prek autoupdate
+#
+# Uses prek (https://github.com/j178/prek), a Rust reimplementation of
+# pre-commit that consumes this same .pre-commit-config.yaml format. Falling
+# back to Python `pre-commit` works identically.
+
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  # ─── TypeScript / JavaScript ─────────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: eslint
+        name: ESLint (auto-fix)
+        entry: pnpm exec eslint --fix --max-warnings 0
+        language: system
+        files: ^packages/cachekit/src/.*\.(ts|tsx)$
+        pass_filenames: true
+
+      - id: prettier
+        name: Prettier (auto-format)
+        entry: pnpm exec prettier --write --ignore-unknown
+        language: system
+        files: \.(ts|tsx|js|mjs|cjs|json|md|yaml|yml)$
+        exclude: |
+          (?x)^(
+            pnpm-lock\.yaml|
+            packages/[^/]+/dist/.*|
+            packages/cachekit-core-ts/index\.(js|d\.ts)|
+            \.release-please-manifest\.json
+          )$
+        pass_filenames: true
+
+      - id: type-check
+        name: TypeScript type-check (pre-push)
+        entry: pnpm type-check
+        language: system
+        files: \.(ts|tsx)$
+        pass_filenames: false
+        stages: [pre-push]
+
+  # ─── Rust (packages/cachekit-core-ts) ────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: Cargo format
+        entry: bash -c 'cd packages/cachekit-core-ts && cargo fmt --all -- --check'
+        language: system
+        files: ^packages/cachekit-core-ts/.*\.rs$
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: Cargo clippy
+        entry: bash -c 'cd packages/cachekit-core-ts && cargo clippy --all-targets -- -D warnings'
+        language: system
+        files: ^packages/cachekit-core-ts/.*\.rs$
+        pass_filenames: false
+
+  # ─── GitHub Actions workflow linting ─────────────────────────────────────
+  - repo: https://github.com/rhysd/actionlint
+    rev: 914e7df21a07ef503a81201c76d2b11c789d3fca # v1.7.12  # pragma: allowlist secret
+    hooks:
+      - id: actionlint
+
+  # ─── General file hygiene ────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # v6.0.0  # pragma: allowlist secret
+    hooks:
+      - id: trailing-whitespace
+        exclude: \.md$ # markdown uses trailing whitespace for line breaks
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+        exclude: ^(\.vscode/|tsconfig.*\.json$) # tsconfig allows comments
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=1000]
+      - id: check-merge-conflict
+      - id: check-case-conflict
+
+  # ─── Secret scanning ─────────────────────────────────────────────────────
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: 01886c8a910c64595c47f186ca1ffc0b77fa5458 # v1.5.0  # pragma: allowlist secret
+    hooks:
+      - id: detect-secrets
+        args: [--baseline, .secrets.baseline]
+        exclude: |
+          (?x)^(
+            pnpm-lock\.yaml|
+            packages/[^/]+/dist/.*|
+            packages/cachekit-core-ts/index\.(js|d\.ts)|
+            .*\.snap$
+          )$
