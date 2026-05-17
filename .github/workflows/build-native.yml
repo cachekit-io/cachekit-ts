@@ -6,6 +6,11 @@ on:
     tags: ['cachekit-core-ts-v*']
   pull_request:
     branches: [main]
+    # Skip the whole workflow for PRs that don't touch the native crate.
+    paths:
+      - 'packages/cachekit-core-ts/**'
+      - '.github/workflows/build-native.yml'
+      - 'pnpm-lock.yaml'
 
 permissions:
   contents: read
@@ -14,21 +19,38 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  matrix:
+    name: Resolve build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      builds: ${{ steps.set.outputs.builds }}
+    steps:
+      - id: set
+        # PRs build the cheap linux-x64 target only (catches the vast majority
+        # of compile errors on the self-hosted runner). Full cross-platform
+        # validation runs on push to main and on release tags, which is what
+        # actually gates publication — keeping the macOS/Windows cost off the
+        # PR review loop without losing coverage where it matters.
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            builds='[{"target":"x86_64-unknown-linux-gnu","os":"cachekit-lean"}]'
+          else
+            builds='[
+              {"target":"x86_64-unknown-linux-gnu","os":"cachekit-lean"},
+              {"target":"aarch64-unknown-linux-gnu","os":"ubuntu-latest"},
+              {"target":"x86_64-apple-darwin","os":"macos-latest"},
+              {"target":"aarch64-apple-darwin","os":"macos-latest"},
+              {"target":"x86_64-pc-windows-msvc","os":"windows-latest"}
+            ]'
+          fi
+          echo "builds=$(echo "$builds" | tr -d '\n ')" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: matrix
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: cachekit-lean
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
+        include: ${{ fromJSON(needs.matrix.outputs.builds) }}
 
     runs-on: ${{ matrix.os }}
 
