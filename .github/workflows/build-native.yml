@@ -167,14 +167,27 @@ jobs:
         # @napi-rs/cli v3 renamed --artifacts-dir to --output-dir.
         run: npx napi artifacts --output-dir artifacts
 
+      # napi-rs scaffolds npm/<platform>/package.json files at the
+      # version present when `napi build` first ran; they don't update
+      # on subsequent version bumps. Without this sync, the platform
+      # packages publish at whatever stale version was scaffolded
+      # (caught locally during the 0.1.2 bootstrap publish).
+      - name: Sync platform package versions to main package version
+        working-directory: packages/cachekit-core-ts
+        run: npx napi version
+
       - name: List platform packages
         working-directory: packages/cachekit-core-ts
         run: ls -la npm/*/
 
       - name: Publish platform packages
         working-directory: packages/cachekit-core-ts
+        # The ./ prefix forces local-directory interpretation. Without
+        # it, `npm publish npm/darwin-arm64` is treated as the GitHub
+        # shorthand <user>/<repo>, attempts ssh://git@github.com/npm/
+        # darwin-arm64.git, and fails with Permission denied.
         run: |
-          find npm -mindepth 1 -maxdepth 1 -type d -exec npm publish {} --access public --provenance \;
+          find npm -mindepth 1 -maxdepth 1 -type d -exec npm publish ./{} --access public --provenance \;
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
