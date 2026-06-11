@@ -3,6 +3,14 @@ import { CachekitIOCore } from './cachekitio.js';
 import { BackendError, TimeoutError } from '../errors.js';
 import { classifyHttpError, classifyNetworkError } from './error-classifier.js';
 
+/**
+ * Lock capability token travels in this request header, never the query string
+ * (CWE-532): a `?lock_id=` query leaks the token into access/proxy logs and
+ * OpenTelemetry `http.url` spans. SaaS dual-reads header + legacy query during
+ * rollout, preferring the header. See protocol spec/saas-api.md.
+ */
+const LOCK_ID_HEADER = 'X-CacheKit-Lock-Id';
+
 export class LockableCachekitIO implements LockableBackend {
   constructor(private readonly inner: CachekitIOCore) {}
 
@@ -50,8 +58,10 @@ export class LockableCachekitIO implements LockableBackend {
 
   async releaseLock(key: string, lockId: string): Promise<boolean> {
     try {
-      const url = `${this.inner['apiUrl']}/v1/cache/${encodeURIComponent(key)}/lock?lock_id=${encodeURIComponent(lockId)}`;
-      const response = await this.inner.requestJson('DELETE', url);
+      const url = `${this.inner['apiUrl']}/v1/cache/${encodeURIComponent(key)}/lock`;
+      const response = await this.inner.requestJson('DELETE', url, undefined, {
+        [LOCK_ID_HEADER]: lockId,
+      });
       if (!response.ok)
         throw new BackendError(
           `Lock release failed (HTTP ${response.status})`,
