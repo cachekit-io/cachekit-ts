@@ -47,6 +47,18 @@ describe('LockableCachekitIO', () => {
     expect(await lockable.releaseLock('key', 'lock-id')).toBe(true);
   });
 
+  it('releaseLock sends lock_id in the X-CacheKit-Lock-Id header, not the URL (CWE-532)', async () => {
+    fetchSpy.mockResolvedValueOnce(mockResponse(200, { success: true }));
+    expect(await lockable.releaseLock('key', 'lock-secret')).toBe(true);
+    const [url, opts] = fetchSpy.mock.calls[0];
+    expect(opts.method).toBe('DELETE');
+    // Capability token rides the header under the exact wire name...
+    expect(opts.headers['X-CacheKit-Lock-Id']).toBe('lock-secret');
+    // ...and never appears in the URL (no query smuggling / log leak).
+    expect(url).not.toContain('lock_id');
+    expect(url).not.toContain('lock-secret');
+  });
+
   it('delegates get to inner backend', async () => {
     fetchSpy.mockResolvedValueOnce(new Response(null, { status: 404 }));
     expect(await lockable.get('missing')).toBeNull();

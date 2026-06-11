@@ -157,10 +157,15 @@ export class CachekitIOCore implements Backend {
   }
 
   /** Package-internal: JSON request for lock/TTL decorators. Not part of public API. */
-  async requestJson(method: string, url: string, body?: unknown): Promise<Response> {
+  async requestJson(
+    method: string,
+    url: string,
+    body?: unknown,
+    headers?: Record<string, string>
+  ): Promise<Response> {
     return this.request(method, url, {
       body: body ? new TextEncoder().encode(JSON.stringify(body)) : undefined,
-      headers: body ? { 'Content-Type': 'application/json' } : {},
+      headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers },
     });
   }
 
