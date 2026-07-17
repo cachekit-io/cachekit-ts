@@ -49,7 +49,7 @@ jobs:
 
       - name: Assign release PR
         if: ${{ steps.release.outputs.pr }}
-        run: gh pr edit "${{ fromJson(steps.release.outputs.pr).number }}" --add-assignee 27Bslash6
+        run: gh pr edit "${{ fromJson(steps.release.outputs.pr).number }}" --repo "${{ github.repository }}" --add-assignee 27Bslash6
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
