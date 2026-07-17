@@ -30,21 +30,5 @@
     "turbo": "^2.9.3",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.58.0"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "cpu-features",
-      "protobufjs",
-      "ssh2"
-    ],
-    "overrides": {
-      "protobufjs": ">=7.5.8",
-      "vite": ">=8.0.5",
-      "lodash": ">=4.18.0",
-      "flatted": ">=3.4.2",
-      "picomatch": ">=4.0.4",
-      "yaml": ">=2.8.3",
-      "postcss": ">=8.5.14"
-    }
   }
 }

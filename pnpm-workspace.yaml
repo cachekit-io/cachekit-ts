@@ -1,2 +1,20 @@
 packages:
   - 'packages/*'
+
+# pnpm v11 no longer reads the "pnpm" field in package.json; these settings
+# moved here. allowBuilds replaces onlyBuiltDependencies — same allowlist,
+# unlisted packages stay default-denied (ERR_PNPM_IGNORED_BUILDS).
+allowBuilds:
+  cpu-features: true
+  protobufjs: true
+  ssh2: true
+
+# Security floor-pins for vulnerable transitives (formerly pnpm.overrides).
+overrides:
+  protobufjs: '>=7.5.8'
+  vite: '>=8.0.5'
+  lodash: '>=4.18.0'
+  flatted: '>=3.4.2'
+  picomatch: '>=4.0.4'
+  yaml: '>=2.8.3'
+  postcss: '>=8.5.14'
