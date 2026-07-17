@@ -47,6 +47,12 @@ jobs:
           config-file: release-please-config.json
           token: ${{ steps.app-token.outputs.token }}
 
+      - name: Assign release PR
+        if: ${{ steps.release.outputs.pr }}
+        run: gh pr edit "${{ fromJson(steps.release.outputs.pr).number }}" --add-assignee 27Bslash6
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
   publish-cachekit:
     name: Publish @cachekit-io/cachekit
     needs: release-please
