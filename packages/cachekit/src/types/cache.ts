@@ -35,6 +35,22 @@ export interface WrapOptions {
   ttl: number;
   /** Skip L1 cache for this operation */
   skipL1?: boolean;
+  /**
+   * Opt into interop mode (interop/v1) with an explicit, language-neutral
+   * operation name — cache entries become readable and writable by the
+   * Python and Rust SDKs.
+   *
+   * Keys use `{namespace}:{operation}:{args_hash}` (canonical cross-SDK
+   * argument hashing) and values are stored as plain MessagePack with no
+   * ByteStorage envelope. Both `namespace` and the operation name must match
+   * `^[a-z0-9][a-z0-9._-]{0,63}$` (validated at wrap time).
+   *
+   * The wrapped function MUST NOT use default parameters, and callers MUST
+   * pass the full declared arity — JS cannot introspect defaults, so they
+   * would silently diverge from the other SDKs' named-to-positional binding.
+   * Integer arguments beyond `Number.isSafeInteger` must be passed as BigInt.
+   */
+  interop?: string;
 }
 
 /**

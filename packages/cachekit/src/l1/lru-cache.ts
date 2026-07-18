@@ -117,8 +117,19 @@ export class L1Cache<T = unknown> {
   /**
    * Complete a SWR refresh, updating the cache if version matches.
    * Returns false if version changed (stale refresh result).
+   *
+   * Pass `namespace` when the caller knows it (wrap options) — deriving it
+   * from the key only works for auto-mode keys; an interop key
+   * `{ns}:{op}:{hash}` would be mis-grouped as `ns:op` and escape
+   * namespace-level invalidation.
    */
-  completeRefresh(key: string, value: T, ttl: number, versionToken: number): boolean {
+  completeRefresh(
+    key: string,
+    value: T,
+    ttl: number,
+    versionToken: number,
+    namespace?: string
+  ): boolean {
     this.refreshingKeys.delete(key);
 
     // Check version - if changed, this refresh is stale
@@ -128,7 +139,7 @@ export class L1Cache<T = unknown> {
     }
 
     // Update with new value
-    this.set(key, value, ttl, extractNamespace(key));
+    this.set(key, value, ttl, namespace ?? extractNamespace(key));
     return true;
   }
 

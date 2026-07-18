@@ -17,6 +17,12 @@ import {
   generateParamsHash,
   extractNamespace,
 } from './serialization/key-generator.js';
+import {
+  generateInteropKey,
+  validateInteropSegment,
+  encodeInteropValue,
+  decodeInteropValue,
+} from './serialization/interop.js';
 import { EncryptionManager } from './encryption/manager.js';
 import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 import { RedisInvalidationChannel } from './invalidation/redis-channel.js';
@@ -111,6 +117,17 @@ class CacheImpl implements SecureCache {
   }
 
   async get<T>(key: string): Promise<T | null> {
+    return this.getEntry(key, false);
+  }
+
+  /**
+   * L1 + L2 read. Interop entries (interop=true) are plain MessagePack —
+   * no ByteStorage envelope and AAD compressed=False — regardless of the
+   * cache-level `compression` option. `ttlSeconds` (when known, i.e. from
+   * wrap()) bounds the L1 repopulation lifetime so an entry never outlives
+   * its declared TTL in L1 long after L2 and the other SDKs expired it.
+   */
+  private async getEntry<T>(key: string, interop: boolean, ttlSeconds?: number): Promise<T | null> {
     this.ensureNotClosed();
 
     // Check L1 first
@@ -121,6 +138,8 @@ class CacheImpl implements SecureCache {
       }
     }
 
+    const useEnvelope = !interop && this.byteStorage !== null;
+
     // Fetch from L2 (backend)
     const operation = async (): Promise<T | null> => {
       const data = await this.backend.get(key);
@@ -129,21 +148,25 @@ class CacheImpl implements SecureCache {
       // Decrypt if encryption enabled
       let plaintext = data;
       if (this.encryption) {
-        plaintext = await this.encryption.decrypt(data, key, !!this.byteStorage);
+        plaintext = await this.encryption.decrypt(data, key, useEnvelope);
       }
 
       // Decompress with ByteStorage (after decryption)
-      if (this.byteStorage) {
-        plaintext = this.byteStorage.unpack(plaintext);
+      if (useEnvelope) {
+        plaintext = this.byteStorage!.unpack(plaintext);
       }
 
       // Deserialize
-      const value = this.serializer.decode<T>(plaintext);
+      const value = interop
+        ? decodeInteropValue<T>(plaintext)
+        : this.serializer.decode<T>(plaintext);
 
-      // Populate L1
+      // Populate L1. Interop keys are {namespace}:{operation}:{hash} — group
+      // under the user-facing namespace segment so namespace-level
+      // invalidation matches entries written through wrap().
       if (this.l1) {
-        const namespace = extractNamespace(key);
-        this.l1.set(key, value, this.defaultTtl * 1000, namespace);
+        const namespace = interop ? key.slice(0, key.indexOf(':')) : extractNamespace(key);
+        this.l1.set(key, value, (ttlSeconds ?? this.defaultTtl) * 1000, namespace);
       }
 
       return value;
@@ -153,6 +176,20 @@ class CacheImpl implements SecureCache {
   }
 
   async set<T>(key: string, value: T, options?: SetOptions): Promise<void> {
+    return this.setEntry(key, value, options, false);
+  }
+
+  /**
+   * L1 + L2 write. Interop entries (interop=true) serialize to canonical
+   * plain MessagePack — never the ByteStorage envelope — and encrypt with
+   * AAD compressed=False, matching the Python and Rust SDKs byte-for-byte.
+   */
+  private async setEntry<T>(
+    key: string,
+    value: T,
+    options: SetOptions | undefined,
+    interop: boolean
+  ): Promise<void> {
     this.ensureNotClosed();
 
     const ttl = options?.ttl ?? this.defaultTtl;
@@ -163,17 +200,26 @@ class CacheImpl implements SecureCache {
     }
 
     const namespace = options?.namespace ?? extractNamespace(key);
+    const useEnvelope = !interop && this.byteStorage !== null;
+
+    // Interop model rejection is a deterministic caller error (spec: values
+    // outside the data model MUST error) — it surfaces synchronously and
+    // never reaches the reliability executor, where degradation would
+    // silently swallow it and retry/circuit-breaker would count it as a
+    // backend failure. Auto-mode encoding stays inside the executor
+    // (existing degrade semantics unchanged).
+    const interopSerialized = interop ? encodeInteropValue(value) : null;
 
     const operation = async (): Promise<void> => {
       // Serialize
-      const serialized = this.serializer.encode(value);
+      const serialized = interopSerialized ?? this.serializer.encode(value);
 
       // Compress with ByteStorage (before encryption)
-      let data: Uint8Array = this.byteStorage ? this.byteStorage.pack(serialized) : serialized;
+      let data: Uint8Array = useEnvelope ? this.byteStorage!.pack(serialized) : serialized;
 
       // Encrypt if encryption enabled
       if (this.encryption) {
-        data = await this.encryption.encrypt(data, key, !!this.byteStorage);
+        data = await this.encryption.encrypt(data, key, useEnvelope);
       }
 
       // Store in backend
@@ -224,8 +270,33 @@ class CacheImpl implements SecureCache {
     fn: (...args: TArgs) => Promise<TResult>,
     options: WrapOptions
   ): (...args: TArgs) => Promise<TResult> {
+    const interopOperation = options.interop;
+    const interop = interopOperation !== undefined;
+    if (interop) {
+      // Spec: reject non-conforming segments at registration time — never
+      // silently normalize, never defer to the first call.
+      validateInteropSegment('namespace', options.namespace);
+      validateInteropSegment('operation', interopOperation);
+    }
+
     return async (...args: TArgs): Promise<TResult> => {
-      const cacheKey = generateKey(options.namespace, args);
+      // Interop arity contract: the flat argument array must match the
+      // declared parameter list exactly — the other SDKs bind named args and
+      // apply defaults, which JS cannot introspect. A short call (relying on
+      // a default), an extra arg, or a rest-parameter function would hash a
+      // different array than Python/Rust and silently miss cross-SDK.
+      // fn.length also drops to the first default/rest parameter, so this
+      // check surfaces the "no default parameters" rule at first call.
+      if (interop && args.length !== fn.length) {
+        throw new ConfigurationError(
+          `Interop operation "${interopOperation}" called with ${args.length} argument(s) but ` +
+            `the wrapped function declares ${fn.length} — interop functions must not use ` +
+            'default, optional, or rest parameters, and callers must pass the full declared arity'
+        );
+      }
+      const cacheKey = interop
+        ? generateInteropKey(options.namespace, interopOperation, args)
+        : generateKey(options.namespace, args);
 
       // Check L1 with SWR
       if (this.l1 && !options.skipL1) {
@@ -241,7 +312,7 @@ class CacheImpl implements SecureCache {
               swrResult.versionToken,
               this.l1,
               async (key, value, opts) => {
-                await this.set(key, value, { ttl: opts.ttl, namespace: opts.namespace });
+                await this.setEntry(key, value, { ttl: opts.ttl, namespace: opts.namespace }, interop);
               }
             );
           }
@@ -250,14 +321,14 @@ class CacheImpl implements SecureCache {
       }
 
       // Check L2
-      const cached = await this.get<TResult>(cacheKey);
+      const cached = await this.getEntry<TResult>(cacheKey, interop, options.ttl);
       if (cached !== null) {
         return cached;
       }
 
       // Compute and cache
       const result = await fn(...args);
-      await this.set(cacheKey, result, { ttl: options.ttl, namespace: options.namespace });
+      await this.setEntry(cacheKey, result, { ttl: options.ttl, namespace: options.namespace }, interop);
 
       return result;
     };
