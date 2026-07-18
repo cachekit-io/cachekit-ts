@@ -37,8 +37,13 @@ describe('LockableCachekitIO', () => {
     expect(opts.method).toBe('POST');
   });
 
-  it('acquireLock returns null when contested', async () => {
+  it('acquireLock returns null when contested (live SaaS shape: 200 + lock_id null)', async () => {
     fetchSpy.mockResolvedValueOnce(mockResponse(200, { lock_id: null }));
+    expect(await lockable.acquireLock('contested-key')).toBeNull();
+  });
+
+  it('acquireLock returns null when contested (spec shape: 409 Conflict)', async () => {
+    fetchSpy.mockResolvedValueOnce(mockResponse(409));
     expect(await lockable.acquireLock('contested-key')).toBeNull();
   });
 
