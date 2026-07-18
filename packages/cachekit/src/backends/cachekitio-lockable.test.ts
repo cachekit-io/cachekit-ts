@@ -77,6 +77,35 @@ describe('LockableCachekitIO', () => {
     expect(headers['Content-Type']).toBe('application/json');
   });
 
+  // ── Bare-key lock contract (cachekit-py#135 parity) ────────
+  //
+  // cachekit-py's wrapper once appended ':lock' to the cache key before
+  // acquire_lock, producing an 8th segment that the SaaS canonical-key
+  // validator rejected (400 on every async cache miss). The LockableBackend
+  // contract is a BARE key: lock semantics live in the URL path
+  // (/v1/cache/{key}/lock), never in the key namespace.
+
+  describe('bare-key lock contract (cachekit-py#135 parity)', () => {
+    // Canonical 7-segment key — exactly what the SaaS validator accepts.
+    const canonicalKey = `ns:app:func:mod.fn:args:${'a'.repeat(64)}:v1`;
+
+    it('acquireLock sends the caller key verbatim — never a ":lock"-suffixed key', async () => {
+      fetchSpy.mockResolvedValueOnce(mockResponse(200, { lock_id: 'uuid-1' }));
+      await lockable.acquireLock(canonicalKey, 1000);
+      const [url] = fetchSpy.mock.calls[0];
+      expect(url).toBe(`https://api.cachekit.io/v1/cache/${encodeURIComponent(canonicalKey)}/lock`);
+      expect(decodeURIComponent(url)).not.toContain(':lock');
+    });
+
+    it('releaseLock sends the caller key verbatim — never a ":lock"-suffixed key', async () => {
+      fetchSpy.mockResolvedValueOnce(mockResponse(200, { success: true }));
+      await lockable.releaseLock(canonicalKey, 'uuid-1');
+      const [url] = fetchSpy.mock.calls[0];
+      expect(url).toBe(`https://api.cachekit.io/v1/cache/${encodeURIComponent(canonicalKey)}/lock`);
+      expect(decodeURIComponent(url)).not.toContain(':lock');
+    });
+  });
+
   // ── Missing branch coverage: error paths ───────────────────
 
   describe('acquireLock error paths', () => {
