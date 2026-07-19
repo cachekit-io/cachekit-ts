@@ -34,6 +34,11 @@ export class LockableCachekitIO implements LockableBackend {
     try {
       const url = `${this.inner['apiUrl']}/v1/cache/${encodeURIComponent(key)}/lock`;
       const response = await this.inner.requestJson('POST', url, { timeout_ms: timeoutMs });
+      // Contested lock: the protocol spec (saas-api.md) answers 409 Conflict;
+      // the deployed SaaS currently answers 200 {lock_id: null}. Both mean
+      // "not acquired" — treat them identically so stampede fallthrough works
+      // against either server behavior.
+      if (response.status === 409) return null;
       if (!response.ok)
         throw new BackendError(
           `Lock acquire failed (HTTP ${response.status})`,
