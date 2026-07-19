@@ -32,6 +32,12 @@ export class RedisBackend implements Backend {
   private readonly config: Required<RedisBackendConfig>;
   private closed = false;
 
+  /** ioredis prepends this to every key on the wire — exposed so interop
+   * mode can fail closed; see Backend.keyPrefix for the contract. */
+  get keyPrefix(): string {
+    return this.config.keyPrefix;
+  }
+
   constructor(config: RedisBackendConfig) {
     this.config = {
       url: config.url,

@@ -6,6 +6,11 @@ import { classifyHttpError, classifyNetworkError } from './error-classifier.js';
 export class TTLCachekitIO implements TTLBackend {
   constructor(private readonly inner: CachekitIOCore) {}
 
+  // Delegating wrappers MUST forward keyPrefix — see Backend.keyPrefix.
+  get keyPrefix(): string | undefined {
+    return this.inner.keyPrefix;
+  }
+
   get(key: string) {
     return this.inner.get(key);
   }

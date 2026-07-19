@@ -74,7 +74,10 @@ export {
 // Interop mode (interop/v1): the key generator for manual invalidate/delete
 // by key, and the value codec for direct cross-SDK readers. Lower-level
 // helpers stay module-internal — public API on a frozen wire format is
-// forever.
+// forever. NOTE: manual get/set/delete/invalidate with an interop key does
+// NOT pass wrap()'s fail-closed keyPrefix guard — on a prefixed backend
+// those calls silently target the prefixed key, so interop keys must only
+// be used against unprefixed clients (see Backend.keyPrefix).
 export {
   generateInteropKey,
   encodeInteropValue,

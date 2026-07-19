@@ -14,6 +14,11 @@ const LOCK_ID_HEADER = 'X-CacheKit-Lock-Id';
 export class LockableCachekitIO implements LockableBackend {
   constructor(private readonly inner: CachekitIOCore) {}
 
+  // Delegating wrappers MUST forward keyPrefix — see Backend.keyPrefix.
+  get keyPrefix(): string | undefined {
+    return this.inner.keyPrefix;
+  }
+
   get(key: string) {
     return this.inner.get(key);
   }

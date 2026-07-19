@@ -59,6 +59,13 @@ describe.skipIf(!dockerAvailable)('RedisBackend Integration (Testcontainers)', (
     expect(result).toEqual(value);
   });
 
+  it('exposes the configured keyPrefix (interop fail-closed contract)', () => {
+    // The Backend interface requires key-transforming backends to expose the
+    // transform so wrap({ interop }) can refuse a prefixed client — a hidden
+    // prefix would silently diverge interop keys from the other SDKs.
+    expect(backend.keyPrefix).toBe(testPrefix);
+  });
+
   it('get returns null for missing key', async () => {
     const result = await backend.get('nonexistent');
     expect(result).toBeNull();

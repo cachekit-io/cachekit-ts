@@ -272,26 +272,88 @@ class CacheImpl implements SecureCache {
   ): (...args: TArgs) => Promise<TResult> {
     const interopOperation = options.interop;
     const interop = interopOperation !== undefined;
+    const interopArity = options.interopArity;
+    if (!interop && interopArity !== undefined) {
+      // A declared contract arity with no operation name means the interop
+      // opt-in was dropped (typo, refactor) — auto-mode keys would silently
+      // miss every cross-SDK entry, so refuse rather than ignore.
+      throw new ConfigurationError(
+        'interopArity was set without interop — declare the operation name (interop: "...") ' +
+          'or remove interopArity'
+      );
+    }
     if (interop) {
       // Spec: reject non-conforming segments at registration time — never
       // silently normalize, never defer to the first call.
       validateInteropSegment('namespace', options.namespace);
       validateInteropSegment('operation', interopOperation);
+
+      // Fail closed on key-transforming backends. An interop key must reach
+      // the store byte-identical to the other SDKs' bare
+      // {namespace}:{operation}:{hash}; a backend prefix (e.g. Redis
+      // keyPrefix) would make TypeScript read and write the prefixed key —
+      // every cross-SDK access silently misses, and the encryption AAD stays
+      // bound to the un-prefixed key while the ciphertext lives elsewhere.
+      // Silently dropping the prefix instead would split the prefix policy
+      // on one connection (auto-mode keys isolated, interop keys escaping) —
+      // worse than refusing.
+      const backendKeyPrefix = this.backend.keyPrefix;
+      if (backendKeyPrefix) {
+        throw new ConfigurationError(
+          `Interop operation "${interopOperation}" cannot run on a backend with a key prefix ` +
+            `(${JSON.stringify(backendKeyPrefix)}). Put interop caches on a separate unprefixed ` +
+            'client, or drop the keyPrefix.'
+        );
+      }
+
+      // The cross-SDK arity contract is declared explicitly (fn.length stops
+      // at the first default/rest parameter, so it cannot be trusted to
+      // carry the contract). A mismatch here means default/optional/rest
+      // parameters — which Python binds but JS cannot introspect — or a
+      // wrapper that erased the parameter list.
+      if (interopArity === undefined) {
+        throw new ConfigurationError(
+          `Interop operation "${interopOperation}" requires interopArity: the exact argument ` +
+            'count of the cross-SDK contract'
+        );
+      }
+      if (!Number.isInteger(interopArity) || interopArity < 0) {
+        throw new ConfigurationError(
+          `Interop operation "${interopOperation}": interopArity must be a non-negative ` +
+            `integer, got ${interopArity}`
+        );
+      }
+      if (fn.length !== interopArity) {
+        throw new ConfigurationError(
+          `Interop operation "${interopOperation}" declares interopArity ${interopArity} but the ` +
+            `wrapped function's parameter list reports ${fn.length} — remove default, optional, ` +
+            'and rest parameters (Python binds defaults into the hash; JS cannot see them), or ' +
+            'declare the parameters explicitly if a wrapper erased them'
+        );
+      }
     }
 
     return async (...args: TArgs): Promise<TResult> => {
-      // Interop arity contract: the flat argument array must match the
-      // declared parameter list exactly — the other SDKs bind named args and
-      // apply defaults, which JS cannot introspect. A short call (relying on
-      // a default), an extra arg, or a rest-parameter function would hash a
-      // different array than Python/Rust and silently miss cross-SDK.
-      // fn.length also drops to the first default/rest parameter, so this
-      // check surfaces the "no default parameters" rule at first call.
-      if (interop && args.length !== fn.length) {
+      // Interop arity contract, call side: the flat argument array must
+      // match the declared contract exactly — a short or long call would
+      // hash a different array than Python/Rust bind and silently miss
+      // cross-SDK.
+      if (interop && args.length !== interopArity) {
         throw new ConfigurationError(
           `Interop operation "${interopOperation}" called with ${args.length} argument(s) but ` +
-            `the wrapped function declares ${fn.length} — interop functions must not use ` +
-            'default, optional, or rest parameters, and callers must pass the full declared arity'
+            `declares interopArity ${interopArity} — callers must pass the full declared arity`
+        );
+      }
+      // Re-check the prefix per call: the wrap-time check is a snapshot, and
+      // a backend whose keyPrefix getter is request-scoped (e.g. an
+      // AsyncLocalStorage tenant router) could report '' at registration and
+      // prefix at runtime — reopening the exact fail-open this guard closes.
+      // The Backend contract requires a construction-time-constant value; a
+      // backend that violates it still fails closed here.
+      if (interop && this.backend.keyPrefix) {
+        throw new ConfigurationError(
+          `Interop operation "${interopOperation}" cannot run on a backend with a key prefix ` +
+            `(${JSON.stringify(this.backend.keyPrefix)}) — see Backend.keyPrefix`
         );
       }
       const cacheKey = interop

@@ -28,6 +28,9 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  * ```
  */
 export class CachekitIOCore implements Backend {
+  /** CachekitIO stores keys verbatim — no wire-key transform (keys travel
+   * URL-encoded but the server sees the exact key). See Backend.keyPrefix. */
+  readonly keyPrefix?: string;
   private readonly apiUrl: string;
   private readonly apiKey: string;
   private readonly defaultTtl: number;
