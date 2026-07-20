@@ -126,7 +126,11 @@ function concatChunks(chunks: Uint8Array[]): Uint8Array {
  */
 interface ChunkSink {
   chunks: Uint8Array[];
-  /** Running encoded byte count (starts above 0 for Set element sub-encodes). */
+  /**
+   * Running budget cursor. Set element sub-encodes seed it with the parent
+   * total plus prior retained elements' bytes, so it may exceed the total
+   * length of `chunks`.
+   */
   bytes: number;
 }
 
@@ -410,19 +414,32 @@ function encodeCanonical(
     // encoded bytes (unsigned lexicographic) and dedupe post-normalization —
     // a total, language-neutral order (spec: "Set ordering is not numeric
     // order").
+    // Elements encode into isolated sub-sinks (the byte-order sort needs each
+    // element's bytes) threaded through a running byte total, and dedupe
+    // happens on insert, so the byte budget and the collection-size cap both
+    // fail DURING iteration — before every element is encoded and buffered —
+    // while counting exactly what the output retains: duplicates advance
+    // neither total. Acceptance matches checking after the loop, except that
+    // a duplicate arriving with less than its own encoded size left in the
+    // byte budget still throws mid-encode (duplicateness is unknowable until
+    // encoded). The parent's own total advances once, on the pushes below.
     const encoded: Uint8Array[] = [];
+    const seen = new Set<string>();
+    let running = sink.bytes;
     for (const element of v) {
-      // Isolated sub-sink (the byte-order sort needs each element's bytes),
-      // inheriting the parent's running total so a huge element fails fast.
-      // Parent bytes are counted once, when the deduped buffers are pushed.
-      const sub: ChunkSink = { chunks: [], bytes: sink.bytes };
+      const sub: ChunkSink = { chunks: [], bytes: running };
       encodeCanonical(element, profile, depth + 1, sub);
-      encoded.push(concatChunks(sub.chunks));
+      const bytes = concatChunks(sub.chunks);
+      const key = bytesToHex(bytes);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      checkCollectionSize(seen.size, 'array');
+      running = sub.bytes;
+      encoded.push(bytes);
     }
     encoded.sort(compareBytes);
-    const deduped = encoded.filter((b, i) => i === 0 || compareBytes(b, encoded[i - 1]!) !== 0);
-    encodeArrayHeader(deduped.length, sink);
-    for (const b of deduped) pushChunk(sink, b);
+    encodeArrayHeader(encoded.length, sink);
+    for (const b of encoded) pushChunk(sink, b);
   } else if (Array.isArray(v)) {
     encodeArrayHeader(v.length, sink);
     for (const item of v) {
