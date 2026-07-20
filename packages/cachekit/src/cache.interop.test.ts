@@ -225,7 +225,7 @@ describe('cache.wrap interop mode', () => {
     await expect(fn(2)).rejects.toThrow(/key prefix/);
   });
 
-  it('allows interop on backends with an empty or absent keyPrefix', () => {
+  it('allows interop on backends with an empty or absent keyPrefix', async () => {
     class EmptyPrefixBackend extends InMemoryBackend {
       readonly keyPrefix = '';
     }
@@ -251,7 +251,7 @@ describe('cache.wrap interop mode', () => {
         })
       ).not.toThrow();
     } finally {
-      void bare.close();
+      await bare.close();
     }
   });
 
@@ -278,13 +278,28 @@ describe('cache.wrap interop mode', () => {
     cache = createCache({ backend });
 
     expect(() =>
-      cache!.wrap(async () => 1, { namespace: 'Users', interop: 'get_user', interopArity: 0, ttl: 60 })
+      cache!.wrap(async () => 1, {
+        namespace: 'Users',
+        interop: 'get_user',
+        interopArity: 0,
+        ttl: 60,
+      })
     ).toThrow(ConfigurationError);
     expect(() =>
-      cache!.wrap(async () => 1, { namespace: 'users', interop: 'get:user', interopArity: 0, ttl: 60 })
+      cache!.wrap(async () => 1, {
+        namespace: 'users',
+        interop: 'get:user',
+        interopArity: 0,
+        ttl: 60,
+      })
     ).toThrow(ConfigurationError);
     expect(() =>
-      cache!.wrap(async () => 1, { namespace: 'users\n', interop: 'get_user', interopArity: 0, ttl: 60 })
+      cache!.wrap(async () => 1, {
+        namespace: 'users\n',
+        interop: 'get_user',
+        interopArity: 0,
+        ttl: 60,
+      })
     ).toThrow(ConfigurationError);
   });
 

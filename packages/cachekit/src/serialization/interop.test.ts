@@ -57,7 +57,9 @@ describe('interop argument encoding (args profile)', () => {
       hex(encodeInteropArgs([-9223372036854775808n]))
     );
     // At/above 2^64 there is no int ambiguity: bare numbers stay float64.
-    expect(hex(encodeInteropArgs([2 ** 64]))).toBe(hex(encodeInteropArgs([new InteropFloat(2 ** 64)])));
+    expect(hex(encodeInteropArgs([2 ** 64]))).toBe(
+      hex(encodeInteropArgs([new InteropFloat(2 ** 64)]))
+    );
   });
 
   it('normalizes a Date argument exactly like the equivalent Unix float64', () => {
@@ -118,6 +120,15 @@ describe('interop argument encoding (args profile)', () => {
 
   it('rejects collections beyond the max collection size (DoS cap, symmetric with decode)', () => {
     expect(() => encodeInteropArgs([new Array(10001).fill(0)])).toThrow(ValueTooLargeError);
+  });
+
+  it('rejects oversized payloads during traversal, before materialising the full buffer', () => {
+    // Two ~600 KiB strings cross the 1 MiB budget on the second chunk push.
+    // The incremental pushChunk message (vs the post-concat backstop's
+    // "Encoded interop args size N exceeds max") pins the fail-fast path.
+    const big = 'x'.repeat(600 * 1024);
+    expect(() => encodeInteropArgs([big, big])).toThrow(ValueTooLargeError);
+    expect(() => encodeInteropArgs([big, big])).toThrow(/payload exceeds max size/);
   });
 
   it('keys never exceed 194 characters', () => {

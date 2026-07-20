@@ -118,6 +118,28 @@ function concatChunks(chunks: Uint8Array[]): Uint8Array {
   return out;
 }
 
+/**
+ * Chunk accumulator with a running byte budget. Oversized payloads are
+ * rejected as soon as the budget is crossed — during traversal, before the
+ * complete encoded buffer is materialised. All appends MUST go through
+ * `pushChunk` so the budget stays exact.
+ */
+interface ChunkSink {
+  chunks: Uint8Array[];
+  /** Running encoded byte count (starts above 0 for Set element sub-encodes). */
+  bytes: number;
+}
+
+function pushChunk(sink: ChunkSink, c: Uint8Array): void {
+  sink.bytes += c.length;
+  if (sink.bytes > DEFAULT_MAX_ENCODED_SIZE) {
+    throw new ValueTooLargeError(
+      `Encoded interop payload exceeds max size ${DEFAULT_MAX_ENCODED_SIZE}`
+    );
+  }
+  sink.chunks.push(c);
+}
+
 function uintBE(marker: number, value: number | bigint, byteLength: 1 | 2 | 4 | 8): Uint8Array {
   const out = new Uint8Array(1 + byteLength);
   out[0] = marker;
@@ -141,44 +163,44 @@ function intBE(marker: number, value: number | bigint, byteLength: 1 | 2 | 4 | 8
 }
 
 /** Shortest-form msgpack int (canonical encoding is normative for hashing). */
-function encodeInt(n: bigint, chunks: Uint8Array[]): void {
+function encodeInt(n: bigint, sink: ChunkSink): void {
   if (n < INT64_MIN || n > UINT64_MAX) {
     throw new SerializationError(`Integer out of interop range [-2^63, 2^64-1]: ${n}`);
   }
   if (n >= 0n && n <= 0x7fn) {
-    chunks.push(Uint8Array.of(Number(n)));
+    pushChunk(sink, Uint8Array.of(Number(n)));
   } else if (n >= -32n && n < 0n) {
-    chunks.push(Uint8Array.of(Number(n) & 0xff));
+    pushChunk(sink, Uint8Array.of(Number(n) & 0xff));
   } else if (n > 0n) {
-    if (n <= 0xffn) chunks.push(uintBE(0xcc, n, 1));
-    else if (n <= 0xffffn) chunks.push(uintBE(0xcd, n, 2));
-    else if (n <= 0xffffffffn) chunks.push(uintBE(0xce, n, 4));
-    else chunks.push(uintBE(0xcf, n, 8));
+    if (n <= 0xffn) pushChunk(sink, uintBE(0xcc, n, 1));
+    else if (n <= 0xffffn) pushChunk(sink, uintBE(0xcd, n, 2));
+    else if (n <= 0xffffffffn) pushChunk(sink, uintBE(0xce, n, 4));
+    else pushChunk(sink, uintBE(0xcf, n, 8));
   } else if (n >= -128n) {
-    chunks.push(intBE(0xd0, n, 1));
+    pushChunk(sink, intBE(0xd0, n, 1));
   } else if (n >= -32768n) {
-    chunks.push(intBE(0xd1, n, 2));
+    pushChunk(sink, intBE(0xd1, n, 2));
   } else if (n >= -2147483648n) {
-    chunks.push(intBE(0xd2, n, 4));
+    pushChunk(sink, intBE(0xd2, n, 4));
   } else {
-    chunks.push(intBE(0xd3, n, 8));
+    pushChunk(sink, intBE(0xd3, n, 8));
   }
 }
 
-function encodeFloat64(f: number, chunks: Uint8Array[]): void {
+function encodeFloat64(f: number, sink: ChunkSink): void {
   const out = new Uint8Array(9);
   out[0] = 0xcb;
   new DataView(out.buffer).setFloat64(1, f, false);
-  chunks.push(out);
+  pushChunk(sink, out);
 }
 
-function encodeStrBytes(utf8: Uint8Array, chunks: Uint8Array[]): void {
+function encodeStrBytes(utf8: Uint8Array, sink: ChunkSink): void {
   const n = utf8.length;
-  if (n <= 31) chunks.push(Uint8Array.of(0xa0 | n));
-  else if (n <= 0xff) chunks.push(uintBE(0xd9, n, 1));
-  else if (n <= 0xffff) chunks.push(uintBE(0xda, n, 2));
-  else chunks.push(uintBE(0xdb, n, 4));
-  chunks.push(utf8);
+  if (n <= 31) pushChunk(sink, Uint8Array.of(0xa0 | n));
+  else if (n <= 0xff) pushChunk(sink, uintBE(0xd9, n, 1));
+  else if (n <= 0xffff) pushChunk(sink, uintBE(0xda, n, 2));
+  else pushChunk(sink, uintBE(0xdb, n, 4));
+  pushChunk(sink, utf8);
 }
 
 /**
@@ -195,12 +217,12 @@ function utf8Strict(s: string): Uint8Array {
   return textEncoder.encode(s);
 }
 
-function encodeBin(b: Uint8Array, chunks: Uint8Array[]): void {
+function encodeBin(b: Uint8Array, sink: ChunkSink): void {
   const n = b.length;
-  if (n <= 0xff) chunks.push(uintBE(0xc4, n, 1));
-  else if (n <= 0xffff) chunks.push(uintBE(0xc5, n, 2));
-  else chunks.push(uintBE(0xc6, n, 4));
-  chunks.push(b);
+  if (n <= 0xff) pushChunk(sink, uintBE(0xc4, n, 1));
+  else if (n <= 0xffff) pushChunk(sink, uintBE(0xc5, n, 2));
+  else pushChunk(sink, uintBE(0xc6, n, 4));
+  pushChunk(sink, b);
 }
 
 // DoS cap on collection sizes, mirroring the auto-mode serializer and the
@@ -216,18 +238,18 @@ function checkCollectionSize(n: number, kind: 'array' | 'map'): void {
   }
 }
 
-function encodeArrayHeader(n: number, chunks: Uint8Array[]): void {
+function encodeArrayHeader(n: number, sink: ChunkSink): void {
   checkCollectionSize(n, 'array');
-  if (n <= 15) chunks.push(Uint8Array.of(0x90 | n));
-  else if (n <= 0xffff) chunks.push(uintBE(0xdc, n, 2));
-  else chunks.push(uintBE(0xdd, n, 4));
+  if (n <= 15) pushChunk(sink, Uint8Array.of(0x90 | n));
+  else if (n <= 0xffff) pushChunk(sink, uintBE(0xdc, n, 2));
+  else pushChunk(sink, uintBE(0xdd, n, 4));
 }
 
-function encodeMapHeader(n: number, chunks: Uint8Array[]): void {
+function encodeMapHeader(n: number, sink: ChunkSink): void {
   checkCollectionSize(n, 'map');
-  if (n <= 15) chunks.push(Uint8Array.of(0x80 | n));
-  else if (n <= 0xffff) chunks.push(uintBE(0xde, n, 2));
-  else chunks.push(uintBE(0xdf, n, 4));
+  if (n <= 15) pushChunk(sink, Uint8Array.of(0x80 | n));
+  else if (n <= 0xffff) pushChunk(sink, uintBE(0xde, n, 2));
+  else pushChunk(sink, uintBE(0xdf, n, 4));
 }
 
 /**
@@ -237,14 +259,14 @@ function encodeMapHeader(n: number, chunks: Uint8Array[]): void {
  * (subsumes -0 -> int 0; the collapse bounds are exact powers of two).
  * Value profile: no collapse — floats stay float64 for round-trip fidelity.
  */
-function encodeDeclaredFloat(f: number, profile: InteropProfile, chunks: Uint8Array[]): void {
+function encodeDeclaredFloat(f: number, profile: InteropProfile, sink: ChunkSink): void {
   if (!Number.isFinite(f)) {
     throw new SerializationError('NaN and Infinity are not allowed in interop mode');
   }
   if (profile === 'args' && Number.isInteger(f) && f >= F64_LOWER_INCL && f < F64_UPPER_EXCL) {
-    encodeInt(BigInt(f), chunks);
+    encodeInt(BigInt(f), sink);
   } else {
-    encodeFloat64(f, chunks);
+    encodeFloat64(f, sink);
   }
 }
 
@@ -264,7 +286,7 @@ function encodeDeclaredFloat(f: number, profile: InteropProfile, chunks: Uint8Ar
  * - The value profile preserves -0 as float64, the one JS-expressible case
  *   of "the value profile does not collapse floats".
  */
-function encodeNumber(f: number, profile: InteropProfile, chunks: Uint8Array[]): void {
+function encodeNumber(f: number, profile: InteropProfile, sink: ChunkSink): void {
   if (!Number.isFinite(f)) {
     throw new SerializationError('NaN and Infinity are not allowed in interop mode');
   }
@@ -277,12 +299,12 @@ function encodeNumber(f: number, profile: InteropProfile, chunks: Uint8Array[]):
       );
     }
     if (profile === 'value' && Object.is(f, -0)) {
-      encodeFloat64(f, chunks);
+      encodeFloat64(f, sink);
       return;
     }
-    encodeInt(BigInt(f), chunks);
+    encodeInt(BigInt(f), sink);
   } else {
-    encodeFloat64(f, chunks);
+    encodeFloat64(f, sink);
   }
 }
 
@@ -309,19 +331,17 @@ function encodeMapEntries(
   entries: [string, unknown][],
   profile: InteropProfile,
   depth: number,
-  chunks: Uint8Array[]
+  sink: ChunkSink
 ): void {
   // Sort keys by UTF-8 byte order (== Unicode code point order). The default
   // Array.prototype.sort comparator orders UTF-16 code units and gets
   // supplementary-plane characters backwards (map_key_sort_supplementary).
-  const encodedKeys = entries.map(
-    ([k, v]) => [utf8Strict(k), v] as [Uint8Array, unknown]
-  );
+  const encodedKeys = entries.map(([k, v]) => [utf8Strict(k), v] as [Uint8Array, unknown]);
   encodedKeys.sort((a, b) => compareBytes(a[0], b[0]));
-  encodeMapHeader(encodedKeys.length, chunks);
+  encodeMapHeader(encodedKeys.length, sink);
   for (const [keyBytes, value] of encodedKeys) {
-    encodeStrBytes(keyBytes, chunks);
-    encodeCanonical(value, profile, depth + 1, chunks);
+    encodeStrBytes(keyBytes, sink);
+    encodeCanonical(value, profile, depth + 1, sink);
   }
 }
 
@@ -329,7 +349,7 @@ function encodeCanonical(
   v: unknown,
   profile: InteropProfile,
   depth: number,
-  chunks: Uint8Array[]
+  sink: ChunkSink
 ): void {
   const maxDepth = profile === 'args' ? KEY_GEN_MAX_DEPTH : DEFAULT_MAX_DEPTH;
   if (depth > maxDepth) {
@@ -337,7 +357,7 @@ function encodeCanonical(
   }
 
   if (v === null) {
-    chunks.push(Uint8Array.of(0xc0));
+    pushChunk(sink, Uint8Array.of(0xc0));
   } else if (v === undefined) {
     // Args are a cross-SDK arity contract: an undefined argument means the
     // caller skipped a declared parameter (interop functions must not use
@@ -349,25 +369,25 @@ function encodeCanonical(
           'default parameters, and callers must pass the full declared arity'
       );
     }
-    chunks.push(Uint8Array.of(0xc0));
+    pushChunk(sink, Uint8Array.of(0xc0));
   } else if (typeof v === 'boolean') {
-    chunks.push(Uint8Array.of(v ? 0xc3 : 0xc2));
+    pushChunk(sink, Uint8Array.of(v ? 0xc3 : 0xc2));
   } else if (typeof v === 'bigint') {
-    encodeInt(v, chunks);
+    encodeInt(v, sink);
   } else if (typeof v === 'number') {
-    encodeNumber(v, profile, chunks);
+    encodeNumber(v, profile, sink);
   } else if (v instanceof InteropFloat) {
-    encodeDeclaredFloat(v.value, profile, chunks);
+    encodeDeclaredFloat(v.value, profile, sink);
   } else if (typeof v === 'string') {
-    encodeStrBytes(utf8Strict(v), chunks);
+    encodeStrBytes(utf8Strict(v), sink);
   } else if (v instanceof Uint8Array) {
-    encodeBin(v, chunks);
+    encodeBin(v, sink);
   } else if (v instanceof Date) {
     if (profile === 'args') {
       // Argument datetimes hash by instant: Unix float64 (spec: DateTime
       // determinism), with declared-float semantics — whole seconds collapse
       // to int. JS Date is always an instant — never naive.
-      encodeDeclaredFloat(dateToUnixFloat64(v), profile, chunks);
+      encodeDeclaredFloat(dateToUnixFloat64(v), profile, sink);
     } else {
       // Value datetimes use the wire-format.md sentinel-map convention for
       // round-trip fidelity across SDKs.
@@ -382,7 +402,7 @@ function encodeCanonical(
         ],
         profile,
         depth,
-        chunks
+        sink
       );
     }
   } else if (v instanceof Set) {
@@ -392,32 +412,33 @@ function encodeCanonical(
     // order").
     const encoded: Uint8Array[] = [];
     for (const element of v) {
-      const sub: Uint8Array[] = [];
+      // Isolated sub-sink (the byte-order sort needs each element's bytes),
+      // inheriting the parent's running total so a huge element fails fast.
+      // Parent bytes are counted once, when the deduped buffers are pushed.
+      const sub: ChunkSink = { chunks: [], bytes: sink.bytes };
       encodeCanonical(element, profile, depth + 1, sub);
-      encoded.push(concatChunks(sub));
+      encoded.push(concatChunks(sub.chunks));
     }
     encoded.sort(compareBytes);
     const deduped = encoded.filter((b, i) => i === 0 || compareBytes(b, encoded[i - 1]!) !== 0);
-    encodeArrayHeader(deduped.length, chunks);
-    for (const b of deduped) chunks.push(b);
+    encodeArrayHeader(deduped.length, sink);
+    for (const b of deduped) pushChunk(sink, b);
   } else if (Array.isArray(v)) {
-    encodeArrayHeader(v.length, chunks);
+    encodeArrayHeader(v.length, sink);
     for (const item of v) {
-      encodeCanonical(item, profile, depth + 1, chunks);
+      encodeCanonical(item, profile, depth + 1, sink);
     }
   } else if (v instanceof Map) {
     const entries: [string, unknown][] = [];
     for (const [k, val] of v) {
       if (typeof k !== 'string') {
-        throw new SerializationError(
-          `Interop map keys must be strings, got ${typeof k}`
-        );
+        throw new SerializationError(`Interop map keys must be strings, got ${typeof k}`);
       }
       entries.push([k, val]);
     }
-    encodeMapEntries(entries, profile, depth, chunks);
+    encodeMapEntries(entries, profile, depth, sink);
   } else if (typeof v === 'object' && isPlainObject(v)) {
-    encodeMapEntries(Object.entries(v), profile, depth, chunks);
+    encodeMapEntries(Object.entries(v), profile, depth, sink);
   } else {
     // Closed data model: a value that encodes on one SDK and errors on
     // another is annoying; one that silently encodes DIFFERENTLY is a
@@ -431,9 +452,10 @@ function encodeCanonical(
 }
 
 function encodeProfile(root: unknown, profile: InteropProfile): Uint8Array {
-  const chunks: Uint8Array[] = [];
-  encodeCanonical(root, profile, 0, chunks);
-  const out = concatChunks(chunks);
+  const sink: ChunkSink = { chunks: [], bytes: 0 };
+  encodeCanonical(root, profile, 0, sink);
+  // pushChunk's incremental budget should make this backstop unreachable.
+  const out = concatChunks(sink.chunks);
   if (out.length > DEFAULT_MAX_ENCODED_SIZE) {
     throw new ValueTooLargeError(
       `Encoded interop ${profile} size ${out.length} exceeds max ${DEFAULT_MAX_ENCODED_SIZE}`
