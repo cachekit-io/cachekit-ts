@@ -61,6 +61,29 @@ export interface Backend {
    * After close(), the backend should not be used.
    */
   close(): Promise<void>;
+
+  /**
+   * Prefix the backend transparently prepends to every key on the wire
+   * (e.g. ioredis `keyPrefix`). A backend that prefixes keys MUST expose it
+   * here: interop mode fails closed when a prefix is present, because
+   * interop keys have to reach the store byte-identical to the Python and
+   * Rust SDKs' bare `{namespace}:{operation}:{hash}` — a hidden prefix
+   * means every cross-SDK read silently misses while the encryption AAD
+   * stays bound to the un-prefixed key. Omit (or return '') when keys are
+   * stored verbatim.
+   *
+   * Contract details:
+   * - The value MUST be constant from construction onward — interop guards
+   *   read it at wrap time and on every call, and a request-scoped prefix
+   *   cannot be made safe.
+   * - Delegating wrappers (metrics, logging, fallback decorators) MUST
+   *   forward the inner backend's `keyPrefix`, or they hide the transform
+   *   from the guard.
+   * - Backends applying any non-prefix key transformation (suffixing,
+   *   hashing, re-encoding) cannot express it here and are incompatible
+   *   with interop mode, full stop.
+   */
+  readonly keyPrefix?: string;
 }
 
 /**

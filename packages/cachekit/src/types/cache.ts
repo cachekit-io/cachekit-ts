@@ -26,9 +26,9 @@ export interface SetOptions {
 }
 
 /**
- * Options for wrap operations (function caching).
+ * Options shared by both wrap modes.
  */
-export interface WrapOptions {
+export interface WrapOptionsBase {
   /** Cache namespace (e.g., "user-service:getUser") */
   namespace: string;
   /** Time-to-live in seconds */
@@ -36,6 +36,59 @@ export interface WrapOptions {
   /** Skip L1 cache for this operation */
   skipL1?: boolean;
 }
+
+/**
+ * Options for wrap operations (function caching).
+ *
+ * Interop mode is a discriminated pair: `interop` and `interopArity` must be
+ * provided together (enforced at compile time for TS callers and at wrap
+ * time for JS callers).
+ */
+export type WrapOptions = WrapOptionsBase &
+  (
+    | {
+        interop?: undefined;
+        interopArity?: undefined;
+      }
+    | {
+        /**
+         * Opt into interop mode (interop/v1) with an explicit,
+         * language-neutral operation name — cache entries become readable
+         * and writable by the Python and Rust SDKs.
+         *
+         * Keys use `{namespace}:{operation}:{args_hash}` (canonical
+         * cross-SDK argument hashing) and values are stored as plain
+         * MessagePack with no ByteStorage envelope. Both `namespace` and the
+         * operation name must match `^[a-z0-9][a-z0-9._-]{0,63}$` (validated
+         * at wrap time).
+         *
+         * Fails closed — at wrap time and on every call — if the backend
+         * applies a key prefix (e.g. Redis `keyPrefix`): a prefixed interop
+         * key would silently miss the bare key the other SDKs read and
+         * write. Use a separate unprefixed client for interop caches.
+         *
+         * The wrapped function MUST NOT use default, optional, or rest
+         * parameters, and callers MUST pass the full declared arity — JS
+         * cannot introspect defaults, so they would silently diverge from
+         * the other SDKs' named-to-positional binding. Integer arguments
+         * beyond `Number.isSafeInteger` must be passed as BigInt.
+         */
+        interop: string;
+        /**
+         * The interop operation's exact argument count — the cross-SDK
+         * contract arity.
+         *
+         * Declared explicitly rather than inferred from `fn.length`, because
+         * `fn.length` stops counting at the first default or rest parameter:
+         * an accidental `(a, b = 5)` would silently hash `[a]` while Python
+         * binds the default and hashes `[a, 5]`. Wrap fails when `fn.length`
+         * disagrees with this declaration (default/rest parameters, or a
+         * wrapper that erased the parameter list), and every call must pass
+         * exactly this many arguments.
+         */
+        interopArity: number;
+      }
+  );
 
 /**
  * Encryption configuration for cache.
@@ -192,7 +245,10 @@ export interface SecureCache extends Cache {
   secure: {
     wrap<TArgs extends unknown[], TResult>(
       fn: (...args: TArgs) => Promise<TResult>,
-      options: Omit<WrapOptions, 'encrypt'>
+      // Plain WrapOptions: 'encrypt' was never one of its keys, and an Omit
+      // over the interop discriminated union would flatten it and lose the
+      // compile-time interop/interopArity pairing.
+      options: WrapOptions
     ): (...args: TArgs) => Promise<TResult>;
   };
 }

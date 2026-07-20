@@ -71,6 +71,18 @@ export {
   generateParamsHash,
   extractNamespace,
 } from './serialization/key-generator.js';
+// Interop mode (interop/v1): the key generator for manual invalidate/delete
+// by key, and the value codec for direct cross-SDK readers. Lower-level
+// helpers stay module-internal — public API on a frozen wire format is
+// forever. NOTE: manual get/set/delete/invalidate with an interop key does
+// NOT pass wrap()'s fail-closed keyPrefix guard — on a prefixed backend
+// those calls silently target the prefixed key, so interop keys must only
+// be used against unprefixed clients (see Backend.keyPrefix).
+export {
+  generateInteropKey,
+  encodeInteropValue,
+  decodeInteropValue,
+} from './serialization/interop.js';
 export { EncryptionManager } from './encryption/manager.js';
 export { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 export { RedisInvalidationChannel } from './invalidation/redis-channel.js';

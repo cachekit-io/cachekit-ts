@@ -10,7 +10,7 @@
     "declarationMap": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "lib": ["ES2022"]
+    "lib": ["ES2022", "ES2024.String"]
   },
   "ts-node": {
     "esm": true,

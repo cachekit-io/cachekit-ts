@@ -71,7 +71,7 @@ export class BackgroundRefreshManager {
         // Then complete L1 refresh with version check
         // If version changed during L2 update, L1 update is rejected (stale data protection)
         if (l1Cache) {
-          l1Cache.completeRefresh(key, result, options.ttl * 1000, versionToken);
+          l1Cache.completeRefresh(key, result, options.ttl * 1000, versionToken, options.namespace);
         }
       } catch (error) {
         // Log error for observability
