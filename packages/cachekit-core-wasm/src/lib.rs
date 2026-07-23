@@ -7,7 +7,7 @@
 //!
 //! Security nuance (documented in the SDK): wasm linear memory is a
 //! host-readable ArrayBuffer, so "keys stay in Rust memory" is weaker than
-//! under NAPI. On Workers the host is your own isolate, making this roughly
+//! under NAPI. On Workers, the host is your own isolate, making this roughly
 //! JS-heap-equivalent in threat model; zeroize-on-drop (via `free()`) still
 //! gives deterministic cleanup.
 

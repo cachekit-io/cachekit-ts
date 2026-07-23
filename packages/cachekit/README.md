@@ -283,7 +283,7 @@ export default {
 - **No Prometheus metrics.**
 - **Key material semantics**: keys are derived and held in wasm linear
   memory, which is a host-readable `ArrayBuffer` — weaker isolation than the
-  NAPI Rust heap on Node. On Workers the host is your own isolate, making
+  NAPI Rust heap on Node. On Workers, the host is your own isolate, making
   this roughly JS-heap-equivalent in threat model; `dispose()`/`close()`
   still zeroizes deterministically.
 - **Startup**: wasm instantiation is a small one-time cost per isolate

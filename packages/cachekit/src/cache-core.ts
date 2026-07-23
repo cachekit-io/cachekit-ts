@@ -523,30 +523,50 @@ export class CacheImpl implements SecureCache {
     if (this.closed) return;
     this.closed = true;
 
+    // Every step runs even if an earlier one throws — key zeroization, wasm
+    // frees, and the backend connection must not be leaked behind a failing
+    // invalidation channel. Errors are collected and re-thrown (never
+    // swallowed): the single-failure case keeps its original error type.
+    const errors: unknown[] = [];
+    const attempt = (step: () => unknown) => {
+      try {
+        step();
+      } catch (error) {
+        errors.push(error);
+      }
+    };
+
     // Stop background refresh manager (clears in-flight refreshes)
-    this.backgroundRefresh.close();
+    attempt(() => this.backgroundRefresh.close());
 
     // Stop invalidation channel
     if (this.invalidationChannel) {
-      await this.invalidationChannel.stop();
+      try {
+        await this.invalidationChannel.stop();
+      } catch (error) {
+        errors.push(error);
+      }
     }
 
-    // Dispose encryption
-    if (this.encryption) {
-      this.encryption.dispose();
-    }
+    // Dispose encryption (zeroizes key material)
+    attempt(() => this.encryption?.dispose());
 
     // Release the envelope codec (zeroizes/frees wasm resources on Workers;
     // no-op for the GC-managed NAPI binding)
-    this.byteStorage?.free?.();
+    attempt(() => this.byteStorage?.free?.());
 
     // Clear L1 (this also clears L1's internal refreshingKeys)
-    if (this.l1) {
-      this.l1.clear();
-    }
+    attempt(() => this.l1?.clear());
 
     // Close backend
-    await this.backend.close();
+    try {
+      await this.backend.close();
+    } catch (error) {
+      errors.push(error);
+    }
+
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, 'cache.close() failed');
   }
 
   private ensureNotClosed(): void {

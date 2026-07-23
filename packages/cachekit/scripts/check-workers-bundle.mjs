@@ -9,16 +9,19 @@
 import { build } from 'esbuild';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import process from 'node:process';
 
 const pkgDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const entry = join(pkgDir, 'dist', 'workers', 'index.js');
 
+// Package filters match the bare specifier AND any deep subpath import
+// (e.g. ioredis/built/Redis) — a subpath would otherwise slip past the guard.
 const FORBIDDEN = [
   { name: 'node builtin', filter: /^node:/ },
   { name: 'native addon', filter: /\.node$/ },
-  { name: 'NAPI binding package', filter: /^@cachekit-io\/cachekit-core-ts$/ },
-  { name: 'ioredis', filter: /^ioredis$/ },
-  { name: 'prom-client', filter: /^prom-client$/ },
+  { name: 'NAPI binding package', filter: /^@cachekit-io\/cachekit-core-ts(\/|$)/ },
+  { name: 'ioredis', filter: /^ioredis(\/|$)/ },
+  { name: 'prom-client', filter: /^prom-client(\/|$)/ },
 ];
 
 const violations = [];

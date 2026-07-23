@@ -174,6 +174,10 @@ jobs:
       # scripts/build.sh fails loudly on drift.
       WASM_BINDGEN_VERSION: 0.2.121
       BINARYEN_VERSION: '131'
+      # SHA-256 of the release tarballs above (x86_64-linux assets) — the
+      # install step refuses to run binaries from a replaced upstream asset.
+      WASM_BINDGEN_SHA256: 3039f38f65fe237b640cf06a140c919ca8d717ec5012146d145d3f27bb4d6b28 # pragma: allowlist secret
+      BINARYEN_SHA256: b5bf1f0eaf17c63ee588ff7a5954dc8f6ce2c26989051c66f24dfe9ece3e46db # pragma: allowlist secret
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -194,15 +198,22 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # stable
         with:
-          toolchain: stable
+          # Pinned (not `stable`) so the published wasm artifact doesn't drift
+          # with the runner's toolchain; bump deliberately alongside the
+          # size-budget check in scripts/build.sh.
+          toolchain: 1.97.1
           targets: wasm32-unknown-unknown
 
-      - name: Install wasm-bindgen + wasm-opt (pinned prebuilts)
+      - name: Install wasm-bindgen + wasm-opt (pinned prebuilts, checksummed)
         run: |
           mkdir -p "$HOME/.local/bin"
-          curl -sSfL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl.tar.gz" | tar xz -C /tmp
+          curl -sSfL -o /tmp/wasm-bindgen.tar.gz "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          echo "${WASM_BINDGEN_SHA256}  /tmp/wasm-bindgen.tar.gz" | sha256sum -c -
+          tar xzf /tmp/wasm-bindgen.tar.gz -C /tmp
           cp "/tmp/wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl/wasm-bindgen" "$HOME/.local/bin/"
-          curl -sSfL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz" | tar xz -C /tmp
+          curl -sSfL -o /tmp/binaryen.tar.gz "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz"
+          echo "${BINARYEN_SHA256}  /tmp/binaryen.tar.gz" | sha256sum -c -
+          tar xzf /tmp/binaryen.tar.gz -C /tmp
           cp "/tmp/binaryen-version_${BINARYEN_VERSION}/bin/wasm-opt" "$HOME/.local/bin/"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 

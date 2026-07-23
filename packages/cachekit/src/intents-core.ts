@@ -195,12 +195,7 @@ export function buildIntents(baseCreate: (options: CacheOptions) => SecureCache)
         keyPrefix: options.keyPrefix,
       },
       defaultTtl: options.ttl ?? 600,
-      l1: {
-        ...options.l1,
-        swrEnabled: options.l1?.swrEnabled ?? true,
-        invalidationEnabled: options.l1?.invalidationEnabled ?? true,
-        namespaceIndex: options.l1?.namespaceIndex ?? true,
-      },
+      l1: withFullL1Defaults(options.l1),
       reliability: mergeReliability(PRODUCTION_RELIABILITY, options.reliability),
       compression: options.compression,
       metrics: options.metrics ?? true,
@@ -226,12 +221,7 @@ export function buildIntents(baseCreate: (options: CacheOptions) => SecureCache)
         keyPrefix: options.keyPrefix,
       },
       defaultTtl: options.ttl ?? 600,
-      l1: {
-        ...options.l1,
-        swrEnabled: options.l1?.swrEnabled ?? true,
-        invalidationEnabled: options.l1?.invalidationEnabled ?? true,
-        namespaceIndex: options.l1?.namespaceIndex ?? true,
-      },
+      l1: withFullL1Defaults(options.l1),
       encryption: {
         masterKey,
         tenantId: options.tenantId,
@@ -262,12 +252,7 @@ export function buildIntents(baseCreate: (options: CacheOptions) => SecureCache)
         timeout: options.timeout,
       },
       defaultTtl: options.ttl ?? 3600,
-      l1: {
-        ...options.l1,
-        swrEnabled: options.l1?.swrEnabled ?? true,
-        invalidationEnabled: options.l1?.invalidationEnabled ?? true,
-        namespaceIndex: options.l1?.namespaceIndex ?? true,
-      },
+      l1: withFullL1Defaults(options.l1),
       encryption: options.encryption,
       reliability: mergeReliability(PRODUCTION_RELIABILITY, options.reliability),
       compression: options.compression,
@@ -290,6 +275,20 @@ export function buildIntents(baseCreate: (options: CacheOptions) => SecureCache)
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/**
+ * Full-featured L1 defaults shared by the production / secure / io intents
+ * (SWR + invalidation + namespace index on unless overridden). `minimal`
+ * deliberately does NOT use this — it hard-disables all three.
+ */
+function withFullL1Defaults(l1: BaseIntentOptions['l1']): CacheOptions['l1'] {
+  return {
+    ...l1,
+    swrEnabled: l1?.swrEnabled ?? true,
+    invalidationEnabled: l1?.invalidationEnabled ?? true,
+    namespaceIndex: l1?.namespaceIndex ?? true,
+  };
+}
 
 /**
  * Environment fallback that survives runtimes without a `process` global

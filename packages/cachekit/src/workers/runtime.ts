@@ -8,7 +8,7 @@
  *
  * Semantics deltas vs Node (documented in the README Workers section):
  * - Keys live in wasm linear memory, which is a host-readable ArrayBuffer —
- *   weaker isolation than NAPI's Rust heap. On Workers the host is your own
+ *   weaker isolation than NAPI's Rust heap. On Workers, the host is your own
  *   isolate, so the threat model is roughly JS-heap-equivalent; free()
  *   still zeroizes deterministically on dispose().
  * - wasm instantiation is a one-time synchronous cost per isolate.
