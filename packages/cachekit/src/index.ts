@@ -32,10 +32,17 @@ export type {
   Backend,
   RedisBackendConfig,
   CachekitIOBackendConfig,
+  MemcachedBackendConfig,
+  FileBackendConfig,
   LockableBackend,
   TTLBackend,
   L1Metrics,
 } from './backends/types.js';
+// NOTE: the Memcached and File backends themselves are deliberately NOT
+// re-exported here. They are Node-runtime only (memjs / node:fs) and live
+// behind subpath exports so browser/edge bundles never pull them in:
+//   import { file } from '@cachekit-io/cachekit/backends/file';
+//   import { memcached } from '@cachekit-io/cachekit/backends/memcached';
 
 export type { ErrorClassification } from './backends/error-classifier.js';
 

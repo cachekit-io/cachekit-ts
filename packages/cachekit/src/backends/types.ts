@@ -105,6 +105,68 @@ export interface RedisBackendConfig {
 }
 
 /**
+ * Configuration for the Memcached backend (Node-runtime only).
+ *
+ * The backend lives at the `@cachekit-io/cachekit/backends/memcached` subpath
+ * export and requires the optional `memjs` peer dependency — neither enters
+ * the root bundle, so browser/edge consumers are unaffected.
+ */
+export interface MemcachedBackendConfig {
+  /**
+   * Memcached server addresses in "host:port" format
+   * (default: ["127.0.0.1:11211"], matching cachekit-py).
+   */
+  servers?: string[];
+  /**
+   * Default TTL in seconds for set operations without explicit TTL.
+   * Default 0 = never expire, matching cachekit-py's Memcached backend
+   * (NOT the Redis backend's 1-hour default).
+   */
+  defaultTtl?: number;
+  /** Operation timeout in milliseconds (default: 1000, matching py's 1.0s) */
+  timeout?: number;
+  /** Connection timeout in milliseconds (default: 2000, matching py's 2.0s) */
+  connectTimeout?: number;
+  /** Retries on transient failures (default: 2, matching py) */
+  retries?: number;
+  /** Key prefix for namespacing (exposed via Backend.keyPrefix for the interop guard) */
+  keyPrefix?: string;
+  /**
+   * Reject values larger than this BEFORE sending to Memcached
+   * (default: 1 MiB, matching the server's default item-size limit; 0 disables).
+   * Memcached rejects oversized items server-side; guarding client-side keeps
+   * the failure loud and actionable (compress, shard, or switch backends).
+   */
+  maxItemSizeBytes?: number;
+}
+
+/**
+ * Configuration for the File backend (Node-runtime only).
+ *
+ * The backend lives at the `@cachekit-io/cachekit/backends/file` subpath
+ * export so its `node:fs` imports never enter the root bundle.
+ */
+export interface FileBackendConfig {
+  /**
+   * Directory for cache files
+   * (default: `${os.tmpdir()}/cachekit`, matching cachekit-py).
+   */
+  cacheDir?: string;
+  /**
+   * Default TTL in seconds for set operations without explicit TTL.
+   * Default 0 = never expire, matching cachekit-py's File backend
+   * (NOT the Redis backend's 1-hour default).
+   */
+  defaultTtl?: number;
+  /** Maximum single value size in bytes (default: 100 MiB, matching py's max_value_mb=100; 0 disables) */
+  maxValueBytes?: number;
+  /** Cache file permissions (default: 0o600 — owner-only, matching py) */
+  fileMode?: number;
+  /** Cache directory permissions (default: 0o700 — owner-only, matching py) */
+  dirMode?: number;
+}
+
+/**
  * Configuration for CachekitIO (SaaS HTTP) backend.
  *
  * Connects to api.cachekit.io (or custom endpoint) via HTTPS.

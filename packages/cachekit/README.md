@@ -6,7 +6,7 @@ Production-ready Redis caching for TypeScript/Node.js. Hybrid TypeScript-Rust de
 
 ## Features
 
-- **Dual-layer caching**: L1 in-memory (~50ns) + L2 Redis (~2-50ms)
+- **Dual-layer caching**: L1 in-memory (~50ns) + pluggable L2 (Redis, CacheKit SaaS, Memcached, local File)
 - **Stale-while-revalidate**: Serve stale data while refreshing in background
 - **Zero-knowledge encryption**: Optional AES-256-GCM client-side encryption
 - **Circuit breaker**: Automatic failure isolation with exponential backoff
@@ -132,6 +132,50 @@ const cache = createCache({
   },
 });
 ```
+
+## Backends
+
+Four backends implement the same `Backend` interface (raw bytes in/out) and plug into `createCache({ backend })` interchangeably:
+
+| Backend           | Import                                                      | Runtime    | Notes                                                                                |
+| ----------------- | ----------------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------ |
+| Redis             | `redis` from `@cachekit-io/cachekit`                        | Node       | ioredis; TTL inspection + distributed locking                                        |
+| CachekitIO (SaaS) | `cachekitio` from `@cachekit-io/cachekit`                   | Node, edge | fetch-based; TTL + locking variants                                                  |
+| Memcached         | `memcached` from `@cachekit-io/cachekit/backends/memcached` | Node       | memjs (binary protocol, multi-server); requires the optional `memjs` peer dependency |
+| File              | `file` from `@cachekit-io/cachekit/backends/file`           | Node       | local disk, on-disk format shared with cachekit-py                                   |
+
+The Memcached and File backends are **Node-runtime only** and live behind subpath exports, so browser/edge bundles that import the package root never pull in `memjs` or `node:fs`.
+
+### Memcached
+
+```typescript
+// pnpm add memjs   (optional peer dependency, loaded lazily on first use)
+import { createCache } from '@cachekit-io/cachekit';
+import { memcached } from '@cachekit-io/cachekit/backends/memcached';
+
+const backend = memcached({
+  servers: ['mc1:11211', 'mc2:11211'], // default: ['127.0.0.1:11211']
+  keyPrefix: 'myapp:',
+});
+const cache = createCache({ backend });
+```
+
+Semantics match cachekit-py's Memcached backend: TTLs are clamped to the 30-day protocol maximum (larger values would be read as unix timestamps), values over `maxItemSizeBytes` (default 1 MiB, the server's default item-size limit) are rejected client-side with a loud error, `exists()` is GET-based (memcached has no EXISTS command), and omitting `ttl` with no `defaultTtl` means never expire. `refreshTTL(key, ttl)` is available via the `touch` command, but there is no `getTTL` — the memcached protocol cannot read a key's remaining TTL, so this backend deliberately does not implement `TTLBackend`.
+
+### File
+
+```typescript
+import { createCache } from '@cachekit-io/cachekit';
+import { file } from '@cachekit-io/cachekit/backends/file';
+
+const backend = file({
+  cacheDir: '/var/cache/myapp', // default: os.tmpdir() + '/cachekit'
+  defaultTtl: 3600, // default: 0 = never expire
+});
+const cache = createCache({ backend });
+```
+
+The on-disk format is shared with cachekit-py's File backend — filenames are `blake2b(key, digestSize=16)` hex and each file carries the same 14-byte header (magic, version, flags, big-endian expiry), so Python and TypeScript processes can point at the same cache directory. Writes are atomic (write-to-temp, fsync, rename), expired or corrupt entries are unlinked on read, and symlinks are rejected (`O_NOFOLLOW`). Implements `TTLBackend` (`getTTL`/`refreshTTL` read and rewrite the on-disk expiry header). Unlike cachekit-py there is no LRU size eviction yet — cap growth with TTLs.
 
 ## API Reference
 
