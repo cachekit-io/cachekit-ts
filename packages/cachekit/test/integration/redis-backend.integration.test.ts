@@ -149,6 +149,21 @@ describe.skipIf(!dockerAvailable)('RedisBackend Integration (Testcontainers)', (
     it('refreshTTL returns false for a missing key', async () => {
       expect(await backend.refreshTTL('no-such-key', 60)).toBe(false);
     });
+
+    it('refreshTTL rejects ttl <= 0 instead of deleting the key (EXPIRE 0 deletes)', async () => {
+      await backend.set('guard-key', new Uint8Array([1]), 60);
+      await expect(backend.refreshTTL('guard-key', 0)).rejects.toThrow(/ttl >= 1/);
+      // The data survived the rejected call.
+      expect(await backend.get('guard-key')).toEqual(new Uint8Array([1]));
+    });
+
+    it('refreshTTL floors fractional ttl to whole seconds', async () => {
+      await backend.set('frac-key', new Uint8Array([1]), 30);
+      expect(await backend.refreshTTL('frac-key', 90.9)).toBe(true);
+      const ttl = await backend.getTTL('frac-key');
+      expect(ttl).toBeGreaterThan(30);
+      expect(ttl).toBeLessThanOrEqual(90);
+    });
   });
 
   describe('LockableBackend', () => {
@@ -188,6 +203,14 @@ describe.skipIf(!dockerAvailable)('RedisBackend Integration (Testcontainers)', (
       expect(await client.get(`${testPrefix}cad-key:lock`)).toBe(holder);
     });
 
+    it('acquireLock floors fractional timeoutMs (PX requires an integer) and rejects <= 0', async () => {
+      const lockId = await backend.acquireLock('float-key', 5000.7);
+      expect(lockId).toBeTruthy();
+      expect(await client.pttl(`${testPrefix}float-key:lock`)).toBeLessThanOrEqual(5000);
+
+      await expect(backend.acquireLock('float-key-2', 0)).rejects.toThrow(/timeoutMs >= 1/);
+    });
+
     it('lock auto-expires after timeoutMs (best-effort lease, not a permanent lock)', async () => {
       const lockId = await backend.acquireLock('expiry-key', 100);
       expect(lockId).toBeTruthy();
@@ -196,13 +219,8 @@ describe.skipIf(!dockerAvailable)('RedisBackend Integration (Testcontainers)', (
       expect(await backend.acquireLock('expiry-key', 5000)).toBeTruthy();
     });
 
-    // ── Bare-key lock contract (cachekit-py#135 / cachekit-ts#70 parity) ──
-    //
-    // Lock methods take the same BARE key as get/set/delete. The `:lock`
-    // namespace is derived by the backend on the wire (matching py's
-    // `<scoped_key>:lock`) — it must never leak into the data keyspace or
-    // require callers to pre-suffix.
-
+    // Pins the bare-key contract on LockableBackend (types.ts) — the
+    // cachekit-py#135 / cachekit-ts#70 regression class.
     describe('bare-key lock contract', () => {
       const canonicalKey = 'ns:app:func:mod.fn:args:' + 'a'.repeat(64) + ':v1';
 

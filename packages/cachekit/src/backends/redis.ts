@@ -153,11 +153,7 @@ export class RedisBackend implements LockableBackend, TTLBackend {
     }
   }
 
-  /**
-   * Remaining TTL in seconds, or null when the key is missing or has no
-   * expiry — the same collapse cachekit-py's Redis provider applies to
-   * Redis's -2 (missing) / -1 (no expiry) sentinels.
-   */
+  /** See {@link TTLBackend.getTTL}: -2 (missing) / -1 (no expiry) → null. */
   async getTTL(key: string): Promise<number | null> {
     this.ensureNotClosed();
 
@@ -173,8 +169,16 @@ export class RedisBackend implements LockableBackend, TTLBackend {
   async refreshTTL(key: string, ttl: number): Promise<boolean> {
     this.ensureNotClosed();
 
+    // EXPIRE with a non-positive TTL DELETES the key and still returns 1 —
+    // reporting "refreshed" while silently destroying the data. Reject loudly
+    // instead (the SaaS backend's PATCH /ttl rejects ttl <= 0 the same way).
+    const seconds = Math.floor(ttl);
+    if (seconds <= 0) {
+      throw new BackendError(`Redis refreshTTL requires ttl >= 1 second, got ${ttl}`);
+    }
+
     try {
-      const result = await this.client.expire(key, ttl);
+      const result = await this.client.expire(key, seconds);
       return result === 1;
     } catch (error) {
       throw this.wrapError('refreshTTL', error);
@@ -182,24 +186,23 @@ export class RedisBackend implements LockableBackend, TTLBackend {
   }
 
   /**
-   * Acquire a distributed lock, or null when another client holds it
-   * (contested — never blocks or retries, matching the LAB-240 contract).
-   *
-   * Takes the BARE cache key: the `:lock` namespace is derived on the wire
-   * by this backend (`<key>:lock`, after ioredis applies keyPrefix), exactly
+   * See {@link LockableBackend.acquireLock} for the contract. On Redis the
+   * lease is a `SET NX PX` under the derived lock key (see {@link lockKey}),
    * mirroring cachekit-py's Redis provider so py and ts workloads contend on
-   * the same lock. Callers MUST NOT pre-suffix the key.
-   *
-   * @param timeoutMs - How long the lock is held before auto-release (lease
-   *   TTL, `SET PX`). Best-effort stampede mitigation, not mutual-exclusion
-   *   correctness: a holder that outlives the lease loses exclusivity.
+   * the same lock.
    */
   async acquireLock(key: string, timeoutMs = 5000): Promise<string | null> {
     this.ensureNotClosed();
 
+    // PX requires a positive integer — floats/zero make Redis reject the SET.
+    const px = Math.floor(timeoutMs);
+    if (px <= 0) {
+      throw new BackendError(`Redis acquireLock requires timeoutMs >= 1, got ${timeoutMs}`);
+    }
+
     const lockId = randomUUID();
     try {
-      const result = await this.client.set(this.lockKey(key), lockId, 'PX', timeoutMs, 'NX');
+      const result = await this.client.set(this.lockKey(key), lockId, 'PX', px, 'NX');
       return result === 'OK' ? lockId : null;
     } catch (error) {
       throw this.wrapError('acquireLock', error);
@@ -207,9 +210,7 @@ export class RedisBackend implements LockableBackend, TTLBackend {
   }
 
   /**
-   * Release a lock previously acquired with {@link acquireLock}. Atomic
-   * compare-and-delete: returns false (and deletes nothing) when the lock
-   * expired or is held by someone else — never releases another holder's lock.
+   * See {@link LockableBackend.releaseLock}: atomic Lua compare-and-delete.
    */
   async releaseLock(key: string, lockId: string): Promise<boolean> {
     this.ensureNotClosed();
