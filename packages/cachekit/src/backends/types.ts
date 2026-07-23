@@ -140,12 +140,48 @@ export interface L1Metrics {
   l1Enabled: boolean;
 }
 
+/**
+ * Optional capability: distributed locking for cache stampede prevention.
+ *
+ * Contract (shared by every implementation and pinned by regression tests —
+ * see cachekit-py#135 / cachekit-ts#70 for the regressions this prevents):
+ * - Lock methods take the same BARE cache key as get/set/delete. Any lock
+ *   namespace (e.g. Redis's on-wire `<key>:lock`) is derived internally by
+ *   the backend; callers MUST NOT pre-suffix the key.
+ * - The lease is best-effort stampede mitigation bounded by `timeoutMs`,
+ *   not a mutual-exclusion guarantee: a holder that outlives the lease
+ *   loses exclusivity. Size `timeoutMs` at or above the expected recompute.
+ */
 export interface LockableBackend extends Backend {
+  /**
+   * Acquire the lock, or return null when another client holds it
+   * (contested — never blocks, retries, or throws for contention; LAB-240).
+   *
+   * @param timeoutMs - Lease duration in milliseconds before auto-release
+   *   (default 5000)
+   * @returns The lock capability token to pass to releaseLock, or null
+   */
   acquireLock(key: string, timeoutMs?: number): Promise<string | null>;
+
+  /**
+   * Release a lock acquired with acquireLock. Must be compare-and-delete:
+   * returns false (releasing nothing) when the lease expired or lockId is
+   * not the current holder's — never releases another holder's lock.
+   */
   releaseLock(key: string, lockId: string): Promise<boolean>;
 }
 
+/** Optional capability: TTL inspection and refresh. */
 export interface TTLBackend extends Backend {
+  /**
+   * Remaining TTL in seconds, or null when the key is missing OR exists
+   * without an expiry (matches cachekit-py's collapse of Redis's -2/-1).
+   */
   getTTL(key: string): Promise<number | null>;
+
+  /**
+   * Reset the key's TTL to `ttl` seconds (>= 1). Returns false when the key
+   * doesn't exist; throws on ttl <= 0 rather than deleting the key.
+   */
   refreshTTL(key: string, ttl: number): Promise<boolean>;
 }

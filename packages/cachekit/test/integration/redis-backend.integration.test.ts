@@ -120,4 +120,140 @@ describe.skipIf(!dockerAvailable)('RedisBackend Integration (Testcontainers)', (
       expect(result).toEqual(new Uint8Array([i % 256]));
     }
   });
+
+  describe('TTLBackend', () => {
+    it('getTTL returns remaining seconds for a key with expiry', async () => {
+      await backend.set('ttl-key', new Uint8Array([1]), 60);
+      const ttl = await backend.getTTL('ttl-key');
+      expect(ttl).toBeGreaterThan(0);
+      expect(ttl).toBeLessThanOrEqual(60);
+    });
+
+    it('getTTL returns null for a missing key', async () => {
+      expect(await backend.getTTL('no-such-key')).toBeNull();
+    });
+
+    it('getTTL returns null for a key without expiry (py parity: -1 collapses to null)', async () => {
+      await client.set(`${testPrefix}persistent-key`, 'v');
+      expect(await backend.getTTL('persistent-key')).toBeNull();
+    });
+
+    it('refreshTTL resets the TTL and returns true', async () => {
+      await backend.set('refresh-key', new Uint8Array([1]), 30);
+      expect(await backend.refreshTTL('refresh-key', 120)).toBe(true);
+      const ttl = await backend.getTTL('refresh-key');
+      expect(ttl).toBeGreaterThan(30);
+      expect(ttl).toBeLessThanOrEqual(120);
+    });
+
+    it('refreshTTL returns false for a missing key', async () => {
+      expect(await backend.refreshTTL('no-such-key', 60)).toBe(false);
+    });
+
+    it('refreshTTL rejects ttl <= 0 instead of deleting the key (EXPIRE 0 deletes)', async () => {
+      await backend.set('guard-key', new Uint8Array([1]), 60);
+      await expect(backend.refreshTTL('guard-key', 0)).rejects.toThrow(/ttl >= 1/);
+      // The data survived the rejected call.
+      expect(await backend.get('guard-key')).toEqual(new Uint8Array([1]));
+    });
+
+    it('refreshTTL floors fractional ttl to whole seconds', async () => {
+      await backend.set('frac-key', new Uint8Array([1]), 30);
+      expect(await backend.refreshTTL('frac-key', 90.9)).toBe(true);
+      const ttl = await backend.getTTL('frac-key');
+      expect(ttl).toBeGreaterThan(30);
+      expect(ttl).toBeLessThanOrEqual(90);
+    });
+  });
+
+  describe('LockableBackend', () => {
+    it('acquireLock returns a lockId and holds the lease for timeoutMs', async () => {
+      const lockId = await backend.acquireLock('lock-key', 5000);
+      expect(lockId).toBeTruthy();
+
+      // The lease lives under the derived lock key with a PX expiry.
+      const pttl = await client.pttl(`${testPrefix}lock-key:lock`);
+      expect(pttl).toBeGreaterThan(0);
+      expect(pttl).toBeLessThanOrEqual(5000);
+    });
+
+    it('acquireLock returns null when contested (never blocks, never throws — LAB-240 shape)', async () => {
+      const first = await backend.acquireLock('contested-key', 5000);
+      expect(first).toBeTruthy();
+
+      const second = await backend.acquireLock('contested-key', 5000);
+      expect(second).toBeNull();
+
+      // The original holder's lease is untouched by the failed attempt.
+      expect(await client.get(`${testPrefix}contested-key:lock`)).toBe(first);
+    });
+
+    it('releaseLock with the holder lockId frees the lock and returns true', async () => {
+      const lockId = await backend.acquireLock('release-key', 5000);
+      expect(await backend.releaseLock('release-key', lockId!)).toBe(true);
+      expect(await client.exists(`${testPrefix}release-key:lock`)).toBe(0);
+
+      // Freed lock is immediately acquirable again.
+      expect(await backend.acquireLock('release-key', 5000)).toBeTruthy();
+    });
+
+    it('releaseLock with a stale lockId returns false and never deletes the current lease', async () => {
+      const holder = await backend.acquireLock('cad-key', 5000);
+      expect(await backend.releaseLock('cad-key', 'not-the-holder')).toBe(false);
+      expect(await client.get(`${testPrefix}cad-key:lock`)).toBe(holder);
+    });
+
+    it('acquireLock floors fractional timeoutMs (PX requires an integer) and rejects <= 0', async () => {
+      const lockId = await backend.acquireLock('float-key', 5000.7);
+      expect(lockId).toBeTruthy();
+      expect(await client.pttl(`${testPrefix}float-key:lock`)).toBeLessThanOrEqual(5000);
+
+      await expect(backend.acquireLock('float-key-2', 0)).rejects.toThrow(/timeoutMs >= 1/);
+    });
+
+    it('lock auto-expires after timeoutMs (best-effort lease, not a permanent lock)', async () => {
+      const lockId = await backend.acquireLock('expiry-key', 100);
+      expect(lockId).toBeTruthy();
+
+      await new Promise((r) => setTimeout(r, 250));
+      expect(await backend.acquireLock('expiry-key', 5000)).toBeTruthy();
+    });
+
+    // Pins the bare-key contract on LockableBackend (types.ts) — the
+    // cachekit-py#135 / cachekit-ts#70 regression class.
+    describe('bare-key lock contract', () => {
+      const canonicalKey = 'ns:app:func:mod.fn:args:' + 'a'.repeat(64) + ':v1';
+
+      it('derives exactly one on-wire `:lock` suffix from the bare canonical key', async () => {
+        const lockId = await backend.acquireLock(canonicalKey, 5000);
+        expect(lockId).toBeTruthy();
+
+        // Exactly `<prefix><key>:lock` — no double suffix, no other shape.
+        expect(await client.get(`${testPrefix}${canonicalKey}:lock`)).toBe(lockId);
+        const lockKeys = await client.keys(`${testPrefix}*lock*`);
+        expect(lockKeys).toEqual([`${testPrefix}${canonicalKey}:lock`]);
+      });
+
+      it('locking never touches the data key, and release leaves zero :lock residue', async () => {
+        await backend.set(canonicalKey, new Uint8Array([42]), 60);
+        const lockId = await backend.acquireLock(canonicalKey, 5000);
+
+        // Data key untouched by the lock lifecycle.
+        expect(await backend.get(canonicalKey)).toEqual(new Uint8Array([42]));
+
+        expect(await backend.releaseLock(canonicalKey, lockId!)).toBe(true);
+        expect(await client.keys(`${testPrefix}*:lock`)).toEqual([]);
+        expect(await backend.get(canonicalKey)).toEqual(new Uint8Array([42]));
+      });
+
+      it('tripwire: the decoded data keyspace never contains `:lock` after normal cache ops', async () => {
+        await backend.set('plain-key', new Uint8Array([1]), 60);
+        await backend.get('plain-key');
+        await backend.exists('plain-key');
+
+        const allKeys = await client.keys(`${testPrefix}*`);
+        expect(allKeys.some((k) => k.includes(':lock'))).toBe(false);
+      });
+    });
+  });
 });

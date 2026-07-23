@@ -1,5 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import { Redis as IoRedis, type RedisOptions } from 'ioredis';
-import { Backend, RedisBackendConfig } from './types.js';
+import { LockableBackend, RedisBackendConfig, TTLBackend } from './types.js';
 import { BackendError, TimeoutError } from '../errors.js';
 import {
   DEFAULT_TTL_SECONDS,
@@ -11,6 +12,17 @@ import {
 } from '../constants.js';
 
 /**
+ * Atomic compare-and-delete: release the lock only if the caller still holds
+ * it (stored value == lockId). A plain GET+DEL race would let a client whose
+ * lock already expired delete the next holder's lock.
+ */
+const RELEASE_LOCK_SCRIPT = `if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+else
+  return 0
+end`;
+
+/**
  * Redis backend implementation using ioredis.
  *
  * Features:
@@ -18,6 +30,8 @@ import {
  * - Auto-reconnect with exponential backoff
  * - TLS support
  * - Key prefixing
+ * - TTL inspection/refresh (TTLBackend)
+ * - Distributed locking for stampede prevention (LockableBackend)
  *
  * @example
  * ```typescript
@@ -27,7 +41,7 @@ import {
  * await backend.close();
  * ```
  */
-export class RedisBackend implements Backend {
+export class RedisBackend implements LockableBackend, TTLBackend {
   private readonly client: IoRedis;
   private readonly config: Required<RedisBackendConfig>;
   private closed = false;
@@ -139,6 +153,87 @@ export class RedisBackend implements Backend {
     }
   }
 
+  /** See {@link TTLBackend.getTTL}: -2 (missing) / -1 (no expiry) → null. */
+  async getTTL(key: string): Promise<number | null> {
+    this.ensureNotClosed();
+
+    try {
+      const ttl = await this.client.ttl(key);
+      return ttl > 0 ? ttl : null;
+    } catch (error) {
+      throw this.wrapError('getTTL', error);
+    }
+  }
+
+  /** Reset the key's TTL. Returns false when the key doesn't exist. */
+  async refreshTTL(key: string, ttl: number): Promise<boolean> {
+    this.ensureNotClosed();
+
+    // EXPIRE with a non-positive TTL DELETES the key and still returns 1 —
+    // reporting "refreshed" while silently destroying the data. Reject loudly
+    // instead (the SaaS backend's PATCH /ttl rejects ttl <= 0 the same way).
+    const seconds = Math.floor(ttl);
+    if (seconds <= 0) {
+      throw new BackendError(`Redis refreshTTL requires ttl >= 1 second, got ${ttl}`);
+    }
+
+    try {
+      const result = await this.client.expire(key, seconds);
+      return result === 1;
+    } catch (error) {
+      throw this.wrapError('refreshTTL', error);
+    }
+  }
+
+  /**
+   * See {@link LockableBackend.acquireLock} for the contract. On Redis the
+   * lease is a `SET NX PX` under the derived lock key (see {@link lockKey}),
+   * mirroring cachekit-py's Redis provider so py and ts workloads contend on
+   * the same lock.
+   */
+  async acquireLock(key: string, timeoutMs = 5000): Promise<string | null> {
+    this.ensureNotClosed();
+
+    // PX requires a positive integer — floats/zero make Redis reject the SET.
+    const px = Math.floor(timeoutMs);
+    if (px <= 0) {
+      throw new BackendError(`Redis acquireLock requires timeoutMs >= 1, got ${timeoutMs}`);
+    }
+
+    const lockId = randomUUID();
+    try {
+      const result = await this.client.set(this.lockKey(key), lockId, 'PX', px, 'NX');
+      return result === 'OK' ? lockId : null;
+    } catch (error) {
+      throw this.wrapError('acquireLock', error);
+    }
+  }
+
+  /**
+   * See {@link LockableBackend.releaseLock}: atomic Lua compare-and-delete.
+   */
+  async releaseLock(key: string, lockId: string): Promise<boolean> {
+    this.ensureNotClosed();
+
+    try {
+      const result = await this.client.eval(RELEASE_LOCK_SCRIPT, 1, this.lockKey(key), lockId);
+      return result === 1;
+    } catch (error) {
+      throw this.wrapError('releaseLock', error);
+    }
+  }
+
+  /**
+   * Bare-cache-key contract (cachekit-py#135 / cachekit-ts#70): lock methods
+   * receive the same key as get/set/delete; the `:lock` suffix is a
+   * Redis-backend wire detail, kept identical to py's `<scoped_key>:lock`
+   * for zero-migration compatibility. It never enters the data keyspace or
+   * the canonical cache-key format.
+   */
+  private lockKey(key: string): string {
+    return `${key}:lock`;
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
 
@@ -182,6 +277,6 @@ export class RedisBackend implements Backend {
  * });
  * ```
  */
-export function redis(config: RedisBackendConfig): Backend {
+export function redis(config: RedisBackendConfig): LockableBackend & TTLBackend {
   return new RedisBackend(config);
 }
