@@ -3,6 +3,10 @@ import { CacheMetrics, NoopMetrics, createMetrics } from './prometheus';
 
 // Mock prom-client (not available in test environment)
 vi.mock('prom-client', () => ({
+  register: {
+    registerMetric() {},
+    getSingleMetric: () => undefined,
+  },
   Counter: class MockCounter {
     inc() {}
   },

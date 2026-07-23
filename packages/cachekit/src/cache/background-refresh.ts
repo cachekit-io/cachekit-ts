@@ -1,4 +1,5 @@
 import type { L1Cache } from '../l1/lru-cache.js';
+import { logError } from '../logger.js';
 
 /**
  * Options for scheduling a background refresh.
@@ -75,8 +76,7 @@ export class BackgroundRefreshManager {
         }
       } catch (error) {
         // Log error for observability
-        // eslint-disable-next-line no-console
-        console.error(
+        logError(
           '[cachekit] Background refresh failed:',
           error instanceof Error ? error.message : 'Unknown error'
         );

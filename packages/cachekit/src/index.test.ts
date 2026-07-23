@@ -26,4 +26,12 @@ describe('index exports', () => {
     expect(cachekit.NonceExhaustedError).toBe(NonceExhaustedError);
     expect(cachekit.SerializationError).toBe(SerializationError);
   });
+
+  // LAB-517: the metrics module and logger hook are public API
+  it('should export the observability surface', () => {
+    expect(cachekit.CacheMetrics).toBeTypeOf('function');
+    expect(cachekit.NoopMetrics).toBeTypeOf('function');
+    expect(cachekit.createMetrics).toBeTypeOf('function');
+    expect(cachekit.setLogger).toBeTypeOf('function');
+  });
 });

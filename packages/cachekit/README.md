@@ -218,12 +218,33 @@ npm install prom-client
 ```typescript
 const cache = createCache({
   backend: { url: 'redis://localhost:6379' },
-  metrics: true, // Enable Prometheus metrics
+  metrics: true, // or { prefix: 'myapp', defaultLabels: { env: 'prod' }, registry }
 });
 
-// Metrics: cachekit_operations_total, cachekit_hits_total, cachekit_misses_total,
-//          cachekit_errors_total, cachekit_operation_duration_seconds
+// Counters:   cachekit_operations_total{operation,status}, cachekit_hits_total{layer},
+//             cachekit_misses_total, cachekit_errors_total{error_type}
+// Histogram:  cachekit_operation_duration_seconds{operation}
+// Gauges:     cachekit_l1_entries, cachekit_l1_memory_bytes, cachekit_circuit_breaker_state
 ```
+
+If `metrics` is enabled but `prom-client` is not installed, the SDK reports the
+failure once through the library logger and metrics degrade to no-ops — never
+silently.
+
+Internal error reporting (background refresh, invalidation channel, Redis
+connection events) defaults to `console.error`; route it into your own logging
+pipeline with `setLogger`:
+
+```typescript
+import { setLogger } from '@cachekit-io/cachekit';
+
+setLogger((message, error) => myLogger.warn({ error }, message));
+setLogger(null); // restore the default
+```
+
+With the CachekitIO backend, the `X-CacheKit-L1-*` telemetry headers are wired
+automatically from the cache's live L1/L2 hit and miss counters; pass your own
+`metricsProvider` in the backend config to override.
 
 ## Requirements
 

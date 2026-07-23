@@ -28,6 +28,7 @@ import type {
   InvalidationConfig,
 } from './types/cache.js';
 import type { L1Config } from './l1/types.js';
+import type { MetricsConfig } from './metrics/prometheus.js';
 import type { SerializerConfig } from './serialization/serializer.js';
 import { createCache as _createCache } from './cache.js';
 import { ConfigurationError } from './errors.js';
@@ -74,8 +75,13 @@ export interface ProductionOptions extends BaseIntentOptions {
   url: string;
   /** Redis key prefix */
   keyPrefix?: string;
-  /** Enable Prometheus metrics (default: true) */
-  metrics?: boolean;
+  /**
+   * Enable Prometheus metrics (default: true), or pass a MetricsConfig to
+   * customize prefix/labels/registry. Requires the optional `prom-client`
+   * peer dependency — reports once through the library logger and degrades
+   * to no-ops when it is missing.
+   */
+  metrics?: boolean | MetricsConfig;
   /** Override default reliability settings */
   reliability?: Partial<ReliabilityConfig>;
 }
@@ -98,8 +104,13 @@ export interface SecureOptions extends BaseIntentOptions {
   tenantId?: string;
   /** Redis key prefix */
   keyPrefix?: string;
-  /** Enable Prometheus metrics (default: true) */
-  metrics?: boolean;
+  /**
+   * Enable Prometheus metrics (default: true), or pass a MetricsConfig to
+   * customize prefix/labels/registry. Requires the optional `prom-client`
+   * peer dependency — reports once through the library logger and degrades
+   * to no-ops when it is missing.
+   */
+  metrics?: boolean | MetricsConfig;
   /** Override default reliability settings */
   reliability?: Partial<ReliabilityConfig>;
 }
@@ -122,8 +133,13 @@ export interface IOOptions extends BaseIntentOptions {
   timeout?: number;
   /** Optional encryption config for zero-knowledge mode */
   encryption?: EncryptionConfig;
-  /** Enable Prometheus metrics (default: true) */
-  metrics?: boolean;
+  /**
+   * Enable Prometheus metrics (default: true), or pass a MetricsConfig to
+   * customize prefix/labels/registry. Requires the optional `prom-client`
+   * peer dependency — reports once through the library logger and degrades
+   * to no-ops when it is missing.
+   */
+  metrics?: boolean | MetricsConfig;
   /** Override default reliability settings */
   reliability?: Partial<ReliabilityConfig>;
 }

@@ -59,6 +59,12 @@ export {
   SerializationError,
 } from './errors.js';
 
+// ============ Observability ============
+export { CacheMetrics, NoopMetrics, createMetrics } from './metrics/prometheus.js';
+export type { MetricsCollector, MetricsConfig } from './metrics/prometheus.js';
+export { setLogger } from './logger.js';
+export type { CachekitLogger } from './logger.js';
+
 // ============ Optional Utilities ============
 // Export for advanced users who want to customize
 export { L1Cache } from './l1/lru-cache.js';

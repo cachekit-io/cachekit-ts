@@ -369,5 +369,78 @@ describe('CachekitIO Backend', () => {
 
       await cache.close();
     });
+
+    // LAB-517: the SaaS telemetry headers are auto-wired from the cache's
+    // live hit/miss counters — no user-supplied metricsProvider needed.
+    it('auto-wires X-CacheKit-L1-* telemetry headers from live cache counters', async () => {
+      const { createCache } = await import('../cache.js');
+
+      const cache = createCache({
+        backend: {
+          apiKey: 'ck_test_xyz',
+          apiUrl: 'https://api.test.cachekit.io',
+          allowCustomHost: true,
+        },
+        l1: { enabled: true },
+      });
+
+      fetchSpy.mockResolvedValue(mockResponse(404));
+      await cache.get('ns:first'); // miss
+      await cache.get('ns:second'); // second request sees the first miss
+
+      const [, secondOpts] = fetchSpy.mock.calls[1] as [string, RequestInit];
+      const headers = secondOpts.headers as Record<string, string>;
+      expect(headers['X-CacheKit-L1-Status']).toBe('miss');
+      expect(headers['X-CacheKit-Misses']).toBe('1');
+      expect(headers['X-CacheKit-L1-Hits']).toBe('0');
+
+      await cache.close();
+    });
+
+    it('reports L1 telemetry as disabled when the cache has no L1', async () => {
+      const { createCache } = await import('../cache.js');
+
+      const cache = createCache({
+        backend: {
+          apiKey: 'ck_test_xyz',
+          apiUrl: 'https://api.test.cachekit.io',
+          allowCustomHost: true,
+        },
+        l1: { enabled: false },
+      });
+
+      fetchSpy.mockResolvedValueOnce(mockResponse(404));
+      await cache.get('ns:key');
+
+      const [, opts] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      const headers = opts.headers as Record<string, string>;
+      expect(headers['X-CacheKit-L1-Status']).toBe('disabled');
+
+      await cache.close();
+    });
+
+    it('a user-supplied metricsProvider overrides the auto-wired one', async () => {
+      const { createCache } = await import('../cache.js');
+
+      const cache = createCache({
+        backend: {
+          apiKey: 'ck_test_xyz',
+          apiUrl: 'https://api.test.cachekit.io',
+          allowCustomHost: true,
+          metricsProvider: () => ({ l1Hits: 42, l2Hits: 7, misses: 3, l1Enabled: true }),
+        },
+        l1: { enabled: true },
+      });
+
+      fetchSpy.mockResolvedValueOnce(mockResponse(404));
+      await cache.get('ns:key');
+
+      const [, opts] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      const headers = opts.headers as Record<string, string>;
+      expect(headers['X-CacheKit-L1-Hits']).toBe('42');
+      expect(headers['X-CacheKit-Misses']).toBe('3');
+
+      await cache.close();
+    });
   });
 });

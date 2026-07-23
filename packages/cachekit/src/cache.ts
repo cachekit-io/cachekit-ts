@@ -9,6 +9,8 @@ import type { Backend, RedisBackendConfig, CachekitIOBackendConfig } from './bac
 import { redis } from './backends/redis.js';
 import { cachekitio } from './backends/cachekitio-factory.js';
 import { L1Cache } from './l1/lru-cache.js';
+import { logError } from './logger.js';
+import { createMetrics, type MetricsCollector } from './metrics/prometheus.js';
 import { ReliabilityExecutor } from './reliability/executor.js';
 import { BackgroundRefreshManager } from './cache/background-refresh.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
@@ -43,6 +45,10 @@ class CacheImpl implements SecureCache {
   private readonly serializer: MessagePackSerializer;
   private readonly defaultTtl: number;
   private readonly invalidationChannel: RedisInvalidationChannel | null = null;
+  private readonly metrics: MetricsCollector;
+  // Live hit/miss counters. Feed both the Prometheus collector and the SaaS
+  // X-CacheKit-L1-* telemetry headers (auto-wired metricsProvider below).
+  private readonly telemetry = { l1Hits: 0, l2Hits: 0, misses: 0 };
   private closed = false;
 
   constructor(options: CacheOptions) {
@@ -50,10 +56,29 @@ class CacheImpl implements SecureCache {
     if ('get' in options.backend) {
       this.backend = options.backend;
     } else if ('apiKey' in options.backend) {
-      this.backend = cachekitio(options.backend as CachekitIOBackendConfig);
+      const ioConfig = options.backend as CachekitIOBackendConfig;
+      this.backend = cachekitio({
+        ...ioConfig,
+        // Auto-wire the SaaS telemetry headers from the cache's live hit/miss
+        // counters; an explicit user-supplied provider still wins. Reads
+        // `this` lazily (per request), so constructor field order is safe.
+        metricsProvider:
+          ioConfig.metricsProvider ??
+          ((): import('./backends/types.js').L1Metrics => ({
+            ...this.telemetry,
+            l1Enabled: this.l1 !== null,
+          })),
+      });
     } else {
       this.backend = redis(options.backend as RedisBackendConfig);
     }
+
+    // Initialize metrics (Prometheus via optional prom-client peer dependency)
+    const metricsOption = options.metrics ?? false;
+    this.metrics = createMetrics(
+      metricsOption !== false,
+      typeof metricsOption === 'object' ? metricsOption : undefined
+    );
 
     // Initialize L1 cache
     if (options.l1?.enabled !== false) {
@@ -109,11 +134,69 @@ class CacheImpl implements SecureCache {
 
     // Start the channel (fire-and-forget, channel handles errors internally)
     channel.start().catch((err) => {
-      // eslint-disable-next-line no-console
-      console.error('[cachekit] Failed to start invalidation channel:', err);
+      logError('[cachekit] Failed to start invalidation channel:', err);
     });
 
     return channel;
+  }
+
+  // ── Metrics recording ─────────────────────────────────────
+  // MetricsCollector methods never reject (errors route to its handler), so
+  // fire-and-forget `void` keeps them off the hot path.
+
+  private recordHit(layer: 'l1' | 'l2'): void {
+    if (layer === 'l1') this.telemetry.l1Hits++;
+    else this.telemetry.l2Hits++;
+    void this.metrics.recordHit(layer);
+  }
+
+  private recordMiss(): void {
+    this.telemetry.misses++;
+    void this.metrics.recordMiss();
+  }
+
+  private recordFailure(operation: string, error: unknown): void {
+    void this.metrics.recordOperation(operation, 'error');
+    void this.metrics.recordError(error instanceof Error ? error.constructor.name : 'Unknown');
+  }
+
+  private publishL1Stats(): void {
+    if (!this.l1) return;
+    const stats = this.l1.stats;
+    void this.metrics.updateL1Stats(stats.entries, stats.memoryUsed);
+  }
+
+  /**
+   * Run an operation through the reliability stack, then publish the
+   * circuit-breaker state gauge (state transitions happen inside execute).
+   */
+  private async execute<T>(operation: () => Promise<T>, fallback: T): Promise<T> {
+    try {
+      return await this.reliabilityExecutor.execute(operation, fallback);
+    } finally {
+      const state = this.reliabilityExecutor.getCircuitBreakerState();
+      if (state !== null) void this.metrics.updateCircuitBreakerState(state);
+    }
+  }
+
+  /**
+   * Instrument one backend attempt: duration histogram + operations counter
+   * by status + errors counter. Wraps the operation closure (inside retry),
+   * so each retry attempt counts as one operation — the honest reading of
+   * `operations_total`.
+   */
+  private async instrument<T>(operation: string, fn: () => Promise<T>): Promise<T> {
+    const endTimer = await this.metrics.startTimer(operation);
+    try {
+      const result = await fn();
+      void this.metrics.recordOperation(operation, 'success');
+      return result;
+    } catch (error) {
+      this.recordFailure(operation, error);
+      throw error;
+    } finally {
+      endTimer();
+    }
   }
 
   async get<T>(key: string): Promise<T | null> {
@@ -134,6 +217,7 @@ class CacheImpl implements SecureCache {
     if (this.l1) {
       const l1Result = this.l1.get(key);
       if (l1Result !== null) {
+        this.recordHit('l1');
         return l1Result as T;
       }
     }
@@ -141,38 +225,44 @@ class CacheImpl implements SecureCache {
     const useEnvelope = !interop && this.byteStorage !== null;
 
     // Fetch from L2 (backend)
-    const operation = async (): Promise<T | null> => {
-      const data = await this.backend.get(key);
-      if (data === null) return null;
+    const operation = (): Promise<T | null> =>
+      this.instrument('get', async () => {
+        const data = await this.backend.get(key);
+        if (data === null) {
+          this.recordMiss();
+          return null;
+        }
 
-      // Decrypt if encryption enabled
-      let plaintext = data;
-      if (this.encryption) {
-        plaintext = await this.encryption.decrypt(data, key, useEnvelope);
-      }
+        // Decrypt if encryption enabled
+        let plaintext = data;
+        if (this.encryption) {
+          plaintext = await this.encryption.decrypt(data, key, useEnvelope);
+        }
 
-      // Decompress with ByteStorage (after decryption)
-      if (useEnvelope) {
-        plaintext = this.byteStorage!.unpack(plaintext);
-      }
+        // Decompress with ByteStorage (after decryption)
+        if (useEnvelope) {
+          plaintext = this.byteStorage!.unpack(plaintext);
+        }
 
-      // Deserialize
-      const value = interop
-        ? decodeInteropValue<T>(plaintext)
-        : this.serializer.decode<T>(plaintext);
+        // Deserialize
+        const value = interop
+          ? decodeInteropValue<T>(plaintext)
+          : this.serializer.decode<T>(plaintext);
 
-      // Populate L1. Interop keys are {namespace}:{operation}:{hash} — group
-      // under the user-facing namespace segment so namespace-level
-      // invalidation matches entries written through wrap().
-      if (this.l1) {
-        const namespace = interop ? key.slice(0, key.indexOf(':')) : extractNamespace(key);
-        this.l1.set(key, value, (ttlSeconds ?? this.defaultTtl) * 1000, namespace);
-      }
+        // Populate L1. Interop keys are {namespace}:{operation}:{hash} — group
+        // under the user-facing namespace segment so namespace-level
+        // invalidation matches entries written through wrap().
+        if (this.l1) {
+          const namespace = interop ? key.slice(0, key.indexOf(':')) : extractNamespace(key);
+          this.l1.set(key, value, (ttlSeconds ?? this.defaultTtl) * 1000, namespace);
+          this.publishL1Stats();
+        }
 
-      return value;
-    };
+        this.recordHit('l2');
+        return value;
+      });
 
-    return this.reliabilityExecutor.execute(operation, null);
+    return this.execute(operation, null);
   }
 
   async set<T>(key: string, value: T, options?: SetOptions): Promise<void> {
@@ -210,46 +300,50 @@ class CacheImpl implements SecureCache {
     // (existing degrade semantics unchanged).
     const interopSerialized = interop ? encodeInteropValue(value) : null;
 
-    const operation = async (): Promise<void> => {
-      // Serialize
-      const serialized = interopSerialized ?? this.serializer.encode(value);
+    const operation = (): Promise<void> =>
+      this.instrument('set', async () => {
+        // Serialize
+        const serialized = interopSerialized ?? this.serializer.encode(value);
 
-      // Compress with ByteStorage (before encryption)
-      let data: Uint8Array = useEnvelope ? this.byteStorage!.pack(serialized) : serialized;
+        // Compress with ByteStorage (before encryption)
+        let data: Uint8Array = useEnvelope ? this.byteStorage!.pack(serialized) : serialized;
 
-      // Encrypt if encryption enabled
-      if (this.encryption) {
-        data = await this.encryption.encrypt(data, key, useEnvelope);
-      }
+        // Encrypt if encryption enabled
+        if (this.encryption) {
+          data = await this.encryption.encrypt(data, key, useEnvelope);
+        }
 
-      // Store in backend
-      await this.backend.set(key, data, ttl);
+        // Store in backend
+        await this.backend.set(key, data, ttl);
 
-      // Update L1
-      if (this.l1) {
-        this.l1.set(key, value, ttl * 1000, namespace);
-      }
-    };
+        // Update L1
+        if (this.l1) {
+          this.l1.set(key, value, ttl * 1000, namespace);
+          this.publishL1Stats();
+        }
+      });
 
-    await this.reliabilityExecutor.execute(operation, undefined);
+    await this.execute(operation, undefined);
   }
 
   async delete(key: string): Promise<boolean> {
     this.ensureNotClosed();
 
-    const operation = async (): Promise<boolean> => {
-      // Delete from backend
-      const deleted = await this.backend.delete(key);
+    const operation = (): Promise<boolean> =>
+      this.instrument('delete', async () => {
+        // Delete from backend
+        const deleted = await this.backend.delete(key);
 
-      // Invalidate L1
-      if (this.l1) {
-        this.l1.invalidateByKey(key);
-      }
+        // Invalidate L1
+        if (this.l1) {
+          this.l1.invalidateByKey(key);
+          this.publishL1Stats();
+        }
 
-      return deleted;
-    };
+        return deleted;
+      });
 
-    return this.reliabilityExecutor.execute(operation, false);
+    return this.execute(operation, false);
   }
 
   async exists(key: string): Promise<boolean> {
@@ -263,7 +357,7 @@ class CacheImpl implements SecureCache {
       }
     }
 
-    return this.reliabilityExecutor.execute(() => this.backend.exists(key), false);
+    return this.execute(() => this.backend.exists(key), false);
   }
 
   wrap<TArgs extends unknown[], TResult>(
@@ -374,10 +468,16 @@ class CacheImpl implements SecureCache {
               swrResult.versionToken,
               this.l1,
               async (key, value, opts) => {
-                await this.setEntry(key, value, { ttl: opts.ttl, namespace: opts.namespace }, interop);
+                await this.setEntry(
+                  key,
+                  value,
+                  { ttl: opts.ttl, namespace: opts.namespace },
+                  interop
+                );
               }
             );
           }
+          this.recordHit('l1');
           return swrResult.value as TResult;
         }
       }
@@ -390,7 +490,12 @@ class CacheImpl implements SecureCache {
 
       // Compute and cache
       const result = await fn(...args);
-      await this.setEntry(cacheKey, result, { ttl: options.ttl, namespace: options.namespace }, interop);
+      await this.setEntry(
+        cacheKey,
+        result,
+        { ttl: options.ttl, namespace: options.namespace },
+        interop
+      );
 
       return result;
     };
@@ -437,6 +542,7 @@ class CacheImpl implements SecureCache {
           }
           break;
       }
+      this.publishL1Stats();
     }
 
     // Invalidate L2 for params-level (key deletion)
