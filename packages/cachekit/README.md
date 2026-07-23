@@ -8,6 +8,7 @@ Production-ready Redis caching for TypeScript/Node.js. Hybrid TypeScript-Rust de
 
 - **Dual-layer caching**: L1 in-memory (~50ns) + L2 Redis (~2-50ms)
 - **Stale-while-revalidate**: Serve stale data while refreshing in background
+- **Stampede protection**: Cold-miss single-flight per process (always on) + opt-in cross-process distributed locks
 - **Zero-knowledge encryption**: Optional AES-256-GCM client-side encryption
 - **Circuit breaker**: Automatic failure isolation with exponential backoff
 - **TypeScript-first**: Full type safety with strict mode
@@ -132,6 +133,50 @@ const cache = createCache({
   },
 });
 ```
+
+## Stampede Protection
+
+A cold cache key hit by N concurrent callers would normally execute the wrapped
+function N times and issue N backend reads — on the metered-misses SaaS backend
+that is N billed misses for one key.
+
+**In-process single-flight is always on**: concurrent `wrap()` calls for the
+same cache key share one in-flight promise, so the herd costs one L2 read, one
+compute, and one write. If the flight fails, every waiting caller receives the
+same rejection and the next call retries fresh.
+
+**Cross-process locking is opt-in** via `stampede.distributedLock`, for fleets
+where many processes can go cold on the same key simultaneously. It mirrors
+cachekit-py's flow: acquire the backend lock, double-check L2, compute, write,
+release. Contested processes retry the lock on an interval (never polling
+`get()` — on metered-misses backends a poll against a still-cold key is itself
+a billed miss) and fall through to computing after `lockWaitMs`; the lock is
+best-effort mitigation, never a correctness gate, so lock-endpoint failures
+degrade to an unlocked compute.
+
+```typescript
+const cache = createCache({
+  backend: { url: 'redis://localhost:6379' }, // Redis and CachekitIO backends support locks
+  stampede: {
+    distributedLock: true, // default false
+    lockTimeoutMs: 30000, // lock lease; size at/above expected recompute time
+    lockWaitMs: 5000, // max wait for the lock holder before computing anyway
+    lockPollMs: 100, // lock retry interval while contested
+  },
+});
+```
+
+Requires a lock-capable backend: Redis, a `CachekitIOBackendConfig` (the SaaS
+lock endpoint is selected automatically), `cachekitioWithLocking()`, or
+`cachekitioFull()`. `createCache` throws `ConfigurationError` if
+`distributedLock` is requested on a backend without `acquireLock`/`releaseLock`.
+
+There is deliberately no general admission-control cap beyond L1's
+`maxConcurrentRefreshes`: on Node's single-threaded event loop concurrent
+misses don't compete for threads, single-flight collapses the per-key herd,
+and distinct-key miss floods are already bounded by backend timeouts plus the
+circuit breaker. A global semaphore would add queueing latency without a
+failure mode it prevents.
 
 ## API Reference
 

@@ -25,6 +25,7 @@ export type {
   WrapOptions,
   EncryptionConfig,
   ReliabilityConfig,
+  StampedeConfig,
   InvalidationConfig,
 } from './types/cache.js';
 
