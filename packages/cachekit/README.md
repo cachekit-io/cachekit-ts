@@ -238,11 +238,14 @@ same audited Rust core the Node SDK uses (`@cachekit-io/cachekit-core-wasm`,
 Node, Workers, Python, and Rust.
 
 ```typescript
-import { createCache } from '@cachekit-io/cachekit/workers';
+import { createCache, type SecureCache } from '@cachekit-io/cachekit/workers';
+
+// One cache per isolate — see the note below.
+let cache: SecureCache | null = null;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const cache = createCache.io({
+    cache ??= createCache.io({
       apiKey: env.CACHEKIT_API_KEY, // explicit config — no process.env needed
       encryption: { masterKey: env.CACHEKIT_MASTER_KEY }, // optional zero-knowledge mode
       ttl: 300,
@@ -258,6 +261,14 @@ export default {
 };
 ```
 
+> **Create the cache once per isolate, not per request.** Reusing one cache
+> keeps a single encryptor whose monotonic counter guarantees nonce
+> uniqueness; per-request caches each start a fresh encryptor whose
+> uniqueness rests on a random 64-bit instance id (a weaker, birthday-bounded
+> guarantee at very high request volumes) and leave wasm allocations behind
+> on hot isolates. If you do create short-lived caches, call `cache.close()`
+> — it zeroizes key material and frees the wasm codec deterministically.
+
 **Phase-1 surface (deltas vs Node):**
 
 - **Backends**: CachekitIO (`createCache.io` / `backend: { apiKey }`) or a
@@ -265,6 +276,10 @@ export default {
   `secure`) throw `ConfigurationError` — ioredis is TCP and Node-only.
 - **No cross-instance invalidation** (Redis Pub/Sub is Node-only); L1
   invalidation within an isolate works as usual.
+- **No SWR background refresh** — refresh promises would be canceled when
+  the response returns (they aren't tied to `ctx.waitUntil` yet), so
+  `swrEnabled` is forced off; L1 entries expire and refresh in the request
+  path instead.
 - **No Prometheus metrics.**
 - **Key material semantics**: keys are derived and held in wasm linear
   memory, which is a host-readable `ArrayBuffer` — weaker isolation than the

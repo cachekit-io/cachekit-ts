@@ -35,6 +35,13 @@ import { DEFAULT_TTL_SECONDS } from './constants.js';
 export interface ByteStorageLike {
   pack(data: Uint8Array): Uint8Array;
   unpack(packed: Uint8Array): Uint8Array;
+  /**
+   * Release the codec's native resources (wasm bindings). Optional: the NAPI
+   * binding is GC-managed and doesn't expose it. cache.close() calls this —
+   * on Workers, FinalizationRegistry callbacks are best-effort ("may never
+   * be executed"), so unfreed wasm allocations accumulate in linear memory.
+   */
+  free?(): void;
 }
 
 /** Encryption surface CacheImpl drives (see EncryptionManagerCore). */
@@ -528,6 +535,10 @@ export class CacheImpl implements SecureCache {
     if (this.encryption) {
       this.encryption.dispose();
     }
+
+    // Release the envelope codec (zeroizes/frees wasm resources on Workers;
+    // no-op for the GC-managed NAPI binding)
+    this.byteStorage?.free?.();
 
     // Clear L1 (this also clears L1's internal refreshingKeys)
     if (this.l1) {

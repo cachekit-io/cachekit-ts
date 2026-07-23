@@ -14,13 +14,23 @@
  * - No cross-instance invalidation (Redis Pub/Sub is Node-only).
  * - No Prometheus metrics.
  *
+ * Create the cache ONCE per isolate and reuse it across requests (lazy
+ * singleton, as below). Per-request creation derives a fresh encryptor per
+ * request — nonce uniqueness then rests on the encryptor's random 64-bit
+ * instance id instead of its monotonic counter, weakening the birthday
+ * bound at very high volumes — and leaves wasm allocations behind on hot
+ * isolates (Workers' FinalizationRegistry is best-effort). If you must
+ * create short-lived caches, call `cache.close()` when done.
+ *
  * @example
  * ```typescript
- * import { createCache } from '@cachekit-io/cachekit/workers';
+ * import { createCache, type SecureCache } from '@cachekit-io/cachekit/workers';
+ *
+ * let cache: SecureCache | null = null;
  *
  * export default {
  *   async fetch(request: Request, env: Env): Promise<Response> {
- *     const cache = createCache.io({
+ *     cache ??= createCache.io({
  *       apiKey: env.CACHEKIT_API_KEY,
  *       encryption: { masterKey: env.CACHEKIT_MASTER_KEY },
  *     });
@@ -38,84 +48,9 @@ import { buildIntents } from '../intents-core.js';
 /** createCache with intent-based factory methods attached (Workers). */
 export const createCache = buildIntents(createWorkersCache);
 
-export type {
-  CreateCacheFn,
-  MinimalOptions,
-  ProductionOptions,
-  SecureOptions,
-  IOOptions,
-} from '../intents-core.js';
-export {
-  cachekitio,
-  cachekitioWithLocking,
-  cachekitioWithTTL,
-  cachekitioFull,
-} from '../backends/cachekitio-factory.js';
-export { CachekitIOCore } from '../backends/cachekitio.js';
+// ============ Shared surface (identical on the Node entrypoint) ============
+export * from '../exports-common.js';
 
-// ============ Types ============
-export type {
-  Cache,
-  SecureCache,
-  CacheOptions,
-  SetOptions,
-  WrapOptions,
-  EncryptionConfig,
-  ReliabilityConfig,
-} from '../types/cache.js';
-
-export type {
-  Backend,
-  CachekitIOBackendConfig,
-  LockableBackend,
-  TTLBackend,
-  L1Metrics,
-} from '../backends/types.js';
-
-export type { ErrorClassification } from '../backends/error-classifier.js';
-
-export type { L1Config, InvalidationLevel, InvalidationEvent } from '../l1/types.js';
-
-export type { CircuitBreakerConfig, CircuitState } from '../reliability/circuit-breaker.js';
-export type { RetryConfig } from '../reliability/retry.js';
-export type { SerializerConfig, Serializer } from '../serialization/serializer.js';
-
-// ============ Error Classes ============
-export {
-  CachekitError,
-  ConfigurationError,
-  EncryptionError,
-  IntegrityError,
-  BackendError,
-  CircuitBreakerOpenError,
-  TimeoutError,
-  ValueTooLargeError,
-  NonceExhaustedError,
-  SerializationError,
-} from '../errors.js';
-
-// ============ Optional Utilities ============
-// Export for advanced users who want to customize
-export { L1Cache } from '../l1/lru-cache.js';
-export { CircuitBreaker } from '../reliability/circuit-breaker.js';
-export { RetryPolicy } from '../reliability/retry.js';
-export { withDegradation, withDegradationFn } from '../reliability/degradation.js';
-export { MessagePackSerializer, defaultSerializer } from '../serialization/serializer.js';
-export {
-  generateKey,
-  generateParamsHash,
-  extractNamespace,
-} from '../serialization/key-generator.js';
-// Interop mode (interop/v1) — same caveats as the root entrypoint: interop
-// keys must only be used against unprefixed clients (see Backend.keyPrefix).
-export {
-  generateInteropKey,
-  encodeInteropValue,
-  decodeInteropValue,
-} from '../serialization/interop.js';
+// ============ Workers-only exports ============
 // wasm-backed drop-ins for the root entrypoint's NAPI-backed exports.
 export { EncryptionManager, ByteStorage } from './runtime.js';
-
-// ============ Constants ============
-// Export for users who want to reference defaults programmatically
-export * from '../constants.js';

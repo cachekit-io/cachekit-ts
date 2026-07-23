@@ -131,6 +131,29 @@ describe('createCache full stack inside workerd', () => {
 
     await cache.close();
   });
+
+  it('wrap() with L1 enabled works (SWR forced off — no background refresh)', async () => {
+    const backend = memoryBackend();
+    // Intent-style config would set swrEnabled: true; the Workers runtime
+    // forces it off because fire-and-forget refreshes are canceled by
+    // workerd when the response returns.
+    const cache = createCache({ backend, defaultTtl: 60, l1: { swrEnabled: true } });
+
+    let calls = 0;
+    const fn = cache.wrap(
+      async (id: number) => {
+        calls++;
+        return { id };
+      },
+      { namespace: 'swr:test', ttl: 60 }
+    );
+
+    expect(await fn(1)).toEqual({ id: 1 });
+    expect(await fn(1)).toEqual({ id: 1 }); // L1 hit
+    expect(calls).toBe(1);
+
+    await cache.close();
+  });
 });
 
 describe('intents with explicit config (no process.env)', () => {

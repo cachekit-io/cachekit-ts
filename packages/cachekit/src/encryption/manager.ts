@@ -1,4 +1,23 @@
 import { EncryptionManagerCore, type EncryptionBindings } from './manager-core.js';
+import type { TenantKeys as NapiTenantKeys } from '@cachekit-io/cachekit-core-ts';
+
+/**
+ * NAPI bindings adapter (lazy-loaded). Typed member-by-member so tsc
+ * enforces the EncryptionBindings contract against the NAPI d.ts — only the
+ * TenantKeys handle parameter needs a narrowing cast (the manager passes
+ * back exactly the handles this adapter's deriveTenantKeys returned).
+ */
+async function loadNapiBindings(): Promise<EncryptionBindings> {
+  // Dynamic import to handle native module loading
+  const napi = await import('@cachekit-io/cachekit-core-ts');
+  return {
+    deriveTenantKeys: napi.deriveTenantKeys,
+    encryptWithTenantKeys: (plaintext, aad, tenantKeys) =>
+      napi.encryptWithTenantKeys(plaintext, aad, tenantKeys as NapiTenantKeys),
+    decryptWithTenantKeys: (ciphertext, aad, tenantKeys) =>
+      napi.decryptWithTenantKeys(ciphertext, aad, tenantKeys as NapiTenantKeys),
+  };
+}
 
 /**
  * High-level encryption manager wrapping native cachekit-core-ts bindings
@@ -28,11 +47,6 @@ export class EncryptionManager extends EncryptionManagerCore {
    * @throws {ConfigurationError} if masterKey is invalid
    */
   constructor(masterKey: string, tenantId?: string) {
-    super(
-      masterKey,
-      tenantId,
-      // Dynamic import to handle native module loading
-      async () => (await import('@cachekit-io/cachekit-core-ts')) as unknown as EncryptionBindings
-    );
+    super(masterKey, tenantId, loadNapiBindings);
   }
 }

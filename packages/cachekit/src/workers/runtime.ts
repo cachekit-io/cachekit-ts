@@ -32,7 +32,7 @@ import { ConfigurationError } from '../errors.js';
 function wasmEncryptionBindings(): EncryptionBindings {
   ensureInitialized();
   return {
-    deriveTenantKeys: (masterKey, tenantId) => deriveTenantKeys(masterKey, tenantId),
+    deriveTenantKeys,
     encryptWithTenantKeys: (plaintext, aad, tenantKeys) =>
       encryptWithTenantKeys(plaintext, aad, tenantKeys as WasmTenantKeys),
     decryptWithTenantKeys: (ciphertext, aad, tenantKeys) =>
@@ -95,9 +95,16 @@ const workersRuntime: CacheRuntime = {
  *
  * Same API as the Node createCache, with the phase-1 Workers surface:
  * CachekitIO (or custom Backend instance) backends, compression and
- * zero-knowledge encryption included. Redis backends and cross-instance
- * invalidation are Node-only.
+ * zero-knowledge encryption included. Redis backends, cross-instance
+ * invalidation, and SWR background refresh are Node-only.
  */
 export function createWorkersCache(options: CacheOptions): SecureCache {
-  return new CacheImpl(options, workersRuntime);
+  // SWR background refresh is fire-and-forget; workerd cancels pending work
+  // when the response returns (no ExecutionContext.waitUntil is plumbed
+  // through phase 1), and a canceled refresh never clears its
+  // refreshingKeys slot — a handful of wedged keys would silently disable
+  // SWR cache-wide. Forced off until refreshes can ride ctx.waitUntil.
+  // The intents default swrEnabled to true, so an explicit opt-in is
+  // indistinguishable from the default — documented phase-1 limitation.
+  return new CacheImpl({ ...options, l1: { ...options.l1, swrEnabled: false } }, workersRuntime);
 }

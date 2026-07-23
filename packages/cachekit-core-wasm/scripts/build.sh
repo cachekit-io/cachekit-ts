@@ -37,16 +37,29 @@ if [ "$GZ" -ge 102400 ]; then
   exit 1
 fi
 
-# API-surface drift check: every export wasm-bindgen generated must be
-# declared in the committed index.d.ts (which TS consumers type against).
-MISSING=0
+# API-surface drift check, both directions:
+# 1. every export wasm-bindgen generated must be declared in the committed
+#    index.d.ts (which TS consumers type against);
+# 2. every declaration in index.d.ts must exist in the generated surface —
+#    a stale declaration for a renamed/removed Rust export would type-check
+#    and then fail at runtime.
+DRIFT=0
 while read -r name; do
   if ! grep -q "declare \(class\|function\) ${name}\b" index.d.ts; then
     echo "error: pkg export '${name}' missing from index.d.ts" >&2
-    MISSING=1
+    DRIFT=1
   fi
 done < <(grep -o '^export \(class\|function\) [A-Za-z_][A-Za-z0-9_]*' pkg/cachekit_core_wasm.d.ts | awk '{print $3}')
-if [ "$MISSING" -ne 0 ]; then
+while read -r name; do
+  # ensureInitialized lives in the hand-written index.js wrapper, and
+  # initSync is wasm-bindgen runtime glue (present in pkg, different shape).
+  case "$name" in ensureInitialized|initSync) continue ;; esac
+  if ! grep -q "^export \(class\|function\) ${name}\b" pkg/cachekit_core_wasm.d.ts; then
+    echo "error: index.d.ts declares '${name}' but pkg no longer exports it" >&2
+    DRIFT=1
+  fi
+done < <(grep -o '^export declare \(class\|function\) [A-Za-z_][A-Za-z0-9_]*' index.d.ts | awk '{print $4}')
+if [ "$DRIFT" -ne 0 ]; then
   echo "update index.d.ts to match the generated pkg/cachekit_core_wasm.d.ts" >&2
   exit 1
 fi

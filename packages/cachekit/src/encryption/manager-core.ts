@@ -22,6 +22,13 @@ export interface EncryptionTenantKeys {
  * The cachekit-core binding surface EncryptionManagerCore drives. Implemented
  * by @cachekit-io/cachekit-core-ts (NAPI, Node) and
  * @cachekit-io/cachekit-core-wasm (wasm32, Cloudflare Workers).
+ *
+ * Error contract: when the encryptor's nonce counter is exhausted,
+ * encryptWithTenantKeys MUST throw an Error whose message contains
+ * "Nonce counter exhausted" (cachekit-core's EncryptionError Display) —
+ * encrypt() classifies that substring into NonceExhaustedError so rotation
+ * alerting works. Both bindings inherit the string from the same core crate;
+ * a core wording change must update this contract and the classifier below.
  */
 export interface EncryptionBindings {
   deriveTenantKeys(masterKey: Uint8Array, tenantId: string): EncryptionTenantKeys;
@@ -54,6 +61,7 @@ export class EncryptionManagerCore {
   private tenantKeys: EncryptionTenantKeys | null = null;
   private native: EncryptionBindings | null = null;
   private disposed = false;
+  private initPromise: Promise<void> | null = null;
   // Note: Nonce tracking is done in Rust via getNonceCounter().
   // The Rust encryptor throws NonceCounterExhausted when the limit is reached.
 
@@ -100,6 +108,18 @@ export class EncryptionManagerCore {
       throw new EncryptionError('EncryptionManager has been disposed');
     }
 
+    // Memoize the in-flight init: concurrent first uses (Promise.all on a
+    // fresh manager) must derive exactly ONE TenantKeys handle — a losing
+    // duplicate would hold live key material with nothing left to free it.
+    // Reset on failure so a later call can retry.
+    this.initPromise ??= this.doInitialize().catch((error) => {
+      this.initPromise = null;
+      throw error;
+    });
+    return this.initPromise;
+  }
+
+  private async doInitialize(): Promise<void> {
     try {
       this.native = await this.loadBindings();
 
@@ -109,7 +129,14 @@ export class EncryptionManagerCore {
       // Derive tenant keys (uses cachekit-core's derive_tenant_keys with domain "encryption")
       // Keys stay in binding memory - never copied to the JavaScript heap
       const effectiveTenantId = this.tenantId ?? 'default';
-      this.tenantKeys = this.native.deriveTenantKeys(masterKeyBytes, effectiveTenantId);
+      const tenantKeys = this.native.deriveTenantKeys(masterKeyBytes, effectiveTenantId);
+      if (this.disposed) {
+        // dispose() ran while init was in flight — zeroize immediately
+        // instead of parking live key material on a disposed manager.
+        tenantKeys.free?.();
+        throw new EncryptionError('EncryptionManager has been disposed');
+      }
+      this.tenantKeys = tenantKeys;
     } catch (error) {
       if (error instanceof ConfigurationError || error instanceof EncryptionError) {
         throw error;
