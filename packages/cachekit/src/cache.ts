@@ -199,6 +199,16 @@ class CacheImpl implements SecureCache {
     }
   }
 
+  /**
+   * Route a backend op through instrumentation (timer + op/error counters,
+   * inside retry so each attempt counts once) and the reliability stack
+   * (retry + circuit breaker, publishing the CB gauge). Every public op goes
+   * through here so none can silently drift out of the metrics set.
+   */
+  private run<T>(operation: string, fallback: T, fn: () => Promise<T>): Promise<T> {
+    return this.execute(() => this.instrument(operation, fn), fallback);
+  }
+
   async get<T>(key: string): Promise<T | null> {
     return this.getEntry(key, false);
   }
@@ -225,44 +235,41 @@ class CacheImpl implements SecureCache {
     const useEnvelope = !interop && this.byteStorage !== null;
 
     // Fetch from L2 (backend)
-    const operation = (): Promise<T | null> =>
-      this.instrument('get', async () => {
-        const data = await this.backend.get(key);
-        if (data === null) {
-          this.recordMiss();
-          return null;
-        }
+    return this.run('get', null, async (): Promise<T | null> => {
+      const data = await this.backend.get(key);
+      if (data === null) {
+        this.recordMiss();
+        return null;
+      }
 
-        // Decrypt if encryption enabled
-        let plaintext = data;
-        if (this.encryption) {
-          plaintext = await this.encryption.decrypt(data, key, useEnvelope);
-        }
+      // Decrypt if encryption enabled
+      let plaintext = data;
+      if (this.encryption) {
+        plaintext = await this.encryption.decrypt(data, key, useEnvelope);
+      }
 
-        // Decompress with ByteStorage (after decryption)
-        if (useEnvelope) {
-          plaintext = this.byteStorage!.unpack(plaintext);
-        }
+      // Decompress with ByteStorage (after decryption)
+      if (useEnvelope) {
+        plaintext = this.byteStorage!.unpack(plaintext);
+      }
 
-        // Deserialize
-        const value = interop
-          ? decodeInteropValue<T>(plaintext)
-          : this.serializer.decode<T>(plaintext);
+      // Deserialize
+      const value = interop
+        ? decodeInteropValue<T>(plaintext)
+        : this.serializer.decode<T>(plaintext);
 
-        // Populate L1. Interop keys are {namespace}:{operation}:{hash} — group
-        // under the user-facing namespace segment so namespace-level
-        // invalidation matches entries written through wrap().
-        if (this.l1) {
-          const namespace = interop ? key.slice(0, key.indexOf(':')) : extractNamespace(key);
-          this.l1.set(key, value, (ttlSeconds ?? this.defaultTtl) * 1000, namespace);
-          this.publishL1Stats();
-        }
+      // Populate L1. Interop keys are {namespace}:{operation}:{hash} — group
+      // under the user-facing namespace segment so namespace-level
+      // invalidation matches entries written through wrap().
+      if (this.l1) {
+        const namespace = interop ? key.slice(0, key.indexOf(':')) : extractNamespace(key);
+        this.l1.set(key, value, (ttlSeconds ?? this.defaultTtl) * 1000, namespace);
+        this.publishL1Stats();
+      }
 
-        this.recordHit('l2');
-        return value;
-      });
-
-    return this.execute(operation, null);
+      this.recordHit('l2');
+      return value;
+    });
   }
 
   async set<T>(key: string, value: T, options?: SetOptions): Promise<void> {
@@ -300,50 +307,44 @@ class CacheImpl implements SecureCache {
     // (existing degrade semantics unchanged).
     const interopSerialized = interop ? encodeInteropValue(value) : null;
 
-    const operation = (): Promise<void> =>
-      this.instrument('set', async () => {
-        // Serialize
-        const serialized = interopSerialized ?? this.serializer.encode(value);
+    return this.run('set', undefined, async (): Promise<void> => {
+      // Serialize
+      const serialized = interopSerialized ?? this.serializer.encode(value);
 
-        // Compress with ByteStorage (before encryption)
-        let data: Uint8Array = useEnvelope ? this.byteStorage!.pack(serialized) : serialized;
+      // Compress with ByteStorage (before encryption)
+      let data: Uint8Array = useEnvelope ? this.byteStorage!.pack(serialized) : serialized;
 
-        // Encrypt if encryption enabled
-        if (this.encryption) {
-          data = await this.encryption.encrypt(data, key, useEnvelope);
-        }
+      // Encrypt if encryption enabled
+      if (this.encryption) {
+        data = await this.encryption.encrypt(data, key, useEnvelope);
+      }
 
-        // Store in backend
-        await this.backend.set(key, data, ttl);
+      // Store in backend
+      await this.backend.set(key, data, ttl);
 
-        // Update L1
-        if (this.l1) {
-          this.l1.set(key, value, ttl * 1000, namespace);
-          this.publishL1Stats();
-        }
-      });
-
-    await this.execute(operation, undefined);
+      // Update L1
+      if (this.l1) {
+        this.l1.set(key, value, ttl * 1000, namespace);
+        this.publishL1Stats();
+      }
+    });
   }
 
   async delete(key: string): Promise<boolean> {
     this.ensureNotClosed();
 
-    const operation = (): Promise<boolean> =>
-      this.instrument('delete', async () => {
-        // Delete from backend
-        const deleted = await this.backend.delete(key);
+    return this.run('delete', false, async (): Promise<boolean> => {
+      // Delete from backend
+      const deleted = await this.backend.delete(key);
 
-        // Invalidate L1
-        if (this.l1) {
-          this.l1.invalidateByKey(key);
-          this.publishL1Stats();
-        }
+      // Invalidate L1
+      if (this.l1) {
+        this.l1.invalidateByKey(key);
+        this.publishL1Stats();
+      }
 
-        return deleted;
-      });
-
-    return this.execute(operation, false);
+      return deleted;
+    });
   }
 
   async exists(key: string): Promise<boolean> {
@@ -353,11 +354,12 @@ class CacheImpl implements SecureCache {
     if (this.l1) {
       const l1Value = this.l1.get(key);
       if (l1Value !== null) {
+        this.recordHit('l1');
         return true;
       }
     }
 
-    return this.execute(() => this.backend.exists(key), false);
+    return this.run('exists', false, () => this.backend.exists(key));
   }
 
   wrap<TArgs extends unknown[], TResult>(
