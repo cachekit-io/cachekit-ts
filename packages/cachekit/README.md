@@ -225,10 +225,59 @@ const cache = createCache({
 //          cachekit_errors_total, cachekit_operation_duration_seconds
 ```
 
+## Cloudflare Workers
+
+The SDK ships a Workers-native entrypoint: `@cachekit-io/cachekit/workers`
+(bare `import '@cachekit-io/cachekit'` also resolves to it under wrangler via
+the `workerd` export condition). It needs **no `nodejs_compat` flag** — the
+bundle contains no `node:*` builtins, no native addons, no ioredis, and no
+prom-client. Crypto (AES-256-GCM + HKDF-SHA256, counter nonces) and the
+ByteStorage wire envelope (LZ4 + xxHash3-64) run on a wasm32 build of the
+same audited Rust core the Node SDK uses (`@cachekit-io/cachekit-core-wasm`,
+~55 KB gzipped), so ciphertexts and envelopes are byte-compatible across
+Node, Workers, Python, and Rust.
+
+```typescript
+import { createCache } from '@cachekit-io/cachekit/workers';
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const cache = createCache.io({
+      apiKey: env.CACHEKIT_API_KEY, // explicit config — no process.env needed
+      encryption: { masterKey: env.CACHEKIT_MASTER_KEY }, // optional zero-knowledge mode
+      ttl: 300,
+    });
+
+    const getAnswer = cache.wrap(async () => computeExpensiveThing(), {
+      namespace: 'api:answer',
+      ttl: 300,
+    });
+
+    return Response.json(await getAnswer());
+  },
+};
+```
+
+**Phase-1 surface (deltas vs Node):**
+
+- **Backends**: CachekitIO (`createCache.io` / `backend: { apiKey }`) or a
+  custom `Backend` instance. The Redis-URL intents (`minimal`, `production`,
+  `secure`) throw `ConfigurationError` — ioredis is TCP and Node-only.
+- **No cross-instance invalidation** (Redis Pub/Sub is Node-only); L1
+  invalidation within an isolate works as usual.
+- **No Prometheus metrics.**
+- **Key material semantics**: keys are derived and held in wasm linear
+  memory, which is a host-readable `ArrayBuffer` — weaker isolation than the
+  NAPI Rust heap on Node. On Workers the host is your own isolate, making
+  this roughly JS-heap-equivalent in threat model; `dispose()`/`close()`
+  still zeroizes deterministically.
+- **Startup**: wasm instantiation is a small one-time cost per isolate
+  (~150 KB module, no I/O).
+
 ## Requirements
 
-- Node.js 22+
-- Redis 6+
+- Node.js 22+ (Node entrypoint) or Cloudflare Workers (workerd)
+- Redis 6+ (Node Redis backends)
 
 ## License
 

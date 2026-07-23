@@ -55,3 +55,7 @@ AGENTS.md
 CALIBER_LEARNINGS.md
 .cursor/
 .cursorrules
+
+# cachekit-core-wasm build outputs
+packages/cachekit-core-wasm/target/
+packages/cachekit-core-wasm/pkg/

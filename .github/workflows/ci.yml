@@ -166,6 +166,61 @@ jobs:
         env:
           CARGO_HOME: /tmp/cargo
 
+  workers:
+    name: Workers lane (wasm + workerd)
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
+    env:
+      # Must match the wasm-bindgen version pinned in the crate's Cargo.lock;
+      # scripts/build.sh fails loudly on drift.
+      WASM_BINDGEN_VERSION: 0.2.121
+      BINARYEN_VERSION: '131'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Configure Rust paths (self-hosted)
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        run: |
+          echo "RUSTUP_HOME=/tmp/rustup" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=/tmp/cargo" >> "$GITHUB_ENV"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: '22'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-bindgen + wasm-opt (pinned prebuilts)
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl.tar.gz" | tar xz -C /tmp
+          cp "/tmp/wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl/wasm-bindgen" "$HOME/.local/bin/"
+          curl -sSfL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz" | tar xz -C /tmp
+          cp "/tmp/binaryen-version_${BINARYEN_VERSION}/bin/wasm-opt" "$HOME/.local/bin/"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build wasm artifact (size budget + API drift asserted)
+        run: pnpm --filter @cachekit-io/cachekit-core-wasm build:wasm
+
+      - name: Build SDK
+        run: pnpm --filter @cachekit-io/cachekit build
+
+      - name: Workers bundle guard (no node:*, NAPI, ioredis, prom-client)
+        run: pnpm --filter @cachekit-io/cachekit check:workers-bundle
+
+      - name: Workers tests (protocol vectors + smoke inside workerd)
+        run: pnpm --filter @cachekit-io/cachekit test:workers
+
   smoke-test:
     name: Package smoke test (ESM + CJS)
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
@@ -230,7 +285,7 @@ jobs:
   ci-success:
     name: CI Success
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
-    needs: [lint, test, test-integration, coverage, security, smoke-test]
+    needs: [lint, test, test-integration, coverage, security, smoke-test, workers]
     if: always()
     steps:
       - name: Check all jobs succeeded
@@ -240,7 +295,8 @@ jobs:
              [[ "${{ needs.test-integration.result }}" != "success" ]] || \
              [[ "${{ needs.coverage.result }}" != "success" ]] || \
              [[ "${{ needs.security.result }}" != "success" ]] || \
-             [[ "${{ needs.smoke-test.result }}" != "success" ]]; then
+             [[ "${{ needs.smoke-test.result }}" != "success" ]] || \
+             [[ "${{ needs.workers.result }}" != "success" ]]; then
             echo "One or more jobs failed"
             exit 1
           fi
