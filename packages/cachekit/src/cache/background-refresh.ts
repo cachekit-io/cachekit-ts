@@ -108,7 +108,22 @@ export class BackgroundRefreshManager {
     // Register with the platform so the refresh survives response return.
     // The promise never rejects (errors are handled above), so this cannot
     // surface an unhandled rejection through waitUntil.
-    waitUntil?.(refresh);
+    //
+    // Guard the registration call itself: waitUntil() is a synchronous
+    // platform call that can throw (e.g. a caller reusing a wrapped function
+    // across requests with a stale ExecutionContext). A failed registration
+    // must forfeit only this refresh attempt, never the read that already
+    // has a valid (stale) value to return. A stranded refreshingKeys marker
+    // is bounded by SWR_REFRESH_MARKER_TTL_MS.
+    try {
+      waitUntil?.(refresh);
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error(
+        '[cachekit] Failed to register background refresh with waitUntil:',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+    }
   }
 
   /**
