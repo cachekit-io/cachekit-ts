@@ -8,6 +8,13 @@ allowBuilds:
   cpu-features: true
   protobufjs: true
   ssh2: true
+  # Workers test lane (vitest-pool-workers): esbuild's install script writes
+  # its platform binary; workerd ships the runtime binary the pool executes.
+  esbuild: true
+  workerd: true
+  # sharp arrives transitively via wrangler; nothing in this repo does image
+  # work, so its native build stays denied.
+  sharp: false
 
 # Security floor-pins for vulnerable transitives (formerly pnpm.overrides).
 overrides:

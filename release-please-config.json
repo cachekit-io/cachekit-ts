@@ -29,6 +29,12 @@
       "changelog-path": "CHANGELOG.md",
       "component": "cachekit-core-ts",
       "include-component-in-tag": true
+    },
+    "packages/cachekit-core-wasm": {
+      "package-name": "@cachekit-io/cachekit-core-wasm",
+      "changelog-path": "CHANGELOG.md",
+      "component": "cachekit-core-wasm",
+      "include-component-in-tag": true
     }
   }
 }
