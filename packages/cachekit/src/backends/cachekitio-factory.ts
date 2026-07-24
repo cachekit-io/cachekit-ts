@@ -25,9 +25,12 @@ class CachekitIO implements LockableBackend, TTLBackend {
     this.ttl = new TTLCachekitIO(core);
   }
 
-  // Delegating wrappers MUST forward keyPrefix — see Backend.keyPrefix.
+  // Delegating wrappers MUST forward keyPrefix / transformsKeys — see Backend.keyPrefix.
   get keyPrefix(): string | undefined {
     return this.lockable.keyPrefix;
+  }
+  get transformsKeys(): boolean | undefined {
+    return this.lockable.transformsKeys;
   }
   get(key: string) {
     return this.lockable.get(key);
