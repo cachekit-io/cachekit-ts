@@ -214,9 +214,12 @@ describe('interop/v1 value vectors', () => {
   // Python float 2.0 to int. A bare JS number cannot carry that distinction
   // (`2.0 === 2` — the spec's "a JS-written 2 may come back to Python as
   // int" caveat); the harness expresses it with the InteropFloat wrapper.
-  it.each(vectors.value_vectors)('$name encodes canonically', ({ value, canonical_msgpack_hex }) => {
-    expect(bytesToHex(encodeInteropValue(fromTagged(value)))).toBe(canonical_msgpack_hex);
-  });
+  it.each(vectors.value_vectors)(
+    '$name encodes canonically',
+    ({ value, canonical_msgpack_hex }) => {
+      expect(bytesToHex(encodeInteropValue(fromTagged(value)))).toBe(canonical_msgpack_hex);
+    }
+  );
 
   it('accepts every published value payload on read (canonical or not)', () => {
     for (const v of vectors.value_vectors) {
@@ -304,8 +307,6 @@ describe('interop/v1 error vectors (MUST reject)', () => {
   });
 
   it('rejects a lone surrogate (self-test — inexpressible in portable JSON)', () => {
-    expect(() => encodeInteropArgs([String.fromCharCode(0xd800)])).toThrow(
-      /well-formed Unicode/
-    );
+    expect(() => encodeInteropArgs([String.fromCharCode(0xd800)])).toThrow(/well-formed Unicode/);
   });
 });
