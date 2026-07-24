@@ -8,6 +8,7 @@ Production-ready Redis caching for TypeScript/Node.js. Hybrid TypeScript-Rust de
 
 - **Dual-layer caching**: L1 in-memory (~50ns) + L2 Redis (~2-50ms)
 - **Stale-while-revalidate**: Serve stale data while refreshing in background
+- **Stampede protection**: Cold-miss single-flight per process (always on) + opt-in cross-process distributed locks
 - **Zero-knowledge encryption**: Optional AES-256-GCM client-side encryption
 - **Circuit breaker**: Automatic failure isolation with exponential backoff
 - **TypeScript-first**: Full type safety with strict mode
@@ -133,6 +134,50 @@ const cache = createCache({
 });
 ```
 
+## Stampede Protection
+
+A cold cache key hit by N concurrent callers would normally execute the wrapped
+function N times and issue N backend reads — on the metered-misses SaaS backend
+that is N billed misses for one key.
+
+**In-process single-flight is always on**: concurrent `wrap()` calls for the
+same cache key share one in-flight promise, so the herd costs one L2 read, one
+compute, and one write. If the flight fails, every waiting caller receives the
+same rejection and the next call retries fresh.
+
+**Cross-process locking is opt-in** via `stampede.distributedLock`, for fleets
+where many processes can go cold on the same key simultaneously. It mirrors
+cachekit-py's flow: acquire the backend lock, double-check L2, compute, write,
+release. Contested processes retry the lock on an interval (never polling
+`get()` — on metered-misses backends a poll against a still-cold key is itself
+a billed miss) and fall through to computing after `lockWaitMs`; the lock is
+best-effort mitigation, never a correctness gate, so lock-endpoint failures
+degrade to an unlocked compute.
+
+```typescript
+const cache = createCache({
+  backend: { url: 'redis://localhost:6379' }, // Redis and CachekitIO backends support locks
+  stampede: {
+    distributedLock: true, // default false
+    lockTimeoutMs: 30000, // lock lease; size at/above expected recompute time
+    lockWaitMs: 5000, // max wait for the lock holder before computing anyway
+    lockPollMs: 100, // lock retry interval while contested
+  },
+});
+```
+
+Requires a lock-capable backend: Redis, a `CachekitIOBackendConfig` (the SaaS
+lock endpoint is selected automatically), `cachekitioWithLocking()`, or
+`cachekitioFull()`. `createCache` throws `ConfigurationError` if
+`distributedLock` is requested on a backend without `acquireLock`/`releaseLock`.
+
+There is deliberately no general admission-control cap beyond L1's
+`maxConcurrentRefreshes`: on Node's single-threaded event loop concurrent
+misses don't compete for threads, single-flight collapses the per-key herd,
+and distinct-key miss floods are already bounded by backend timeouts plus the
+circuit breaker. A global semaphore would add queueing latency without a
+failure mode it prevents.
+
 ## API Reference
 
 ### createCache(options)
@@ -229,7 +274,8 @@ const cache = createCache({
 
 If `metrics` is enabled but `prom-client` is not installed, the SDK reports the
 failure once through the library logger and metrics degrade to no-ops — never
-silently.
+silently. (On Cloudflare Workers, where prom-client cannot run, the `metrics`
+option degrades to a no-op the same way.)
 
 Internal error reporting (background refresh, invalidation channel, Redis
 connection events) defaults to `console.error`; route it into your own logging
@@ -246,10 +292,74 @@ With the CachekitIO backend, the `X-CacheKit-L1-*` telemetry headers are wired
 automatically from the cache's live L1/L2 hit and miss counters; pass your own
 `metricsProvider` in the backend config to override.
 
+## Cloudflare Workers
+
+The SDK ships a Workers-native entrypoint: `@cachekit-io/cachekit/workers`
+(bare `import '@cachekit-io/cachekit'` also resolves to it under wrangler via
+the `workerd` export condition). It needs **no `nodejs_compat` flag** — the
+bundle contains no `node:*` builtins, no native addons, no ioredis, and no
+prom-client. Crypto (AES-256-GCM + HKDF-SHA256, counter nonces) and the
+ByteStorage wire envelope (LZ4 + xxHash3-64) run on a wasm32 build of the
+same audited Rust core the Node SDK uses (`@cachekit-io/cachekit-core-wasm`,
+~55 KB gzipped), so ciphertexts and envelopes are byte-compatible across
+Node, Workers, Python, and Rust.
+
+```typescript
+import { createCache, type SecureCache } from '@cachekit-io/cachekit/workers';
+
+// One cache per isolate — see the note below.
+let cache: SecureCache | null = null;
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    cache ??= createCache.io({
+      apiKey: env.CACHEKIT_API_KEY, // explicit config — no process.env needed
+      encryption: { masterKey: env.CACHEKIT_MASTER_KEY }, // optional zero-knowledge mode
+      ttl: 300,
+    });
+
+    const getAnswer = cache.wrap(async () => computeExpensiveThing(), {
+      namespace: 'api:answer',
+      ttl: 300,
+    });
+
+    return Response.json(await getAnswer());
+  },
+};
+```
+
+> **Create the cache once per isolate, not per request.** Reusing one cache
+> keeps a single encryptor whose monotonic counter guarantees nonce
+> uniqueness; per-request caches each start a fresh encryptor whose
+> uniqueness rests on a random 64-bit instance id (a weaker, birthday-bounded
+> guarantee at very high request volumes) and leave wasm allocations behind
+> on hot isolates. If you do create short-lived caches, call `cache.close()`
+> — it zeroizes key material and frees the wasm codec deterministically.
+
+**Phase-1 surface (deltas vs Node):**
+
+- **Backends**: CachekitIO (`createCache.io` / `backend: { apiKey }`) or a
+  custom `Backend` instance. The Redis-URL intents (`minimal`, `production`,
+  `secure`) throw `ConfigurationError` — ioredis is TCP and Node-only.
+- **No cross-instance invalidation** (Redis Pub/Sub is Node-only); L1
+  invalidation within an isolate works as usual.
+- **No SWR background refresh** — refresh promises would be canceled when
+  the response returns (they aren't tied to `ctx.waitUntil` yet), so
+  `swrEnabled` is forced off; L1 entries expire and refresh in the request
+  path instead.
+- **No Prometheus metrics.**
+- **Key material semantics**: keys are derived and held in wasm linear
+  memory, which is a host-readable `ArrayBuffer` — weaker isolation than the
+  NAPI Rust heap on Node. On Workers, the host is your own isolate, making
+  this roughly JS-heap-equivalent in threat model; `dispose()`/`close()`
+  still zeroizes deterministically.
+- **Startup**: wasm instantiation is a small one-time cost per isolate
+  (~150 KB module, no I/O).
+
 ## Requirements
 
-- Node.js 22+
-- Redis 6+
+- Node.js 22+ (Node entrypoint) or Cloudflare Workers (workerd)
+- Redis 6+ (Node Redis backends)
 
 ## License
 

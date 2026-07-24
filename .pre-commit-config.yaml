@@ -32,6 +32,7 @@ repos:
             pnpm-lock\.yaml|
             packages/[^/]+/dist/.*|
             packages/cachekit-core-ts/index\.(js|d\.ts)|
+            packages/cachekit/test/workers/fixtures/.*|
             \.release-please-manifest\.json
           )$
         pass_filenames: true
@@ -94,5 +95,6 @@ repos:
             pnpm-lock\.yaml|
             packages/[^/]+/dist/.*|
             packages/cachekit-core-ts/index\.(js|d\.ts)|
+            packages/cachekit/test/workers/fixtures/.*| # vendored protocol vectors: public hex ground truth, not secrets
             .*\.snap$
           )$

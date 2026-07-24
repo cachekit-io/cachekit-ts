@@ -1,7 +1,23 @@
 import { ConfigurationError } from '../errors.js';
-import { isIP } from 'node:net';
 
 const ALLOWED_HOSTS = new Set(['api.cachekit.io', 'api.staging.cachekit.io']);
+
+/**
+ * Strict IPv4 dotted-decimal check, matching node:net's isIP(x) === 4
+ * semantics (four octets, 0-255, no leading zeros). Local so the Workers
+ * entrypoint needs no node:* builtins and no nodejs_compat flag.
+ */
+function isStrictIPv4(hostname: string): boolean {
+  const parts = hostname.split('.');
+  if (parts.length !== 4) return false;
+  return parts.every(
+    (part) =>
+      /^\d{1,3}$/.test(part) &&
+      Number(part) <= 255 &&
+      // isIP rejects leading zeros (octal ambiguity): '01' invalid, '0' valid
+      (part.length === 1 || part[0] !== '0')
+  );
+}
 
 function isPrivateIp(hostname: string): boolean {
   // Exact loopback names
@@ -20,8 +36,8 @@ function isPrivateIp(hostname: string): boolean {
     return false;
   }
 
-  // IPv4 standard dotted-decimal (validated by isIP)
-  if (isIP(hostname) === 4) {
+  // IPv4 standard dotted-decimal (strict validation)
+  if (isStrictIPv4(hostname)) {
     const nums = hostname.split('.').map(Number);
     if (nums[0] === 127) return true; // 127.0.0.0/8
     if (nums[0] === 10) return true; // 10.0.0.0/8

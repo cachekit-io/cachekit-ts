@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.3](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.1.2...cachekit-v0.1.3) (2026-07-23)
+
+
+### Features
+
+* interop mode (interop/v1) — cross-SDK keys and plain-MessagePack values [LAB-247] ([#71](https://github.com/cachekit-io/cachekit-ts/issues/71)) ([ad0fe0c](https://github.com/cachekit-io/cachekit-ts/commit/ad0fe0cdd089e20311f84b3f93547deff5f72394))
+* **redis:** implement TTLBackend and LockableBackend (LAB-427) ([#74](https://github.com/cachekit-io/cachekit-ts/issues/74)) ([7178bb8](https://github.com/cachekit-io/cachekit-ts/commit/7178bb8d2e924753b786727f62cf00f062953756))
+
+
+### Bug Fixes
+
+* contested-lock 409 handling + pin bare-key lock contract ([#63](https://github.com/cachekit-io/cachekit-ts/issues/63) item 3) ([#70](https://github.com/cachekit-io/cachekit-ts/issues/70)) ([150035b](https://github.com/cachekit-io/cachekit-ts/commit/150035bf94f91d7493ebf17ace0653e5d06a6176))
+
+
+### Security
+
+* send lock_id via X-CacheKit-Lock-Id header, not query string ([#63](https://github.com/cachekit-io/cachekit-ts/issues/63)) ([#65](https://github.com/cachekit-io/cachekit-ts/issues/65)) ([40df857](https://github.com/cachekit-io/cachekit-ts/commit/40df85744f120c2a2cd32b1a7ff168d7712b220a))
+
 ## [0.1.2](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.1.1...cachekit-v0.1.2) (2026-05-17)
 
 ### Release notes
