@@ -238,20 +238,25 @@ same audited Rust core the Node SDK uses (`@cachekit-io/cachekit-core-wasm`,
 Node, Workers, Python, and Rust.
 
 ```typescript
-import { createCache, type SecureCache } from '@cachekit-io/cachekit/workers';
+import { createCache, type WorkersCache } from '@cachekit-io/cachekit/workers';
 
 // One cache per isolate — see the note below.
-let cache: SecureCache | null = null;
+let cache: WorkersCache | null = null;
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     cache ??= createCache.io({
       apiKey: env.CACHEKIT_API_KEY, // explicit config — no process.env needed
       encryption: { masterKey: env.CACHEKIT_MASTER_KEY }, // optional zero-knowledge mode
       ttl: 300,
     });
 
-    const getAnswer = cache.wrap(async () => computeExpensiveThing(), {
+    // Bind THIS request's context: SWR background refreshes then ride
+    // ctx.waitUntil and survive past the response. A cheap request-scoped
+    // view over the singleton — same encryptor, same L1.
+    const requestCache = cache.withExecutionContext(ctx);
+
+    const getAnswer = requestCache.wrap(async () => computeExpensiveThing(), {
       namespace: 'api:answer',
       ttl: 300,
     });
@@ -269,17 +274,20 @@ export default {
 > on hot isolates. If you do create short-lived caches, call `cache.close()`
 > — it zeroizes key material and frees the wasm codec deterministically.
 
-**Phase-1 surface (deltas vs Node):**
+**Workers surface (deltas vs Node):**
 
 - **Backends**: CachekitIO (`createCache.io` / `backend: { apiKey }`) or a
   custom `Backend` instance. The Redis-URL intents (`minimal`, `production`,
   `secure`) throw `ConfigurationError` — ioredis is TCP and Node-only.
 - **No cross-instance invalidation** (Redis Pub/Sub is Node-only); L1
   invalidation within an isolate works as usual.
-- **No SWR background refresh** — refresh promises would be canceled when
-  the response returns (they aren't tied to `ctx.waitUntil` yet), so
-  `swrEnabled` is forced off; L1 entries expire and refresh in the request
-  path instead.
+- **SWR needs the request context** — workerd cancels fire-and-forget work
+  when the response returns, so background refreshes only schedule through
+  a view bound with `cache.withExecutionContext(ctx)` (they're registered
+  via `ctx.waitUntil` and run to completion). Wrap functions through the
+  bound view inside the fetch handler, as above; functions wrapped on the
+  base cache still work but fall back to plain (no-SWR) L1 reads — entries
+  expire and recompute in the request path instead.
 - **No Prometheus metrics.**
 - **Key material semantics**: keys are derived and held in wasm linear
   memory, which is a host-readable `ArrayBuffer` — weaker isolation than the

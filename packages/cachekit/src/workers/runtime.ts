@@ -25,7 +25,7 @@ import {
 import type { CacheOptions, SecureCache } from '../types/cache.js';
 import type { CachekitIOBackendConfig } from '../backends/types.js';
 import { cachekitio } from '../backends/cachekitio-factory.js';
-import { CacheImpl, type CacheRuntime } from '../cache-core.js';
+import { CacheImpl, type CacheRuntime, type ExecutionContextLike } from '../cache-core.js';
 import { EncryptionManagerCore, type EncryptionBindings } from '../encryption/manager-core.js';
 import { ConfigurationError } from '../errors.js';
 
@@ -88,23 +88,41 @@ const workersRuntime: CacheRuntime = {
   createEncryption: (config) => new EncryptionManager(config.masterKey, config.tenantId),
   // No createInvalidationChannel: Redis Pub/Sub is Node-only. cache-core
   // fails fast with a ConfigurationError if `invalidation` is configured.
+
+  // workerd cancels fire-and-forget work when the response returns, and a
+  // cancelled refresh never clears its "refreshing" marker — so SWR
+  // refreshes only schedule through a request context bound via
+  // cache.withExecutionContext(ctx) (they ride ctx.waitUntil). Reads
+  // without a bound context fall back to plain L1 gets: no marker taken,
+  // nothing to wedge.
+  swrRequiresWaitUntil: true,
 };
+
+/**
+ * The Workers cache surface: SecureCache plus the per-request context
+ * binding that enables SWR background refreshes (see withExecutionContext).
+ */
+export interface WorkersCache extends SecureCache {
+  /**
+   * Bind the current request's ExecutionContext, returning a request-scoped
+   * view (shared state, same nonce counters) whose SWR refreshes are kept
+   * alive past response return via `ctx.waitUntil`. Wrap functions through
+   * the view inside the fetch handler; without it, reads are plain L1 gets
+   * (no SWR, fail-safe).
+   */
+  withExecutionContext(ctx: ExecutionContextLike): SecureCache;
+}
 
 /**
  * Create a configured cache instance on Cloudflare Workers.
  *
- * Same API as the Node createCache, with the phase-1 Workers surface:
- * CachekitIO (or custom Backend instance) backends, compression and
- * zero-knowledge encryption included. Redis backends, cross-instance
- * invalidation, and SWR background refresh are Node-only.
+ * Same API as the Node createCache, with the Workers surface: CachekitIO
+ * (or custom Backend instance) backends, compression and zero-knowledge
+ * encryption included. Redis backends and cross-instance invalidation are
+ * Node-only. SWR background refresh requires binding the request's
+ * ExecutionContext per request — `cache.withExecutionContext(ctx)` — so
+ * workerd keeps the refresh alive past response return.
  */
-export function createWorkersCache(options: CacheOptions): SecureCache {
-  // SWR background refresh is fire-and-forget; workerd cancels pending work
-  // when the response returns (no ExecutionContext.waitUntil is plumbed
-  // through phase 1), and a canceled refresh never clears its
-  // refreshingKeys slot — a handful of wedged keys would silently disable
-  // SWR cache-wide. Forced off until refreshes can ride ctx.waitUntil.
-  // The intents default swrEnabled to true, so an explicit opt-in is
-  // indistinguishable from the default — documented phase-1 limitation.
-  return new CacheImpl({ ...options, l1: { ...options.l1, swrEnabled: false } }, workersRuntime);
+export function createWorkersCache(options: CacheOptions): WorkersCache {
+  return new CacheImpl(options, workersRuntime);
 }

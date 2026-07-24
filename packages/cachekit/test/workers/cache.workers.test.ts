@@ -132,11 +132,12 @@ describe('createCache full stack inside workerd', () => {
     await cache.close();
   });
 
-  it('wrap() with L1 enabled works (SWR forced off — no background refresh)', async () => {
+  it('wrap() with L1 enabled works without a bound context (fail-safe no-SWR)', async () => {
     const backend = memoryBackend();
-    // Intent-style config would set swrEnabled: true; the Workers runtime
-    // forces it off because fire-and-forget refreshes are canceled by
-    // workerd when the response returns.
+    // swrEnabled is honored on Workers since LAB-751, but refreshes only
+    // schedule through cache.withExecutionContext(ctx) — without a bound
+    // request context, reads fall back to plain L1 gets (see
+    // swr.workers.test.ts for the full SWR lane).
     const cache = createCache({ backend, defaultTtl: 60, l1: { swrEnabled: true } });
 
     let calls = 0;

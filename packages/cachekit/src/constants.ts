@@ -135,3 +135,14 @@ export const SWR_JITTER_MIN = 0.9;
 
 /** SWR jitter range (±10% = 0.2 total range) */
 export const SWR_JITTER_RANGE = 0.2;
+
+/**
+ * Lifetime of a "refresh in progress" marker. A refresh whose promise is
+ * torn down without ever settling (workerd drops `waitUntil` work at its
+ * deadline — historically ~30s past response — while the isolate lives on)
+ * can never clear its own marker; without an expiry, enough stranded
+ * markers reach maxConcurrentRefreshes and silently disable SWR cache-wide.
+ * An expired marker only risks a duplicate refresh, which L1 version tokens
+ * already make benign — so this errs generous, not tight.
+ */
+export const SWR_REFRESH_MARKER_TTL_MS = 60_000;
