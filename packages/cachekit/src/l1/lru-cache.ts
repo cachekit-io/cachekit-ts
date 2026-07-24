@@ -1,7 +1,12 @@
 import { L1Config, DEFAULT_L1_CONFIG, CacheEntry, SwrResult, InvalidationEvent } from './types.js';
 import { secureRandomFloat } from '../utils/random.js';
 import { extractNamespace } from '../serialization/key-generator.js';
-import { SWR_JITTER_MIN, SWR_JITTER_RANGE, DEFAULT_L1_FALLBACK_SIZE } from '../constants.js';
+import {
+  SWR_JITTER_MIN,
+  SWR_JITTER_RANGE,
+  SWR_REFRESH_MARKER_TTL_MS,
+  DEFAULT_L1_FALLBACK_SIZE,
+} from '../constants.js';
 
 /**
  * L1 in-memory cache with LRU eviction, SWR, and multi-level invalidation.
@@ -21,8 +26,14 @@ export class L1Cache<T = unknown> {
   private readonly cache = new Map<string, CacheEntry<T>>();
   private readonly namespaceIndex = new Map<string, Set<string>>();
 
-  // SWR tracking
-  private readonly refreshingKeys = new Set<string>();
+  // SWR tracking: key → marker expiry timestamp. Markers expire
+  // (SWR_REFRESH_MARKER_TTL_MS) because a refresh promise can be torn down
+  // without settling — workerd drops waitUntil work at its deadline while
+  // the isolate keeps serving — and a marker nobody clears would wedge the
+  // key (and eventually all refresh slots) in a permanent "refreshing"
+  // state. An expired marker merely allows a duplicate refresh, which
+  // version tokens make benign.
+  private readonly refreshingKeys = new Map<string, number>();
   private readonly entryVersion = new Map<string, number>();
   private versionCounter = 0;
 
@@ -99,11 +110,11 @@ export class L1Cache<T = unknown> {
     const shouldRefresh =
       this.config.swrEnabled &&
       !isFresh &&
-      !this.refreshingKeys.has(key) &&
-      this.refreshingKeys.size < this.config.maxConcurrentRefreshes; // C3 fix
+      !this.isRefreshInFlight(key, now) &&
+      this.hasRefreshSlot(now); // C3 fix
 
     if (shouldRefresh) {
-      this.refreshingKeys.add(key);
+      this.refreshingKeys.set(key, now + SWR_REFRESH_MARKER_TTL_MS);
     }
 
     return {
@@ -148,6 +159,35 @@ export class L1Cache<T = unknown> {
    */
   cancelRefresh(key: string): void {
     this.refreshingKeys.delete(key);
+  }
+
+  /**
+   * Is a live (unexpired) refresh marker held for this key?
+   * An expired marker is dropped on sight — the refresh that set it was
+   * torn down without settling, so the key must become refreshable again.
+   */
+  private isRefreshInFlight(key: string, now: number): boolean {
+    const markerExpiry = this.refreshingKeys.get(key);
+    if (markerExpiry === undefined) return false;
+    if (markerExpiry <= now) {
+      this.refreshingKeys.delete(key);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Concurrency gate for starting a refresh. At the limit, sweep expired
+   * markers once before refusing — stranded markers must not permanently
+   * consume refresh slots. The sweep is bounded: the map never grows past
+   * maxConcurrentRefreshes entries.
+   */
+  private hasRefreshSlot(now: number): boolean {
+    if (this.refreshingKeys.size < this.config.maxConcurrentRefreshes) return true;
+    for (const [key, markerExpiry] of this.refreshingKeys) {
+      if (markerExpiry <= now) this.refreshingKeys.delete(key);
+    }
+    return this.refreshingKeys.size < this.config.maxConcurrentRefreshes;
   }
 
   /**

@@ -1,6 +1,13 @@
 import type { L1Cache } from '../l1/lru-cache.js';
 
 /**
+ * Registers a background promise with the platform so it survives past the
+ * current request — Cloudflare Workers' `ExecutionContext.waitUntil`. On
+ * platforms where fire-and-forget is safe (Node), no handle is needed.
+ */
+export type WaitUntil = (promise: Promise<unknown>) => void;
+
+/**
  * Options for scheduling a background refresh.
  */
 export interface RefreshOptions {
@@ -43,6 +50,10 @@ export class BackgroundRefreshManager {
    * @param versionToken - L1 version token at time of read (for staleness detection)
    * @param l1Cache - L1 cache instance (may be null if L1 disabled)
    * @param persistToL2 - Callback to persist value to L2 cache
+   * @param waitUntil - Platform handle that keeps the refresh alive past the
+   *   current request (Workers ctx.waitUntil). Without it the refresh is
+   *   fire-and-forget, which is only safe on platforms that never cancel
+   *   pending work (Node).
    */
   scheduleRefresh<T>(
     key: string,
@@ -50,13 +61,17 @@ export class BackgroundRefreshManager {
     options: RefreshOptions,
     versionToken: number,
     l1Cache: L1Cache | null,
-    persistToL2: PersistCallback<T>
+    persistToL2: PersistCallback<T>,
+    waitUntil?: WaitUntil
   ): void {
     // Track at manager level for cleanup on close
     this.refreshingKeys.add(key);
 
-    // Fire-and-forget background refresh
-    (async () => {
+    // Background refresh. Note computeFn is invoked synchronously here (the
+    // async body runs to its first await on invocation) — on workerd that
+    // matters: the refresh's I/O is created inside the request that
+    // triggered it, i.e. the same request whose waitUntil is passed in.
+    const refresh = (async () => {
       try {
         // Skip if manager is closed (avoid operations on closed cache)
         if (this.closed) {
@@ -89,6 +104,26 @@ export class BackgroundRefreshManager {
         this.refreshingKeys.delete(key);
       }
     })();
+
+    // Register with the platform so the refresh survives response return.
+    // The promise never rejects (errors are handled above), so this cannot
+    // surface an unhandled rejection through waitUntil.
+    //
+    // Guard the registration call itself: waitUntil() is a synchronous
+    // platform call that can throw (e.g. a caller reusing a wrapped function
+    // across requests with a stale ExecutionContext). A failed registration
+    // must forfeit only this refresh attempt, never the read that already
+    // has a valid (stale) value to return. A stranded refreshingKeys marker
+    // is bounded by SWR_REFRESH_MARKER_TTL_MS.
+    try {
+      waitUntil?.(refresh);
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error(
+        '[cachekit] Failed to register background refresh with waitUntil:',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+    }
   }
 
   /**
