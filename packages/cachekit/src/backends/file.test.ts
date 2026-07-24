@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -133,6 +133,19 @@ describe('FileBackend', () => {
       expect(expiry).toBeLessThanOrEqual(now + 3605);
       expect(raw.subarray(HEADER_SIZE).toString('utf-8')).toBe('hi');
     });
+
+    it('fails closed on nonzero future flags without deleting the entry', async () => {
+      const filePath = path.join(dir, TEST_KEY_HASH);
+      const image = fileImage(0n, new TextEncoder().encode('future-payload'));
+      image.writeUInt16BE(1, 4);
+      await fs.writeFile(filePath, image);
+
+      expect(await backend.get('test-key')).toBeNull();
+      expect(await backend.exists('test-key')).toBe(false);
+      expect(await backend.getTTL('test-key')).toBeNull();
+      expect(await backend.refreshTTL('test-key', 60)).toBe(false);
+      await expect(fs.access(filePath)).resolves.toBeUndefined();
+    });
   });
 
   describe('TTL and expiry', () => {
@@ -191,6 +204,26 @@ describe('FileBackend', () => {
         BackendError
       );
     });
+  });
+
+  it('uses the fractional wall-clock expiry boundary from cachekit-py', async () => {
+    vi.useFakeTimers();
+    try {
+      const filePath = path.join(dir, TEST_KEY_HASH);
+      const image = fileImage(1001n, new Uint8Array([1]));
+      await fs.writeFile(filePath, image);
+
+      vi.setSystemTime(1_000_999);
+      expect(await backend.getTTL('test-key')).toBe(0);
+
+      vi.setSystemTime(1_001_000);
+      expect(await backend.get('test-key')).toEqual(new Uint8Array([1]));
+
+      vi.setSystemTime(1_001_001);
+      expect(await backend.get('test-key')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   describe('refreshTTL', () => {

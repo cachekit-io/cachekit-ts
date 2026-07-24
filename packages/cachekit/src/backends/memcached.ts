@@ -12,16 +12,6 @@ export const MAX_MEMCACHED_TTL = 30 * 24 * 60 * 60;
 /** Server default item-size limit (-I flag): 1 MiB. */
 const DEFAULT_MAX_ITEM_SIZE_BYTES = 1024 * 1024;
 
-interface ResolvedConfig {
-  servers: string[];
-  defaultTtl: number;
-  timeout: number;
-  connectTimeout: number;
-  retries: number;
-  keyPrefix: string;
-  maxItemSizeBytes: number;
-}
-
 /**
  * Memcached backend using memjs (binary protocol, multi-server support).
  *
@@ -47,7 +37,7 @@ interface ResolvedConfig {
  * ```
  */
 export class MemcachedBackend implements Backend {
-  private readonly config: ResolvedConfig;
+  private readonly config: Required<MemcachedBackendConfig>;
   private closed = false;
   /** Memoized lazy client — memjs is an optional peer dep, imported on first use. */
   private clientPromise: Promise<MemjsClient> | null = null;
@@ -111,7 +101,8 @@ export class MemcachedBackend implements Backend {
     }
 
     const effectiveTtl = ttl ?? this.config.defaultTtl;
-    const expires = effectiveTtl > 0 ? Math.min(Math.floor(effectiveTtl), MAX_MEMCACHED_TTL) : 0;
+    const expires =
+      effectiveTtl > 0 ? Math.min(Math.max(1, Math.floor(effectiveTtl)), MAX_MEMCACHED_TTL) : 0;
 
     const client = await this.getClient();
     try {

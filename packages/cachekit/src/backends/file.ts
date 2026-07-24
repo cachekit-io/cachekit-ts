@@ -15,6 +15,7 @@ const MAGIC_0 = 0x43; // 'C'
 const MAGIC_1 = 0x4b; // 'K'
 const FORMAT_VERSION = 1;
 const HEADER_SIZE = 14; // [0:2] magic, [2] version, [3] reserved, [4:6] flags u16 BE, [6:14] expiry u64 BE
+const FLAGS_OFFSET = 4;
 const EXPIRY_OFFSET = 6;
 
 /** TTL ceiling shared with py (10 years) — prevents u64 overflow games. */
@@ -94,7 +95,8 @@ export class FileBackend implements Backend, TTLBackend {
     try {
       const data = await handle.readFile();
       const expiry = this.parseHeader(data);
-      if (expiry === 'corrupt' || (expiry > 0n && nowSeconds() > expiry)) {
+      if (expiry === 'unsupported') return null;
+      if (expiry === 'corrupt' || isExpired(expiry)) {
         await handle.close();
         await this.safeUnlink(filePath);
         return null;
@@ -185,7 +187,12 @@ export class FileBackend implements Backend, TTLBackend {
     this.ensureNotClosed();
     const expiry = await this.readExpiry('getTTL', key);
     if (expiry === null || expiry === 0n) return null;
-    return Number(expiry - nowSeconds());
+    const remaining = Number(expiry) - Date.now() / 1000;
+    if (remaining <= 0) {
+      await this.delete(key);
+      return null;
+    }
+    return Math.floor(remaining);
   }
 
   /**
@@ -223,7 +230,8 @@ export class FileBackend implements Backend, TTLBackend {
       const header = Buffer.alloc(HEADER_SIZE);
       const { bytesRead } = await handle.read(header, 0, HEADER_SIZE, 0);
       const expiry = this.parseHeader(header.subarray(0, bytesRead));
-      if (expiry === 'corrupt' || (expiry > 0n && nowSeconds() > expiry)) {
+      if (expiry === 'unsupported') return false;
+      if (expiry === 'corrupt' || isExpired(expiry)) {
         await handle.close();
         await this.safeUnlink(filePath);
         return false;
@@ -258,10 +266,20 @@ export class FileBackend implements Backend, TTLBackend {
     return path.join(this.config.cacheDir, hash);
   }
 
-  /** Expiry from a header buffer, or 'corrupt' on bad magic/version/length. */
-  private parseHeader(data: Uint8Array): bigint | 'corrupt' {
+  /**
+   * Expiry from a header buffer. Unknown reserved/flag bits are deliberately
+   * reported separately: they may denote a future transform, so this reader
+   * must fail closed without unlinking an entry a newer SDK understands.
+   */
+  private parseHeader(data: Uint8Array): bigint | 'corrupt' | 'unsupported' {
     if (data.length < HEADER_SIZE) return 'corrupt';
     if (data[0] !== MAGIC_0 || data[1] !== MAGIC_1 || data[2] !== FORMAT_VERSION) return 'corrupt';
+    if (
+      data[3] !== 0 ||
+      Buffer.from(data.buffer, data.byteOffset, HEADER_SIZE).readUInt16BE(FLAGS_OFFSET) !== 0
+    ) {
+      return 'unsupported';
+    }
     return Buffer.from(data.buffer, data.byteOffset, HEADER_SIZE).readBigUInt64BE(EXPIRY_OFFSET);
   }
 
@@ -286,7 +304,8 @@ export class FileBackend implements Backend, TTLBackend {
       const header = Buffer.alloc(HEADER_SIZE);
       const { bytesRead } = await handle.read(header, 0, HEADER_SIZE, 0);
       const expiry = this.parseHeader(header.subarray(0, bytesRead));
-      if (expiry === 'corrupt' || (expiry > 0n && nowSeconds() > expiry)) {
+      if (expiry === 'unsupported') return null;
+      if (expiry === 'corrupt' || isExpired(expiry)) {
         await handle.close();
         await this.safeUnlink(filePath);
         return null;
@@ -347,8 +366,8 @@ export class FileBackend implements Backend, TTLBackend {
   private wrapError(operation: string, error: unknown): Error {
     if (error instanceof BackendError) return error;
     if (isErrnoException(error)) {
-      // Disk full / transient fs errors may clear; bad permissions and
-      // read-only filesystems won't (same classification as py).
+      // Disk-full and I/O errors may clear; inaccessible or read-only paths
+      // are permanent for this backend instance.
       const permanent = error.code === 'EACCES' || error.code === 'EROFS' || error.code === 'EPERM';
       return new BackendError(
         `File ${operation} failed: ${error.message}`,
@@ -377,6 +396,11 @@ function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
 /** Whole-second wall clock as bigint, the unit of the on-disk expiry field. */
 function nowSeconds(): bigint {
   return BigInt(Math.floor(Date.now() / 1000));
+}
+
+/** Python compares the integer wire timestamp to its fractional wall clock. */
+function isExpired(expiry: bigint): boolean {
+  return expiry > 0n && BigInt(Date.now()) > expiry * 1000n;
 }
 
 /**

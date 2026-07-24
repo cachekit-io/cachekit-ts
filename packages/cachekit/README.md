@@ -175,7 +175,7 @@ const backend = file({
 const cache = createCache({ backend });
 ```
 
-The on-disk format is shared with cachekit-py's File backend — filenames are `blake2b(key, digestSize=16)` hex and each file carries the same 14-byte header (magic, version, flags, big-endian expiry), so Python and TypeScript processes can point at the same cache directory. Writes are atomic (write-to-temp, fsync, rename), expired or corrupt entries are unlinked on read, and symlinks are rejected (`O_NOFOLLOW`). Implements `TTLBackend` (`getTTL`/`refreshTTL` read and rewrite the on-disk expiry header). Unlike cachekit-py there is no LRU size eviction yet — cap growth with TTLs.
+The on-disk format is shared with cachekit-py's File backend — filenames are `blake2b(key, digestSize=16)` hex and each file carries the same 14-byte header (magic, version, flags, big-endian expiry), so Python and TypeScript processes can point at the same cache directory. Writes are atomic (write-to-temp, fsync, rename), expired or corrupt entries are unlinked on read, and symlinks are rejected (`O_NOFOLLOW`). Implements `TTLBackend` (`getTTL`/`refreshTTL` read and rewrite the on-disk expiry header). Unlike cachekit-py there is no LRU size eviction yet — cap growth with TTLs. The shared format is specified in [cachekit-io/protocol](https://github.com/cachekit-io/protocol/blob/main/spec/file-backend-format.md): version-1 writers set reserved and flags to zero, and this backend fails closed on a future nonzero value (misses without deleting or exposing the payload). Positive fractional TTLs round up to one second so they never become the permanent-entry sentinel.
 
 ## API Reference
 

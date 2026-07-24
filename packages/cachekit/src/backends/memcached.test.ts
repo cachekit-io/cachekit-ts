@@ -122,6 +122,11 @@ describe('MemcachedBackend', () => {
       });
     });
 
+    it('rounds a positive fractional TTL up instead of making it permanent', async () => {
+      await backend.set('k', new Uint8Array([9]), 0.1);
+      expect(mockClient.set).toHaveBeenCalledWith('k', Buffer.from([9]), { expires: 1 });
+    });
+
     it('rejects oversized values client-side without calling the server', async () => {
       const b = memcached({ maxItemSizeBytes: 8 });
       await expect(b.set('k', new Uint8Array(9))).rejects.toThrow(/max\s+item size/);
