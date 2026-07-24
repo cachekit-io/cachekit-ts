@@ -1,0 +1,84 @@
+{
+  "version": "1.1.0",
+  "generator": "extracted from cachekit-rs v0.5.1 + cachekit-ts v0.1.0 (Python ground truth); arrow/orjson/original_type vectors generated with cryptography/OpenSSL (fixed nonces) matching real cachekit-py serializer metadata, verified by tools/encryption-verify.py",
+  "algorithm": "AES-256-GCM",
+  "key_derivation": "HKDF-SHA256 with cachekit_v1_ salt prefix",
+  "nonce_size": 12,
+  "tag_size": 16,
+  "aad_version": "0x03",
+  "aad_format": "[version_byte(1)] [len(4BE)][tenant_id] [len(4BE)][cache_key] [len(4BE)][format] [len(4BE)][compressed_flag] ([len(4BE)][original_type])?",
+  "ciphertext_format": "[nonce(12)] || [ciphertext] || [auth_tag(16)]",
+  "master_key_hex": "6161616161616161616161616161616161616161616161616161616161616161",
+  "master_key_note": "32 bytes of 0x61 (ASCII 'a' repeated 32 times)",
+  "tenant_id": "cross-sdk-test",
+  "derived_key_fingerprint_hex": "96179a9bc881aa7ca83f04b78a66afd3",
+  "vectors": [
+    {
+      "name": "basic_bytes",
+      "plaintext_hex": "0102030405060708",
+      "cache_key": "test:vector:1",
+      "format": "msgpack",
+      "compressed": false,
+      "aad_hex": "030000000e63726f73732d73646b2d746573740000000d746573743a766563746f723a31000000076d73677061636b0000000546616c7365",
+      "ciphertext_hex": "f8f69c70000000000000000087d9ec09f2c2347a4b37d5330ccf50e3c31e69642801bef5"
+    },
+    {
+      "name": "special_cache_key",
+      "plaintext_hex": "deadbeef",
+      "cache_key": "user@example.com:profile",
+      "format": "msgpack",
+      "compressed": false,
+      "aad_hex": "030000000e63726f73732d73646b2d746573740000001875736572406578616d706c652e636f6d3a70726f66696c65000000076d73677061636b0000000546616c7365",
+      "ciphertext_hex": "f8f69c7000000000000000012bf77e0cfc353ab04d0b941b22aa2ce39167ee63"
+    },
+    {
+      "name": "compressed_basic",
+      "plaintext_hex": "deadbeefcafe",
+      "cache_key": "test:compressed:vector",
+      "format": "msgpack",
+      "compressed": true,
+      "aad_hex": "030000000e63726f73732d73646b2d7465737400000016746573743a636f6d707265737365643a766563746f72000000076d73677061636b0000000454727565",
+      "ciphertext_hex": "44cc06e600000000000000000eb8450c4aac2337265323f7f1b03fc3966deaa515f7"
+    },
+    {
+      "name": "arrow_uncompressed",
+      "plaintext_hex": "0011223344556677",
+      "cache_key": "test:arrow:uncompressed",
+      "format": "arrow",
+      "compressed": false,
+      "original_type": "arrow",
+      "aad_hex": "030000000e63726f73732d73646b2d7465737400000017746573743a6172726f773a756e636f6d70726573736564000000056172726f770000000546616c7365000000056172726f77",
+      "ciphertext_hex": "0a0b0c0d0e0f10110000000066ee6349733c18b89159de7db35910d6b996bdb9150d5f1d"
+    },
+    {
+      "name": "arrow_compressed",
+      "plaintext_hex": "8899aabbccddeeff",
+      "cache_key": "test:arrow:compressed",
+      "format": "arrow",
+      "compressed": true,
+      "original_type": "arrow",
+      "aad_hex": "030000000e63726f73732d73646b2d7465737400000015746573743a6172726f773a636f6d70726573736564000000056172726f770000000454727565000000056172726f77",
+      "ciphertext_hex": "0a0b0c0d0e0f101100000001a4a4ee2872d4b60054edc7d4973188ad865d239be211796e"
+    },
+    {
+      "name": "orjson_uncompressed",
+      "plaintext_hex": "7b2261223a2231227d",
+      "cache_key": "test:orjson:vector",
+      "format": "orjson",
+      "compressed": false,
+      "original_type": "orjson",
+      "aad_hex": "030000000e63726f73732d73646b2d7465737400000012746573743a6f726a736f6e3a766563746f72000000066f726a736f6e0000000546616c7365000000066f726a736f6e",
+      "ciphertext_hex": "0a0b0c0d0e0f1011000000024f4b2924c8166fcd7e6ff731f4e02ff46e6879534e8074c0a4"
+    },
+    {
+      "name": "original_type_numpy",
+      "plaintext_hex": "93010203",
+      "cache_key": "test:original-type:numpy",
+      "format": "msgpack",
+      "compressed": false,
+      "original_type": "numpy",
+      "aad_hex": "030000000e63726f73732d73646b2d7465737400000018746573743a6f726967696e616c2d747970653a6e756d7079000000076d73677061636b0000000546616c7365000000056e756d7079",
+      "ciphertext_hex": "0a0b0c0d0e0f101100000003657e765491f9790882c0543d98ab280c5951a1ed"
+    }
+  ]
+}

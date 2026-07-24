@@ -8,6 +8,10 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
+      "workerd": {
+        "types": "./dist/workers/index.d.ts",
+        "default": "./dist/workers/index.js"
+      },
       "import": {
         "types": "./dist/index.d.ts",
         "default": "./dist/index.js"
@@ -36,6 +40,10 @@
         "types": "./dist/cjs/backends/memcached.d.ts",
         "default": "./dist/cjs/backends/memcached.js"
       }
+    },
+    "./workers": {
+      "types": "./dist/workers/index.d.ts",
+      "default": "./dist/workers/index.js"
     }
   },
   "files": [
@@ -52,7 +60,9 @@
     "test:protocol": "vitest run test/protocol",
     "lint": "eslint src/",
     "type-check": "tsc --noEmit",
-    "clean": "rm -rf dist *.tsbuildinfo"
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "test:workers": "vitest run --config vitest.workers.config.ts",
+    "check:workers-bundle": "node scripts/check-workers-bundle.mjs"
   },
   "keywords": [
     "cache",
@@ -75,16 +85,19 @@
   },
   "dependencies": {
     "@cachekit-io/cachekit-core-ts": "workspace:*",
+    "@cachekit-io/cachekit-core-wasm": "workspace:*",
     "@msgpack/msgpack": "^3.1.3",
     "@noble/hashes": "^2.0.1",
     "ioredis": "^5.10.1"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.18.7",
     "@testcontainers/redis": "^11.13.0",
     "@types/ioredis": "^5.0.0",
     "@types/memjs": "^1.3.3",
     "@types/node": "^25.5.0",
     "@vitest/coverage-v8": "^4.1.2",
+    "esbuild": "0.28.1",
     "eslint": "^10.1.0",
     "memjs": "^1.3.2",
     "prom-client": "^15.1.3",

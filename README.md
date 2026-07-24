@@ -4,10 +4,11 @@ TypeScript SDK for CacheKit - Production-ready Redis caching with L1 in-memory, 
 
 ## Packages
 
-| Package                                                      | Description             |
-| ------------------------------------------------------------ | ----------------------- |
-| [@cachekit-io/cachekit](./packages/cachekit)                 | Main SDK                |
-| [@cachekit-io/cachekit-core-ts](./packages/cachekit-core-ts) | Native bindings (N-API) |
+| Package                                                          | Description                          |
+| ---------------------------------------------------------------- | ------------------------------------ |
+| [@cachekit-io/cachekit](./packages/cachekit)                     | Main SDK (Node + Cloudflare Workers) |
+| [@cachekit-io/cachekit-core-ts](./packages/cachekit-core-ts)     | Native bindings (N-API, Node)        |
+| [@cachekit-io/cachekit-core-wasm](./packages/cachekit-core-wasm) | wasm32 bindings (Cloudflare Workers) |
 
 ## Development
 

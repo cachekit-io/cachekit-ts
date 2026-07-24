@@ -34,9 +34,7 @@
       "description": "Issue #1 example: users:get_user with one integer argument",
       "namespace": "users",
       "operation": "get_user",
-      "args": [
-        42
-      ],
+      "args": [42],
       "canonical_args_hex": "912a",
       "args_hash": "61598716255080080f6456eb065c2e51badfaa4320b0efe97469c29cffee8875",
       "expected_key": "users:get_user:61598716255080080f6456eb065c2e51badfaa4320b0efe97469c29cffee8875"
@@ -74,16 +72,7 @@
       "description": "Every unsigned width boundary: 127/128 (fixint/uint8), 255/256 (uint8/uint16), 65535/65536 (uint16/uint32), 4294967295/4294967296 (uint32/uint64)",
       "namespace": "t",
       "operation": "op",
-      "args": [
-        127,
-        128,
-        255,
-        256,
-        65535,
-        65536,
-        4294967295,
-        4294967296
-      ],
+      "args": [127, 128, 255, 256, 65535, 65536, 4294967295, 4294967296],
       "canonical_args_hex": "987fcc80ccffcd0100cdffffce00010000ceffffffffcf0000000100000000",
       "args_hash": "ccf107ae1fc53bde440609a16dc30794916bd692f06309832621b9c49c89f9b7",
       "expected_key": "t:op:ccf107ae1fc53bde440609a16dc30794916bd692f06309832621b9c49c89f9b7"
@@ -93,16 +82,7 @@
       "description": "Every signed width boundary: -32/-33 (fixint/int8), -128/-129 (int8/int16), -32768/-32769 (int16/int32), -2147483648/-2147483649 (int32/int64)",
       "namespace": "t",
       "operation": "op",
-      "args": [
-        -32,
-        -33,
-        -128,
-        -129,
-        -32768,
-        -32769,
-        -2147483648,
-        -2147483649
-      ],
+      "args": [-32, -33, -128, -129, -32768, -32769, -2147483648, -2147483649],
       "canonical_args_hex": "98e0d0dfd080d1ff7fd18000d2ffff7fffd280000000d3ffffffff7fffffff",
       "args_hash": "92fa9f5c0f336f282290472144b6a4cf86b2840a1cbd8366e42fdfa1d4faa98f",
       "expected_key": "t:op:92fa9f5c0f336f282290472144b6a4cf86b2840a1cbd8366e42fdfa1d4faa98f"
@@ -112,9 +92,7 @@
       "description": "UTF-8 string, no Unicode normalization applied",
       "namespace": "t",
       "operation": "op",
-      "args": [
-        "h\u00e9llo w\u00f6rld \u2713"
-      ],
+      "args": ["h\u00e9llo w\u00f6rld \u2713"],
       "canonical_args_hex": "91b168c3a96c6c6f2077c3b6726c6420e29c93",
       "args_hash": "00fd1c3045fe23cfe4cac788a9e15773e1f9722ca84e28917f64be99dd7a5a3c",
       "expected_key": "t:op:00fd1c3045fe23cfe4cac788a9e15773e1f9722ca84e28917f64be99dd7a5a3c"
@@ -157,41 +135,8 @@
       "namespace": "t",
       "operation": "op",
       "args": [
-        [
-          0,
-          1,
-          2,
-          3,
-          4,
-          5,
-          6,
-          7,
-          8,
-          9,
-          10,
-          11,
-          12,
-          13,
-          14
-        ],
-        [
-          0,
-          1,
-          2,
-          3,
-          4,
-          5,
-          6,
-          7,
-          8,
-          9,
-          10,
-          11,
-          12,
-          13,
-          14,
-          15
-        ]
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
       ],
       "canonical_args_hex": "929f000102030405060708090a0b0c0d0edc0010000102030405060708090a0b0c0d0e0f",
       "args_hash": "d121a3c3f0427c5df363068940c15d966120be41ea11d4befe62e3408a676130",
@@ -248,24 +193,7 @@
       "description": "16 arguments: the ROOT canonical argument array itself uses array16",
       "namespace": "t",
       "operation": "op",
-      "args": [
-        0,
-        1,
-        2,
-        3,
-        4,
-        5,
-        6,
-        7,
-        8,
-        9,
-        10,
-        11,
-        12,
-        13,
-        14,
-        15
-      ],
+      "args": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
       "canonical_args_hex": "dc0010000102030405060708090a0b0c0d0e0f",
       "args_hash": "c55dd1f50e57b0dfbcd8827965516e2e33e7de2788f18d7d88d82575e34f2116",
       "expected_key": "t:op:c55dd1f50e57b0dfbcd8827965516e2e33e7de2788f18d7d88d82575e34f2116"
@@ -275,11 +203,7 @@
       "description": "Booleans and null",
       "namespace": "t",
       "operation": "op",
-      "args": [
-        true,
-        false,
-        null
-      ],
+      "args": [true, false, null],
       "canonical_args_hex": "93c3c2c0",
       "args_hash": "1e364f6582ca4dc93b8bed0ff4413162cddafd52407517bff6248286cb863ac1",
       "expected_key": "t:op:1e364f6582ca4dc93b8bed0ff4413162cddafd52407517bff6248286cb863ac1"
@@ -317,9 +241,7 @@
       "description": "Int 2 \u2014 must produce the same key as float_integral_collapse",
       "namespace": "t",
       "operation": "op",
-      "args": [
-        2
-      ],
+      "args": [2],
       "canonical_args_hex": "9102",
       "args_hash": "6df5e966da1ba347f99784f56e50e2f570e775e54c9c9349dd8944cb7fe01ea7",
       "expected_key": "t:op:6df5e966da1ba347f99784f56e50e2f570e775e54c9c9349dd8944cb7fe01ea7"
@@ -394,10 +316,7 @@
             "b": 1,
             "a": 2
           },
-          "a": [
-            1,
-            2
-          ]
+          "a": [1, 2]
         }
       ],
       "canonical_args_hex": "9182a161920102a17a82a16102a16201",
@@ -411,11 +330,7 @@
       "operation": "op",
       "args": [
         {
-          "$set": [
-            3,
-            1,
-            2
-          ]
+          "$set": [3, 1, 2]
         }
       ],
       "canonical_args_hex": "9193010203",
@@ -429,11 +344,7 @@
       "operation": "op",
       "args": [
         {
-          "$set": [
-            "b",
-            10,
-            "a"
-          ]
+          "$set": ["b", 10, "a"]
         }
       ],
       "canonical_args_hex": "91930aa161a162",

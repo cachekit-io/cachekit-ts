@@ -1,0 +1,31 @@
+# wasm32 build of cachekit-core for Cloudflare Workers (LAB-595).
+#
+# Same pinned cachekit-core as the NAPI crate (../cachekit-core-ts) — one
+# touchpoint for all core persistence/encryption changes. The `encryption`
+# feature pulls the pure-Rust aes-gcm path on wasm32 (ring is native-only)
+# and getrandom's `js` feature for crypto.getRandomValues.
+#
+# wasm-bindgen is exact-pinned: the CLI that post-processes the artifact must
+# match this version (see package.json build script and CI).
+[package]
+name = "cachekit-core-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "=0.2.121"
+cachekit-core = { version = "0.3.0", features = ["encryption"] }
+
+# Standalone crate — never join an enclosing cargo workspace.
+[workspace]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
