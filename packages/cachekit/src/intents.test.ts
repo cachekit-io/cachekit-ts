@@ -281,6 +281,55 @@ describe('Intent-based Cache API', () => {
   });
 
   // ========================================================================
+  // Backend instances through the storage-agnostic intents (LAB-750)
+  // ========================================================================
+  describe('backend instances in minimal/production/secure', () => {
+    const instanceBackend = {
+      get: vi.fn(),
+      set: vi.fn(),
+      delete: vi.fn(),
+      exists: vi.fn(),
+      close: vi.fn(),
+    };
+
+    it.each(['minimal', 'production', 'secure'] as const)(
+      'createCache.%s() passes a backend instance through untouched',
+      (intent) => {
+        createCache[intent]({
+          backend: instanceBackend,
+          ...(intent === 'secure' ? { masterKey: 'a'.repeat(64) } : {}),
+        });
+
+        expect(capturedOptions!.backend).toBe(instanceBackend);
+      }
+    );
+
+    it.each(['minimal', 'production', 'secure'] as const)(
+      'createCache.%s() rejects url and backend together',
+      (intent) => {
+        expect(() =>
+          createCache[intent]({
+            url: 'redis://localhost:6379',
+            backend: instanceBackend,
+            ...(intent === 'secure' ? { masterKey: 'a'.repeat(64) } : {}),
+          } as never)
+        ).toThrow(ConfigurationError);
+      }
+    );
+
+    it.each(['minimal', 'production', 'secure'] as const)(
+      'createCache.%s() rejects neither url nor backend',
+      (intent) => {
+        expect(() =>
+          createCache[intent]({
+            ...(intent === 'secure' ? { masterKey: 'a'.repeat(64) } : {}),
+          } as never)
+        ).toThrow(/requires a Redis url or a backend instance/);
+      }
+    );
+  });
+
+  // ========================================================================
   // createCache() — original API unchanged
   // ========================================================================
   describe('createCache() (original)', () => {

@@ -7,10 +7,13 @@
  * envelope run on the wasm32 build of cachekit-core
  * (@cachekit-io/cachekit-core-wasm, ~55 KB gzipped).
  *
- * Phase-1 deltas vs the Node entrypoint:
- * - Backends: CachekitIO (`createCache.io` / `backend: { apiKey }`) or a
- *   custom Backend instance. Redis-URL intents (minimal / production /
- *   secure) throw ConfigurationError.
+ * Deltas vs the Node entrypoint:
+ * - Backends: CachekitIO (`createCache.io` / `backend: { apiKey }`), the
+ *   native edge stores added in phase 2 — Workers KV (`workersKV`) and the
+ *   Cache API (`workersCacheAPI`), both passed as `backend:` instances to
+ *   createCache or any intent — or a custom Backend instance. Redis-URL
+ *   intents (minimal / production / secure with `url`) throw
+ *   ConfigurationError.
  * - No cross-instance invalidation (Redis Pub/Sub is Node-only).
  * - No Prometheus metrics.
  *
@@ -54,3 +57,20 @@ export * from '../exports-common.js';
 // ============ Workers-only exports ============
 // wasm-backed drop-ins for the root entrypoint's NAPI-backed exports.
 export { EncryptionManager, ByteStorage } from './runtime.js';
+
+// Native edge storage backends (phase 2): Workers KV and the Cache API.
+export {
+  workersKV,
+  WorkersKVBackend,
+  KV_MIN_TTL_SECONDS,
+  type WorkersKVBackendConfig,
+  type KVNamespaceLike,
+} from '../backends/workers-kv.js';
+export {
+  workersCacheAPI,
+  CacheAPIBackend,
+  CACHE_API_NO_EXPIRY_MAX_AGE,
+  type CacheAPIBackendConfig,
+  type CacheLike,
+  type CacheStorageLike,
+} from '../backends/workers-cache-api.js';
