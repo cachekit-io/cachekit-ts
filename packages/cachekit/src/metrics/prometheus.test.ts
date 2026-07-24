@@ -171,3 +171,49 @@ describe('CacheMetrics init failure handling', () => {
     timer(); // should not throw
   });
 });
+
+describe('CacheMetrics guards the onError handler', () => {
+  // The cache layer calls every collector method fire-and-forget
+  // (`void this.metrics.*()`) on the invariant that they never reject. A
+  // user-supplied onError that throws must not break that invariant.
+
+  it('a throwing onError during a metric operation never rejects', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const throwingCounter = {
+      inc: () => {
+        throw new Error('inc failed');
+      },
+    };
+    const metrics = new CacheMetrics({
+      registry: { registerMetric() {}, getSingleMetric: () => throwingCounter },
+      onError: () => {
+        throw new Error('handler bug');
+      },
+    });
+
+    await expect(metrics.recordOperation('get', 'success')).resolves.toBeUndefined();
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '[cachekit] metrics onError handler threw:',
+      expect.any(Error)
+    );
+    consoleSpy.mockRestore();
+  });
+
+  it('a throwing onError during initialization failure never rejects', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const metrics = new CacheMetrics({
+      registry: {
+        registerMetric() {},
+        getSingleMetric: () => {
+          throw new Error('registry down');
+        },
+      },
+      onError: () => {
+        throw new Error('handler bug');
+      },
+    });
+
+    await expect(metrics.recordOperation('get', 'success')).resolves.toBeUndefined();
+    consoleSpy.mockRestore();
+  });
+});

@@ -218,9 +218,7 @@ export class CacheMetrics implements MetricsCollector {
       // m5 Fix: Log error instead of silently swallowing
       const err = error instanceof Error ? error : new Error(String(error));
 
-      if (this.errorHandler) {
-        this.errorHandler(err);
-      } else {
+      if (!this.invokeErrorHandler(err)) {
         logError(
           '[cachekit] metrics are enabled but failed to initialize — install the optional ' +
             '`prom-client` peer dependency or set `metrics: false`:',
@@ -233,15 +231,30 @@ export class CacheMetrics implements MetricsCollector {
   }
 
   /**
+   * Invoke the user's onError handler guarded, returning whether one was
+   * registered. A throwing handler must never escape: the cache layer calls
+   * every collector method fire-and-forget (`void this.metrics.*()`) on the
+   * invariant that they never reject — an unguarded handler would turn its
+   * own bug into unhandled rejections. Metrics stay best-effort.
+   */
+  private invokeErrorHandler(err: Error): boolean {
+    if (!this.errorHandler) return false;
+    try {
+      this.errorHandler(err);
+    } catch (handlerError) {
+      logError('[cachekit] metrics onError handler threw:', handlerError);
+    }
+    return true;
+  }
+
+  /**
    * Handle errors from async metric operations.
    * m5 Fix: Proper error handling instead of silent failures.
    */
   private handleError(error: unknown, context: string): void {
     const err = error instanceof Error ? error : new Error(String(error));
 
-    if (this.errorHandler) {
-      this.errorHandler(err);
-    } else {
+    if (!this.invokeErrorHandler(err)) {
       logError(`[cachekit] Metrics error (${context}):`, err.message);
     }
   }
