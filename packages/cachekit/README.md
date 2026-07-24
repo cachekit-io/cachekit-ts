@@ -313,6 +313,16 @@ authoritative storage. `delete()` on KV derives its boolean from a
 read-then-delete (KV's own delete is void), so it is advisory under
 concurrent writers.
 
+> **Cache API caveats.** `caches.default` requires a Worker on a **route or
+> custom domain** — it is a silent no-op on `*.workers.dev` and in the
+> dashboard/Playground preview (writes are dropped, reads always miss, no
+> error). It is also **zone-shared**: a co-located Worker can read entries you
+> store unencrypted, so keep non-secure workloads on a **named cache**
+> (`workersCacheAPI({ cacheName })`) or use `createCache.secure(...)`
+> (ciphertext at rest). And because the Cache API re-encodes keys onto
+> synthetic URLs (a key transform, not a prefix), it does **not** support
+> cross-SDK **interop** mode — use Workers KV or CachekitIO for interop caches.
+
 **Workers surface (deltas vs Node):**
 
 - **Backends**: CachekitIO (`createCache.io` / `backend: { apiKey }`),

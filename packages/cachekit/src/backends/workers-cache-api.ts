@@ -83,6 +83,13 @@ export interface CacheAPIBackendConfig {
 export class CacheAPIBackend implements Backend {
   /** Keys map 1:1 to synthetic URLs — no prefixing. See Backend.keyPrefix. */
   readonly keyPrefix?: string;
+  /**
+   * `keyUrl()` re-encodes each key onto a synthetic URL — a key transform,
+   * not a prefix — so this backend is interop-incompatible. Interop caches
+   * must use a verbatim-key backend (KV / Redis / CachekitIO).
+   * See Backend.transformsKeys.
+   */
+  readonly transformsKeys = true;
   private readonly cacheName?: string;
   private readonly defaultTtl: number;
   private cachePromise: Promise<CacheLike> | null = null;
