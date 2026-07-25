@@ -27,7 +27,9 @@ import {
   type WorkersKVBackendConfig,
 } from '../../src/workers/index.js';
 
-const MASTER_KEY_HEX = '61'.repeat(32); // 32 bytes of 0x61, same as the vector fixture
+// Public protocol test-vector key (32 bytes of 0x61) — the same fixture the
+// LAB-595 suites and protocol/test-vectors use. Not a credential.
+const MASTER_KEY_HEX = '61'.repeat(32); // pragma: allowlist secret
 
 /** The real miniflare binding, widened with the list() the tests use to
  * inspect expiration metadata. */
