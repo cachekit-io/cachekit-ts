@@ -69,8 +69,6 @@ export interface ExecutionContextLike {
   waitUntil(promise: Promise<unknown>): void;
 }
 
-export type { WaitUntil };
-
 /**
  * Platform pieces injected into CacheImpl. Two implementations: Node
  * (cache.ts — Redis + NAPI) and Cloudflare Workers (workers/index.ts —
@@ -261,7 +259,8 @@ export class CacheImpl implements SecureCache {
     key: string,
     value: T,
     options: SetOptions | undefined,
-    interop: boolean
+    interop: boolean,
+    updateL1 = true
   ): Promise<void> {
     this.ensureNotClosed();
 
@@ -298,8 +297,8 @@ export class CacheImpl implements SecureCache {
       // Store in backend
       await this.backend.set(key, data, ttl);
 
-      // Update L1
-      if (this.l1) {
+      // Update L1 for direct writes. SWR calls completeRefresh below so its version guard remains authoritative.
+      if (updateL1 && this.l1) {
         this.l1.set(key, value, ttl * 1000, namespace);
       }
     };
@@ -469,7 +468,8 @@ export class CacheImpl implements SecureCache {
                     key,
                     value,
                     { ttl: opts.ttl, namespace: opts.namespace },
-                    interop
+                    interop,
+                    false
                   );
                 },
                 waitUntil

@@ -26,7 +26,6 @@ export type PersistCallback<T> = (key: string, value: T, options: RefreshOptions
  * Manages stale-while-revalidate (SWR) background refreshes.
  *
  * Responsibilities:
- * - Track in-flight background refreshes
  * - Execute refresh operations asynchronously
  * - Coordinate L1 cache version tokens to prevent stale data resurrection
  * - Handle errors gracefully with logging
@@ -35,7 +34,6 @@ export type PersistCallback<T> = (key: string, value: T, options: RefreshOptions
  * This class extracts SWR logic from CacheImpl for better separation of concerns.
  */
 export class BackgroundRefreshManager {
-  private readonly refreshingKeys = new Set<string>();
   private closed = false;
 
   /**
@@ -64,9 +62,6 @@ export class BackgroundRefreshManager {
     persistToL2: PersistCallback<T>,
     waitUntil?: WaitUntil
   ): void {
-    // Track at manager level for cleanup on close
-    this.refreshingKeys.add(key);
-
     // Background refresh. Note computeFn is invoked synchronously here (the
     // async body runs to its first await on invocation) — on workerd that
     // matters: the refresh's I/O is created inside the request that
@@ -99,9 +94,6 @@ export class BackgroundRefreshManager {
         if (l1Cache) {
           l1Cache.cancelRefresh(key);
         }
-      } finally {
-        // Always clean up tracking
-        this.refreshingKeys.delete(key);
       }
     })();
 
@@ -113,7 +105,7 @@ export class BackgroundRefreshManager {
     // platform call that can throw (e.g. a caller reusing a wrapped function
     // across requests with a stale ExecutionContext). A failed registration
     // must forfeit only this refresh attempt, never the read that already
-    // has a valid (stale) value to return. A stranded refreshingKeys marker
+    // has a valid (stale) value to return. A stranded L1 marker
     // is bounded by SWR_REFRESH_MARKER_TTL_MS.
     try {
       waitUntil?.(refresh);
@@ -127,26 +119,11 @@ export class BackgroundRefreshManager {
   }
 
   /**
-   * Check if a key is currently being refreshed.
-   */
-  isRefreshing(key: string): boolean {
-    return this.refreshingKeys.has(key);
-  }
-
-  /**
-   * Get count of in-flight refreshes.
-   */
-  get refreshingCount(): number {
-    return this.refreshingKeys.size;
-  }
-
-  /**
-   * Mark manager as closed and cancel all pending refreshes.
+   * Mark manager as closed.
    * Called during cache shutdown.
    */
   close(): void {
     this.closed = true;
-    this.refreshingKeys.clear();
   }
 
   /**

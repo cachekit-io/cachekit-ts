@@ -110,6 +110,7 @@ export class L1Cache<T = unknown> {
     const shouldRefresh =
       this.config.swrEnabled &&
       !isFresh &&
+      entry.value !== null &&
       !this.isRefreshInFlight(key, now) &&
       this.hasRefreshSlot(now); // C3 fix
 

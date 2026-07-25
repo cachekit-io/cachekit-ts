@@ -142,6 +142,16 @@ describe('L1Cache', () => {
       expect(result.isFresh).toBe(true);
       expect(result.shouldRefresh).toBe(false);
     });
+    it('does not take a refresh marker for a null-valued entry', () => {
+      const nullCache = new L1Cache<null>({ swrEnabled: true, swrThresholdRatio: 2 });
+      nullCache.set('key', null, 10_000, 'test');
+
+      const result = nullCache.getWithSwr('key');
+
+      expect(result.value).toBeNull();
+      expect(result.shouldRefresh).toBe(false);
+      expect(nullCache.stats.refreshing).toBe(0);
+    });
 
     it('returns stale result with shouldRefresh after threshold', () => {
       vi.useFakeTimers();

@@ -66,4 +66,4 @@ export { EncryptionManager, ByteStorage } from './runtime.js';
 // SWR on Workers: bind the request's ExecutionContext per request so
 // background refreshes ride ctx.waitUntil (see WorkersCache).
 export type { WorkersCache } from './runtime.js';
-export type { ExecutionContextLike, WaitUntil } from '../cache-core.js';
+export type { ExecutionContextLike } from '../cache-core.js';
