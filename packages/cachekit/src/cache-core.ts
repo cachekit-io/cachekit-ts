@@ -69,6 +69,12 @@ export interface ExecutionContextLike {
   waitUntil(promise: Promise<unknown>): void;
 }
 
+// Public API since cachekit v0.1.4 (the workers entry re-exports it): the
+// handle type consumers use to adapt a platform's background-work
+// registration to withExecutionContext-style plumbing. Removing it broke
+// published imports — keep the re-export.
+export type { WaitUntil };
+
 /**
  * Platform pieces injected into CacheImpl. Two implementations: Node
  * (cache.ts — Redis + NAPI) and Cloudflare Workers (workers/index.ts —
@@ -297,7 +303,15 @@ export class CacheImpl implements SecureCache {
       // Store in backend
       await this.backend.set(key, data, ttl);
 
-      // Update L1 for direct writes. SWR calls completeRefresh below so its version guard remains authoritative.
+      // Update L1 for direct writes. The SWR refresh path passes
+      // updateL1=false and writes L1 only through completeRefresh, whose
+      // version token discards the refresh if an explicit write or
+      // invalidation landed meanwhile — the guard is authoritative for L1
+      // ONLY. The backend.set above is unconditional last-write-wins: an
+      // interleaved explicit set() survives in L1 but is overwritten in L2
+      // by the refresh's value until the entry next expires or refreshes
+      // (a conditional L2 write would need CAS the Backend contract doesn't
+      // have).
       if (updateL1 && this.l1) {
         this.l1.set(key, value, ttl * 1000, namespace);
       }
