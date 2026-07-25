@@ -110,6 +110,12 @@ jobs:
     needs: release-please
     if: needs.release-please.outputs.core-wasm--release_created == 'true' || github.event.inputs.wasm_tag != ''
     runs-on: ubuntu-latest
+    # Serialize publishes of the same wasm tag so an in-flight automatic
+    # release-please run and a manual `wasm_tag` recovery dispatch can't race
+    # into duplicate npm publishes. Different tags still publish in parallel.
+    concurrency:
+      group: publish-cachekit-core-wasm-${{ needs.release-please.outputs.core-wasm--tag_name || github.event.inputs.wasm_tag }}
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
@@ -118,6 +124,8 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ needs.release-please.outputs.core-wasm--tag_name || github.event.inputs.wasm_tag }}
+          # Publish-only job (no git writes); don't leave the token on disk.
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
