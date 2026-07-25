@@ -128,6 +128,31 @@ describe('Cache API backend inside workerd', () => {
     await backend.close();
   });
 
+  // Regression (panel MAJ, CWE-41): path-borne keys '.', '..' (and their
+  // %2E escapes) get dot-normalized by the URL parser — '.' aliased '' and
+  // '..' escaped the key prefix. Keys ride a query parameter now, which is
+  // never normalized.
+  it('degenerate keys ("", ".", "..") stay distinct — no dot-segment aliasing', async () => {
+    const backend = workersCacheAPI();
+    const valueA = new Uint8Array([0x0a]);
+    const valueB = new Uint8Array([0x0b]);
+    const valueC = new Uint8Array([0x0c]);
+
+    await backend.set('', valueA, 300);
+    await backend.set('.', valueB, 300);
+    await backend.set('..', valueC, 300);
+
+    expect(await backend.get('')).toEqual(valueA);
+    expect(await backend.get('.')).toEqual(valueB);
+    expect(await backend.get('..')).toEqual(valueC);
+
+    expect(await backend.delete('.')).toBe(true);
+    expect(await backend.get('')).toEqual(valueA); // deleting '.' must not touch ''
+    expect(await backend.get('..')).toEqual(valueC);
+
+    await backend.close();
+  });
+
   it('named caches are isolated from caches.default', async () => {
     const namedBackend = workersCacheAPI({ cacheName: 'cachekit-test' });
     const defaultBackend = workersCacheAPI();

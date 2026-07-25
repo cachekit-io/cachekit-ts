@@ -36,6 +36,59 @@ describe('BackgroundRefreshManager', () => {
       expect(persistToL2).toHaveBeenCalledWith('key1', { data: 'new' }, options);
     });
 
+    it('registers the refresh with waitUntil, settling only after completion', async () => {
+      let resolveCompute: (value: string) => void;
+      const computeFn = vi.fn().mockReturnValue(
+        new Promise<string>((resolve) => {
+          resolveCompute = resolve;
+        })
+      );
+      const registered: Promise<unknown>[] = [];
+      const waitUntil = vi.fn((promise: Promise<unknown>) => {
+        registered.push(promise);
+      });
+
+      manager.scheduleRefresh(
+        'key1',
+        computeFn,
+        { ttl: 60, namespace: 'test' },
+        0,
+        null,
+        persistToL2,
+        waitUntil
+      );
+
+      // The platform handle received the refresh promise synchronously —
+      // before the response could return.
+      expect(waitUntil).toHaveBeenCalledTimes(1);
+
+      resolveCompute!('done');
+      await registered[0]; // resolves once L2 persistence finished
+      expect(persistToL2).toHaveBeenCalledWith('key1', 'done', { ttl: 60, namespace: 'test' });
+      expect(manager.isRefreshing('key1')).toBe(false);
+    });
+
+    it('the promise handed to waitUntil never rejects, even when the refresh fails', async () => {
+      const computeFn = vi.fn().mockRejectedValue(new Error('refresh boom'));
+      const registered: Promise<unknown>[] = [];
+
+      manager.scheduleRefresh(
+        'key1',
+        computeFn,
+        { ttl: 60, namespace: 'test' },
+        0,
+        null,
+        persistToL2,
+        (promise) => registered.push(promise)
+      );
+
+      // A rejection here would surface as an unhandled rejection through
+      // ctx.waitUntil — the refresh handles its own errors instead.
+      await expect(registered[0]).resolves.toBeUndefined();
+      expect(consoleSpy).toHaveBeenCalled();
+      expect(manager.isRefreshing('key1')).toBe(false);
+    });
+
     it('should track refreshing keys during execution', async () => {
       let resolveCompute: () => void;
       const computePromise = new Promise<string>((resolve) => {

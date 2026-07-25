@@ -6,7 +6,7 @@ Production-ready Redis caching for TypeScript/Node.js. Hybrid TypeScript-Rust de
 
 ## Features
 
-- **Dual-layer caching**: L1 in-memory (~50ns) + L2 Redis (~2-50ms)
+- **Dual-layer caching**: L1 in-memory (~50ns) + pluggable L2 (Redis, CacheKit SaaS, Memcached, local File)
 - **Stale-while-revalidate**: Serve stale data while refreshing in background
 - **Zero-knowledge encryption**: Optional AES-256-GCM client-side encryption
 - **Circuit breaker**: Automatic failure isolation with exponential backoff
@@ -133,6 +133,50 @@ const cache = createCache({
 });
 ```
 
+## Backends
+
+Four backends implement the same `Backend` interface (raw bytes in/out) and plug into `createCache({ backend })` interchangeably:
+
+| Backend           | Import                                                      | Runtime    | Notes                                                                                |
+| ----------------- | ----------------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------ |
+| Redis             | `redis` from `@cachekit-io/cachekit`                        | Node       | ioredis; TTL inspection + distributed locking                                        |
+| CachekitIO (SaaS) | `cachekitio` from `@cachekit-io/cachekit`                   | Node, edge | fetch-based; TTL + locking variants                                                  |
+| Memcached         | `memcached` from `@cachekit-io/cachekit/backends/memcached` | Node       | memjs (binary protocol, multi-server); requires the optional `memjs` peer dependency |
+| File              | `file` from `@cachekit-io/cachekit/backends/file`           | Node       | local disk, on-disk format shared with cachekit-py                                   |
+
+The Memcached and File backends are **Node-runtime only** and live behind subpath exports, so browser/edge bundles that import the package root never pull in `memjs` or `node:fs`.
+
+### Memcached
+
+```typescript
+// pnpm add memjs   (optional peer dependency, loaded lazily on first use)
+import { createCache } from '@cachekit-io/cachekit';
+import { memcached } from '@cachekit-io/cachekit/backends/memcached';
+
+const backend = memcached({
+  servers: ['mc1:11211', 'mc2:11211'], // default: ['127.0.0.1:11211']
+  keyPrefix: 'myapp:',
+});
+const cache = createCache({ backend });
+```
+
+Semantics match cachekit-py's Memcached backend: TTLs are clamped to the 30-day protocol maximum (larger values would be read as unix timestamps), values over `maxItemSizeBytes` (default 1 MiB, the server's default item-size limit) are rejected client-side with a loud error, `exists()` is GET-based (memcached has no EXISTS command), and omitting `ttl` with no `defaultTtl` means never expire. `refreshTTL(key, ttl)` is available via the `touch` command, but there is no `getTTL` — the memcached protocol cannot read a key's remaining TTL, so this backend deliberately does not implement `TTLBackend`.
+
+### File
+
+```typescript
+import { createCache } from '@cachekit-io/cachekit';
+import { file } from '@cachekit-io/cachekit/backends/file';
+
+const backend = file({
+  cacheDir: '/var/cache/myapp', // default: os.tmpdir() + '/cachekit'
+  defaultTtl: 3600, // default: 0 = never expire
+});
+const cache = createCache({ backend });
+```
+
+The on-disk format is shared with cachekit-py's File backend — filenames are `blake2b(key, digestSize=16)` hex and each file carries the same 14-byte header (magic, version, flags, big-endian expiry), so Python and TypeScript processes can point at the same cache directory. Writes are atomic (write-to-temp, fsync, rename), expired or corrupt entries are unlinked on read, and symlinks are rejected (`O_NOFOLLOW`). Implements `TTLBackend` (`getTTL`/`refreshTTL` read and rewrite the on-disk expiry header). Unlike cachekit-py there is no LRU size eviction yet — cap growth with TTLs. The shared format is specified in [cachekit-io/protocol](https://github.com/cachekit-io/protocol/blob/main/spec/file-backend-format.md): version-1 writers set reserved and flags to zero, and this backend fails closed on a future nonzero value (misses without deleting or exposing the payload). Positive fractional TTLs round up to one second so they never become the permanent-entry sentinel.
+
 ## API Reference
 
 ### createCache(options)
@@ -238,20 +282,25 @@ same audited Rust core the Node SDK uses (`@cachekit-io/cachekit-core-wasm`,
 Node, Workers, Python, and Rust.
 
 ```typescript
-import { createCache, type SecureCache } from '@cachekit-io/cachekit/workers';
+import { createCache, type WorkersCache } from '@cachekit-io/cachekit/workers';
 
 // One cache per isolate — see the note below.
-let cache: SecureCache | null = null;
+let cache: WorkersCache | null = null;
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     cache ??= createCache.io({
       apiKey: env.CACHEKIT_API_KEY, // explicit config — no process.env needed
       encryption: { masterKey: env.CACHEKIT_MASTER_KEY }, // optional zero-knowledge mode
       ttl: 300,
     });
 
-    const getAnswer = cache.wrap(async () => computeExpensiveThing(), {
+    // Bind THIS request's context: SWR background refreshes then ride
+    // ctx.waitUntil and survive past the response. A cheap request-scoped
+    // view over the singleton — same encryptor, same L1.
+    const requestCache = cache.withExecutionContext(ctx);
+
+    const getAnswer = requestCache.wrap(async () => computeExpensiveThing(), {
       namespace: 'api:answer',
       ttl: 300,
     });
@@ -332,10 +381,13 @@ concurrent writers.
   Node-only.
 - **No cross-instance invalidation** (Redis Pub/Sub is Node-only); L1
   invalidation within an isolate works as usual.
-- **No SWR background refresh** — refresh promises would be canceled when
-  the response returns (they aren't tied to `ctx.waitUntil` yet), so
-  `swrEnabled` is forced off; L1 entries expire and refresh in the request
-  path instead.
+- **SWR needs the request context** — workerd cancels fire-and-forget work
+  when the response returns, so background refreshes only schedule through
+  a view bound with `cache.withExecutionContext(ctx)` (they're registered
+  via `ctx.waitUntil` and run to completion). Wrap functions through the
+  bound view inside the fetch handler, as above; functions wrapped on the
+  base cache still work but fall back to plain (no-SWR) L1 reads — entries
+  expire and recompute in the request path instead.
 - **No Prometheus metrics.**
 - **Key material semantics**: keys are derived and held in wasm linear
   memory, which is a host-readable `ArrayBuffer` — weaker isolation than the

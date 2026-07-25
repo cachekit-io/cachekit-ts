@@ -8,15 +8,22 @@ import { DEFAULT_TTL_SECONDS } from '../constants.js';
  * unbounded storage — freshness always comes from `Cache-Control`. Such
  * entries get a 1-year max-age instead (Cloudflare's edge-TTL ceiling).
  */
-export const CACHE_API_NO_EXPIRY_MAX_AGE = 31_536_000;
+const CACHE_API_NO_EXPIRY_MAX_AGE = 31_536_000;
 
 /**
  * Synthetic URL base for cache keys. The Cache API is request-keyed, so each
  * cache key maps to a URL under a deliberately non-routable host — it can
  * never collide with real zone traffic cached in `caches.default`, and is
  * never fetched.
+ *
+ * The key rides a query parameter, NOT a path segment: the WHATWG URL
+ * parser dot-normalizes path segments AFTER percent-decoding, so path-borne
+ * keys '.', '..' — and even their '%2E' escapes — would alias the empty key
+ * or escape the prefix entirely (CWE-41). Query strings are never
+ * normalized, and encodeURIComponent escapes '&'/'='/'#', so the key → URL
+ * mapping stays injective for every possible key.
  */
-const SYNTHETIC_KEY_BASE = 'https://cachekit.invalid/v1/cache/';
+const SYNTHETIC_KEY_BASE = 'https://cachekit.invalid/v1/cache?key=';
 
 /**
  * Minimal structural view of a Workers `Cache` / `CacheStorage`.
@@ -185,6 +192,10 @@ export class CacheAPIBackend implements Backend {
   }
 
   private wrapError(operation: string, error: unknown): Error {
+    // ConfigurationError passes through unwrapped because openCache() throws
+    // lazily INSIDE each op's try-block (unlike KV, whose config errors
+    // throw in the constructor) — wrapping would bury the clean "caches
+    // global missing" setup error inside a BackendError.
     if (error instanceof ConfigurationError) return error;
     if (error instanceof Error) {
       return new BackendError(

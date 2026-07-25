@@ -128,22 +128,26 @@ export interface IOOptions extends BaseIntentOptions {
 // CreateCacheFn — callable with intent properties
 // ============================================================================
 
-/** The createCache function augmented with intent-based factory methods. */
-export interface CreateCacheFn {
+/**
+ * The createCache function augmented with intent-based factory methods.
+ * Generic over the platform's cache surface — Node returns SecureCache,
+ * Workers returns WorkersCache (SecureCache + withExecutionContext).
+ */
+export interface CreateCacheFn<TCache extends SecureCache = SecureCache> {
   /** Create a cache with explicit options. */
-  (options: CacheOptions): SecureCache;
+  (options: CacheOptions): TCache;
 
   /** Speed-first cache: no circuit breaker, no retry, minimal L1. */
-  minimal(options: MinimalOptions): SecureCache;
+  minimal(options: MinimalOptions): TCache;
 
   /** Reliability-first cache: circuit breaker + retry + degradation + full L1. */
-  production(options: ProductionOptions): SecureCache;
+  production(options: ProductionOptions): TCache;
 
   /** Zero-knowledge encrypted cache: production reliability + AES-256-GCM. */
-  secure(options: SecureOptions): SecureCache;
+  secure(options: SecureOptions): TCache;
 
   /** SaaS-backed cache via cachekit.io: full reliability, zero infrastructure. */
-  io(options: IOOptions): SecureCache;
+  io(options: IOOptions): TCache;
 }
 
 // ============================================================================
@@ -173,8 +177,10 @@ const PRODUCTION_RELIABILITY: ReliabilityConfig = {
 /**
  * Build the intent-augmented createCache over a platform's base factory.
  */
-export function buildIntents(baseCreate: (options: CacheOptions) => SecureCache): CreateCacheFn {
-  function createMinimal(options: MinimalOptions): SecureCache {
+export function buildIntents<TCache extends SecureCache>(
+  baseCreate: (options: CacheOptions) => TCache
+): CreateCacheFn<TCache> {
+  function createMinimal(options: MinimalOptions): TCache {
     const cacheOptions: CacheOptions = {
       backend: resolveIntentBackend(options, 'minimal'),
       defaultTtl: options.ttl ?? 300,
@@ -196,7 +202,7 @@ export function buildIntents(baseCreate: (options: CacheOptions) => SecureCache)
     return baseCreate(cacheOptions);
   }
 
-  function createProduction(options: ProductionOptions): SecureCache {
+  function createProduction(options: ProductionOptions): TCache {
     const cacheOptions: CacheOptions = {
       backend: resolveIntentBackend(options, 'production'),
       defaultTtl: options.ttl ?? 600,
@@ -211,7 +217,7 @@ export function buildIntents(baseCreate: (options: CacheOptions) => SecureCache)
     return baseCreate(cacheOptions);
   }
 
-  function createSecure(options: SecureOptions): SecureCache {
+  function createSecure(options: SecureOptions): TCache {
     const masterKey = options.masterKey ?? envVar('CACHEKIT_MASTER_KEY');
     if (!masterKey) {
       throw new ConfigurationError(
@@ -238,7 +244,7 @@ export function buildIntents(baseCreate: (options: CacheOptions) => SecureCache)
     return baseCreate(cacheOptions);
   }
 
-  function createIO(options: IOOptions): SecureCache {
+  function createIO(options: IOOptions): TCache {
     const apiKey = options.apiKey ?? envVar('CACHEKIT_API_KEY');
     if (!apiKey) {
       throw new ConfigurationError(
@@ -271,7 +277,7 @@ export function buildIntents(baseCreate: (options: CacheOptions) => SecureCache)
     production: createProduction,
     secure: createSecure,
     io: createIO,
-  }) as CreateCacheFn;
+  }) as CreateCacheFn<TCache>;
 }
 
 // ============================================================================

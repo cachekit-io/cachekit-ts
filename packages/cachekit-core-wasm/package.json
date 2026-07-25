@@ -1,6 +1,6 @@
 {
   "name": "@cachekit-io/cachekit-core-wasm",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "wasm32 build of cachekit-core for Cloudflare Workers (compression, integrity, encryption)",
   "type": "module",
   "main": "./index.js",

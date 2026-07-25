@@ -35,7 +35,7 @@ cachekit-ts/
 │   │   ├── src/
 │   │   │   ├── cache.ts          # Core cache implementation
 │   │   │   ├── intents.ts        # Intent-based API (.minimal, .production, .secure, .io)
-│   │   │   ├── backends/         # Redis backend
+│   │   │   ├── backends/         # Redis, CachekitIO, Memcached, File backends
 │   │   │   ├── l1/               # In-memory LRU cache
 │   │   │   ├── reliability/      # Circuit breaker, retry
 │   │   │   ├── encryption/       # Encryption manager

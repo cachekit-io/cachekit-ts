@@ -6,7 +6,16 @@ export { redis } from './backends/redis.js';
 export * from './exports-common.js';
 
 // ============ Node-only exports ============
-export type { RedisBackendConfig } from './backends/types.js';
+export type {
+  RedisBackendConfig,
+  MemcachedBackendConfig,
+  FileBackendConfig,
+} from './backends/types.js';
+// NOTE: the Memcached and File backends themselves are deliberately NOT
+// re-exported here. They are Node-runtime only (memjs / node:fs) and live
+// behind subpath exports so browser/edge bundles never pull them in:
+//   import { file } from '@cachekit-io/cachekit/backends/file';
+//   import { memcached } from '@cachekit-io/cachekit/backends/memcached';
 export type { InvalidationConfig } from './types/cache.js';
 export { EncryptionManager } from './encryption/manager.js';
 export { ByteStorage } from '@cachekit-io/cachekit-core-ts';
