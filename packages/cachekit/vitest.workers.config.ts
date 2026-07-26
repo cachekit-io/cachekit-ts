@@ -75,6 +75,8 @@ export default defineConfig({
         // (real Request/Response marshalling, binary-safe bodies). Unknown
         // hosts 502 so tests can never reach the network.
         outboundService: mockCachekitIOService,
+        // Real KV binding for the Workers KV backend tests (LAB-750).
+        kvNamespaces: ['TEST_KV'],
       },
     }),
   ],

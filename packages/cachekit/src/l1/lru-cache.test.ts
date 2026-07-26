@@ -142,6 +142,16 @@ describe('L1Cache', () => {
       expect(result.isFresh).toBe(true);
       expect(result.shouldRefresh).toBe(false);
     });
+    it('does not take a refresh marker for a null-valued entry', () => {
+      const nullCache = new L1Cache<null>({ swrEnabled: true, swrThresholdRatio: 2 });
+      nullCache.set('key', null, 10_000, 'test');
+
+      const result = nullCache.getWithSwr('key');
+
+      expect(result.value).toBeNull();
+      expect(result.shouldRefresh).toBe(false);
+      expect(nullCache.stats.refreshing).toBe(0);
+    });
 
     it('returns stale result with shouldRefresh after threshold', () => {
       vi.useFakeTimers();
@@ -266,6 +276,61 @@ describe('L1Cache', () => {
       // Now second refresh should work
       const r3 = limitedCache.getWithSwr('b');
       expect(r3.shouldRefresh).toBe(true);
+
+      vi.useRealTimers();
+    });
+
+    it('expires a refresh marker that is never cleared (torn-down refresh cannot wedge the key)', () => {
+      vi.useFakeTimers();
+
+      // Long TTL so the entry outlives the 60s marker lifetime. At t=120s,
+      // remaining TTL (80s) is below the jittered threshold floor
+      // (0.5 * 200s * 0.9 = 90s) — deterministically stale.
+      cache.set('key', 'value', 200_000, 'test');
+      vi.advanceTimersByTime(120_000);
+
+      const first = cache.getWithSwr('key');
+      expect(first.shouldRefresh).toBe(true);
+
+      // Simulate the refresh being torn down without settling (workerd
+      // dropping waitUntil work at its deadline): neither completeRefresh
+      // nor cancelRefresh ever runs. While the marker lives, the key is
+      // single-flighted…
+      vi.advanceTimersByTime(5_000);
+      expect(cache.getWithSwr('key').shouldRefresh).toBe(false);
+
+      // …but once the marker expires, the key becomes refreshable again.
+      vi.advanceTimersByTime(60_000);
+      expect(cache.getWithSwr('key').shouldRefresh).toBe(true);
+
+      vi.useRealTimers();
+    });
+
+    it('sweeps expired markers at the concurrency limit (wedged markers free their slots)', () => {
+      const limitedCache = new L1Cache<number>({
+        maxEntries: 100,
+        maxConcurrentRefreshes: 2,
+        swrEnabled: true,
+      });
+
+      vi.useFakeTimers();
+
+      for (let i = 0; i < 3; i++) {
+        limitedCache.set(`key${i}`, i, 200_000, 'test');
+      }
+      vi.advanceTimersByTime(120_000); // all deterministically stale
+
+      // Fill both refresh slots with markers that are never cleared.
+      expect(limitedCache.getWithSwr('key0').shouldRefresh).toBe(true);
+      expect(limitedCache.getWithSwr('key1').shouldRefresh).toBe(true);
+      expect(limitedCache.getWithSwr('key2').shouldRefresh).toBe(false); // at limit
+
+      // Past the marker lifetime, the limit check sweeps the expired
+      // markers instead of refusing forever — SWR is not disabled
+      // cache-wide by stranded refreshes.
+      vi.advanceTimersByTime(65_000);
+      expect(limitedCache.getWithSwr('key2').shouldRefresh).toBe(true);
+      expect(limitedCache.stats.refreshing).toBe(1);
 
       vi.useRealTimers();
     });

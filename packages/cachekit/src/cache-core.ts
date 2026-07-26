@@ -12,7 +12,7 @@ import type { Backend, LockableBackend } from './backends/types.js';
 import type { InvalidationEvent } from './l1/types.js';
 import { L1Cache } from './l1/lru-cache.js';
 import { ReliabilityExecutor } from './reliability/executor.js';
-import { BackgroundRefreshManager } from './cache/background-refresh.js';
+import { BackgroundRefreshManager, type WaitUntil } from './cache/background-refresh.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
 import {
   generateKey,
@@ -76,6 +76,22 @@ export interface InvalidationChannelLike {
 }
 
 /**
+ * Structural subset of the Workers `ExecutionContext` the cache uses.
+ * Structural on purpose: no dependency on @cloudflare/workers-types, and
+ * any platform exposing a compatible waitUntil (Vercel Edge, Deno Deploy)
+ * satisfies it.
+ */
+export interface ExecutionContextLike {
+  waitUntil(promise: Promise<unknown>): void;
+}
+
+// Public API since cachekit v0.1.4 (the workers entry re-exports it): the
+// handle type consumers use to adapt a platform's background-work
+// registration to withExecutionContext-style plumbing. Removing it broke
+// published imports — keep the re-export.
+export type { WaitUntil };
+
+/**
  * Platform pieces injected into CacheImpl. Two implementations: Node
  * (cache.ts — Redis + NAPI) and Cloudflare Workers (workers/index.ts —
  * CachekitIO + wasm). Everything protocol-critical stays in CacheImpl.
@@ -98,6 +114,15 @@ export interface CacheRuntime {
    * without one (Workers) — configuring `invalidation` there fails fast.
    */
   createInvalidationChannel?(config: InvalidationConfig): InvalidationChannelLike;
+  /**
+   * When true, SWR background refreshes only schedule through a bound
+   * per-request handle (withExecutionContext) — the platform cancels
+   * fire-and-forget work at response return (workerd), which would strand
+   * the refresh mid-flight and leave its key marked "refreshing". Reads
+   * without a handle fall back to plain (no-SWR) L1 gets rather than
+   * wedging. Unset on Node, where fire-and-forget is safe.
+   */
+  swrRequiresWaitUntil?: boolean;
 }
 
 /**
@@ -113,6 +138,7 @@ export class CacheImpl implements SecureCache {
   private readonly serializer: MessagePackSerializer;
   private readonly defaultTtl: number;
   private readonly invalidationChannel: InvalidationChannelLike | null = null;
+  private readonly swrRequiresWaitUntil: boolean;
   private closed = false;
   /** One in-flight cold-miss resolution per cache key (single-flight, LAB-519). */
   private readonly inflight = new Map<string, Promise<unknown>>();
@@ -177,6 +203,7 @@ export class CacheImpl implements SecureCache {
 
     // Initialize background refresh manager (SWR)
     this.backgroundRefresh = new BackgroundRefreshManager();
+    this.swrRequiresWaitUntil = runtime.swrRequiresWaitUntil ?? false;
 
     // Initialize encryption
     this.encryption = options.encryption ? runtime.createEncryption(options.encryption) : null;
@@ -302,7 +329,8 @@ export class CacheImpl implements SecureCache {
     key: string,
     value: T,
     options: SetOptions | undefined,
-    interop: boolean
+    interop: boolean,
+    updateL1 = true
   ): Promise<void> {
     this.ensureNotClosed();
 
@@ -339,8 +367,16 @@ export class CacheImpl implements SecureCache {
       // Store in backend
       await this.backend.set(key, data, ttl);
 
-      // Update L1
-      if (this.l1) {
+      // Update L1 for direct writes. The SWR refresh path passes
+      // updateL1=false and writes L1 only through completeRefresh, whose
+      // version token discards the refresh if an explicit write or
+      // invalidation landed meanwhile — the guard is authoritative for L1
+      // ONLY. The backend.set above is unconditional last-write-wins: an
+      // interleaved explicit set() survives in L1 but is overwritten in L2
+      // by the refresh's value until the entry next expires or refreshes
+      // (a conditional L2 write would need CAS the Backend contract doesn't
+      // have).
+      if (updateL1 && this.l1) {
         this.l1.set(key, value, ttl * 1000, namespace);
       }
     };
@@ -380,9 +416,16 @@ export class CacheImpl implements SecureCache {
     return this.reliabilityExecutor.execute(() => this.backend.exists(key), false);
   }
 
+  /**
+   * The optional `waitUntil` is not part of the public Cache interface — it
+   * is threaded in by withExecutionContext()'s request-scoped view so SWR
+   * refreshes triggered by the wrapped function ride the platform's
+   * background-work registration instead of firing fire-and-forget.
+   */
   wrap<TArgs extends unknown[], TResult>(
     fn: (...args: TArgs) => Promise<TResult>,
-    options: WrapOptions
+    options: WrapOptions,
+    waitUntil?: WaitUntil
   ): (...args: TArgs) => Promise<TResult> {
     const interopOperation = options.interop;
     const interop = interopOperation !== undefined;
@@ -417,6 +460,17 @@ export class CacheImpl implements SecureCache {
           `Interop operation "${interopOperation}" cannot run on a backend with a key prefix ` +
             `(${JSON.stringify(backendKeyPrefix)}). Put interop caches on a separate unprefixed ` +
             'client, or drop the keyPrefix.'
+        );
+      }
+      // Re-encoding backends (e.g. the Cloudflare Cache API maps keys to
+      // synthetic URLs) can't express the transform as a keyPrefix, but they
+      // break interop for the same reason — the key never reaches the store
+      // byte-identical to py/rs. Fail closed; see Backend.transformsKeys.
+      if (this.backend.transformsKeys) {
+        throw new ConfigurationError(
+          `Interop operation "${interopOperation}" cannot run on a backend that transforms keys ` +
+            '(e.g. the Cloudflare Cache API maps each key onto a synthetic URL). Use a verbatim-key ' +
+            'backend (Redis / CachekitIO / Workers KV) for interop caches; see Backend.transformsKeys.'
         );
       }
 
@@ -464,40 +518,54 @@ export class CacheImpl implements SecureCache {
       // prefix at runtime — reopening the exact fail-open this guard closes.
       // The Backend contract requires a construction-time-constant value; a
       // backend that violates it still fails closed here.
-      if (interop && this.backend.keyPrefix) {
+      if (interop && (this.backend.keyPrefix || this.backend.transformsKeys)) {
         throw new ConfigurationError(
           `Interop operation "${interopOperation}" cannot run on a backend with a key prefix ` +
-            `(${JSON.stringify(this.backend.keyPrefix)}) — see Backend.keyPrefix`
+            'or key transform — see Backend.keyPrefix / Backend.transformsKeys'
         );
       }
       const cacheKey = interop
         ? generateInteropKey(options.namespace, interopOperation, args)
         : generateKey(options.namespace, args);
 
-      // Check L1 with SWR
+      // Check L1 with SWR. On platforms that cancel fire-and-forget work at
+      // response return (Workers), SWR only runs when a per-request
+      // waitUntil handle is bound — otherwise fall back to a plain L1 read:
+      // no refresh marker is taken, so nothing can wedge, and the entry
+      // simply expires and recomputes in the request path (fail-safe
+      // no-SWR).
       if (this.l1 && !options.skipL1) {
-        const swrResult = this.l1.getWithSwr(cacheKey);
-
-        if (swrResult.value !== null) {
-          // Trigger background refresh if needed
-          if (swrResult.shouldRefresh) {
-            this.backgroundRefresh.scheduleRefresh(
-              cacheKey,
-              () => fn(...args),
-              { ttl: options.ttl, namespace: options.namespace },
-              swrResult.versionToken,
-              this.l1,
-              async (key, value, opts) => {
-                await this.setEntry(
-                  key,
-                  value,
-                  { ttl: opts.ttl, namespace: opts.namespace },
-                  interop
-                );
-              }
-            );
+        if (this.swrRequiresWaitUntil && !waitUntil) {
+          const l1Value = this.l1.get(cacheKey);
+          if (l1Value !== null) {
+            return l1Value as TResult;
           }
-          return swrResult.value as TResult;
+        } else {
+          const swrResult = this.l1.getWithSwr(cacheKey);
+
+          if (swrResult.value !== null) {
+            // Trigger background refresh if needed
+            if (swrResult.shouldRefresh) {
+              this.backgroundRefresh.scheduleRefresh(
+                cacheKey,
+                () => fn(...args),
+                { ttl: options.ttl, namespace: options.namespace },
+                swrResult.versionToken,
+                this.l1,
+                async (key, value, opts) => {
+                  await this.setEntry(
+                    key,
+                    value,
+                    { ttl: opts.ttl, namespace: opts.namespace },
+                    interop,
+                    false
+                  );
+                },
+                waitUntil
+              );
+            }
+            return swrResult.value as TResult;
+          }
         }
       }
 
@@ -637,6 +705,44 @@ export class CacheImpl implements SecureCache {
       return this.wrap(fn, options);
     },
   };
+
+  /**
+   * Bind a request's execution context, returning a request-scoped view of
+   * this cache whose SWR background refreshes are registered with the
+   * platform (`ctx.waitUntil`) instead of fired fire-and-forget.
+   *
+   * All state — L1, backend, encryption, refresh tracking — is shared with
+   * this cache; the view only carries the handle. Create one per request
+   * and wrap functions THROUGH it (`view.wrap` / `view.with` /
+   * `view.secure.wrap`): the handle must belong to the request that calls
+   * the wrapped function, because workerd ties a refresh's I/O to the
+   * request that started it. Binding the context lexically per request is
+   * what makes this safe under concurrent requests in one isolate — a
+   * mutable "current context" slot on the singleton would not be.
+   *
+   * Functions wrapped on the base cache keep working on Workers, just
+   * without SWR (fail-safe plain L1 reads). On Node this is unnecessary:
+   * fire-and-forget refreshes are never cancelled.
+   */
+  withExecutionContext(ctx: ExecutionContextLike): SecureCache {
+    const waitUntil: WaitUntil = (promise) => ctx.waitUntil(promise);
+    const wrapWith = <TArgs extends unknown[], TResult>(
+      fn: (...args: TArgs) => Promise<TResult>,
+      options: WrapOptions
+    ): ((...args: TArgs) => Promise<TResult>) => this.wrap(fn, options, waitUntil);
+
+    return {
+      get: (key) => this.get(key),
+      set: (key, value, options) => this.set(key, value, options),
+      delete: (key) => this.delete(key),
+      exists: (key) => this.exists(key),
+      wrap: wrapWith,
+      with: (options) => (fn) => wrapWith(fn, options),
+      secure: { wrap: wrapWith },
+      invalidate: (level, options) => this.invalidate(level, options),
+      close: () => this.close(),
+    };
+  }
 
   async invalidate(
     level: 'global' | 'namespace' | 'params',

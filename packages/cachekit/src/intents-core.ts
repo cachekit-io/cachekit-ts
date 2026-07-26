@@ -14,6 +14,7 @@ import type {
   InvalidationConfig,
 } from './types/cache.js';
 import type { L1Config } from './l1/types.js';
+import type { Backend } from './backends/types.js';
 import type { SerializerConfig } from './serialization/serializer.js';
 import { ConfigurationError } from './errors.js';
 
@@ -36,17 +37,33 @@ interface BaseIntentOptions {
 }
 
 /**
+ * Backend selection for the storage-agnostic intents (minimal / production /
+ * secure): a Redis connection URL, or any pre-built {@link Backend} instance
+ * (Workers KV / Cache API, custom backends). Exactly one of `url` /
+ * `backend` — enforced at compile time here and at runtime for JS callers.
+ */
+type IntentBackendOptions =
+  | {
+      /** Redis connection URL */
+      url: string;
+      /** Redis key prefix */
+      keyPrefix?: string;
+      backend?: undefined;
+    }
+  | {
+      /** Pre-built backend instance (e.g. `workersKV(...)`, a custom Backend) */
+      backend: Backend;
+      url?: undefined;
+      keyPrefix?: undefined;
+    };
+
+/**
  * Options for `createCache.minimal()` — speed-first, no protection.
  *
  * Disables circuit breaker, retry, and degradation for maximum throughput.
  * Use for read-heavy, non-critical caching (product catalogs, public APIs).
  */
-export interface MinimalOptions extends BaseIntentOptions {
-  /** Redis connection URL */
-  url: string;
-  /** Redis key prefix */
-  keyPrefix?: string;
-}
+export type MinimalOptions = BaseIntentOptions & IntentBackendOptions;
 
 /**
  * Options for `createCache.production()` — reliability-first.
@@ -54,16 +71,13 @@ export interface MinimalOptions extends BaseIntentOptions {
  * Enables circuit breaker (failureThreshold: 5), retry with backoff,
  * and graceful degradation. Full L1 with SWR.
  */
-export interface ProductionOptions extends BaseIntentOptions {
-  /** Redis connection URL */
-  url: string;
-  /** Redis key prefix */
-  keyPrefix?: string;
-  /** Enable Prometheus metrics (default: true) */
-  metrics?: boolean;
-  /** Override default reliability settings */
-  reliability?: Partial<ReliabilityConfig>;
-}
+export type ProductionOptions = BaseIntentOptions &
+  IntentBackendOptions & {
+    /** Enable Prometheus metrics (default: true) */
+    metrics?: boolean;
+    /** Override default reliability settings */
+    reliability?: Partial<ReliabilityConfig>;
+  };
 
 /**
  * Options for `createCache.secure()` — zero-knowledge encryption.
@@ -71,23 +85,20 @@ export interface ProductionOptions extends BaseIntentOptions {
  * Production-grade reliability + AES-256-GCM client-side encryption.
  * Master key never leaves the client. GDPR/HIPAA/PCI-DSS compliant.
  */
-export interface SecureOptions extends BaseIntentOptions {
-  /** Redis connection URL */
-  url: string;
-  /**
-   * Master encryption key (hex-encoded, min 32 bytes / 64 hex chars).
-   * Falls back to CACHEKIT_MASTER_KEY env var if not provided.
-   */
-  masterKey?: string;
-  /** Tenant ID for key derivation isolation */
-  tenantId?: string;
-  /** Redis key prefix */
-  keyPrefix?: string;
-  /** Enable Prometheus metrics (default: true) */
-  metrics?: boolean;
-  /** Override default reliability settings */
-  reliability?: Partial<ReliabilityConfig>;
-}
+export type SecureOptions = BaseIntentOptions &
+  IntentBackendOptions & {
+    /**
+     * Master encryption key (hex-encoded, min 32 bytes / 64 hex chars).
+     * Falls back to CACHEKIT_MASTER_KEY env var if not provided.
+     */
+    masterKey?: string;
+    /** Tenant ID for key derivation isolation */
+    tenantId?: string;
+    /** Enable Prometheus metrics (default: true) */
+    metrics?: boolean;
+    /** Override default reliability settings */
+    reliability?: Partial<ReliabilityConfig>;
+  };
 
 /**
  * Options for `createCache.io()` — SaaS backend (cachekit.io).
@@ -117,22 +128,26 @@ export interface IOOptions extends BaseIntentOptions {
 // CreateCacheFn — callable with intent properties
 // ============================================================================
 
-/** The createCache function augmented with intent-based factory methods. */
-export interface CreateCacheFn {
+/**
+ * The createCache function augmented with intent-based factory methods.
+ * Generic over the platform's cache surface — Node returns SecureCache,
+ * Workers returns WorkersCache (SecureCache + withExecutionContext).
+ */
+export interface CreateCacheFn<TCache extends SecureCache = SecureCache> {
   /** Create a cache with explicit options. */
-  (options: CacheOptions): SecureCache;
+  (options: CacheOptions): TCache;
 
   /** Speed-first cache: no circuit breaker, no retry, minimal L1. */
-  minimal(options: MinimalOptions): SecureCache;
+  minimal(options: MinimalOptions): TCache;
 
   /** Reliability-first cache: circuit breaker + retry + degradation + full L1. */
-  production(options: ProductionOptions): SecureCache;
+  production(options: ProductionOptions): TCache;
 
   /** Zero-knowledge encrypted cache: production reliability + AES-256-GCM. */
-  secure(options: SecureOptions): SecureCache;
+  secure(options: SecureOptions): TCache;
 
   /** SaaS-backed cache via cachekit.io: full reliability, zero infrastructure. */
-  io(options: IOOptions): SecureCache;
+  io(options: IOOptions): TCache;
 }
 
 // ============================================================================
@@ -162,13 +177,12 @@ const PRODUCTION_RELIABILITY: ReliabilityConfig = {
 /**
  * Build the intent-augmented createCache over a platform's base factory.
  */
-export function buildIntents(baseCreate: (options: CacheOptions) => SecureCache): CreateCacheFn {
-  function createMinimal(options: MinimalOptions): SecureCache {
+export function buildIntents<TCache extends SecureCache>(
+  baseCreate: (options: CacheOptions) => TCache
+): CreateCacheFn<TCache> {
+  function createMinimal(options: MinimalOptions): TCache {
     const cacheOptions: CacheOptions = {
-      backend: {
-        url: options.url,
-        keyPrefix: options.keyPrefix,
-      },
+      backend: resolveIntentBackend(options, 'minimal'),
       defaultTtl: options.ttl ?? 300,
       l1: {
         ...options.l1,
@@ -188,12 +202,9 @@ export function buildIntents(baseCreate: (options: CacheOptions) => SecureCache)
     return baseCreate(cacheOptions);
   }
 
-  function createProduction(options: ProductionOptions): SecureCache {
+  function createProduction(options: ProductionOptions): TCache {
     const cacheOptions: CacheOptions = {
-      backend: {
-        url: options.url,
-        keyPrefix: options.keyPrefix,
-      },
+      backend: resolveIntentBackend(options, 'production'),
       defaultTtl: options.ttl ?? 600,
       l1: withFullL1Defaults(options.l1),
       reliability: mergeReliability(PRODUCTION_RELIABILITY, options.reliability),
@@ -206,7 +217,7 @@ export function buildIntents(baseCreate: (options: CacheOptions) => SecureCache)
     return baseCreate(cacheOptions);
   }
 
-  function createSecure(options: SecureOptions): SecureCache {
+  function createSecure(options: SecureOptions): TCache {
     const masterKey = options.masterKey ?? envVar('CACHEKIT_MASTER_KEY');
     if (!masterKey) {
       throw new ConfigurationError(
@@ -216,10 +227,7 @@ export function buildIntents(baseCreate: (options: CacheOptions) => SecureCache)
     }
 
     const cacheOptions: CacheOptions = {
-      backend: {
-        url: options.url,
-        keyPrefix: options.keyPrefix,
-      },
+      backend: resolveIntentBackend(options, 'secure'),
       defaultTtl: options.ttl ?? 600,
       l1: withFullL1Defaults(options.l1),
       encryption: {
@@ -236,7 +244,7 @@ export function buildIntents(baseCreate: (options: CacheOptions) => SecureCache)
     return baseCreate(cacheOptions);
   }
 
-  function createIO(options: IOOptions): SecureCache {
+  function createIO(options: IOOptions): TCache {
     const apiKey = options.apiKey ?? envVar('CACHEKIT_API_KEY');
     if (!apiKey) {
       throw new ConfigurationError(
@@ -269,12 +277,37 @@ export function buildIntents(baseCreate: (options: CacheOptions) => SecureCache)
     production: createProduction,
     secure: createSecure,
     io: createIO,
-  }) as CreateCacheFn;
+  }) as CreateCacheFn<TCache>;
 }
 
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/**
+ * Resolve the backend for the storage-agnostic intents: a pre-built Backend
+ * instance wins; otherwise the url becomes a Redis backend config. The
+ * runtime guard covers JS callers the compile-time union can't reach.
+ */
+function resolveIntentBackend(
+  options: IntentBackendOptions,
+  intent: 'minimal' | 'production' | 'secure'
+): CacheOptions['backend'] {
+  if (options.backend !== undefined) {
+    if (options.url !== undefined) {
+      throw new ConfigurationError(
+        `createCache.${intent}() accepts either url (Redis) or backend (instance), not both.`
+      );
+    }
+    return options.backend;
+  }
+  if (options.url === undefined) {
+    throw new ConfigurationError(
+      `createCache.${intent}() requires a Redis url or a backend instance.`
+    );
+  }
+  return { url: options.url, keyPrefix: options.keyPrefix };
+}
 
 /**
  * Full-featured L1 defaults shared by the production / secure / io intents

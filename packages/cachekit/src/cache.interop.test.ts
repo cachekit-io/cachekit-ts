@@ -199,6 +199,30 @@ describe('cache.wrap interop mode', () => {
     ).not.toThrow();
   });
 
+  it('fails closed at wrap time when the backend transforms keys (Backend.transformsKeys)', () => {
+    // Re-encoding backends (e.g. the Cloudflare Cache API maps keys onto
+    // synthetic URLs) can't express the transform as a keyPrefix, but they
+    // break interop for the same reason — fail closed. See Backend.transformsKeys.
+    class KeyTransformBackend extends InMemoryBackend {
+      readonly transformsKeys = true;
+    }
+    cache = createCache({ backend: new KeyTransformBackend(), l1: { enabled: false } });
+
+    expect(() =>
+      cache!.wrap(async (id: number) => ({ id }), {
+        namespace: 'users',
+        interop: 'get_user',
+        interopArity: 1,
+        ttl: 60,
+      })
+    ).toThrow(/transforms keys/);
+
+    // Auto mode on the same key-transforming backend stays fully usable.
+    expect(() =>
+      cache!.wrap(async (id: number) => ({ id }), { namespace: 'users', ttl: 60 })
+    ).not.toThrow();
+  });
+
   it('fails closed at call time when a keyPrefix appears after wrap (dynamic prefix)', async () => {
     // The Backend contract requires a construction-time-constant keyPrefix;
     // a request-scoped getter (e.g. AsyncLocalStorage tenant router) would

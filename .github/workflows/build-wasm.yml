@@ -2,11 +2,12 @@ name: Build Wasm
 
 # One deterministic wasm32 target — the deliberate contrast to the NAPI
 # per-platform matrix in build-native.yml (see cachekit-ts#63 / LAB-595).
-
+#
 # Tags only: the ci.yml `workers` job (required via ci-success) already runs
 # the identical build:wasm — size budget, version pin, drift check — on every
-# PR and main push. This workflow exists solely to build + publish the
-# artifact when release-please tags a release.
+# PR and main push. Releases created by release-please publish from
+# release-please.yml because GitHub App-created tags do not trigger this
+# workflow; this path remains for manually pushed recovery tags.
 on:
   push:
     tags: ['cachekit-core-wasm-v*']
