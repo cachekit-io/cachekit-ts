@@ -8,9 +8,12 @@
  * (@cachekit-io/cachekit-core-wasm, ~55 KB gzipped).
  *
  * Deltas vs the Node entrypoint:
- * - Backends: CachekitIO (`createCache.io` / `backend: { apiKey }`) or a
- *   custom Backend instance. Redis-URL intents (minimal / production /
- *   secure) throw ConfigurationError.
+ * - Backends: CachekitIO (`createCache.io` / `backend: { apiKey }`), the
+ *   native edge stores added in phase 2 — Workers KV (`workersKV`) and the
+ *   Cache API (`workersCacheAPI`), both passed as `backend:` instances to
+ *   createCache or any intent — or a custom Backend instance. Redis-URL
+ *   intents (minimal / production / secure with `url`) throw
+ *   ConfigurationError.
  * - No cross-instance invalidation (Redis Pub/Sub is Node-only).
  * - No Prometheus metrics.
  * - SWR background refresh requires binding the request's ExecutionContext
@@ -63,7 +66,24 @@ export * from '../exports-common.js';
 // ============ Workers-only exports ============
 // wasm-backed drop-ins for the root entrypoint's NAPI-backed exports.
 export { EncryptionManager, ByteStorage } from './runtime.js';
+
 // SWR on Workers: bind the request's ExecutionContext per request so
 // background refreshes ride ctx.waitUntil (see WorkersCache).
 export type { WorkersCache } from './runtime.js';
 export type { ExecutionContextLike, WaitUntil } from '../cache-core.js';
+
+// Native edge storage backends (phase 2): Workers KV and the Cache API.
+export {
+  workersKV,
+  WorkersKVBackend,
+  KV_MIN_TTL_SECONDS,
+  type WorkersKVBackendConfig,
+  type KVNamespaceLike,
+} from '../backends/workers-kv.js';
+export {
+  workersCacheAPI,
+  CacheAPIBackend,
+  type CacheAPIBackendConfig,
+  type CacheLike,
+  type CacheStorageLike,
+} from '../backends/workers-cache-api.js';

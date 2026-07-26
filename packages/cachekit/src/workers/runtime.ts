@@ -80,7 +80,9 @@ const workersRuntime: CacheRuntime = {
     // RedisBackendConfig — ioredis is TCP + Node-only, never bundled here.
     throw new ConfigurationError(
       'Redis backends are not supported on Cloudflare Workers. ' +
-        'Use the CachekitIO backend (createCache.io / backend: { apiKey }) ' +
+        'Use the CachekitIO backend (createCache.io / backend: { apiKey }), ' +
+        'Workers KV (backend: workersKV({ kv: env.MY_KV })), ' +
+        'the Cache API (backend: workersCacheAPI()), ' +
         'or pass a custom Backend instance.'
     );
   },
@@ -116,8 +118,9 @@ export interface WorkersCache extends SecureCache {
 /**
  * Create a configured cache instance on Cloudflare Workers.
  *
- * Same API as the Node createCache, with the Workers surface: CachekitIO
- * (or custom Backend instance) backends, compression and zero-knowledge
+ * Same API as the Node createCache, with the Workers backend surface:
+ * CachekitIO, Workers KV (`workersKV`), the Cache API (`workersCacheAPI`),
+ * or any custom Backend instance — compression and zero-knowledge
  * encryption included. Redis backends and cross-instance invalidation are
  * Node-only. SWR background refresh requires binding the request's
  * ExecutionContext per request — `cache.withExecutionContext(ctx)` — so

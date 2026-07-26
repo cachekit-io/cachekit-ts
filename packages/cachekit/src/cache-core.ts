@@ -398,6 +398,17 @@ export class CacheImpl implements SecureCache {
             'client, or drop the keyPrefix.'
         );
       }
+      // Re-encoding backends (e.g. the Cloudflare Cache API maps keys to
+      // synthetic URLs) can't express the transform as a keyPrefix, but they
+      // break interop for the same reason — the key never reaches the store
+      // byte-identical to py/rs. Fail closed; see Backend.transformsKeys.
+      if (this.backend.transformsKeys) {
+        throw new ConfigurationError(
+          `Interop operation "${interopOperation}" cannot run on a backend that transforms keys ` +
+            '(e.g. the Cloudflare Cache API maps each key onto a synthetic URL). Use a verbatim-key ' +
+            'backend (Redis / CachekitIO / Workers KV) for interop caches; see Backend.transformsKeys.'
+        );
+      }
 
       // The cross-SDK arity contract is declared explicitly (fn.length stops
       // at the first default/rest parameter, so it cannot be trusted to
@@ -443,10 +454,10 @@ export class CacheImpl implements SecureCache {
       // prefix at runtime — reopening the exact fail-open this guard closes.
       // The Backend contract requires a construction-time-constant value; a
       // backend that violates it still fails closed here.
-      if (interop && this.backend.keyPrefix) {
+      if (interop && (this.backend.keyPrefix || this.backend.transformsKeys)) {
         throw new ConfigurationError(
           `Interop operation "${interopOperation}" cannot run on a backend with a key prefix ` +
-            `(${JSON.stringify(this.backend.keyPrefix)}) — see Backend.keyPrefix`
+            'or key transform — see Backend.keyPrefix / Backend.transformsKeys'
         );
       }
       const cacheKey = interop

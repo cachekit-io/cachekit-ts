@@ -80,10 +80,24 @@ export interface Backend {
    *   forward the inner backend's `keyPrefix`, or they hide the transform
    *   from the guard.
    * - Backends applying any non-prefix key transformation (suffixing,
-   *   hashing, re-encoding) cannot express it here and are incompatible
-   *   with interop mode, full stop.
+   *   hashing, re-encoding) cannot express it here; they declare
+   *   {@link transformsKeys} instead and are incompatible with interop
+   *   mode, full stop.
    */
   readonly keyPrefix?: string;
+
+  /**
+   * Set to `true` by backends that apply a non-prefix key transformation —
+   * suffixing, hashing, or re-encoding (e.g. the Cloudflare Cache API maps
+   * each key onto a synthetic URL). Such a transform cannot be expressed as
+   * a plain {@link keyPrefix}, but it breaks interop for the same reason: the
+   * key can never reach the store byte-identical to the Python and Rust SDKs'
+   * bare `{namespace}:{operation}:{hash}`. Interop mode fails closed when this
+   * is `true`. Backends that store keys verbatim omit it (or return `false`).
+   *
+   * Like `keyPrefix`, the value MUST be constant from construction onward.
+   */
+  readonly transformsKeys?: boolean;
 }
 
 /**

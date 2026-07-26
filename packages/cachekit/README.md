@@ -318,11 +318,67 @@ export default {
 > on hot isolates. If you do create short-lived caches, call `cache.close()`
 > — it zeroizes key material and frees the wasm codec deterministically.
 
+### Native edge storage: Workers KV and the Cache API
+
+Beyond CachekitIO, two Cloudflare-native backends keep cache state in the
+edge itself — no round-trip to api.cachekit.io. Both store the same opaque
+ByteStorage payloads as every other backend, so encryption and the wire
+envelope are unchanged (secure caches store only ciphertext), and both plug
+into `createCache` or any intent via `backend:`:
+
+```typescript
+import { createCache, workersKV, workersCacheAPI } from '@cachekit-io/cachekit/workers';
+
+// Inside your fetch handler (env bindings arrive per-request; create the
+// cache lazily once per isolate, as above):
+
+// Workers KV: globally replicated, eventually consistent.
+cache ??= createCache.production({
+  backend: workersKV({ kv: env.CACHE_KV }), // your KVNamespace binding
+  ttl: 600,
+});
+
+// Cache API: per-data-center read-through tier (caches.default or named).
+popCache ??= createCache.minimal({
+  backend: workersCacheAPI(), // or workersCacheAPI({ cacheName: 'my-cache' })
+  ttl: 60,
+});
+```
+
+TTL and consistency semantics differ from Redis/CachekitIO — pick by workload:
+
+|                          | Workers KV (`workersKV`)                                                            | Cache API (`workersCacheAPI`)                                     |
+| ------------------------ | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| Scope                    | Global (all locations, eventually consistent — writes take up to ~60s to propagate) | Single data center only                                           |
+| TTL                      | Native `expirationTtl`; **60s minimum** — shorter TTLs are clamped up, never down   | `Cache-Control: max-age`, honored to the second, no floor         |
+| `ttl <= 0` ("no expiry") | Stored without expiration                                                           | Capped at 1-year max-age (the Cache API has no unbounded storage) |
+| Eviction                 | Durable until expiry                                                                | Best-effort — entries may be dropped under cache pressure         |
+| Best for                 | Shared config, sessions, rarely-written hot reads                                   | Request-local acceleration in front of a shared source            |
+
+The Cache API is request-keyed under the hood; the backend maps each cache
+key to a synthetic never-fetched URL, so it behaves like a plain KV store
+from the SDK's perspective. Treat it as an accelerator tier, not
+authoritative storage. `delete()` on KV derives its boolean from a
+read-then-delete (KV's own delete is void), so it is advisory under
+concurrent writers.
+
+> **Cache API caveats.** `caches.default` requires a Worker on a **route or
+> custom domain** — it is a silent no-op on `*.workers.dev` and in the
+> dashboard/Playground preview (writes are dropped, reads always miss, no
+> error). It is also **zone-shared**: a co-located Worker can read entries you
+> store unencrypted, so keep non-secure workloads on a **named cache**
+> (`workersCacheAPI({ cacheName })`) or use `createCache.secure(...)`
+> (ciphertext at rest). And because the Cache API re-encodes keys onto
+> synthetic URLs (a key transform, not a prefix), it does **not** support
+> cross-SDK **interop** mode — use Workers KV or CachekitIO for interop caches.
+
 **Workers surface (deltas vs Node):**
 
-- **Backends**: CachekitIO (`createCache.io` / `backend: { apiKey }`) or a
-  custom `Backend` instance. The Redis-URL intents (`minimal`, `production`,
-  `secure`) throw `ConfigurationError` — ioredis is TCP and Node-only.
+- **Backends**: CachekitIO (`createCache.io` / `backend: { apiKey }`),
+  Workers KV (`workersKV`), the Cache API (`workersCacheAPI`), or a custom
+  `Backend` instance. The Redis-URL intents (`minimal`, `production`,
+  `secure` with `url`) throw `ConfigurationError` — ioredis is TCP and
+  Node-only.
 - **No cross-instance invalidation** (Redis Pub/Sub is Node-only); L1
   invalidation within an isolate works as usual.
 - **SWR needs the request context** — workerd cancels fire-and-forget work
