@@ -166,13 +166,13 @@ jobs:
       - name: Build wasm artifact
         run: pnpm --filter @cachekit-io/cachekit-core-wasm build:wasm
 
-      - name: Configure npm auth
-        run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-
+      # Auth is npm OIDC trusted publishing — the repo has NO NPM_TOKEN secret
+      # (the old token-auth steps resolved an empty token and died ENEEDAUTH,
+      # LAB-831). Node 22's bundled npm 10 cannot do OIDC; pnpm 11 can, and
+      # this is the exact invocation the proven publish-cachekit job uses.
+      # First-time creation of a new package additionally needs an ORG-level
+      # trusted publisher on npmjs.com (package-level config requires the
+      # package to already exist — npm/cli#8544).
       - name: Publish to npm
         working-directory: packages/cachekit-core-wasm
-        run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm publish --access public --provenance --no-git-checks
