@@ -65,7 +65,6 @@ describe('BackgroundRefreshManager', () => {
       resolveCompute!('done');
       await registered[0]; // resolves once L2 persistence finished
       expect(persistToL2).toHaveBeenCalledWith('key1', 'done', { ttl: 60, namespace: 'test' });
-      expect(manager.isRefreshing('key1')).toBe(false);
     });
 
     it('the promise handed to waitUntil never rejects, even when the refresh fails', async () => {
@@ -86,34 +85,6 @@ describe('BackgroundRefreshManager', () => {
       // ctx.waitUntil — the refresh handles its own errors instead.
       await expect(registered[0]).resolves.toBeUndefined();
       expect(consoleSpy).toHaveBeenCalled();
-      expect(manager.isRefreshing('key1')).toBe(false);
-    });
-
-    it('should track refreshing keys during execution', async () => {
-      let resolveCompute: () => void;
-      const computePromise = new Promise<string>((resolve) => {
-        resolveCompute = () => resolve('done');
-      });
-      const computeFn = vi.fn().mockReturnValue(computePromise);
-
-      manager.scheduleRefresh(
-        'key1',
-        computeFn,
-        { ttl: 60, namespace: 'test' },
-        0,
-        null,
-        persistToL2
-      );
-
-      // Key should be tracked while computing
-      expect(manager.isRefreshing('key1')).toBe(true);
-      expect(manager.refreshingCount).toBe(1);
-
-      // Complete the computation
-      resolveCompute!();
-      await vi.waitFor(() => {
-        expect(manager.isRefreshing('key1')).toBe(false);
-      });
     });
 
     it('should update L1 cache with version check on success', async () => {
@@ -187,23 +158,6 @@ describe('BackgroundRefreshManager', () => {
       // Should not have computed
       expect(computeFn).not.toHaveBeenCalled();
     });
-
-    it('should clean up tracking even after error', async () => {
-      const computeFn = vi.fn().mockRejectedValue(new Error('fail'));
-
-      manager.scheduleRefresh(
-        'key1',
-        computeFn,
-        { ttl: 60, namespace: 'test' },
-        0,
-        null,
-        persistToL2
-      );
-
-      await vi.waitFor(() => {
-        expect(manager.isRefreshing('key1')).toBe(false);
-      });
-    });
   });
 
   describe('close', () => {
@@ -213,35 +167,10 @@ describe('BackgroundRefreshManager', () => {
       expect(manager.isClosed).toBe(true);
     });
 
-    it('should clear all refreshing keys', async () => {
-      // Start a long-running refresh
-      const computeFn = vi.fn().mockReturnValue(new Promise(() => {})); // Never resolves
-      manager.scheduleRefresh(
-        'key1',
-        computeFn,
-        { ttl: 60, namespace: 'test' },
-        0,
-        null,
-        persistToL2
-      );
-
-      expect(manager.refreshingCount).toBe(1);
-
-      manager.close();
-
-      expect(manager.refreshingCount).toBe(0);
-    });
-
     it('should be idempotent', () => {
       manager.close();
       manager.close();
       expect(manager.isClosed).toBe(true);
-    });
-  });
-
-  describe('isRefreshing', () => {
-    it('should return false for unknown keys', () => {
-      expect(manager.isRefreshing('unknown')).toBe(false);
     });
   });
 

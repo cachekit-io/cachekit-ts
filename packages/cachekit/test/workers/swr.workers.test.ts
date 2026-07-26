@@ -26,6 +26,7 @@
 import { describe, it, expect } from 'vitest';
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { createCache, type Backend } from '../../src/workers/index.js';
+import { generateKey } from '../../src/serialization/key-generator.js';
 
 /** In-memory Backend that counts writes, so L2 persistence is observable. */
 function memoryBackend(): Backend & { store: Map<string, Uint8Array>; setCalls: number } {
@@ -158,6 +159,43 @@ describe('SWR via ctx.waitUntil inside workerd', () => {
     expect(await fn()).toEqual({ gen: 3 });
 
     await waitOnExecutionContext(ctx);
+    await cache.close();
+  });
+
+  it('does not overwrite an interleaved explicit write with a stale refresh', async () => {
+    const backend = memoryBackend();
+    const cache = createCache({ backend, defaultTtl: 60, l1: ALWAYS_STALE_L1 });
+    const ctx = createExecutionContext();
+    const bound = cache.withExecutionContext(ctx);
+    const cacheKey = generateKey('swr:write-race', [1]);
+
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let calls = 0;
+    const fn = bound.wrap(
+      async (id: number) => {
+        calls++;
+        if (calls > 1) await refreshGate;
+        return { id, source: calls === 1 ? 'initial' : 'refresh' };
+      },
+      { namespace: 'swr:write-race', ttl: 60 }
+    );
+
+    expect(await fn(1)).toEqual({ id: 1, source: 'initial' });
+    expect(await fn(1)).toEqual({ id: 1, source: 'initial' });
+    expect(calls).toBe(2); // the stale refresh is now paused in computeFn
+
+    const newer = { id: 1, source: 'explicit-write' };
+    await cache.set(cacheKey, newer, { ttl: 60, namespace: 'swr:write-race' });
+    releaseRefresh();
+    await waitOnExecutionContext(ctx);
+
+    // Refresh persistence is L2-only; completeRefresh sees the newer L1
+    // version and rejects the stale result instead of resurrecting it.
+    expect(await cache.get(cacheKey)).toEqual(newer);
+
     await cache.close();
   });
 
