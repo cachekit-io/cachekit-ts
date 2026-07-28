@@ -27,6 +27,10 @@ minimumReleaseAgeExclude:
 # other brace-expansion major ever appears (e.g. minimatch@3 pulling ^1.1.7),
 # remove this ignore and re-justify. Remove once the advisory lists a patched
 # 2.x version (audit then passes bare); re-evaluate by 2026-09-01 regardless.
+# ENFORCED, not just documented: ci.yml's "Verify brace-expansion
+# advisory-ignore invariant" step fails the security job if any other major
+# resolves, or if brace-expansion leaves the graph entirely. Delete that step
+# in the same commit that deletes this ignore.
 auditConfig:
   ignoreGhsas:
     - GHSA-mh99-v99m-4gvg
