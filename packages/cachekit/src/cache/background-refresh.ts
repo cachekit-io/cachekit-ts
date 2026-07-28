@@ -110,8 +110,7 @@ export class BackgroundRefreshManager {
     try {
       waitUntil?.(refresh);
     } catch (error) {
-      // eslint-disable-next-line no-console
-      console.error(
+      logError(
         '[cachekit] Failed to register background refresh with waitUntil:',
         error instanceof Error ? error.message : 'Unknown error'
       );

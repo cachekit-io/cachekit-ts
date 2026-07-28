@@ -43,24 +43,23 @@ class FailingBackend implements Backend {
   async close(): Promise<void> {}
 }
 
-interface MetricSample {
-  value: number;
-  labels: Record<string, string>;
-  /** prom-client sets this on histogram sub-series (_count/_sum/_bucket) */
-  metricName?: string;
-}
-
 async function metricValue(
   registry: Registry,
   name: string,
   labels?: Record<string, string>
 ): Promise<number> {
-  const metrics = (await registry.getMetricsAsJSON()) as unknown as {
-    name: string;
-    values: MetricSample[];
-  }[];
+  const metrics = await registry.getMetricsAsJSON();
   return metrics
-    .flatMap((m) => m.values.map((v) => ({ ...v, seriesName: v.metricName ?? m.name })))
+    .flatMap((m) =>
+      m.values.map((v) => ({
+        value: v.value,
+        labels: v.labels,
+        // prom-client emits metricName on histogram sub-series
+        // (_count/_sum/_bucket) at runtime but omits it from MetricValue's
+        // declared type — narrow only that one optional field.
+        seriesName: (v as { metricName?: string }).metricName ?? m.name,
+      }))
+    )
     .filter((v) => v.seriesName === name)
     .filter((v) => !labels || Object.entries(labels).every(([k, val]) => v.labels[k] === val))
     .reduce((sum, v) => sum + v.value, 0);
@@ -184,7 +183,7 @@ describe('Cache metrics wiring (LAB-517)', () => {
       const metrics = await registry.getMetricsAsJSON();
       const cb = metrics.find((m) => m.name === 'cachekit_circuit_breaker_state');
       expect(cb).toBeDefined();
-      expect((cb as unknown as { values: { value: number }[] }).values[0]?.value).toBe(0);
+      expect(cb?.values[0]?.value).toBe(0);
     });
   });
 

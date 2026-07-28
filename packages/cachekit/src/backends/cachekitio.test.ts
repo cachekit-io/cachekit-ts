@@ -3,6 +3,10 @@ import { cachekitio } from './cachekitio-factory.js';
 import type { Backend, CachekitIOBackendConfig } from './types.js';
 import { BackendError, ConfigurationError, TimeoutError } from '../errors.js';
 
+// Deliberately fake credential for fixtures — obviously-fake value so secret
+// scanners and reviewers never mistake it for a live key.
+const FAKE_API_KEY = 'ck_test_fake-not-a-secret'; // pragma: allowlist secret
+
 // Helper to create a mock Response
 function mockResponse(
   status: number,
@@ -355,7 +359,7 @@ describe('CachekitIO Backend', () => {
       // This should not throw — it should detect apiKey and use cachekitio()
       const cache = createCache({
         backend: {
-          apiKey: 'ck_test_xyz',
+          apiKey: FAKE_API_KEY,
           apiUrl: 'https://api.test.cachekit.io',
           allowCustomHost: true,
         },
@@ -377,7 +381,7 @@ describe('CachekitIO Backend', () => {
 
       const cache = createCache({
         backend: {
-          apiKey: 'ck_test_xyz',
+          apiKey: FAKE_API_KEY,
           apiUrl: 'https://api.test.cachekit.io',
           allowCustomHost: true,
         },
@@ -402,7 +406,7 @@ describe('CachekitIO Backend', () => {
 
       const cache = createCache({
         backend: {
-          apiKey: 'ck_test_xyz',
+          apiKey: FAKE_API_KEY,
           apiUrl: 'https://api.test.cachekit.io',
           allowCustomHost: true,
         },
@@ -424,7 +428,7 @@ describe('CachekitIO Backend', () => {
 
       const cache = createCache({
         backend: {
-          apiKey: 'ck_test_xyz',
+          apiKey: FAKE_API_KEY,
           apiUrl: 'https://api.test.cachekit.io',
           allowCustomHost: true,
           metricsProvider: () => ({ l1Hits: 42, l2Hits: 7, misses: 3, l1Enabled: true }),
