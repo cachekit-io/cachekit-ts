@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.4](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.1.3...cachekit-v0.1.4) (2026-07-24)
+
+
+### Features
+
+* Cloudflare Workers entrypoint on wasm32 cachekit-core (LAB-595) ([#78](https://github.com/cachekit-io/cachekit-ts/issues/78)) ([d70d225](https://github.com/cachekit-io/cachekit-ts/commit/d70d22597ed83bba83f5e82fae770289734067ce))
+* Memcached + File backends (Node-only subpath exports) (LAB-430) ([#76](https://github.com/cachekit-io/cachekit-ts/issues/76)) ([e22928d](https://github.com/cachekit-io/cachekit-ts/commit/e22928d8a25beb1cc7bbefc98c222e62a08af762))
+
 ## [0.1.3](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.1.2...cachekit-v0.1.3) (2026-07-23)
 
 

@@ -2,6 +2,13 @@ import type { L1Cache } from '../l1/lru-cache.js';
 import { logError } from '../logger.js';
 
 /**
+ * Registers a background promise with the platform so it survives past the
+ * current request — Cloudflare Workers' `ExecutionContext.waitUntil`. On
+ * platforms where fire-and-forget is safe (Node), no handle is needed.
+ */
+export type WaitUntil = (promise: Promise<unknown>) => void;
+
+/**
  * Options for scheduling a background refresh.
  */
 export interface RefreshOptions {
@@ -20,7 +27,6 @@ export type PersistCallback<T> = (key: string, value: T, options: RefreshOptions
  * Manages stale-while-revalidate (SWR) background refreshes.
  *
  * Responsibilities:
- * - Track in-flight background refreshes
  * - Execute refresh operations asynchronously
  * - Coordinate L1 cache version tokens to prevent stale data resurrection
  * - Handle errors gracefully with logging
@@ -29,7 +35,6 @@ export type PersistCallback<T> = (key: string, value: T, options: RefreshOptions
  * This class extracts SWR logic from CacheImpl for better separation of concerns.
  */
 export class BackgroundRefreshManager {
-  private readonly refreshingKeys = new Set<string>();
   private closed = false;
 
   /**
@@ -44,6 +49,10 @@ export class BackgroundRefreshManager {
    * @param versionToken - L1 version token at time of read (for staleness detection)
    * @param l1Cache - L1 cache instance (may be null if L1 disabled)
    * @param persistToL2 - Callback to persist value to L2 cache
+   * @param waitUntil - Platform handle that keeps the refresh alive past the
+   *   current request (Workers ctx.waitUntil). Without it the refresh is
+   *   fire-and-forget, which is only safe on platforms that never cancel
+   *   pending work (Node).
    */
   scheduleRefresh<T>(
     key: string,
@@ -51,13 +60,14 @@ export class BackgroundRefreshManager {
     options: RefreshOptions,
     versionToken: number,
     l1Cache: L1Cache | null,
-    persistToL2: PersistCallback<T>
+    persistToL2: PersistCallback<T>,
+    waitUntil?: WaitUntil
   ): void {
-    // Track at manager level for cleanup on close
-    this.refreshingKeys.add(key);
-
-    // Fire-and-forget background refresh
-    (async () => {
+    // Background refresh. Note computeFn is invoked synchronously here (the
+    // async body runs to its first await on invocation) — on workerd that
+    // matters: the refresh's I/O is created inside the request that
+    // triggered it, i.e. the same request whose waitUntil is passed in.
+    const refresh = (async () => {
       try {
         // Skip if manager is closed (avoid operations on closed cache)
         if (this.closed) {
@@ -84,34 +94,36 @@ export class BackgroundRefreshManager {
         if (l1Cache) {
           l1Cache.cancelRefresh(key);
         }
-      } finally {
-        // Always clean up tracking
-        this.refreshingKeys.delete(key);
       }
     })();
+
+    // Register with the platform so the refresh survives response return.
+    // The promise never rejects (errors are handled above), so this cannot
+    // surface an unhandled rejection through waitUntil.
+    //
+    // Guard the registration call itself: waitUntil() is a synchronous
+    // platform call that can throw (e.g. a caller reusing a wrapped function
+    // across requests with a stale ExecutionContext). A failed registration
+    // must forfeit only this refresh attempt, never the read that already
+    // has a valid (stale) value to return. A stranded L1 marker
+    // is bounded by SWR_REFRESH_MARKER_TTL_MS.
+    try {
+      waitUntil?.(refresh);
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error(
+        '[cachekit] Failed to register background refresh with waitUntil:',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+    }
   }
 
   /**
-   * Check if a key is currently being refreshed.
-   */
-  isRefreshing(key: string): boolean {
-    return this.refreshingKeys.has(key);
-  }
-
-  /**
-   * Get count of in-flight refreshes.
-   */
-  get refreshingCount(): number {
-    return this.refreshingKeys.size;
-  }
-
-  /**
-   * Mark manager as closed and cancel all pending refreshes.
+   * Mark manager as closed.
    * Called during cache shutdown.
    */
   close(): void {
     this.closed = true;
-    this.refreshingKeys.clear();
   }
 
   /**

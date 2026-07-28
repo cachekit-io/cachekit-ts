@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createCache } from './cache.js';
+import { generateKey } from './serialization/key-generator.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
 
@@ -393,6 +394,112 @@ describe('Cache Integration', () => {
       await expect(cache.get('test')).rejects.toThrow('Cache has been closed');
       await expect(cache.set('test', 'value')).rejects.toThrow('Cache has been closed');
       await expect(cache.delete('test')).rejects.toThrow('Cache has been closed');
+    });
+  });
+
+  describe('SWR refresh persistence (L2-only setEntry + version-guarded L1)', () => {
+    // The SWR refresh persists through setEntry with updateL1=false: the
+    // ONLY L1 writer on the refresh path is completeRefresh, whose version
+    // token discards the refresh when an explicit write landed meanwhile.
+    // swrThresholdRatio: 2 makes every live L1 entry deterministically
+    // stale (threshold ≥ 1.8×ttl > remaining TTL) — no clock control.
+
+    /** Backend whose Nth set() call blocks on a gate (1-indexed). */
+    class GatedBackend extends InMemoryBackend {
+      setCount = 0;
+      constructor(
+        private readonly gatedCall: number,
+        private readonly gate: Promise<void>
+      ) {
+        super();
+      }
+      override async set(key: string, value: Uint8Array, ttl: number): Promise<void> {
+        this.setCount++;
+        if (this.setCount === this.gatedCall) await this.gate;
+        return super.set(key, value, ttl);
+      }
+    }
+
+    it('completes a refresh via completeRefresh: L1 and L2 both end up with the new value', async () => {
+      const swrBackend = new InMemoryBackend();
+      const swrCache = createCache({
+        backend: swrBackend,
+        defaultTtl: 60,
+        l1: { swrEnabled: true, swrThresholdRatio: 2 },
+      });
+
+      let calls = 0;
+      const fn = swrCache.wrap(
+        async () => {
+          calls++;
+          return { gen: calls };
+        },
+        { namespace: 'swr:persist', ttl: 60 }
+      );
+
+      expect(await fn()).toEqual({ gen: 1 }); // cold miss
+      expect(await fn()).toEqual({ gen: 1 }); // stale hit, schedules refresh
+
+      // completeRefresh is what lands gen 2 in L1 (plain get() does no SWR
+      // read, so this observes L1 without scheduling more refreshes).
+      const cacheKey = generateKey('swr:persist', []);
+      await vi.waitFor(async () => {
+        expect(await swrCache.get(cacheKey)).toEqual({ gen: 2 });
+      });
+
+      // And the refresh persisted to L2: a second cache on the same
+      // backend with L1 disabled decodes the L2 bytes directly.
+      const l2View = createCache({ backend: swrBackend, defaultTtl: 60, l1: { enabled: false } });
+      expect(await l2View.get(cacheKey)).toEqual({ gen: 2 });
+      await l2View.close();
+      await swrCache.close();
+    });
+
+    it('an explicit set() during an in-flight refresh wins in L1 (refresh L1 write discarded)', async () => {
+      // Gate the refresh's L2 persist (2nd backend set: 1st = cold miss,
+      // 2nd = refresh, 3rd = the explicit set) so the explicit write can
+      // interleave between the refresh's L2 write and its L1 completion.
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const gatedBackend = new GatedBackend(2, gate);
+      const swrCache = createCache({
+        backend: gatedBackend,
+        defaultTtl: 60,
+        l1: { swrEnabled: true, swrThresholdRatio: 2 },
+      });
+
+      let calls = 0;
+      const fn = swrCache.wrap(
+        async () => {
+          calls++;
+          return { gen: calls };
+        },
+        { namespace: 'swr:race', ttl: 60 }
+      );
+      const cacheKey = generateKey('swr:race', []);
+
+      expect(await fn()).toEqual({ gen: 1 }); // cold miss (set #1)
+      expect(await fn()).toEqual({ gen: 1 }); // stale hit → refresh blocks in set #2
+
+      await vi.waitFor(() => {
+        expect(gatedBackend.setCount).toBe(2); // refresh is parked in its L2 write
+      });
+
+      // Explicit write lands while the refresh is in flight — bumps the L1
+      // version token. Pre-#84, setEntry's unconditional L1 write on the
+      // refresh path would clobber this with the stale-computed value.
+      await swrCache.set(cacheKey, { gen: 999 }, { ttl: 60, namespace: 'swr:race' });
+
+      release();
+
+      // The refresh finishes: its completeRefresh sees the bumped version
+      // and discards — the explicit write stays authoritative in L1.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(await swrCache.get(cacheKey)).toEqual({ gen: 999 });
+
+      await swrCache.close();
     });
   });
 });
