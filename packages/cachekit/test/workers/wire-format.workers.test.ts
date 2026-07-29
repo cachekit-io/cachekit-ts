@@ -18,9 +18,17 @@ interface WireVector {
   input_hex: string;
   envelope_hex: string;
   format: string;
+  /** "bin" on protocol 1.1 vectors; absent on legacy array-of-integers vectors. */
+  envelope_encoding?: string;
 }
 
 const vectors = fixture.vectors as WireVector[];
+const binVectors = vectors.filter((v) => v.envelope_encoding === 'bin');
+const legacyVectors = vectors.filter((v) => v.envelope_encoding === undefined);
+
+// msgpack bin format markers: bin8 / bin16 / bin32. The envelope is a
+// 4-element fixarray (0x94), so byte 1 is the first byte of compressed_data.
+const MSGPACK_BIN_MARKERS = [0xc4, 0xc5, 0xc6];
 
 function hexToBytes(hex: string): Uint8Array {
   const bytes = new Uint8Array(hex.length / 2);
@@ -61,6 +69,40 @@ describe('wire-format vectors (wasm ByteStorage)', () => {
       expect(storage.unpack(storage.pack(input))).toEqual(input);
     }
   );
+
+  // Protocol 1.1 (core 0.4.0): fresh packs emit compressed_data as msgpack
+  // bin. Byte-equality against the *_bin ground-truth vectors proves both the
+  // bin emit and byte-identity with every other SDK (the NAPI lane asserts
+  // the same vectors).
+  it.each(binVectors.map((v) => [v.name, v] as const))(
+    'pack emits the protocol 1.1 bin envelope byte-for-byte (%s)',
+    (_name, vector) => {
+      const packed = storage.pack(hexToBytes(vector.input_hex));
+      expect(bytesToHex(packed)).toBe(vector.envelope_hex);
+    }
+  );
+
+  it('pack marks compressed_data as msgpack bin for arbitrary payloads', () => {
+    // Not in the vector set: one bin8-sized and one bin16-sized payload.
+    const small = new TextEncoder().encode('fresh bin-emit check');
+    const large = new Uint8Array(1000);
+    for (let i = 0; i < large.length; i++) large[i] = (i * 131 + 17) & 0xff; // incompressible
+    for (const payload of [small, large]) {
+      const packed = storage.pack(payload);
+      expect(packed[0]).toBe(0x94); // fixarray(4) envelope
+      expect(MSGPACK_BIN_MARKERS).toContain(packed[1]);
+      expect(storage.unpack(packed)).toEqual(payload);
+    }
+  });
+
+  // Permanent legacy read (protocol 1.1 dual-read): pre-0.4.0 array-of-
+  // integers envelopes must keep decoding forever.
+  it('decodes every legacy (pre-bin) envelope', () => {
+    expect(legacyVectors.length).toBeGreaterThan(0);
+    for (const vector of legacyVectors) {
+      expect(bytesToHex(storage.unpack(hexToBytes(vector.envelope_hex)))).toBe(vector.input_hex);
+    }
+  });
 
   it('rejects corrupted envelopes', () => {
     const packed = storage.pack(new TextEncoder().encode('integrity check payload'));
