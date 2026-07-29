@@ -1,7 +1,12 @@
-import type { CacheOptions, SecureCache, InvalidationConfig } from './types/cache.js';
+import type {
+  CacheOptions,
+  SecureCache,
+  InvalidationConfig,
+  StampedeConfig,
+} from './types/cache.js';
 import type { RedisBackendConfig, CachekitIOBackendConfig } from './backends/types.js';
 import { redis } from './backends/redis.js';
-import { cachekitio } from './backends/cachekitio-factory.js';
+import { cachekitio, cachekitioWithLocking } from './backends/cachekitio-factory.js';
 import { EncryptionManager } from './encryption/manager.js';
 import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 import { RedisInvalidationChannel } from './invalidation/redis-channel.js';
@@ -14,12 +19,17 @@ import { CacheImpl, type CacheRuntime } from './cache-core.js';
  * everything protocol-critical is shared in cache-core.ts.
  */
 const nodeRuntime: CacheRuntime = {
-  resolveBackend(config: CacheOptions['backend']) {
+  resolveBackend(config: CacheOptions['backend'], stampede?: StampedeConfig) {
     if ('get' in config) {
       return config;
     }
     if ('apiKey' in config) {
-      return cachekitio(config as CachekitIOBackendConfig);
+      // The plain SaaS factory has no lock capability; the distributedLock
+      // opt-in selects the lockable wrapper so config-based users aren't
+      // forced to construct the backend by hand.
+      return stampede?.distributedLock
+        ? cachekitioWithLocking(config as CachekitIOBackendConfig)
+        : cachekitio(config as CachekitIOBackendConfig);
     }
     return redis(config as RedisBackendConfig);
   },

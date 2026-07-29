@@ -127,6 +127,19 @@ export const MIN_MASTER_KEY_BYTES = 32;
 export const MIN_MASTER_KEY_HEX_LENGTH = 64;
 
 // ============================================================================
+// Stampede / Single-Flight Constants
+// ============================================================================
+
+/** Default distributed lock lease in milliseconds (matches cachekit-py's lock_timeout=30s) */
+export const DEFAULT_LOCK_TIMEOUT_MS = 30000;
+
+/** Default wait for a contested lock holder to fill the cache (matches cachekit-py's blocking_timeout=5s) */
+export const DEFAULT_LOCK_WAIT_MS = 5000;
+
+/** Default lock retry interval while contested, in milliseconds */
+export const DEFAULT_LOCK_POLL_MS = 100;
+
+// ============================================================================
 // SWR (Stale-While-Revalidate) Constants
 // ============================================================================
 

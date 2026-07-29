@@ -101,6 +101,61 @@ export interface EncryptionConfig {
 }
 
 /**
+ * Cold-miss stampede protection.
+ *
+ * In-process single-flight is always on: concurrent wrap() calls for the
+ * same cache key share one in-flight promise, so a herd of N cold callers
+ * costs one L2 read, one compute, and one L2 write instead of N of each —
+ * under metered-misses billing that is 1 billed miss per cold key instead
+ * of N.
+ *
+ * This config only controls the cross-process extension of that posture.
+ *
+ * Deliberately absent — general admission control (a global concurrent-miss
+ * cap beyond L1's maxConcurrentRefreshes): on Node's single-threaded event
+ * loop concurrent misses don't compete for threads, single-flight already
+ * collapses the per-key herd (the amplification vector metered-misses
+ * punishes), and distinct-key miss floods are bounded by backend timeouts
+ * plus the circuit breaker. A global semaphore would add queueing latency
+ * and a tuning knob without a failure mode it prevents; revisit only with
+ * evidence of backend connection exhaustion. (LAB-519)
+ */
+export interface StampedeConfig {
+  /**
+   * Hold a backend distributed lock around cold-miss compute, mirroring
+   * cachekit-py's acquire_lock flow: acquire → double-check L2 → compute →
+   * write → release. When contested, re-try the lock on an interval up to
+   * `lockWaitMs` (acquireLock never blocks — LAB-240), then compute anyway:
+   * the lease is best-effort stampede mitigation, never a correctness gate.
+   *
+   * Contested waiters deliberately retry the LOCK rather than polling
+   * get(): on a metered-misses backend every poll GET against a still-cold
+   * key would itself be a billed miss.
+   *
+   * Requires a LockableBackend (Redis, cachekitioWithLocking,
+   * cachekitioFull, or a CachekitIO config — the SaaS lock endpoint is
+   * selected automatically). createCache() throws ConfigurationError when
+   * the backend has no lock capability — an explicit opt-in that silently
+   * does nothing would be a lie. Default: false.
+   */
+  distributedLock?: boolean;
+  /**
+   * Lock lease in milliseconds before auto-release. Size at or above the
+   * expected recompute time (default 30000, matching cachekit-py's
+   * lock_timeout).
+   */
+  lockTimeoutMs?: number;
+  /**
+   * Contested: max milliseconds to wait for the lock holder to fill the
+   * cache before computing anyway (default 5000, matching cachekit-py's
+   * blocking_timeout).
+   */
+  lockWaitMs?: number;
+  /** Contested: lock retry interval in milliseconds (default 100). */
+  lockPollMs?: number;
+}
+
+/**
  * Reliability configuration for cache.
  */
 export interface ReliabilityConfig {
@@ -130,6 +185,9 @@ export interface CacheOptions {
 
   /** Reliability configuration (circuit breaker, retry) */
   reliability?: ReliabilityConfig;
+
+  /** Cold-miss stampede protection (cross-process lock opt-in) */
+  stampede?: StampedeConfig;
 
   /** Serializer configuration */
   serializer?: Partial<SerializerConfig>;

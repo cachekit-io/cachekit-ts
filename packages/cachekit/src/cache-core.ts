@@ -1,12 +1,14 @@
 import type {
   CacheOptions,
   SetOptions,
+  StampedeConfig,
   WrapOptions,
+  WrapOptionsBase,
   SecureCache,
   EncryptionConfig,
   InvalidationConfig,
 } from './types/cache.js';
-import type { Backend } from './backends/types.js';
+import type { Backend, LockableBackend } from './backends/types.js';
 import type { InvalidationEvent } from './l1/types.js';
 import { L1Cache } from './l1/lru-cache.js';
 import { ReliabilityExecutor } from './reliability/executor.js';
@@ -25,7 +27,21 @@ import {
 } from './serialization/interop.js';
 import { createInvalidationEvent } from './invalidation/event.js';
 import { BackendError, ConfigurationError } from './errors.js';
-import { DEFAULT_TTL_SECONDS } from './constants.js';
+import {
+  DEFAULT_TTL_SECONDS,
+  DEFAULT_LOCK_TIMEOUT_MS,
+  DEFAULT_LOCK_WAIT_MS,
+  DEFAULT_LOCK_POLL_MS,
+} from './constants.js';
+
+/**
+ * Sentinel for "the lock path did not resolve the miss — compute without
+ * it". Distinct from null: the wrapped function may legitimately resolve
+ * null, and conflating the two would compute twice under a held lock.
+ */
+const LOCK_FALLTHROUGH = Symbol('cachekit.lock-fallthrough');
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * ByteStorage envelope surface (LZ4 + xxHash3-64 + msgpack envelope).
@@ -81,8 +97,14 @@ export type { WaitUntil };
  * CachekitIO + wasm). Everything protocol-critical stays in CacheImpl.
  */
 export interface CacheRuntime {
-  /** Resolve a backend config union to a Backend instance. */
-  resolveBackend(config: CacheOptions['backend']): Backend;
+  /**
+   * Resolve a backend config union to a Backend instance. `stampede` carries
+   * the cold-miss protection config so a runtime can select a lock-capable
+   * variant (Node picks cachekitioWithLocking for apiKey configs when
+   * distributedLock is on); runtimes without that convenience may ignore it —
+   * users can still pass a lock-capable Backend instance directly.
+   */
+  resolveBackend(config: CacheOptions['backend'], stampede?: StampedeConfig): Backend;
   /** Create the ByteStorage envelope codec. */
   createByteStorage(): ByteStorageLike;
   /** Create the encryption manager for this platform's bindings. */
@@ -118,10 +140,52 @@ export class CacheImpl implements SecureCache {
   private readonly invalidationChannel: InvalidationChannelLike | null = null;
   private readonly swrRequiresWaitUntil: boolean;
   private closed = false;
+  /** One in-flight cold-miss resolution per cache key (single-flight, LAB-519). */
+  private readonly inflight = new Map<string, Promise<unknown>>();
+  private readonly stampede: Required<StampedeConfig>;
+  private readonly lockable: LockableBackend | null;
 
   constructor(options: CacheOptions, runtime: CacheRuntime) {
     // Initialize backend
-    this.backend = runtime.resolveBackend(options.backend);
+    this.backend = runtime.resolveBackend(options.backend, options.stampede);
+
+    // Stampede config + lock capability. Duck-typed like cachekit-py's
+    // hasattr check: user-supplied Backend instances aren't required to
+    // declare the LockableBackend interface, only to implement it.
+    this.stampede = {
+      distributedLock: options.stampede?.distributedLock ?? false,
+      lockTimeoutMs: options.stampede?.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS,
+      lockWaitMs: options.stampede?.lockWaitMs ?? DEFAULT_LOCK_WAIT_MS,
+      lockPollMs: options.stampede?.lockPollMs ?? DEFAULT_LOCK_POLL_MS,
+    };
+    if (!Number.isFinite(this.stampede.lockTimeoutMs) || this.stampede.lockTimeoutMs <= 0) {
+      throw new ConfigurationError(
+        `stampede.lockTimeoutMs must be > 0, got ${this.stampede.lockTimeoutMs}`
+      );
+    }
+    if (!Number.isFinite(this.stampede.lockPollMs) || this.stampede.lockPollMs <= 0) {
+      throw new ConfigurationError(
+        `stampede.lockPollMs must be > 0, got ${this.stampede.lockPollMs}`
+      );
+    }
+    if (!Number.isFinite(this.stampede.lockWaitMs) || this.stampede.lockWaitMs < 0) {
+      throw new ConfigurationError(
+        `stampede.lockWaitMs must be >= 0, got ${this.stampede.lockWaitMs}`
+      );
+    }
+    const maybeLockable = this.backend as Partial<LockableBackend>;
+    this.lockable =
+      typeof maybeLockable.acquireLock === 'function' &&
+      typeof maybeLockable.releaseLock === 'function'
+        ? (this.backend as LockableBackend)
+        : null;
+    if (this.stampede.distributedLock && !this.lockable) {
+      throw new ConfigurationError(
+        'stampede.distributedLock requires a backend with lock capability ' +
+          '(Redis, cachekitioWithLocking, or cachekitioFull) — the configured backend ' +
+          'has no acquireLock/releaseLock'
+      );
+    }
 
     // Initialize L1 cache
     if (options.l1?.enabled !== false) {
@@ -505,23 +569,123 @@ export class CacheImpl implements SecureCache {
         }
       }
 
-      // Check L2
-      const cached = await this.getEntry<TResult>(cacheKey, interop, options.ttl);
-      if (cached !== null) {
-        return cached;
+      // Cold path (L1 miss): single-flight per key per process. The flight
+      // covers the L2 read too, not just the compute — the L2 GET-miss is
+      // the billed event under metered-misses, so N concurrent cold callers
+      // must share one read, one compute, and one write (LAB-519).
+      const existing = this.inflight.get(cacheKey);
+      if (existing) {
+        return existing as Promise<TResult>;
+      }
+      const flight = this.resolveMiss<TResult>(cacheKey, interop, () => fn(...args), options);
+      this.inflight.set(cacheKey, flight);
+      try {
+        return await flight;
+      } finally {
+        this.inflight.delete(cacheKey);
+      }
+    };
+  }
+
+  /**
+   * Cold-path resolution shared by every concurrent caller of one key:
+   * L2 read, then compute + write, optionally bracketed by a distributed
+   * lock when the backend supports it and stampede.distributedLock is on.
+   */
+  private async resolveMiss<TResult>(
+    cacheKey: string,
+    interop: boolean,
+    compute: () => Promise<TResult>,
+    options: WrapOptionsBase
+  ): Promise<TResult> {
+    const cached = await this.getEntry<TResult>(cacheKey, interop, options.ttl);
+    if (cached !== null) {
+      return cached;
+    }
+
+    if (this.lockable && this.stampede.distributedLock) {
+      const locked = await this.resolveUnderLock<TResult>(cacheKey, interop, compute, options);
+      if (locked !== LOCK_FALLTHROUGH) {
+        return locked;
+      }
+    }
+
+    return this.computeAndStore(cacheKey, interop, compute, options);
+  }
+
+  /**
+   * Cross-process miss arbitration, mirroring cachekit-py's acquire_lock
+   * flow (wrapper.py): acquire → double-check L2 → compute → write →
+   * release. acquireLock never blocks on contention (LAB-240), so
+   * "waiting" is retrying the lock on an interval bounded by lockWaitMs —
+   * deliberately NOT polling get(), because on a metered-misses backend
+   * every poll GET against a still-cold key is itself a billed miss,
+   * while contested lock calls are not.
+   *
+   * Returns LOCK_FALLTHROUGH when the lock never resolved the miss
+   * (acquire error, or contested past the wait budget): the lease is
+   * best-effort stampede mitigation, never a correctness gate, so lock
+   * failure degrades to computing without it.
+   */
+  private async resolveUnderLock<TResult>(
+    cacheKey: string,
+    interop: boolean,
+    compute: () => Promise<TResult>,
+    options: WrapOptionsBase
+  ): Promise<TResult | typeof LOCK_FALLTHROUGH> {
+    const lockable = this.lockable!;
+    const { lockTimeoutMs, lockWaitMs, lockPollMs } = this.stampede;
+    const deadline = Date.now() + lockWaitMs;
+
+    for (;;) {
+      let lockId: string | null;
+      try {
+        // Deliberately outside the reliability executor: retry would stack
+        // latency onto a best-effort call, and counting lock failures
+        // against the circuit breaker could open it for data operations.
+        lockId = await lockable.acquireLock(cacheKey, lockTimeoutMs);
+      } catch {
+        return LOCK_FALLTHROUGH;
       }
 
-      // Compute and cache
-      const result = await fn(...args);
-      await this.setEntry(
-        cacheKey,
-        result,
-        { ttl: options.ttl, namespace: options.namespace },
-        interop
-      );
+      if (lockId !== null) {
+        try {
+          // Double-check: the holder we waited on (or a racing process)
+          // may have written between our miss and this grant — one GET
+          // that hits, instead of a duplicate compute + write.
+          const filled = await this.getEntry<TResult>(cacheKey, interop, options.ttl);
+          if (filled !== null) {
+            return filled;
+          }
+          return await this.computeAndStore(cacheKey, interop, compute, options);
+        } finally {
+          // Best-effort: the lease auto-expires, and a failed release must
+          // not mask the compute result.
+          lockable.releaseLock(cacheKey, lockId).catch(() => {});
+        }
+      }
 
-      return result;
-    };
+      if (Date.now() + lockPollMs > deadline) {
+        return LOCK_FALLTHROUGH;
+      }
+      await sleep(lockPollMs);
+    }
+  }
+
+  private async computeAndStore<TResult>(
+    cacheKey: string,
+    interop: boolean,
+    compute: () => Promise<TResult>,
+    options: WrapOptionsBase
+  ): Promise<TResult> {
+    const result = await compute();
+    await this.setEntry(
+      cacheKey,
+      result,
+      { ttl: options.ttl, namespace: options.namespace },
+      interop
+    );
+    return result;
   }
 
   with(
@@ -644,6 +808,11 @@ export class CacheImpl implements SecureCache {
 
     // Stop background refresh manager (clears in-flight refreshes)
     attempt(() => this.backgroundRefresh.close());
+
+    // Drop single-flight registrations (in-flight promises settle on their
+    // own; callers already awaiting them get the result or a closed-backend
+    // error)
+    attempt(() => this.inflight.clear());
 
     // Stop invalidation channel
     if (this.invalidationChannel) {
