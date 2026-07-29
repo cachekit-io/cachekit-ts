@@ -128,8 +128,9 @@ interface ChunkSink {
   chunks: Uint8Array[];
   /**
    * Running budget cursor. Set element sub-encodes seed it with the parent
-   * total plus prior retained elements' bytes, so it may exceed the total
-   * length of `chunks`.
+   * total (so it may exceed the total length of `chunks`), capping any single
+   * element; the aggregate across retained elements is charged separately in
+   * the Set loop, after dedupe.
    */
   bytes: number;
 }
@@ -415,26 +416,32 @@ function encodeCanonical(
     // a total, language-neutral order (spec: "Set ordering is not numeric
     // order").
     // Elements encode into isolated sub-sinks (the byte-order sort needs each
-    // element's bytes) threaded through a running byte total, and dedupe
-    // happens on insert, so the byte budget and the collection-size cap both
-    // fail DURING iteration — before every element is encoded and buffered —
-    // while counting exactly what the output retains: duplicates advance
-    // neither total. Acceptance matches checking after the loop, except that
-    // a duplicate arriving with less than its own encoded size left in the
-    // byte budget still throws mid-encode (duplicateness is unknowable until
-    // encoded). The parent's own total advances once, on the pushes below.
+    // element's bytes), each seeded from the parent total so no single
+    // element can exceed the absolute budget, and dedupe happens on insert.
+    // The aggregate byte budget is charged only AFTER an element is confirmed
+    // unique — duplicateness is unknowable until encoded, and charging the
+    // running total during the re-encode would falsely reject a duplicate
+    // bigger than the budget remainder even though the deduped output fits.
+    // Both the byte budget and the collection-size cap fail DURING iteration,
+    // counting exactly what the output retains: duplicates advance neither
+    // total. The parent's own total advances once, on the pushes below.
     const encoded: Uint8Array[] = [];
     const seen = new Set<string>();
     let running = sink.bytes;
     for (const element of v) {
-      const sub: ChunkSink = { chunks: [], bytes: running };
+      const sub: ChunkSink = { chunks: [], bytes: sink.bytes };
       encodeCanonical(element, profile, depth + 1, sub);
       const bytes = concatChunks(sub.chunks);
       const key = bytesToHex(bytes);
       if (seen.has(key)) continue;
       seen.add(key);
       checkCollectionSize(seen.size, 'array');
-      running = sub.bytes;
+      running += bytes.length;
+      if (running > DEFAULT_MAX_ENCODED_SIZE) {
+        throw new ValueTooLargeError(
+          `Encoded interop payload exceeds max size ${DEFAULT_MAX_ENCODED_SIZE}`
+        );
+      }
       encoded.push(bytes);
     }
     encoded.sort(compareBytes);

@@ -170,6 +170,18 @@ describe('interop Set encoding budgets (encodeCanonical, shared by both profiles
     expect(encodeInteropValue(many)).toEqual(encodeInteropValue(new Set([dup()])));
   });
 
+  it('accepts a duplicate larger than half the budget (dedupe is confirmed before the aggregate charge)', () => {
+    // Two distinct-identity copies of one ~700 KiB element: deduped output
+    // ~700 KiB, comfortably under the 1 MiB budget. The duplicate's re-encode
+    // must run against the parent base, not the advanced running total —
+    // otherwise it crosses the budget mid-encode before dedupe can identify
+    // it, falsely rejecting a Set whose canonical encoding fits.
+    const dup = (): { k: string } => ({ k: 'y'.repeat(700 * 1024) });
+    const pair = new Set([dup(), dup()]);
+    expect(pair.size).toBe(2);
+    expect(encodeInteropValue(pair)).toEqual(encodeInteropValue(new Set([dup()])));
+  });
+
   it('rejects a Set with too many distinct elements during iteration', () => {
     // 10,002 tiny distinct elements: far under the byte budget, over the
     // 10,000 collection cap. The cap fires on the 10,001st retained element,
