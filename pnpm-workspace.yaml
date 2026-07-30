@@ -72,8 +72,10 @@ overrides:
   sharp: '>=0.35.0' # GHSA-f88m-g3jw-g9cj (build denied above; pin is belt+braces)
   # GHSA-w5hq-g745-h8pq. Dev-only: testcontainers -> dockerode -> uuid, v4 only
   # (alert #47 mislabels it runtime — it can't read pnpm-lock's dev partition).
-  # 11.1.1 is the advisory's lowest fix and 10.0.0 is the entire 10.x line, so
-  # the forced major is unavoidable. <12 IS LOAD-BEARING: uuid >=12 dropped the
+  # 11.1.1 is the advisory's lowest fix, and 10.0.0 is uuid's ONLY 10.x release
+  # (dockerode's declared range is ^10.0.0, which resolves to it), so there is
+  # no in-major fix and the forced major is unavoidable.
+  # <12 IS LOAD-BEARING: uuid >=12 dropped the
   # `require` export condition and dockerode does `require("uuid").v4`, so
   # widening breaks Node <22.12 — which engines allow (>=22.0.0) and CI, on
   # 22-latest, would not catch. Lift only when dockerode moves off ^10.0.0.
