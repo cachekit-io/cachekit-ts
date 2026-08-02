@@ -104,6 +104,20 @@ describe('Cache metrics wiring (LAB-517)', () => {
     });
   });
 
+  it('records L2 outcomes for exists()', async () => {
+    const registry = new Registry();
+    const cache = makeCache(registry, { l1: { enabled: false } });
+    await cache.set('ns:present', 'value');
+
+    expect(await cache.exists('ns:present')).toBe(true); // L2 hit
+    expect(await cache.exists('ns:absent')).toBe(false); // miss
+
+    await vi.waitFor(async () => {
+      expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l2' })).toBe(1);
+      expect(await metricValue(registry, 'cachekit_misses_total')).toBe(1);
+    });
+  });
+
   it('records l1 hits after set, and l2 hits when L1 is disabled', async () => {
     const registry = new Registry();
     const cache = makeCache(registry);

@@ -25,6 +25,21 @@ describe('pluggable logger (LAB-517)', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it('a throwing custom logger never propagates out of logError', () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    setLogger(() => {
+      throw new Error('logger bug');
+    });
+
+    expect(() => logError('[cachekit] report', 'detail')).not.toThrow();
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '[cachekit] logger threw; original report:',
+      '[cachekit] report',
+      'detail',
+      expect.any(Error)
+    );
+  });
+
   it('setLogger(null) restores the console.error default', () => {
     const custom = vi.fn();
     setLogger(custom);

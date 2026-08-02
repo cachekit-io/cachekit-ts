@@ -535,7 +535,15 @@ export class CacheImpl implements SecureCache {
       }
     }
 
-    return this.run('exists', false, () => this.backend.exists(key));
+    // Record the L2 outcome too — the L1 path above already counts hits, so
+    // skipping L2 here would skew the hit/miss counters (and the SaaS L1
+    // telemetry headers they feed) for L2-only existence checks.
+    return this.run('exists', false, async () => {
+      const exists = await this.backend.exists(key);
+      if (exists) this.recordHit('l2');
+      else this.recordMiss();
+      return exists;
+    });
   }
 
   /**

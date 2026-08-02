@@ -30,7 +30,15 @@ export function setLogger(logger: CachekitLogger | null): void {
   activeLogger = logger ?? defaultLogger;
 }
 
-/** Internal: report a library error through the active logger. */
+/** Internal: report a library error through the active logger. Never throws —
+ * every call site is a fire-and-forget error path (metrics, background
+ * refresh, invalidation), where a broken custom logger propagating would
+ * become an unhandled rejection. */
 export function logError(message: string, error?: unknown): void {
-  activeLogger(message, error);
+  try {
+    activeLogger(message, error);
+  } catch (loggerError) {
+    // eslint-disable-next-line no-console -- last-resort sink when the active logger itself throws
+    console.error('[cachekit] logger threw; original report:', message, error, loggerError);
+  }
 }
