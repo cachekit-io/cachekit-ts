@@ -1,6 +1,40 @@
 packages:
   - 'packages/*'
 
+# Release-age quarantine (minutes). 1440 = 24h, pnpm 11's built-in default —
+# pinned so CI policy doesn't silently move when the package manager bumps.
+# Applies at resolution (lockfile refresh skips younger versions) AND at
+# `--frozen-lockfile` verification, regardless of which bot wrote the lockfile.
+# Renovate's routine window is 5 days (set in cachekit-io/renovate-config), so
+# its PRs always clear this; a 0-day security PR may red for up to 24h —
+# accepted, rebase after the window.
+minimumReleaseAge: 1440
+
+# Surgical quarantine bypass for a same-day security backport: brace-expansion
+# 2.1.3 (published 2026-07-28) is the 2.x backport of the GHSA-mh99-v99m-4gvg
+# fix. Version-scoped so future releases of the package still age-gate.
+# Safe to delete from 2026-07-30 (2.1.3 clears the window 2026-07-29 ~10:17 UTC).
+minimumReleaseAgeExclude:
+  - 'brace-expansion@2.1.3'
+
+# GHSA-mh99-v99m-4gvg's advisory data claims vulnerable <=5.0.7 / patched
+# 5.0.8 only — a range that swallows the whole 2.x line and does not yet
+# reflect the 2.x backport (2.1.3, published 2026-07-28) we install above.
+# This ignore covers pure advisory-metadata lag, not an unpatched vulnerability:
+# the brace-expansion overrides below floor every resolved line at the fix.
+# SAFETY INVARIANT: this ignore is graph-wide — it is safe ONLY while those
+# overrides exist and only the 2.x/5.x lines resolve in the lockfile. If any
+# other brace-expansion major ever appears (e.g. minimatch@3 pulling ^1.1.7),
+# remove this ignore and re-justify. Remove once the advisory lists a patched
+# 2.x version (audit then passes bare); re-evaluate by 2026-09-01 regardless.
+# ENFORCED, not just documented: ci.yml's "Verify brace-expansion
+# advisory-ignore invariant" step fails the security job if any other major
+# resolves, or if brace-expansion leaves the graph entirely. Delete that step
+# in the same commit that deletes this ignore.
+auditConfig:
+  ignoreGhsas:
+    - GHSA-mh99-v99m-4gvg
+
 # pnpm v11 no longer reads the "pnpm" field in package.json; these settings
 # moved here. allowBuilds replaces onlyBuiltDependencies — same allowlist,
 # unlisted packages stay default-denied (ERR_PNPM_IGNORED_BUILDS).
@@ -17,11 +51,17 @@ allowBuilds:
   sharp: false
 
 # Security floor-pins for vulnerable transitives (formerly pnpm.overrides).
+# Floors are bounded to their current major where a newer major exists —
+# an unbounded floor re-resolves to the newest match, majors included.
 overrides:
-  protobufjs: '>=7.5.8'
+  protobufjs: '>=7.6.5 <8' # GHSA-j3f2-48v5-ccww
   vite: '>=8.0.5'
   lodash: '>=4.18.0'
   flatted: '>=3.4.2'
   picomatch: '>=4.0.4'
   yaml: '>=2.8.3'
-  postcss: '>=8.5.14'
+  postcss: '>=8.5.18' # GHSA-r28c-9q8g-f849
+  'brace-expansion@2': '>=2.1.3 <3' # GHSA-3jxr-9vmj-r5cp + GHSA-mh99-v99m-4gvg 2.x backport
+  'brace-expansion@5': '>=5.0.8' # GHSA-3jxr-9vmj-r5cp + GHSA-mh99-v99m-4gvg
+  js-yaml: '>=4.3.0 <5' # GHSA-52cp-r559-cp3m
+  sharp: '>=0.35.0' # GHSA-f88m-g3jw-g9cj (build denied above; pin is belt+braces)

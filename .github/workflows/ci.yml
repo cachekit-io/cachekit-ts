@@ -145,6 +145,31 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # pnpm-workspace.yaml ignores GHSA-mh99-v99m-4gvg graph-wide (advisory
+      # metadata lags the 2.x backport). That is only sound while every resolved
+      # brace-expansion sits on a floor-pinned line — 2.x or 5.x. A third major
+      # would be silently un-audited by the step below, so fail here instead of
+      # letting the ignore suppress a real advisory. Enforces the SAFETY
+      # INVARIANT documented beside the ignore; delete both together.
+      - name: Verify brace-expansion advisory-ignore invariant
+        run: |
+          set -euo pipefail
+          # `|| true`: no match makes grep exit 1, which under pipefail would
+          # abort the step with no message. Let the empty case reach the
+          # explicit branch below so the failure explains itself.
+          majors=$(grep -oE '^  brace-expansion@[0-9]+\.' pnpm-lock.yaml \
+                   | sed -E 's#.*@([0-9]+)\.#\1#' | sort -u || true)
+          if [ -z "${majors}" ]; then
+            echo "::error::brace-expansion no longer resolves in pnpm-lock.yaml. The GHSA-mh99-v99m-4gvg ignore and its overrides in pnpm-workspace.yaml are now dead config — remove them."
+            exit 1
+          fi
+          unexpected=$(printf '%s\n' "${majors}" | grep -vxE '2|5' || true)
+          if [ -n "${unexpected}" ]; then
+            echo "::error::brace-expansion major(s) outside the floor-pinned 2.x/5.x lines resolved: $(printf '%s' "${unexpected}" | tr '\n' ' '). The graph-wide GHSA-mh99-v99m-4gvg ignore in pnpm-workspace.yaml no longer holds — floor-pin the new line via overrides, or drop the ignore and re-justify."
+            exit 1
+          fi
+          echo "brace-expansion majors resolved: $(printf '%s' "${majors}" | tr '\n' ' ')— invariant holds"
+
       - name: Audit production dependencies (blocking)
         run: pnpm audit --prod --audit-level=high
 

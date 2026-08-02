@@ -138,6 +138,67 @@ describe('interop argument encoding (args profile)', () => {
   });
 });
 
+describe('interop Set encoding budgets (encodeCanonical, shared by both profiles)', () => {
+  it('rejects a Set whose elements are collectively over budget during iteration', () => {
+    // 32 × ~64 KiB elements: each far under the 1 MiB budget, ~2 MiB in
+    // aggregate. Set element sub-encodes buffer into `encoded[]` before the
+    // parent sink sees any bytes, so the running total must be threaded
+    // across the loop — otherwise all 32 elements materialise before the
+    // budget fires. Getter spies count how many elements were actually
+    // encoded: each element encodes to 65,550 bytes, so the throw lands
+    // during element 16 — mid-iteration, not after the loop.
+    const total = 32;
+    let encoded = 0;
+    const elements = Array.from({ length: total }, (_, i) => ({
+      get payload(): string {
+        encoded++;
+        return `${i}:`.padEnd(64 * 1024, 'x');
+      },
+    }));
+    expect(() => encodeInteropValue(new Set(elements))).toThrow(ValueTooLargeError);
+    expect(encoded).toBeLessThan(total);
+  });
+
+  it('accepts a duplicate-heavy Set whose deduped encoding fits the budget', () => {
+    // 20 distinct-identity objects with identical canonical encodings: ~4 MiB
+    // pre-dedupe, ~200 KiB deduped. Dedupe happens on insert, so duplicates
+    // advance neither the byte budget nor the count — this must encode
+    // byte-identically to the singleton, not throw at the pre-dedupe sum.
+    const dup = (): { k: string } => ({ k: 'x'.repeat(200 * 1024) });
+    const many = new Set(Array.from({ length: 20 }, dup));
+    expect(many.size).toBe(20);
+    expect(encodeInteropValue(many)).toEqual(encodeInteropValue(new Set([dup()])));
+  });
+
+  it('accepts a duplicate larger than half the budget (dedupe is confirmed before the aggregate charge)', () => {
+    // Two distinct-identity copies of one ~700 KiB element: deduped output
+    // ~700 KiB, comfortably under the 1 MiB budget. The duplicate's re-encode
+    // must run against the parent base, not the advanced running total —
+    // otherwise it crosses the budget mid-encode before dedupe can identify
+    // it, falsely rejecting a Set whose canonical encoding fits.
+    const dup = (): { k: string } => ({ k: 'y'.repeat(700 * 1024) });
+    const pair = new Set([dup(), dup()]);
+    expect(pair.size).toBe(2);
+    expect(encodeInteropValue(pair)).toEqual(encodeInteropValue(new Set([dup()])));
+  });
+
+  it('rejects a Set with too many distinct elements during iteration', () => {
+    // 10,002 tiny distinct elements: far under the byte budget, over the
+    // 10,000 collection cap. The cap fires on the 10,001st retained element,
+    // not after the full Set has been encoded and buffered.
+    const total = 10_002;
+    let encoded = 0;
+    const elements = Array.from({ length: total }, (_, i) => ({
+      get n(): number {
+        encoded++;
+        return i;
+      },
+    }));
+    expect(() => encodeInteropValue(new Set(elements))).toThrow(ValueTooLargeError);
+    expect(encoded).toBeLessThan(total);
+  });
+});
+
 describe('interop value encoding (value profile)', () => {
   it('maps undefined to nil (no cross-SDK arity contract for values)', () => {
     expect(hex(encodeInteropValue(undefined))).toBe('c0');

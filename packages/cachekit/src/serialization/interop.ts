@@ -126,7 +126,12 @@ function concatChunks(chunks: Uint8Array[]): Uint8Array {
  */
 interface ChunkSink {
   chunks: Uint8Array[];
-  /** Running encoded byte count (starts above 0 for Set element sub-encodes). */
+  /**
+   * Running budget cursor. Set element sub-encodes seed it with the parent
+   * total (so it may exceed the total length of `chunks`), capping any single
+   * element; the aggregate across retained elements is charged separately in
+   * the Set loop, after dedupe.
+   */
   bytes: number;
 }
 
@@ -410,19 +415,38 @@ function encodeCanonical(
     // encoded bytes (unsigned lexicographic) and dedupe post-normalization —
     // a total, language-neutral order (spec: "Set ordering is not numeric
     // order").
+    // Elements encode into isolated sub-sinks (the byte-order sort needs each
+    // element's bytes), each seeded from the parent total so no single
+    // element can exceed the absolute budget, and dedupe happens on insert.
+    // The aggregate byte budget is charged only AFTER an element is confirmed
+    // unique — duplicateness is unknowable until encoded, and charging the
+    // running total during the re-encode would falsely reject a duplicate
+    // bigger than the budget remainder even though the deduped output fits.
+    // Both the byte budget and the collection-size cap fail DURING iteration,
+    // counting exactly what the output retains: duplicates advance neither
+    // total. The parent's own total advances once, on the pushes below.
     const encoded: Uint8Array[] = [];
+    const seen = new Set<string>();
+    let running = sink.bytes;
     for (const element of v) {
-      // Isolated sub-sink (the byte-order sort needs each element's bytes),
-      // inheriting the parent's running total so a huge element fails fast.
-      // Parent bytes are counted once, when the deduped buffers are pushed.
       const sub: ChunkSink = { chunks: [], bytes: sink.bytes };
       encodeCanonical(element, profile, depth + 1, sub);
-      encoded.push(concatChunks(sub.chunks));
+      const bytes = concatChunks(sub.chunks);
+      const key = bytesToHex(bytes);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      checkCollectionSize(seen.size, 'array');
+      running += bytes.length;
+      if (running > DEFAULT_MAX_ENCODED_SIZE) {
+        throw new ValueTooLargeError(
+          `Encoded interop payload exceeds max size ${DEFAULT_MAX_ENCODED_SIZE}`
+        );
+      }
+      encoded.push(bytes);
     }
     encoded.sort(compareBytes);
-    const deduped = encoded.filter((b, i) => i === 0 || compareBytes(b, encoded[i - 1]!) !== 0);
-    encodeArrayHeader(deduped.length, sink);
-    for (const b of deduped) pushChunk(sink, b);
+    encodeArrayHeader(encoded.length, sink);
+    for (const b of encoded) pushChunk(sink, b);
   } else if (Array.isArray(v)) {
     encodeArrayHeader(v.length, sink);
     for (const item of v) {
