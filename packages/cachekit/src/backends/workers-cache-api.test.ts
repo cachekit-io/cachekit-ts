@@ -86,12 +86,20 @@ describe('CacheAPIBackend (unit, mocked caches global)', () => {
     expect(result!.ttlSeconds).toBe(0);
   });
 
-  it('getWithTtl reports null (no expiry) for the no-expiry sentinel', async () => {
+  it('getWithTtl reports null (no expiry) for ttl <= 0 via the marker header', async () => {
     const backend = workersCacheAPI();
-    await backend.set('ns:key', value, 0); // ttl <= 0 → 1-year sentinel max-age
+    await backend.set('ns:key', value, 0); // ttl <= 0 → marker header + 1-year max-age
 
     const result = await backend.getWithTtl('ns:key');
     expect(result!.ttlSeconds).toBeNull();
+  });
+
+  it('getWithTtl treats a legitimate exactly-one-year TTL as a real TTL, not the sentinel', async () => {
+    const backend = workersCacheAPI();
+    await backend.set('ns:key', value, 31_536_000); // same max-age as the sentinel, no marker
+
+    const result = await backend.getWithTtl('ns:key');
+    expect(result!.ttlSeconds).toBe(31_536_000);
   });
 
   it('getWithTtl reports null when freshness headers are absent', async () => {

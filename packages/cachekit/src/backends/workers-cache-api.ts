@@ -11,6 +11,14 @@ import { DEFAULT_TTL_SECONDS } from '../constants.js';
 const CACHE_API_NO_EXPIRY_MAX_AGE = 31_536_000;
 
 /**
+ * Marker header distinguishing a genuine no-expiry entry (`ttl <= 0`) from
+ * a caller who legitimately set a TTL of exactly one year — both write the
+ * same `max-age`, so max-age alone is ambiguous. getWithTtl reports
+ * `ttlSeconds: null` (no expiry) only when this header is present.
+ */
+const NO_EXPIRY_HEADER = 'X-CacheKit-No-Expiry';
+
+/**
  * Synthetic URL base for cache keys. The Cache API is request-keyed, so each
  * cache key maps to a URL under a deliberately non-routable host — it can
  * never collide with real zone traffic cached in `caches.default`, and is
@@ -142,19 +150,19 @@ export class CacheAPIBackend implements Backend {
   async set(key: string, value: Uint8Array, ttl?: number): Promise<void> {
     this.ensureNotClosed();
     const effectiveTtl = ttl ?? this.defaultTtl;
-    const maxAge = effectiveTtl > 0 ? Math.ceil(effectiveTtl) : CACHE_API_NO_EXPIRY_MAX_AGE;
+    const noExpiry = effectiveTtl <= 0;
+    const maxAge = noExpiry ? CACHE_API_NO_EXPIRY_MAX_AGE : Math.ceil(effectiveTtl);
     try {
-      await (
-        await this.cache()
-      ).put(
-        keyUrl(key),
-        new Response(value, {
-          headers: {
-            'Cache-Control': `max-age=${maxAge}`,
-            'Content-Type': 'application/octet-stream',
-          },
-        })
-      );
+      const headers: Record<string, string> = {
+        'Cache-Control': `max-age=${maxAge}`,
+        'Content-Type': 'application/octet-stream',
+      };
+      // Explicit marker instead of overloading max-age as the no-expiry
+      // signal: a caller may legitimately set ttl to exactly one year,
+      // which writes the same max-age as the sentinel. getWithTtl reads
+      // this header to report "no expiry" (null) unambiguously.
+      if (noExpiry) headers[NO_EXPIRY_HEADER] = '1';
+      await (await this.cache()).put(keyUrl(key), new Response(value, { headers }));
     } catch (error) {
       throw this.wrapError('set', error);
     }
@@ -242,15 +250,19 @@ function keyUrl(key: string): string {
 /**
  * Remaining lifetime of a matched response: the `max-age` set() wrote minus
  * the `Age` header the edge reports. Null (unknown / no expiry) when the
- * entry carries the no-expiry sentinel or the headers are absent — e.g.
- * test harnesses that don't emit `Age` report the full max-age, which the
- * caller's own TTL cap still bounds; never a negative freshness.
+ * entry carries the explicit no-expiry marker header or the freshness
+ * headers are absent. Any max-age without the marker is treated as a real
+ * TTL — including exactly one year, which a caller may legitimately set.
+ * (Entries written by 0.1.5, before the marker existed, report their
+ * sentinel max-age as a real ~1-year remainder; the caller's own TTL cap
+ * bounds it, so behavior is unchanged for them.) Test harnesses that don't
+ * emit `Age` report the full max-age — never a negative freshness.
  */
 function remainingTtlSeconds(response: Response): number | null {
+  if (response.headers.get(NO_EXPIRY_HEADER) !== null) return null;
   const maxAgeMatch = /(?:^|[,\s])max-age=(\d+)/.exec(response.headers.get('Cache-Control') ?? '');
   if (!maxAgeMatch) return null;
   const maxAge = Number(maxAgeMatch[1]);
-  if (maxAge >= CACHE_API_NO_EXPIRY_MAX_AGE) return null;
   const age = Number(response.headers.get('Age'));
   return Math.max(0, maxAge - (Number.isFinite(age) && age > 0 ? Math.floor(age) : 0));
 }

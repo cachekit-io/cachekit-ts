@@ -699,6 +699,27 @@ describe('Cache Integration', () => {
 
       await c.close();
     });
+
+    it('warns on the interop encode path too (rejection throws to the caller but hides behind consumer try/catch)', async () => {
+      const logs: string[] = [];
+      setLogger((message) => logs.push(message));
+
+      const c = createCache({ backend: new InMemoryBackend() });
+      const big = c.wrap(async () => oversized(), {
+        namespace: 'ns',
+        ttl: 60,
+        interop: 'bigop',
+        interopArity: 0,
+      });
+
+      // Interop model/size rejection is a deterministic caller error —
+      // degradation never swallows it — but it must still emit the
+      // greppable warning for consumers whose own try/catch absorbs it.
+      await expect(big()).rejects.toThrow(ValueTooLargeError);
+      expect(logs.filter((m) => m.includes('set rejected'))).toHaveLength(1);
+
+      await c.close();
+    });
   });
 
   describe('backend-advertised compression default (LAB-1388)', () => {

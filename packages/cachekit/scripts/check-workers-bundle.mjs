@@ -83,7 +83,14 @@ console.log(
 // reference typechecks clean here while still breaking consumers that don't
 // have it. Diagnostics are checked too (with skipLibCheck off) so the
 // closure is also proven self-consistent against ES+DOM libs alone.
-const ts = (await import('typescript')).default;
+let ts;
+try {
+  ts = (await import('typescript')).default;
+} catch (error) {
+  console.error('type-closure guard: failed to load the typescript compiler (devDependency)');
+  console.error(error?.message ?? error);
+  process.exit(1);
+}
 
 const typesEntry = join(pkgDir, 'dist', 'workers', 'index.d.ts');
 const compilerOptions = {

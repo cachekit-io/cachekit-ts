@@ -570,8 +570,18 @@ export class CacheImpl implements SecureCache {
     // never reaches the reliability executor, where degradation would
     // silently swallow it and retry/circuit-breaker would count it as a
     // backend failure. Auto-mode encoding stays inside the executor
-    // (existing degrade semantics unchanged).
-    const interopSerialized = interop ? encodeInteropValue(value) : null;
+    // (existing degrade semantics unchanged). A size rejection still routes
+    // through the LAB-1388 warning: degradation never hides this path, but
+    // a consumer's own try/catch around set() does.
+    let interopSerialized: Uint8Array | null = null;
+    if (interop) {
+      try {
+        interopSerialized = encodeInteropValue(value);
+      } catch (error) {
+        if (error instanceof ValueTooLargeError) this.warnValueTooLarge(key, error);
+        throw error;
+      }
+    }
 
     return this.run('set', undefined, async (): Promise<void> => {
       // Serialize. A size rejection here is invisible in production configs
