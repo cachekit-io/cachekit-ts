@@ -1,5 +1,6 @@
 import type { Redis } from 'ioredis';
 import type { InvalidationEvent, InvalidationCallback } from '../l1/types.js';
+import { logError } from '../logger.js';
 import { serializeEvent, deserializeEvent } from './event.js';
 
 const DEFAULT_CHANNEL = 'cachekit:invalidate';
@@ -56,8 +57,7 @@ export class RedisInvalidationChannel {
 
     // Fire-and-forget - don't await, don't throw
     this.redis.publish(this.channelName, Buffer.from(data)).catch((err) => {
-      // eslint-disable-next-line no-console -- Library intentionally uses console for error visibility
-      console.error('[cachekit] Failed to publish invalidation:', err.message);
+      logError('[cachekit] Failed to publish invalidation:', err.message);
     });
   }
 
@@ -95,13 +95,11 @@ export class RedisInvalidationChannel {
           try {
             callback(event);
           } catch (err) {
-            // eslint-disable-next-line no-console -- Library intentionally uses console for error visibility
-            console.error('[cachekit] Invalidation callback error:', err);
+            logError('[cachekit] Invalidation callback error:', err);
           }
         }
       } catch (err) {
-        // eslint-disable-next-line no-console -- Library intentionally uses console for error visibility
-        console.error('[cachekit] Failed to deserialize invalidation event:', err);
+        logError('[cachekit] Failed to deserialize invalidation event:', err);
       }
     });
 

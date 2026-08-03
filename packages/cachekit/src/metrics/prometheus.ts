@@ -3,6 +3,7 @@
  *
  * Uses prom-client types when available, otherwise provides compatible interface.
  */
+import { logError } from '../logger.js';
 
 // Types for prom-client (peer dependency)
 interface Counter {
@@ -22,6 +23,7 @@ interface Gauge {
 
 interface Registry {
   registerMetric(metric: unknown): void;
+  getSingleMetric?(name: string): unknown;
 }
 
 // Generic constructor type for prom-client metric classes
@@ -68,17 +70,18 @@ export interface MetricsCollector {
  * - cachekit_l1_memory_bytes (gauge): Current L1 memory usage
  * - cachekit_circuit_breaker_state (gauge): Circuit breaker state (0=closed, 1=open, 0.5=half-open)
  *
+ * Requires the optional `prom-client` peer dependency; when it is missing,
+ * initialization reports once through the library logger and metrics degrade
+ * to no-ops.
+ *
  * @example
  * ```typescript
- * import { CacheMetrics } from '@cachekit-io/cachekit';
+ * import { createCache } from '@cachekit-io/cachekit';
  * import promClient from 'prom-client';
  *
- * const metrics = new CacheMetrics({ prefix: 'myapp_cache' });
- *
- * // Use with cache
  * const cache = createCache({
  *   backend: { url: 'redis://localhost' },
- *   metrics: true,
+ *   metrics: { prefix: 'myapp_cache' }, // or `metrics: true` for defaults
  * });
  *
  * // Expose metrics endpoint
@@ -91,6 +94,7 @@ export interface MetricsCollector {
 export class CacheMetrics implements MetricsCollector {
   private readonly prefix: string;
   private readonly defaultLabels: Record<string, string>;
+  private readonly registry: Registry | undefined;
   private readonly errorHandler: ((error: Error) => void) | undefined;
 
   // Metric instances (lazy-loaded when prom-client available)
@@ -112,6 +116,7 @@ export class CacheMetrics implements MetricsCollector {
   constructor(config: MetricsConfig = {}) {
     this.prefix = config.prefix ?? 'cachekit';
     this.defaultLabels = config.defaultLabels ?? {};
+    this.registry = config.registry;
     this.errorHandler = config.onError;
   }
 
@@ -140,36 +145,47 @@ export class CacheMetrics implements MetricsCollector {
       this.HistogramClass = promClient.Histogram as unknown as MetricConstructor<Histogram>;
       this.GaugeClass = promClient.Gauge as unknown as MetricConstructor<Gauge>;
 
+      // Target registry: custom (config.registry) or prom-client's default.
+      // Reuse an already-registered metric instead of constructing a second
+      // one — prom-client throws on duplicate names, which would kill metrics
+      // for every cache instance after the first sharing a prefix+registry.
+      const registry = this.registry ?? (promClient.register as unknown as Registry);
+      const getOrCreate = <M>(Ctor: MetricConstructor<M>, cfg: Record<string, unknown>): M => {
+        const existing = registry.getSingleMetric?.(cfg.name as string);
+        if (existing) return existing as M;
+        return new Ctor({ ...cfg, registers: [registry] });
+      };
+
       // Operations counter
-      this.operationsCounter = new this.CounterClass({
+      this.operationsCounter = getOrCreate(this.CounterClass, {
         name: `${this.prefix}_operations_total`,
         help: 'Total cache operations',
         labelNames: ['operation', 'status'],
       });
 
       // Hits counter
-      this.hitsCounter = new this.CounterClass({
+      this.hitsCounter = getOrCreate(this.CounterClass, {
         name: `${this.prefix}_hits_total`,
         help: 'Cache hits',
         labelNames: ['layer'],
       });
 
       // Misses counter
-      this.missesCounter = new this.CounterClass({
+      this.missesCounter = getOrCreate(this.CounterClass, {
         name: `${this.prefix}_misses_total`,
         help: 'Cache misses',
         labelNames: [],
       });
 
       // Errors counter
-      this.errorsCounter = new this.CounterClass({
+      this.errorsCounter = getOrCreate(this.CounterClass, {
         name: `${this.prefix}_errors_total`,
         help: 'Cache errors',
         labelNames: ['error_type'],
       });
 
       // Duration histogram
-      this.durationHistogram = new this.HistogramClass({
+      this.durationHistogram = getOrCreate(this.HistogramClass, {
         name: `${this.prefix}_operation_duration_seconds`,
         help: 'Operation duration in seconds',
         labelNames: ['operation'],
@@ -177,21 +193,21 @@ export class CacheMetrics implements MetricsCollector {
       });
 
       // L1 entries gauge
-      this.l1EntriesGauge = new this.GaugeClass({
+      this.l1EntriesGauge = getOrCreate(this.GaugeClass, {
         name: `${this.prefix}_l1_entries`,
         help: 'Current L1 cache entries',
         labelNames: [],
       });
 
       // L1 memory gauge
-      this.l1MemoryGauge = new this.GaugeClass({
+      this.l1MemoryGauge = getOrCreate(this.GaugeClass, {
         name: `${this.prefix}_l1_memory_bytes`,
         help: 'Current L1 memory usage in bytes',
         labelNames: [],
       });
 
       // Circuit breaker gauge
-      this.circuitBreakerGauge = new this.GaugeClass({
+      this.circuitBreakerGauge = getOrCreate(this.GaugeClass, {
         name: `${this.prefix}_circuit_breaker_state`,
         help: 'Circuit breaker state (0=closed, 0.5=half-open, 1=open)',
         labelNames: [],
@@ -202,15 +218,33 @@ export class CacheMetrics implements MetricsCollector {
       // m5 Fix: Log error instead of silently swallowing
       const err = error instanceof Error ? error : new Error(String(error));
 
-      if (this.errorHandler) {
-        this.errorHandler(err);
-      } else {
-        // eslint-disable-next-line no-console
-        console.error('[cachekit] Failed to initialize metrics:', err.message);
+      if (!this.invokeErrorHandler(err)) {
+        logError(
+          '[cachekit] metrics are enabled but failed to initialize — install the optional ' +
+            '`prom-client` peer dependency or set `metrics: false`:',
+          err.message
+        );
       }
 
       return false;
     }
+  }
+
+  /**
+   * Invoke the user's onError handler guarded, returning whether one was
+   * registered. A throwing handler must never escape: the cache layer calls
+   * every collector method fire-and-forget (`void this.metrics.*()`) on the
+   * invariant that they never reject — an unguarded handler would turn its
+   * own bug into unhandled rejections. Metrics stay best-effort.
+   */
+  private invokeErrorHandler(err: Error): boolean {
+    if (!this.errorHandler) return false;
+    try {
+      this.errorHandler(err);
+    } catch (handlerError) {
+      logError('[cachekit] metrics onError handler threw:', handlerError);
+    }
+    return true;
   }
 
   /**
@@ -220,11 +254,8 @@ export class CacheMetrics implements MetricsCollector {
   private handleError(error: unknown, context: string): void {
     const err = error instanceof Error ? error : new Error(String(error));
 
-    if (this.errorHandler) {
-      this.errorHandler(err);
-    } else {
-      // eslint-disable-next-line no-console
-      console.error(`[cachekit] Metrics error (${context}):`, err.message);
+    if (!this.invokeErrorHandler(err)) {
+      logError(`[cachekit] Metrics error (${context}):`, err.message);
     }
   }
 

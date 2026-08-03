@@ -43,6 +43,13 @@ export type {
   IOOptions,
 } from './intents-core.js';
 
+// ============ Observability ============
+// The pluggable error logger is platform-neutral and is the sink for every
+// fire-and-forget failure in the shared core (SWR refresh, invalidation
+// channel, metrics init) — Workers apps need setLogger just like Node apps.
+export { setLogger } from './logger.js';
+export type { CachekitLogger } from './logger.js';
+
 // ============ Error Classes ============
 export {
   CachekitError,

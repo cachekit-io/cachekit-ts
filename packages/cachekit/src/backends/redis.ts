@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Redis as IoRedis, type RedisOptions } from 'ioredis';
 import { LockableBackend, RedisBackendConfig, TTLBackend } from './types.js';
 import { BackendError, TimeoutError } from '../errors.js';
+import { logError } from '../logger.js';
 import {
   DEFAULT_TTL_SECONDS,
   DEFAULT_REDIS_CONNECT_TIMEOUT,
@@ -99,8 +100,7 @@ export class RedisBackend implements LockableBackend, TTLBackend {
       };
 
       const safeMessage = sanitize(err.message) || 'Unknown Redis error';
-      // eslint-disable-next-line no-console -- Library intentionally uses console for error visibility
-      console.error(`[cachekit] Redis error: ${safeMessage}`);
+      logError(`[cachekit] Redis error: ${safeMessage}`);
     });
   }
 

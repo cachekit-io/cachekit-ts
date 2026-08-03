@@ -1,5 +1,6 @@
 import type { Backend, RedisBackendConfig, CachekitIOBackendConfig } from '../backends/types.js';
 import type { L1Config } from '../l1/types.js';
+import type { MetricsConfig } from '../metrics/prometheus.js';
 import type { CircuitBreakerConfig } from '../reliability/circuit-breaker.js';
 import type { RetryConfig } from '../reliability/retry.js';
 import type { SerializerConfig } from '../serialization/serializer.js';
@@ -195,8 +196,14 @@ export interface CacheOptions {
   /** Enable ByteStorage wire format (LZ4 compression + xxHash3-64 integrity). Default: true */
   compression?: boolean;
 
-  /** Enable Prometheus metrics */
-  metrics?: boolean;
+  /**
+   * Enable Prometheus metrics (`true`), or enable with configuration
+   * (prefix, default labels, custom registry). Requires the optional
+   * `prom-client` peer dependency — when it is missing, metrics report the
+   * failure once through the library logger and degrade to no-ops.
+   * Default: false.
+   */
+  metrics?: boolean | MetricsConfig;
 
   /** Cross-instance invalidation via Redis Pub/Sub */
   invalidation?: InvalidationConfig;

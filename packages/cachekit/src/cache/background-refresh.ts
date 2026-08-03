@@ -1,4 +1,5 @@
 import type { L1Cache } from '../l1/lru-cache.js';
+import { logError } from '../logger.js';
 
 /**
  * Registers a background promise with the platform so it survives past the
@@ -85,8 +86,7 @@ export class BackgroundRefreshManager {
         }
       } catch (error) {
         // Log error for observability
-        // eslint-disable-next-line no-console
-        console.error(
+        logError(
           '[cachekit] Background refresh failed:',
           error instanceof Error ? error.message : 'Unknown error'
         );
@@ -110,8 +110,7 @@ export class BackgroundRefreshManager {
     try {
       waitUntil?.(refresh);
     } catch (error) {
-      // eslint-disable-next-line no-console
-      console.error(
+      logError(
         '[cachekit] Failed to register background refresh with waitUntil:',
         error instanceof Error ? error.message : 'Unknown error'
       );

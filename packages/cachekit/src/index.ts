@@ -17,6 +17,10 @@ export type {
 //   import { file } from '@cachekit-io/cachekit/backends/file';
 //   import { memcached } from '@cachekit-io/cachekit/backends/memcached';
 export type { InvalidationConfig } from './types/cache.js';
+// Observability: the Prometheus collector reaches the optional prom-client
+// peer dependency, so it stays off the shared (Workers-safe) surface.
+export { CacheMetrics, NoopMetrics, createMetrics } from './metrics/prometheus.js';
+export type { MetricsCollector, MetricsConfig } from './metrics/prometheus.js';
 export { EncryptionManager } from './encryption/manager.js';
 export { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 export { RedisInvalidationChannel } from './invalidation/redis-channel.js';

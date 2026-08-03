@@ -8,8 +8,10 @@ import type {
   EncryptionConfig,
   InvalidationConfig,
 } from './types/cache.js';
-import type { Backend, LockableBackend } from './backends/types.js';
+import type { Backend, L1Metrics, LockableBackend } from './backends/types.js';
 import type { InvalidationEvent } from './l1/types.js';
+import type { MetricsCollector, MetricsConfig } from './metrics/prometheus.js';
+import { logError } from './logger.js';
 import { L1Cache } from './l1/lru-cache.js';
 import { ReliabilityExecutor } from './reliability/executor.js';
 import { BackgroundRefreshManager, type WaitUntil } from './cache/background-refresh.js';
@@ -42,6 +44,25 @@ import {
 const LOCK_FALLTHROUGH = Symbol('cachekit.lock-fallthrough');
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Metrics fallback when the runtime supplies no collector (Workers, or
+ * metrics disabled). Duplicates NoopMetrics from metrics/prometheus.js
+ * deliberately: that module's graph reaches prom-client (Node-only), so
+ * cache-core may only import its types — a value import would trip the
+ * workers bundle guard.
+ */
+const NOOP_METRICS: MetricsCollector = {
+  async recordOperation() {},
+  async recordHit() {},
+  async recordMiss() {},
+  async recordError() {},
+  async startTimer() {
+    return () => {};
+  },
+  async updateL1Stats() {},
+  async updateCircuitBreakerState() {},
+};
 
 /**
  * ByteStorage envelope surface (LZ4 + xxHash3-64 + msgpack envelope).
@@ -101,10 +122,23 @@ export interface CacheRuntime {
    * Resolve a backend config union to a Backend instance. `stampede` carries
    * the cold-miss protection config so a runtime can select a lock-capable
    * variant (Node picks cachekitioWithLocking for apiKey configs when
-   * distributedLock is on); runtimes without that convenience may ignore it —
-   * users can still pass a lock-capable Backend instance directly.
+   * distributedLock is on); `l1Telemetry` lazily reads the cache's live
+   * hit/miss counters so a SaaS backend can auto-wire its telemetry headers.
+   * Runtimes without these conveniences may ignore both — users can still
+   * pass a fully-configured Backend instance directly.
    */
-  resolveBackend(config: CacheOptions['backend'], stampede?: StampedeConfig): Backend;
+  resolveBackend(
+    config: CacheOptions['backend'],
+    stampede?: StampedeConfig,
+    l1Telemetry?: () => L1Metrics
+  ): Backend;
+  /**
+   * Create the Prometheus metrics collector. Absent on platforms without
+   * prom-client (Workers) — the `metrics` option degrades to a no-op there,
+   * mirroring how the Node collector degrades when the optional prom-client
+   * peer dependency is missing.
+   */
+  createMetrics?(config: MetricsConfig | undefined): MetricsCollector;
   /** Create the ByteStorage envelope codec. */
   createByteStorage(): ByteStorageLike;
   /** Create the encryption manager for this platform's bindings. */
@@ -138,6 +172,11 @@ export class CacheImpl implements SecureCache {
   private readonly serializer: MessagePackSerializer;
   private readonly defaultTtl: number;
   private readonly invalidationChannel: InvalidationChannelLike | null = null;
+  private readonly metrics: MetricsCollector;
+  // Live hit/miss counters. Feed both the Prometheus collector and the SaaS
+  // X-CacheKit-L1-* telemetry headers (auto-wired via resolveBackend's
+  // l1Telemetry hook below).
+  private readonly telemetry = { l1Hits: 0, l2Hits: 0, misses: 0 };
   private readonly swrRequiresWaitUntil: boolean;
   private closed = false;
   /** One in-flight cold-miss resolution per cache key (single-flight, LAB-519). */
@@ -146,8 +185,20 @@ export class CacheImpl implements SecureCache {
   private readonly lockable: LockableBackend | null;
 
   constructor(options: CacheOptions, runtime: CacheRuntime) {
-    // Initialize backend
-    this.backend = runtime.resolveBackend(options.backend, options.stampede);
+    // Initialize backend. The telemetry getter reads `this` lazily (per
+    // request), so constructor field order is safe.
+    this.backend = runtime.resolveBackend(options.backend, options.stampede, () => ({
+      ...this.telemetry,
+      l1Enabled: this.l1 !== null,
+    }));
+
+    // Initialize metrics (Prometheus via the runtime; no-op when the
+    // platform has no collector or metrics are off)
+    const metricsOption = options.metrics ?? false;
+    this.metrics =
+      metricsOption !== false && runtime.createMetrics
+        ? runtime.createMetrics(typeof metricsOption === 'object' ? metricsOption : undefined)
+        : NOOP_METRICS;
 
     // Stampede config + lock capability. Duck-typed like cachekit-py's
     // hasattr check: user-supplied Backend instances aren't required to
@@ -250,11 +301,79 @@ export class CacheImpl implements SecureCache {
 
     // Start the channel (fire-and-forget, channel handles errors internally)
     channel.start().catch((err) => {
-      // eslint-disable-next-line no-console
-      console.error('[cachekit] Failed to start invalidation channel:', err);
+      logError('[cachekit] Failed to start invalidation channel:', err);
     });
 
     return channel;
+  }
+
+  // ── Metrics recording ─────────────────────────────────────
+  // MetricsCollector methods never reject (errors route to its handler), so
+  // fire-and-forget `void` keeps them off the hot path.
+
+  private recordHit(layer: 'l1' | 'l2'): void {
+    if (layer === 'l1') this.telemetry.l1Hits++;
+    else this.telemetry.l2Hits++;
+    void this.metrics.recordHit(layer);
+  }
+
+  private recordMiss(): void {
+    this.telemetry.misses++;
+    void this.metrics.recordMiss();
+  }
+
+  private recordFailure(operation: string, error: unknown): void {
+    void this.metrics.recordOperation(operation, 'error');
+    void this.metrics.recordError(error instanceof Error ? error.constructor.name : 'Unknown');
+  }
+
+  private publishL1Stats(): void {
+    if (!this.l1) return;
+    const stats = this.l1.stats;
+    void this.metrics.updateL1Stats(stats.entries, stats.memoryUsed);
+  }
+
+  /**
+   * Run an operation through the reliability stack, then publish the
+   * circuit-breaker state gauge (state transitions happen inside execute).
+   */
+  private async execute<T>(operation: () => Promise<T>, fallback: T): Promise<T> {
+    try {
+      return await this.reliabilityExecutor.execute(operation, fallback);
+    } finally {
+      const state = this.reliabilityExecutor.getCircuitBreakerState();
+      if (state !== null) void this.metrics.updateCircuitBreakerState(state);
+    }
+  }
+
+  /**
+   * Instrument one backend attempt: duration histogram + operations counter
+   * by status + errors counter. Wraps the operation closure (inside retry),
+   * so each retry attempt counts as one operation — the honest reading of
+   * `operations_total`.
+   */
+  private async instrument<T>(operation: string, fn: () => Promise<T>): Promise<T> {
+    const endTimer = await this.metrics.startTimer(operation);
+    try {
+      const result = await fn();
+      void this.metrics.recordOperation(operation, 'success');
+      return result;
+    } catch (error) {
+      this.recordFailure(operation, error);
+      throw error;
+    } finally {
+      endTimer();
+    }
+  }
+
+  /**
+   * Route a backend op through instrumentation (timer + op/error counters,
+   * inside retry so each attempt counts once) and the reliability stack
+   * (retry + circuit breaker, publishing the CB gauge). Every public op goes
+   * through here so none can silently drift out of the metrics set.
+   */
+  private run<T>(operation: string, fallback: T, fn: () => Promise<T>): Promise<T> {
+    return this.execute(() => this.instrument(operation, fn), fallback);
   }
 
   async get<T>(key: string): Promise<T | null> {
@@ -275,6 +394,7 @@ export class CacheImpl implements SecureCache {
     if (this.l1) {
       const l1Result = this.l1.get(key);
       if (l1Result !== null) {
+        this.recordHit('l1');
         return l1Result as T;
       }
     }
@@ -282,9 +402,12 @@ export class CacheImpl implements SecureCache {
     const useEnvelope = !interop && this.byteStorage !== null;
 
     // Fetch from L2 (backend)
-    const operation = async (): Promise<T | null> => {
+    return this.run('get', null, async (): Promise<T | null> => {
       const data = await this.backend.get(key);
-      if (data === null) return null;
+      if (data === null) {
+        this.recordMiss();
+        return null;
+      }
 
       // Decrypt if encryption enabled
       let plaintext = data;
@@ -308,12 +431,12 @@ export class CacheImpl implements SecureCache {
       if (this.l1) {
         const namespace = interop ? key.slice(0, key.indexOf(':')) : extractNamespace(key);
         this.l1.set(key, value, (ttlSeconds ?? this.defaultTtl) * 1000, namespace);
+        this.publishL1Stats();
       }
 
+      this.recordHit('l2');
       return value;
-    };
-
-    return this.reliabilityExecutor.execute(operation, null);
+    });
   }
 
   async set<T>(key: string, value: T, options?: SetOptions): Promise<void> {
@@ -352,7 +475,7 @@ export class CacheImpl implements SecureCache {
     // (existing degrade semantics unchanged).
     const interopSerialized = interop ? encodeInteropValue(value) : null;
 
-    const operation = async (): Promise<void> => {
+    return this.run('set', undefined, async (): Promise<void> => {
       // Serialize
       const serialized = interopSerialized ?? this.serializer.encode(value);
 
@@ -378,28 +501,26 @@ export class CacheImpl implements SecureCache {
       // have).
       if (updateL1 && this.l1) {
         this.l1.set(key, value, ttl * 1000, namespace);
+        this.publishL1Stats();
       }
-    };
-
-    await this.reliabilityExecutor.execute(operation, undefined);
+    });
   }
 
   async delete(key: string): Promise<boolean> {
     this.ensureNotClosed();
 
-    const operation = async (): Promise<boolean> => {
+    return this.run('delete', false, async (): Promise<boolean> => {
       // Delete from backend
       const deleted = await this.backend.delete(key);
 
       // Invalidate L1
       if (this.l1) {
         this.l1.invalidateByKey(key);
+        this.publishL1Stats();
       }
 
       return deleted;
-    };
-
-    return this.reliabilityExecutor.execute(operation, false);
+    });
   }
 
   async exists(key: string): Promise<boolean> {
@@ -409,11 +530,20 @@ export class CacheImpl implements SecureCache {
     if (this.l1) {
       const l1Value = this.l1.get(key);
       if (l1Value !== null) {
+        this.recordHit('l1');
         return true;
       }
     }
 
-    return this.reliabilityExecutor.execute(() => this.backend.exists(key), false);
+    // Record the L2 outcome too — the L1 path above already counts hits, so
+    // skipping L2 here would skew the hit/miss counters (and the SaaS L1
+    // telemetry headers they feed) for L2-only existence checks.
+    return this.run('exists', false, async () => {
+      const exists = await this.backend.exists(key);
+      if (exists) this.recordHit('l2');
+      else this.recordMiss();
+      return exists;
+    });
   }
 
   /**
@@ -538,6 +668,7 @@ export class CacheImpl implements SecureCache {
         if (this.swrRequiresWaitUntil && !waitUntil) {
           const l1Value = this.l1.get(cacheKey);
           if (l1Value !== null) {
+            this.recordHit('l1');
             return l1Value as TResult;
           }
         } else {
@@ -564,6 +695,7 @@ export class CacheImpl implements SecureCache {
                 waitUntil
               );
             }
+            this.recordHit('l1');
             return swrResult.value as TResult;
           }
         }
@@ -767,6 +899,7 @@ export class CacheImpl implements SecureCache {
           }
           break;
       }
+      this.publishL1Stats();
     }
 
     // Invalidate L2 for params-level (key deletion)
