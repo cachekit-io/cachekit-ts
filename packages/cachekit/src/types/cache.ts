@@ -4,14 +4,36 @@ import type { MetricsConfig } from '../metrics/prometheus.js';
 import type { CircuitBreakerConfig } from '../reliability/circuit-breaker.js';
 import type { RetryConfig } from '../reliability/retry.js';
 import type { SerializerConfig } from '../serialization/serializer.js';
-import type { Redis } from 'ioredis';
+
+/**
+ * Structural view of the Redis Pub/Sub surface the invalidation channel
+ * drives — an `ioredis` `Redis` instance satisfies it as-is.
+ *
+ * Structural on purpose (LAB-1388): a nominal `import type { Redis } from
+ * 'ioredis'` here would pull ioredis's Node-typed declarations into the
+ * shared type closure, forcing every Workers consumer without @types/node
+ * into `skipLibCheck` over dozens of `Cannot find name 'Buffer'` errors.
+ * This module is re-exported by the workers entry, so its type closure MUST
+ * stay Node-free (`Uint8Array` here, never `Buffer` — Buffers satisfy it).
+ */
+export interface RedisPubSubLike {
+  /** Publish a message to a channel (ioredis: `publish`). */
+  publish(channel: string, message: string | Uint8Array): Promise<number>;
+  /** Create a dedicated connection for subscribing (ioredis: `duplicate`). */
+  duplicate(): RedisPubSubLike;
+  /** Binary-safe message events (ioredis: `messageBuffer`). */
+  on(event: 'messageBuffer', listener: (channel: Uint8Array, message: Uint8Array) => void): unknown;
+  subscribe(channel: string): Promise<unknown>;
+  unsubscribe(channel: string): Promise<unknown>;
+  quit(): Promise<unknown>;
+}
 
 /**
  * Configuration for cross-instance cache invalidation via Redis Pub/Sub.
  */
 export interface InvalidationConfig {
-  /** Redis client for Pub/Sub (will be duplicated for subscriber) */
-  redis: Redis;
+  /** Redis client for Pub/Sub (will be duplicated for subscriber) — pass an ioredis `Redis` instance */
+  redis: RedisPubSubLike;
   /** Channel name for invalidation messages (default: "cachekit:invalidate") */
   channelName?: string;
 }
@@ -193,7 +215,13 @@ export interface CacheOptions {
   /** Serializer configuration */
   serializer?: Partial<SerializerConfig>;
 
-  /** Enable ByteStorage wire format (LZ4 compression + xxHash3-64 integrity). Default: true */
+  /**
+   * Enable ByteStorage wire format (LZ4 compression + xxHash3-64 integrity).
+   * Default: true, unless the backend advertises `compressionDefault: false`
+   * because its store already compresses at rest (the Workers Cache API
+   * backend does — see Backend.compressionDefault). An explicit value here
+   * always wins.
+   */
   compression?: boolean;
 
   /**

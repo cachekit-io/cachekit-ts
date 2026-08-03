@@ -28,12 +28,13 @@ import {
   decodeInteropValue,
 } from './serialization/interop.js';
 import { createInvalidationEvent } from './invalidation/event.js';
-import { BackendError, ConfigurationError } from './errors.js';
+import { BackendError, ConfigurationError, ValueTooLargeError } from './errors.js';
 import {
   DEFAULT_TTL_SECONDS,
   DEFAULT_LOCK_TIMEOUT_MS,
   DEFAULT_LOCK_WAIT_MS,
   DEFAULT_LOCK_POLL_MS,
+  VALUE_TOO_LARGE_WARN_INTERVAL_MS,
 } from './constants.js';
 
 /**
@@ -259,8 +260,12 @@ export class CacheImpl implements SecureCache {
     // Initialize encryption
     this.encryption = options.encryption ? runtime.createEncryption(options.encryption) : null;
 
-    // Initialize ByteStorage (LZ4 compression + xxHash3-64 integrity)
-    this.byteStorage = (options.compression ?? true) ? runtime.createByteStorage() : null;
+    // Initialize ByteStorage (LZ4 compression + xxHash3-64 integrity). The
+    // default honors the backend's advertised preference (LAB-1388): stores
+    // that already compress values at rest (the Cache API) advertise false so
+    // the default config doesn't compress twice. An explicit option wins.
+    const compressionEnabled = options.compression ?? this.backend.compressionDefault ?? true;
+    this.byteStorage = compressionEnabled ? runtime.createByteStorage() : null;
 
     // Initialize serializer
     this.serializer = new MessagePackSerializer(options.serializer);
@@ -327,6 +332,24 @@ export class CacheImpl implements SecureCache {
     void this.metrics.recordError(error instanceof Error ? error.constructor.name : 'Unknown');
   }
 
+  /** Timestamp of the last oversized-value warning (rate limiting). */
+  private lastSizeWarnAt = 0;
+
+  /**
+   * One-line, greppable, rate-limited report of a set() rejected for size
+   * (LAB-1388) — the only reliable signal of the rejection when degradation
+   * or a consumer catch-block absorbs the ValueTooLargeError itself.
+   */
+  private warnValueTooLarge(key: string, error: ValueTooLargeError): void {
+    const now = Date.now();
+    if (now - this.lastSizeWarnAt < VALUE_TOO_LARGE_WARN_INTERVAL_MS) return;
+    this.lastSizeWarnAt = now;
+    logError(
+      `[cachekit] set rejected, value NOT cached (key=${key}): ${error.message}. ` +
+        'Raise serializer.maxEncodedSize / maxDecodedSize if values this large are expected.'
+    );
+  }
+
   private publishL1Stats(): void {
     if (!this.l1) return;
     const stats = this.l1.stats;
@@ -386,6 +409,10 @@ export class CacheImpl implements SecureCache {
    * cache-level `compression` option. `ttlSeconds` (when known, i.e. from
    * wrap()) bounds the L1 repopulation lifetime so an entry never outlives
    * its declared TTL in L1 long after L2 and the other SDKs expired it.
+   * On backends that surface the remaining TTL on read (getWithTtl), the
+   * bound tightens to the entry's actual remaining lifetime — a plain get()
+   * at t=29s of a 30s entry re-populates L1 for 1s, not defaultTtl
+   * (LAB-1388).
    */
   private async getEntry<T>(key: string, interop: boolean, ttlSeconds?: number): Promise<T | null> {
     this.ensureNotClosed();
@@ -403,7 +430,18 @@ export class CacheImpl implements SecureCache {
 
     // Fetch from L2 (backend)
     return this.run('get', null, async (): Promise<T | null> => {
-      const data = await this.backend.get(key);
+      // When L1 will be re-populated, prefer the TTL-carrying read (same
+      // storage round trip — see Backend.getWithTtl) so the L1 copy can be
+      // capped at the entry's remaining lifetime below.
+      let data: Uint8Array | null;
+      let remainingTtl: number | null = null;
+      if (this.l1 && this.backend.getWithTtl) {
+        const result = await this.backend.getWithTtl(key);
+        data = result?.value ?? null;
+        remainingTtl = result?.ttlSeconds ?? null;
+      } else {
+        data = await this.backend.get(key);
+      }
       if (data === null) {
         this.recordMiss();
         return null;
@@ -427,11 +465,19 @@ export class CacheImpl implements SecureCache {
 
       // Populate L1. Interop keys are {namespace}:{operation}:{hash} — group
       // under the user-facing namespace segment so namespace-level
-      // invalidation matches entries written through wrap().
+      // invalidation matches entries written through wrap(). The lifetime is
+      // the declared TTL (or defaultTtl on a plain get), capped at the L2
+      // entry's remaining TTL when the backend surfaced it — so the L1 copy
+      // never outlives the entry it was read from (LAB-1388).
       if (this.l1) {
         const namespace = interop ? key.slice(0, key.indexOf(':')) : extractNamespace(key);
-        this.l1.set(key, value, (ttlSeconds ?? this.defaultTtl) * 1000, namespace);
-        this.publishL1Stats();
+        const capSeconds = ttlSeconds ?? this.defaultTtl;
+        const l1TtlSeconds =
+          remainingTtl !== null ? Math.min(capSeconds, remainingTtl) : capSeconds;
+        if (l1TtlSeconds > 0) {
+          this.l1.set(key, value, l1TtlSeconds * 1000, namespace);
+          this.publishL1Stats();
+        }
       }
 
       this.recordHit('l2');
@@ -476,8 +522,19 @@ export class CacheImpl implements SecureCache {
     const interopSerialized = interop ? encodeInteropValue(value) : null;
 
     return this.run('set', undefined, async (): Promise<void> => {
-      // Serialize
-      const serialized = interopSerialized ?? this.serializer.encode(value);
+      // Serialize. A size rejection here is invisible in production configs
+      // — degradation (on by default) swallows set() failures, and careful
+      // consumers try/catch set() anyway — so a cache whose hottest values
+      // exceed maxEncodedSize silently never stores them (LAB-1388). Emit
+      // one greppable, rate-limited warning before the error continues into
+      // the reliability stack.
+      let serialized: Uint8Array;
+      try {
+        serialized = interopSerialized ?? this.serializer.encode(value);
+      } catch (error) {
+        if (error instanceof ValueTooLargeError) this.warnValueTooLarge(key, error);
+        throw error;
+      }
 
       // Compress with ByteStorage (before encryption)
       let data: Uint8Array = useEnvelope ? this.byteStorage!.pack(serialized) : serialized;

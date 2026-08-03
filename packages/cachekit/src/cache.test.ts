@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createCache } from './cache.js';
 import { generateKey } from './serialization/key-generator.js';
+import { setLogger } from './logger.js';
+import { ValueTooLargeError } from './errors.js';
+import { MessagePackSerializer } from './serialization/serializer.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
 
@@ -500,6 +503,232 @@ describe('Cache Integration', () => {
       expect(await swrCache.get(cacheKey)).toEqual({ gen: 999 });
 
       await swrCache.close();
+    });
+  });
+
+  // ── LAB-1388 dogfooding fixes ─────────────────────────────────────────
+
+  describe('L1 re-population TTL cap (LAB-1388)', () => {
+    /** In-memory backend that tracks expiry and surfaces remaining TTL on
+     * read — the getWithTtl capability (Cache API / Redis shape). */
+    class TtlAwareBackend implements Backend {
+      readonly store = new Map<string, { value: Uint8Array; expiresAt: number | null }>();
+
+      private live(key: string) {
+        const entry = this.store.get(key);
+        if (!entry) return null;
+        if (entry.expiresAt !== null && entry.expiresAt <= Date.now()) {
+          this.store.delete(key);
+          return null;
+        }
+        return entry;
+      }
+
+      async get(key: string): Promise<Uint8Array | null> {
+        return this.live(key)?.value ?? null;
+      }
+
+      async getWithTtl(key: string) {
+        const entry = this.live(key);
+        if (!entry) return null;
+        const ttlSeconds =
+          entry.expiresAt === null ? null : Math.max(0, (entry.expiresAt - Date.now()) / 1000);
+        return { value: entry.value, ttlSeconds };
+      }
+
+      async set(key: string, value: Uint8Array, ttl: number): Promise<void> {
+        this.store.set(key, { value, expiresAt: ttl > 0 ? Date.now() + ttl * 1000 : null });
+      }
+
+      async delete(key: string): Promise<boolean> {
+        return this.store.delete(key);
+      }
+
+      async exists(key: string): Promise<boolean> {
+        return this.live(key) !== null;
+      }
+
+      async close(): Promise<void> {
+        this.store.clear();
+      }
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('caps a plain get() L1 re-population at the entry remaining lifetime', async () => {
+      const shared = new TtlAwareBackend();
+      const writer = createCache({ backend: shared, defaultTtl: 300 });
+      // Second cache over the same backend = another isolate/process with
+      // its own (empty) L1.
+      const reader = createCache({ backend: shared, defaultTtl: 300 });
+
+      await writer.set('ns:entry', 'v1', { ttl: 30 });
+
+      // t=29s: the reader's plain get() is an L2 hit — pre-fix its L1 copy
+      // got defaultTtl (300s) and served 'v1' long past the entry's expiry.
+      vi.advanceTimersByTime(29_000);
+      expect(await reader.get('ns:entry')).toBe('v1');
+
+      // t=31s: entry expired in L2; the reader's L1 copy must be gone too.
+      vi.advanceTimersByTime(2_000);
+      expect(await reader.get('ns:entry')).toBeNull();
+
+      await writer.close();
+      await reader.close();
+    });
+
+    it('keeps serving from L1 within the remaining lifetime', async () => {
+      const shared = new TtlAwareBackend();
+      const writer = createCache({ backend: shared, defaultTtl: 300 });
+      const reader = createCache({ backend: shared, defaultTtl: 300 });
+
+      await writer.set('ns:entry', 'v1', { ttl: 30 });
+      vi.advanceTimersByTime(10_000);
+      expect(await reader.get('ns:entry')).toBe('v1'); // L2 hit, L1 capped at ~20s
+
+      // Still fresh at t=25s — and served from the reader's L1 (delete the
+      // L2 entry to prove the read never goes back to the backend).
+      shared.store.clear();
+      vi.advanceTimersByTime(15_000);
+      expect(await reader.get('ns:entry')).toBe('v1');
+
+      await writer.close();
+      await reader.close();
+    });
+
+    it('falls back to defaultTtl on backends without getWithTtl (documented limitation)', async () => {
+      const shared = new InMemoryBackend(); // no expiry tracking, no getWithTtl
+      const writer = createCache({ backend: shared, defaultTtl: 300 });
+      const reader = createCache({ backend: shared, defaultTtl: 300 });
+
+      await writer.set('ns:entry', 'v1', { ttl: 30 });
+      vi.advanceTimersByTime(29_000);
+      expect(await reader.get('ns:entry')).toBe('v1');
+
+      // The backend itself never expires entries and reports no TTL, so the
+      // reader's L1 copy legitimately lives out defaultTtl — unchanged
+      // pre-existing behavior for TTL-blind backends.
+      vi.advanceTimersByTime(2_000);
+      expect(await reader.get('ns:entry')).toBe('v1');
+
+      await writer.close();
+      await reader.close();
+    });
+  });
+
+  describe('oversized-value set() warning (LAB-1388)', () => {
+    afterEach(() => {
+      setLogger(null);
+      vi.useRealTimers();
+    });
+
+    // ~2 MiB of unique-ish content — over the 1 MiB default maxEncodedSize.
+    const oversized = () => 'x'.repeat(2 * 1024 * 1024);
+
+    it('reports a rate-limited warning even when degradation swallows the error', async () => {
+      vi.useFakeTimers();
+      const logs: string[] = [];
+      setLogger((message) => logs.push(message));
+
+      const c = createCache({ backend: new InMemoryBackend() });
+
+      // Degradation is on by default: set() resolves silently…
+      await expect(c.set('ns:big', oversized())).resolves.toBeUndefined();
+      // …but the rejection is reported, once, greppably.
+      expect(logs.filter((m) => m.includes('set rejected'))).toHaveLength(1);
+      expect(logs[0]).toContain('maxEncodedSize');
+
+      // Rate-limited: a hot oversized key cannot flood the sink.
+      await c.set('ns:big', oversized());
+      expect(logs.filter((m) => m.includes('set rejected'))).toHaveLength(1);
+
+      // A fresh interval reports again.
+      vi.advanceTimersByTime(61_000);
+      await c.set('ns:big', oversized());
+      expect(logs.filter((m) => m.includes('set rejected'))).toHaveLength(2);
+
+      await c.close();
+    });
+
+    it('still throws ValueTooLargeError when degradation is disabled', async () => {
+      const logs: string[] = [];
+      setLogger((message) => logs.push(message));
+
+      const c = createCache({
+        backend: new InMemoryBackend(),
+        reliability: { degradation: false },
+      });
+
+      await expect(c.set('ns:big', oversized())).rejects.toThrow(ValueTooLargeError);
+      expect(logs.filter((m) => m.includes('set rejected'))).toHaveLength(1);
+
+      await c.close();
+    });
+  });
+
+  describe('backend-advertised compression default (LAB-1388)', () => {
+    /** Plain MessagePack view of raw backend bytes ('decode failed' when the
+     * envelope bytes aren't even valid MessagePack). */
+    const plainDecode = (bytes: Uint8Array): unknown => {
+      try {
+        return new MessagePackSerializer().decode(bytes);
+      } catch {
+        return 'decode failed';
+      }
+    };
+
+    class NoCompressionPreferenceBackend extends InMemoryBackend {
+      readonly compressionDefault = false;
+      readonly raw = new Map<string, Uint8Array>();
+
+      override async set(key: string, value: Uint8Array, ttl: number): Promise<void> {
+        this.raw.set(key, value);
+        await super.set(key, value, ttl);
+      }
+    }
+
+    it('honors compressionDefault=false: stored bytes are plain MessagePack', async () => {
+      const b = new NoCompressionPreferenceBackend();
+      const c = createCache({ backend: b, l1: { enabled: false } });
+
+      await c.set('ns:k', { hello: 'world' });
+      // No ByteStorage envelope: the raw backend bytes decode directly.
+      const stored = [...b.raw.values()][0];
+      expect(new MessagePackSerializer().decode(stored)).toEqual({ hello: 'world' });
+      expect(await c.get('ns:k')).toEqual({ hello: 'world' });
+
+      await c.close();
+    });
+
+    it('explicit compression: true overrides the backend preference', async () => {
+      const b = new NoCompressionPreferenceBackend();
+      const c = createCache({ backend: b, compression: true, l1: { enabled: false } });
+
+      await c.set('ns:k', { hello: 'world' });
+      // Enveloped: plain MessagePack decode of the raw bytes must not yield
+      // the original value (the envelope wraps it).
+      expect(plainDecode([...b.raw.values()][0])).not.toEqual({ hello: 'world' });
+      expect(await c.get('ns:k')).toEqual({ hello: 'world' });
+
+      await c.close();
+    });
+
+    it('backends without a preference keep the compressed default', async () => {
+      const b = new NoCompressionPreferenceBackend();
+      // Erase the preference to model a legacy/custom backend.
+      Object.defineProperty(b, 'compressionDefault', { value: undefined });
+      const c = createCache({ backend: b, l1: { enabled: false } });
+
+      await c.set('ns:k', { hello: 'world' });
+      expect(plainDecode([...b.raw.values()][0])).not.toEqual({ hello: 'world' });
+
+      await c.close();
     });
   });
 });

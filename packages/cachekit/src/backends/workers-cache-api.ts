@@ -1,4 +1,4 @@
-import { Backend } from './types.js';
+import { Backend, GetWithTtlResult } from './types.js';
 import { BackendError, ConfigurationError } from '../errors.js';
 import { classifyWorkersRuntimeError } from './error-classifier.js';
 import { DEFAULT_TTL_SECONDS } from '../constants.js';
@@ -97,6 +97,13 @@ export class CacheAPIBackend implements Backend {
    * See Backend.transformsKeys.
    */
   readonly transformsKeys = true;
+  /**
+   * Cloudflare stores Cache API `Response` bodies compressed at rest, so the
+   * ByteStorage LZ4 envelope would spend isolate CPU compressing twice for
+   * little win — advertise compression off by default (LAB-1388). An
+   * explicit `compression: true` on the cache still enables it.
+   */
+  readonly compressionDefault = false;
   private readonly cacheName?: string;
   private readonly defaultTtl: number;
   private cachePromise: Promise<CacheLike> | null = null;
@@ -113,6 +120,25 @@ export class CacheAPIBackend implements Backend {
       const response = await (await this.cache()).match(keyUrl(key));
       if (response === undefined) return null;
       return new Uint8Array(await response.arrayBuffer());
+    } catch (error) {
+      throw this.wrapError('get', error);
+    }
+  }
+
+  /**
+   * See {@link Backend.getWithTtl}: same single `match()` round trip as
+   * get(); the remaining lifetime comes from the stored response's own
+   * freshness headers (the `Cache-Control: max-age` this backend wrote,
+   * minus the `Age` the Cloudflare edge reports). Lets CacheImpl cap L1
+   * re-population at the entry's remaining lifetime (LAB-1388).
+   */
+  async getWithTtl(key: string): Promise<GetWithTtlResult | null> {
+    this.ensureNotClosed();
+    try {
+      const response = await (await this.cache()).match(keyUrl(key));
+      if (response === undefined) return null;
+      const ttlSeconds = remainingTtlSeconds(response);
+      return { value: new Uint8Array(await response.arrayBuffer()), ttlSeconds };
     } catch (error) {
       throw this.wrapError('get', error);
     }
@@ -216,6 +242,22 @@ export class CacheAPIBackend implements Backend {
 
 function keyUrl(key: string): string {
   return SYNTHETIC_KEY_BASE + encodeURIComponent(key);
+}
+
+/**
+ * Remaining lifetime of a matched response: the `max-age` set() wrote minus
+ * the `Age` header the edge reports. Null (unknown / no expiry) when the
+ * entry carries the no-expiry sentinel or the headers are absent — e.g.
+ * test harnesses that don't emit `Age` report the full max-age, which the
+ * caller's own TTL cap still bounds; never a negative freshness.
+ */
+function remainingTtlSeconds(response: Response): number | null {
+  const maxAgeMatch = /(?:^|[,\s])max-age=(\d+)/.exec(response.headers.get('Cache-Control') ?? '');
+  if (!maxAgeMatch) return null;
+  const maxAge = Number(maxAgeMatch[1]);
+  if (maxAge >= CACHE_API_NO_EXPIRY_MAX_AGE) return null;
+  const age = Number(response.headers.get('Age'));
+  return Math.max(0, maxAge - (Number.isFinite(age) && age > 0 ? Math.floor(age) : 0));
 }
 
 /**

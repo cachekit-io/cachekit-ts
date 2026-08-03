@@ -131,8 +131,52 @@ const cache = createCache({
       baseDelay: 100,
     },
   },
+
+  // Serializer DoS-protection limits — see "Value size limits" below.
+  serializer: {
+    maxEncodedSize: 1024 * 1024, // 1 MiB default
+    maxDecodedSize: 10 * 1024 * 1024, // 10 MiB default
+  },
+
+  // ByteStorage envelope (LZ4 + integrity). Defaults to true, unless the
+  // backend advertises compression off because its store already
+  // compresses at rest (the Workers Cache API backend does).
+  compression: true,
 });
 ```
+
+### Value size limits — the 1 MiB default is a cache-off switch, not a suggestion
+
+`set()` (and every `wrap()` store) rejects values whose encoded size exceeds
+`serializer.maxEncodedSize` — **1 MiB by default** — with `ValueTooLargeError`.
+Two things make this rejection easy to miss in production:
+
+- **Graceful degradation is on by default**, and it treats a failed `set()`
+  as "skip silently" — the call resolves normally.
+- Consumers that guard `set()` with try/catch (correctly — cache failures
+  shouldn't fail requests) absorb the error the same way.
+
+Either way the result is a cache that quietly never stores exactly its
+largest — often hottest — values, while small values keep caching fine. If
+your responses can exceed 1 MiB (large API payloads, reports, aggregates),
+raise both limits up front:
+
+```typescript
+const cache = createCache.minimal({
+  backend: workersCacheAPI(),
+  serializer: {
+    maxEncodedSize: 64 * 1024 * 1024,
+    maxDecodedSize: 64 * 1024 * 1024, // must cover reads of what you write
+  },
+});
+```
+
+The SDK also reports every size rejection through its
+[pluggable logger](#observability) as a rate-limited, greppable
+`[cachekit] set rejected, value NOT cached (key=...)` line — watch for it
+after deploying a new cache. (Backends have their own hard ceilings too:
+Workers KV values cap at 25 MiB, Memcached items at 1 MiB server-side,
+CachekitIO per plan.)
 
 ## Stampede Protection
 
@@ -190,6 +234,17 @@ Four backends implement the same `Backend` interface (raw bytes in/out) and plug
 | File              | `file` from `@cachekit-io/cachekit/backends/file`           | Node       | local disk, on-disk format shared with cachekit-py                                   |
 
 The Memcached and File backends are **Node-runtime only** and live behind subpath exports, so browser/edge bundles that import the package root never pull in `memjs` or `node:fs`.
+
+**L1 freshness across processes.** When a plain `get()` hits L2, the value is
+re-populated into this process's L1. On backends that surface the entry's
+remaining TTL in the same read (`Backend.getWithTtl` — Redis via a pipelined
+`GET`+`TTL`, the Workers Cache API via response freshness headers), that L1
+copy is capped at the entry's **remaining lifetime**, so it can never outlive
+the L2 entry it came from. On backends without the capability (KV, CachekitIO,
+Memcached, File, custom backends that only implement `get`), the L1 copy is
+bounded by `defaultTtl` — if you rely on TTLs for correctness across processes
+there, set a small `defaultTtl`, disable L1 (`l1: { enabled: false }`), or
+implement `getWithTtl` on your custom backend.
 
 ### Memcached
 
@@ -389,9 +444,13 @@ export default {
 
 Beyond CachekitIO, two Cloudflare-native backends keep cache state in the
 edge itself — no round-trip to api.cachekit.io. Both store the same opaque
-ByteStorage payloads as every other backend, so encryption and the wire
-envelope are unchanged (secure caches store only ciphertext), and both plug
-into `createCache` or any intent via `backend:`:
+payloads as every other backend, so encryption is unchanged (secure caches
+store only ciphertext), and both plug into `createCache` or any intent via
+`backend:`. One default differs: the Cache API backend advertises the
+ByteStorage compression envelope **off** — Cloudflare already stores
+`Response` bodies compressed at rest, so the wasm envelope would spend
+isolate CPU compressing twice. Pass `compression: true` to re-enable it
+(e.g. to shrink bodies below a size limit before storage):
 
 ```typescript
 import { createCache, workersKV, workersCacheAPI } from '@cachekit-io/cachekit/workers';
@@ -420,6 +479,8 @@ TTL and consistency semantics differ from Redis/CachekitIO — pick by workload:
 | TTL                      | Native `expirationTtl`; **60s minimum** — shorter TTLs are clamped up, never down   | `Cache-Control: max-age`, honored to the second, no floor         |
 | `ttl <= 0` ("no expiry") | Stored without expiration                                                           | Capped at 1-year max-age (the Cache API has no unbounded storage) |
 | Eviction                 | Durable until expiry                                                                | Best-effort — entries may be dropped under cache pressure         |
+| Compression default      | On (ByteStorage envelope)                                                           | **Off** — Cloudflare stores bodies compressed at rest             |
+| L1 freshness on read     | Bounded by `defaultTtl` (KV reads don't surface remaining TTL)                      | Capped at the entry's **remaining TTL** (from `max-age` − `Age`)  |
 | Best for                 | Shared config, sessions, rarely-written hot reads                                   | Request-local acceleration in front of a shared source            |
 
 The Cache API is request-keyed under the hood; the backend maps each cache
