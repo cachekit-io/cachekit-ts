@@ -94,16 +94,11 @@ jobs:
       - name: Test
         run: pnpm test
 
-      - name: Configure npm auth
-        run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-
+      # Auth is npm OIDC trusted publishing via a package-level trusted
+      # publisher on npmjs.com — the repo has NO npm token secret (LAB-831).
       - name: Publish to npm
         working-directory: packages/cachekit
         run: pnpm publish --access public --provenance --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-cachekit-core-wasm:
     name: Publish @cachekit-io/cachekit-core-wasm
@@ -170,9 +165,10 @@ jobs:
       # (the old token-auth steps resolved an empty token and died ENEEDAUTH,
       # LAB-831). Node 22's bundled npm 10 cannot do OIDC; pnpm 11 can, and
       # this is the exact invocation the proven publish-cachekit job uses.
-      # First-time creation of a new package additionally needs an ORG-level
-      # trusted publisher on npmjs.com (package-level config requires the
-      # package to already exist — npm/cli#8544).
+      # Bootstrapping a NEW package: trusted publishers are package-level and
+      # can only be configured once the package exists (npm/cli#8544), so the
+      # first publish must be a one-off credentialed/manual publish; configure
+      # the package-level trusted publisher after that and OIDC takes over.
       - name: Publish to npm
         working-directory: packages/cachekit-core-wasm
         run: pnpm publish --access public --provenance --no-git-checks
