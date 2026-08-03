@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.3](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-core-ts-v0.1.2...cachekit-core-ts-v0.1.3) (2026-08-03)
+
+
+### Features
+
+* **core-bindings:** pick up cachekit-core 0.4.0 — bin envelopes (LAB-901) ([#91](https://github.com/cachekit-io/cachekit-ts/issues/91)) ([763a3d8](https://github.com/cachekit-io/cachekit-ts/commit/763a3d8c899cf743c0a5777e18bc7411e64530fe))
+
+
+### Bug Fixes
+
+* wire the metrics option live — Prometheus module becomes the implementation (LAB-517) ([#75](https://github.com/cachekit-io/cachekit-ts/issues/75)) ([23721b9](https://github.com/cachekit-io/cachekit-ts/commit/23721b9b87dfb8410e47928d3f3025c60fdd8f0f))
+
 ## [0.1.2](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-core-ts-v0.1.1...cachekit-core-ts-v0.1.2) (2026-05-17)
 
 ### Release notes
