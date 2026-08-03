@@ -649,6 +649,24 @@ describe('Cache Integration', () => {
       await writer.close();
       await reader.close();
     });
+
+    it('repopulates L1 forever when defaultTtl is 0 and the entry has no expiry (LAB-1388)', async () => {
+      const shared = new TtlAwareBackend();
+      const writer = createCache({ backend: shared, defaultTtl: 0 });
+      const reader = createCache({ backend: shared, defaultTtl: 0 });
+
+      await writer.set('ns:entry', 'v1'); // ttl<=0 -> no expiry, per Backend contract
+
+      // Pre-fix, capSeconds (0) collapsed the Math.min cap to 0 and the
+      // `l1TtlSeconds > 0` guard skipped L1 repopulation entirely.
+      expect(await reader.get('ns:entry')).toBe('v1'); // L2 hit, should populate L1
+
+      shared.store.clear(); // prove the next read comes from L1, not L2
+      expect(await reader.get('ns:entry')).toBe('v1');
+
+      await writer.close();
+      await reader.close();
+    });
   });
 
   describe('oversized-value set() warning (LAB-1388)', () => {

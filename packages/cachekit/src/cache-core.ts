@@ -524,8 +524,14 @@ export class CacheImpl implements SecureCache {
       if (this.l1) {
         const namespace = interop ? key.slice(0, key.indexOf(':')) : extractNamespace(key);
         const capSeconds = ttlSeconds ?? this.defaultTtl;
+        // ttl <= 0 means "no expiry" (ts-wide Backend contract) — treat it
+        // as infinite here so Math.min still caps to a real remainingTtl
+        // when the backend reports one, instead of collapsing to 0 and
+        // tripping the skip-guard below for an entry that should never
+        // expire in L1 (LAB-1388).
+        const capOrForever = capSeconds > 0 ? capSeconds : Infinity;
         const l1TtlSeconds =
-          remainingTtl !== null ? Math.min(capSeconds, remainingTtl) : capSeconds;
+          remainingTtl !== null ? Math.min(capOrForever, remainingTtl) : capOrForever;
         if (l1TtlSeconds > 0) {
           this.l1.set(key, value, l1TtlSeconds * 1000, namespace);
           this.publishL1Stats();

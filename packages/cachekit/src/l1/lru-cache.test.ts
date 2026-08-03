@@ -35,6 +35,16 @@ describe('L1Cache', () => {
       vi.useRealTimers();
     });
 
+    it('ttl <= 0 never expires (LAB-1388: matches the ts-wide "no expiry" contract)', () => {
+      vi.useFakeTimers();
+      cache.set('zero', 'value', 0, 'test');
+      cache.set('negative', 'value', -1, 'test');
+      vi.advanceTimersByTime(1000 * 60 * 60 * 24 * 365); // 1 year
+      expect(cache.get('zero')).toBe('value');
+      expect(cache.get('negative')).toBe('value');
+      vi.useRealTimers();
+    });
+
     it('deletes key and returns true', () => {
       cache.set('key', 'value', 10000, 'test');
       expect(cache.delete('key')).toBe(true);
