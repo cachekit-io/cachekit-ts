@@ -128,13 +128,24 @@ export class RedisBackend implements LockableBackend, TTLBackend {
     }
   }
 
+  /** One-shot latch for reporting a failing TTL pipeline leg (LAB-1388). */
+  private ttlLegFailureLogged = false;
+
   /**
    * See {@link Backend.getWithTtl}: GET + TTL pipelined onto one round trip
    * (LAB-1388), so CacheImpl can cap L1 re-population at the entry's
-   * remaining lifetime without a second network hop. TTL's -2 (missing) /
-   * -1 (no expiry) collapse to null, matching {@link TTLBackend.getTTL};
-   * a TTL-command failure downgrades to "unknown" rather than failing a
-   * read whose GET succeeded.
+   * remaining lifetime without a second network hop.
+   *
+   * TTL result mapping: -1 (no expiry) → null; 0 (sub-second remainder) and
+   * -2 (expired between the pipelined GET and TTL — pipelines aren't atomic)
+   * → 0, which the caller's `> 0` gate turns into "don't re-populate L1".
+   * Collapsing those to null instead would hand a dying entry the full
+   * default-TTL L1 lifetime — the exact bug this capability fixes.
+   *
+   * A TTL-command failure downgrades to "unknown" rather than failing a
+   * read whose GET succeeded — but it is reported once through the library
+   * logger, because a persistently failing TTL leg (e.g. a Redis-compatible
+   * proxy without TTL) silently reverts L1 bounding to defaultTtl.
    */
   async getWithTtl(key: string): Promise<GetWithTtlResult | null> {
     this.ensureNotClosed();
@@ -148,7 +159,20 @@ export class RedisBackend implements LockableBackend, TTLBackend {
       if (getErr) throw getErr;
       if (buf === null) return null;
       const [ttlErr, ttl] = results[1] as [Error | null, number];
-      const ttlSeconds = !ttlErr && typeof ttl === 'number' && ttl > 0 ? ttl : null;
+      let ttlSeconds: number | null;
+      if (ttlErr || typeof ttl !== 'number') {
+        ttlSeconds = null;
+        if (!this.ttlLegFailureLogged) {
+          this.ttlLegFailureLogged = true;
+          logError(
+            '[cachekit] Redis getWithTtl: TTL pipeline leg failed — L1 re-population ' +
+              'falls back to the defaultTtl bound (reported once)',
+            ttlErr ?? undefined
+          );
+        }
+      } else {
+        ttlSeconds = ttl === -1 ? null : Math.max(0, ttl);
+      }
       return { value: new Uint8Array(buf), ttlSeconds };
     } catch (error) {
       throw this.wrapError('get', error);

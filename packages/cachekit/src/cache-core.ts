@@ -34,8 +34,16 @@ import {
   DEFAULT_LOCK_TIMEOUT_MS,
   DEFAULT_LOCK_WAIT_MS,
   DEFAULT_LOCK_POLL_MS,
-  VALUE_TOO_LARGE_WARN_INTERVAL_MS,
 } from './constants.js';
+
+/**
+ * Minimum interval between "set rejected: value too large" warnings
+ * (LAB-1388). The rejection itself is often invisible (degradation swallows
+ * set failures; consumers try/catch set), so the SDK reports it through the
+ * logger — rate-limited so a hot oversized key can't flood the sink.
+ * Module-private on purpose: one consumer, not a tuning knob.
+ */
+const VALUE_TOO_LARGE_WARN_INTERVAL_MS = 60_000;
 
 /**
  * Sentinel for "the lock path did not resolve the miss — compute without
@@ -45,6 +53,17 @@ import {
 const LOCK_FALLTHROUGH = Symbol('cachekit.lock-fallthrough');
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Cheap structural sniff for the ByteStorage envelope: a positional msgpack
+ * 4-tuple whose first element is binary — fixarray(4) marker followed by a
+ * bin8/bin16/bin32 marker. User values matching this shape are possible but
+ * the verified unpack (xxHash3-64 over the payload) disambiguates; the sniff
+ * only exists so ordinary reads never pay an unpack attempt.
+ */
+function looksLikeEnvelope(bytes: Uint8Array): boolean {
+  return bytes.length > 2 && bytes[0] === 0x94 && bytes[1] >= 0xc4 && bytes[1] <= 0xc6;
+}
 
 /**
  * Metrics fallback when the runtime supplies no collector (Workers, or
@@ -170,6 +189,10 @@ export class CacheImpl implements SecureCache {
   private readonly backgroundRefresh: BackgroundRefreshManager;
   private readonly encryption: EncryptionLike | null;
   private readonly byteStorage: ByteStorageLike | null;
+  private readonly createByteStorage: () => ByteStorageLike;
+  /** Lazily-created codec for envelope-tolerant reads on compression-off
+   * caches (LAB-1388) — see getEntry. */
+  private envelopeReader: ByteStorageLike | null = null;
   private readonly serializer: MessagePackSerializer;
   private readonly defaultTtl: number;
   private readonly invalidationChannel: InvalidationChannelLike | null = null;
@@ -266,6 +289,9 @@ export class CacheImpl implements SecureCache {
     // the default config doesn't compress twice. An explicit option wins.
     const compressionEnabled = options.compression ?? this.backend.compressionDefault ?? true;
     this.byteStorage = compressionEnabled ? runtime.createByteStorage() : null;
+    // Kept for lazy envelope-tolerant reads (see getEntry): a compression-off
+    // cache still needs a codec the first time it meets an enveloped entry.
+    this.createByteStorage = () => runtime.createByteStorage();
 
     // Initialize serializer
     this.serializer = new MessagePackSerializer(options.serializer);
@@ -334,6 +360,21 @@ export class CacheImpl implements SecureCache {
 
   /** Timestamp of the last oversized-value warning (rate limiting). */
   private lastSizeWarnAt = 0;
+
+  /**
+   * Verified unpack of a suspected legacy/foreign ByteStorage envelope on a
+   * compression-off cache. Returns null when the bytes aren't actually an
+   * envelope (checksum/shape mismatch) — the caller then treats them as
+   * plain serialized data. The codec is created lazily and only once.
+   */
+  private tryUnwrapEnvelope(bytes: Uint8Array): Uint8Array | null {
+    try {
+      this.envelopeReader ??= this.createByteStorage();
+      return this.envelopeReader.unpack(bytes);
+    } catch {
+      return null;
+    }
+  }
 
   /**
    * One-line, greppable, rate-limited report of a set() rejected for size
@@ -456,6 +497,17 @@ export class CacheImpl implements SecureCache {
       // Decompress with ByteStorage (after decryption)
       if (useEnvelope) {
         plaintext = this.byteStorage!.unpack(plaintext);
+      } else if (!interop && looksLikeEnvelope(plaintext)) {
+        // Envelope tolerance (LAB-1388): a compression-off cache can read
+        // entries a compression-on writer stored — same store, older SDK
+        // default, or a mixed-version fleet mid-rollout. This is NOT
+        // optional hygiene: the envelope is itself valid MessagePack (a
+        // positional 4-tuple), so a plain decode would "succeed" and serve
+        // the envelope structure as the cached value — silent corruption,
+        // invisible to degradation. The unpack's xxHash3 check makes sniff
+        // false-positives vanishingly unlikely, and any unpack failure
+        // falls back to treating the bytes as plain-serialized.
+        plaintext = this.tryUnwrapEnvelope(plaintext) ?? plaintext;
       }
 
       // Deserialize
@@ -1016,9 +1068,10 @@ export class CacheImpl implements SecureCache {
     // Dispose encryption (zeroizes key material)
     attempt(() => this.encryption?.dispose());
 
-    // Release the envelope codec (zeroizes/frees wasm resources on Workers;
+    // Release the envelope codecs (zeroizes/frees wasm resources on Workers;
     // no-op for the GC-managed NAPI binding)
     attempt(() => this.byteStorage?.free?.());
+    attempt(() => this.envelopeReader?.free?.());
 
     // Clear L1 (this also clears L1's internal refreshingKeys)
     attempt(() => this.l1?.clear());

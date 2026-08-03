@@ -47,14 +47,6 @@ export const DEFAULT_MAX_DEPTH = 100;
 /** Maximum collection size for Maps, Sets, Arrays, Objects */
 export const DEFAULT_MAX_COLLECTION_SIZE = 10000;
 
-/**
- * Minimum interval between "set rejected: value too large" warnings
- * (LAB-1388). The rejection itself is often invisible (degradation swallows
- * set failures; consumers try/catch set), so the SDK reports it through the
- * logger — rate-limited so a hot oversized key can't flood the sink.
- */
-export const VALUE_TOO_LARGE_WARN_INTERVAL_MS = 60_000;
-
 /** Maximum size for key generation (64KB) */
 export const KEY_GEN_MAX_SIZE = 64 * 1024;
 

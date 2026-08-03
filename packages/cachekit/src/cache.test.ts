@@ -363,30 +363,59 @@ describe('Cache Integration', () => {
       await cache.close();
     });
 
-    it('should return null when reading compressed data with compression disabled (mismatch)', async () => {
+    // The pre-LAB-1388 version of this test closed the writer BEFORE the
+    // read — InMemoryBackend.close() clears the shared store, so it
+    // "verified" a degradation-to-null that never actually happened. The
+    // envelope is itself valid MessagePack, so without envelope tolerance a
+    // plain decode would have SUCCEEDED and served the raw 4-tuple envelope
+    // as the cached value. Tolerance makes the mismatch read correct.
+    it('reads enveloped entries correctly even with compression disabled (envelope tolerance)', async () => {
       const sharedBackend = new InMemoryBackend();
 
-      // Write with compression enabled
+      // Write with compression enabled (0.1.5 default, or a mixed fleet)
       const writer = createCache({
         backend: sharedBackend,
         compression: true,
         l1: { enabled: false },
       });
       await writer.set('test:mismatch', { data: 'compressed' });
-      await writer.close();
 
-      // Read with compression disabled — ByteStorage envelope hits serializer.decode()
-      // which fails (envelope structure doesn't match expected types), caught by
-      // ReliabilityExecutor → degrades to null (cache miss).
-      // KNOWN LIMITATION: compression config must be consistent within a deployment.
+      // Read with compression disabled — the envelope is detected, verified
+      // (xxHash3), and unwrapped; the caller gets the original value, never
+      // the envelope structure.
       const reader = createCache({
         backend: sharedBackend,
         compression: false,
         l1: { enabled: false },
       });
       const result = await reader.get('test:mismatch');
-      expect(result).toBeNull();
+      expect(result).toEqual({ data: 'compressed' });
+
+      await writer.close();
       await reader.close();
+    });
+
+    it('degrades to null when an envelope-on cache reads raw-serialized bytes (reverse mismatch)', async () => {
+      const sharedBackend = new InMemoryBackend();
+
+      const rawWriter = createCache({
+        backend: sharedBackend,
+        compression: false,
+        l1: { enabled: false },
+      });
+      await rawWriter.set('test:reverse', { data: 'raw' });
+
+      // Envelope-on reader: unpack fails integrity, ReliabilityExecutor
+      // degrades to a miss (pre-existing behavior, now actually pinned).
+      const envelopeReader = createCache({
+        backend: sharedBackend,
+        compression: true,
+        l1: { enabled: false },
+      });
+      expect(await envelopeReader.get('test:reverse')).toBeNull();
+
+      await rawWriter.close();
+      await envelopeReader.close();
     });
   });
 

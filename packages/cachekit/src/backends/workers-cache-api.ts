@@ -115,14 +115,9 @@ export class CacheAPIBackend implements Backend {
   }
 
   async get(key: string): Promise<Uint8Array | null> {
-    this.ensureNotClosed();
-    try {
-      const response = await (await this.cache()).match(keyUrl(key));
-      if (response === undefined) return null;
-      return new Uint8Array(await response.arrayBuffer());
-    } catch (error) {
-      throw this.wrapError('get', error);
-    }
+    // Same single match() as getWithTtl — one read path to keep correct
+    // (exists() already re-learned that lesson with its body-cancel fix).
+    return (await this.getWithTtl(key))?.value ?? null;
   }
 
   /**

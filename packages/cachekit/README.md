@@ -450,7 +450,11 @@ store only ciphertext), and both plug into `createCache` or any intent via
 ByteStorage compression envelope **off** — Cloudflare already stores
 `Response` bodies compressed at rest, so the wasm envelope would spend
 isolate CPU compressing twice. Pass `compression: true` to re-enable it
-(e.g. to shrink bodies below a size limit before storage):
+(e.g. to shrink bodies below a size limit before storage). Reads are
+envelope-tolerant either way: a compression-off cache detects, verifies,
+and unwraps entries an earlier version (or a compression-on peer in a
+mixed fleet) stored with the envelope, so upgrades and gradual rollouts
+never serve envelope bytes as values:
 
 ```typescript
 import { createCache, workersKV, workersCacheAPI } from '@cachekit-io/cachekit/workers';
