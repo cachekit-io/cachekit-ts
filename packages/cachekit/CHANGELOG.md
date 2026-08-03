@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.1.5](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.1.4...cachekit-v0.1.5) (2026-08-03)
+
+
+### Features
+
+* **cache:** cold-miss single-flight + opt-in cross-process locking (LAB-519) ([#77](https://github.com/cachekit-io/cachekit-ts/issues/77)) ([2fbfdee](https://github.com/cachekit-io/cachekit-ts/commit/2fbfdee2202e60bb8cea69e610c1a8a031e31bc5))
+* **core-bindings:** pick up cachekit-core 0.4.0 — bin envelopes (LAB-901) ([#91](https://github.com/cachekit-io/cachekit-ts/issues/91)) ([763a3d8](https://github.com/cachekit-io/cachekit-ts/commit/763a3d8c899cf743c0a5777e18bc7411e64530fe))
+* **workers:** LAB-750 Workers KV + Cache API backends (phase-2 edge storage) ([#81](https://github.com/cachekit-io/cachekit-ts/issues/81)) ([d0a0e3d](https://github.com/cachekit-io/cachekit-ts/commit/d0a0e3dce25136ff5088172ec026c822e228b934))
+* **workers:** re-enable SWR on Workers via ctx.waitUntil (LAB-751) ([#80](https://github.com/cachekit-io/cachekit-ts/issues/80)) ([08fd853](https://github.com/cachekit-io/cachekit-ts/commit/08fd853714c99019aba2cb7fcfdf14e964130c46))
+
+
+### Bug Fixes
+
+* **swr:** preserve explicit writes during refresh (LAB-751) ([#84](https://github.com/cachekit-io/cachekit-ts/issues/84)) ([c4d4aed](https://github.com/cachekit-io/cachekit-ts/commit/c4d4aed8796df40af8942f487921cccbaa795d32))
+* wire the metrics option live — Prometheus module becomes the implementation (LAB-517) ([#75](https://github.com/cachekit-io/cachekit-ts/issues/75)) ([23721b9](https://github.com/cachekit-io/cachekit-ts/commit/23721b9b87dfb8410e47928d3f3025c60fdd8f0f))
+
 ## [0.1.4](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.1.3...cachekit-v0.1.4) (2026-07-24)
 
 
