@@ -6,7 +6,7 @@ Backend-agnostic caching for TypeScript/Node.js — works with Redis, Memcached,
 
 ## Features
 
-- **Dual-layer caching**: L1 in-memory (~50ns) + pluggable L2 (Redis, CachekitIO, Memcached, local File)
+- **Dual-layer caching**: L1 in-memory (~50ns) + pluggable L2 (Redis, CachekitIO, Memcached, Workers KV, local File)
 - **Stale-while-revalidate**: Serve stale data while refreshing in background
 - **Stampede protection**: Cold-miss single-flight per process (always on) + opt-in cross-process distributed locks
 - **Zero-knowledge encryption**: Optional AES-256-GCM client-side encryption
