@@ -1,6 +1,6 @@
 # @cachekit-io/cachekit
 
-Production-ready Redis caching for TypeScript/Node.js. Hybrid TypeScript-Rust design with L1 in-memory cache, SWR, circuit breaker, and optional client-side encryption.
+Backend-agnostic caching for TypeScript/Node.js — works with Redis, Memcached, File, Workers KV, or CacheKit Cloud. Hybrid TypeScript-Rust design with L1 in-memory cache, SWR, circuit breaker, and optional zero-knowledge encryption.
 
 > **Version note**: 0.1.1 was tagged in git but never published to npm (a CI auth bug, fixed in #45). Published versions on npm jump 0.1.0 → 0.1.2. If you're pinning, use 0.1.2 or later.
 
