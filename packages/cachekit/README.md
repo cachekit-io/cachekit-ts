@@ -1,12 +1,12 @@
 # @cachekit-io/cachekit
 
-Backend-agnostic caching for TypeScript/Node.js — works with Redis, Memcached, File, Workers KV, or CacheKit Cloud. Hybrid TypeScript-Rust design with L1 in-memory cache, SWR, circuit breaker, and optional zero-knowledge encryption.
+Backend-agnostic caching for TypeScript/Node.js — works with Redis, Memcached, File, Workers KV, or CachekitIO. Hybrid TypeScript-Rust design with L1 in-memory cache, SWR, circuit breaker, and optional zero-knowledge encryption.
 
 > **Version note**: 0.1.1 was tagged in git but never published to npm (a CI auth bug, fixed in #45). Published versions on npm jump 0.1.0 → 0.1.2. If you're pinning, use 0.1.2 or later.
 
 ## Features
 
-- **Dual-layer caching**: L1 in-memory (~50ns) + pluggable L2 (Redis, CacheKit SaaS, Memcached, local File)
+- **Dual-layer caching**: L1 in-memory (~50ns) + pluggable L2 (Redis, CachekitIO, Memcached, local File)
 - **Stale-while-revalidate**: Serve stale data while refreshing in background
 - **Stampede protection**: Cold-miss single-flight per process (always on) + opt-in cross-process distributed locks
 - **Zero-knowledge encryption**: Optional AES-256-GCM client-side encryption

@@ -1,7 +1,7 @@
 {
   "name": "@cachekit-io/cachekit",
   "version": "0.1.5",
-  "description": "Backend-agnostic caching for TypeScript/Node.js — intent-based API with L1 in-memory, stale-while-revalidate, circuit breaker, and optional zero-knowledge AES-256-GCM encryption via a Rust core. Works with Redis, Memcached, File, Workers KV, or CacheKit Cloud.",
+  "description": "Backend-agnostic caching for TypeScript/Node.js — intent-based API with L1 in-memory, stale-while-revalidate, circuit breaker, and optional zero-knowledge AES-256-GCM encryption via a Rust core. Works with Redis, Memcached, File, Workers KV, or CachekitIO.",
   "type": "module",
   "main": "./dist/cjs/index.js",
   "module": "./dist/index.js",
