@@ -142,6 +142,46 @@ jobs:
         with:
           node-version: '22'
 
+      # renovate.json's approval gate covers routine majors only; a
+      # vulnerability-alert update overrides repo config and gets through
+      # (PR #94 did), so this step is the layer that actually holds — for bots
+      # and humans alike. Rationale for both layers: CONTRIBUTING.md.
+      # Deliberately ahead of `pnpm install`: it needs no node_modules, and an
+      # install script must not get to rewrite the file before the check reads
+      # it. (The brace-expansion step below reads pnpm-lock.yaml after install
+      # and has the same exposure — pre-existing, untouched here.)
+      - name: Verify bounded floor-pins stay in-major
+        run: |
+          set -euo pipefail
+          # Declared bounds, "<package> <upper-bound major>", sorted. Adding or
+          # removing a bounded pin means editing this list — that edit IS the
+          # human decision the bound represents.
+          expected='brace-expansion@2 3
+          js-yaml 5
+          protobufjs 8
+          uuid 12'
+          expected=$(printf '%s\n' "${expected}" | sed 's/^ *//')
+
+          # Slice the overrides block (top-level key to next top-level key or
+          # EOF), drop comments, then match ONLY a plain `>=floor <bound` value.
+          # Anything else — a `||` union, a missing bound, reindented YAML — is
+          # deliberately NOT matched, so it drops out of `found` and fails the
+          # set comparison below. Unrecognised shape must fail closed: a parser
+          # that quietly skips what it cannot read is not a guard.
+          found=$(awk '/^overrides:[[:space:]]*$/{inblk=1;next} inblk && /^[^[:space:]#]/{inblk=0} inblk' pnpm-workspace.yaml \
+                  | grep -v '^[[:space:]]*#' \
+                  | sed -nE "s/^  ['\"]?([^'\":]+)['\"]?:[[:space:]]*['\"]>=[0-9][0-9.]*[[:space:]]+<([0-9]+)(\.[0-9.]*)?['\"].*/\1 \2/p" \
+                  | sort)
+
+          if [ "${found}" != "${expected}" ]; then
+            echo "::error::Bounded floor-pins in pnpm-workspace.yaml no longer match the set this check declares. A bound is a deliberate constraint, not drift (see the notes beside each pin, and CONTRIBUTING.md). If crossing a major is genuinely required, remove the bound in a hand-written commit that says why and update the expected list in this step."
+            echo "--- expected ---"; printf '%s\n' "${expected}"
+            echo "--- found ---";    printf '%s\n' "${found:-(none — the parser matched nothing; the file shape moved)}"
+            exit 1
+          fi
+          echo "Bounded floor-pins verified (package upper-bound-major):"
+          printf '%s\n' "${found}" | sed 's/^/  /'
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 

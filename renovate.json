@@ -1,4 +1,12 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["local>cachekit-io/renovate-config"]
+  "extends": ["local>cachekit-io/renovate-config"],
+  "packageRules": [
+    {
+      "description": "Upper bounds on pnpm-workspace.yaml overrides are decisions (LAB-1020), not drift, so cross-major proposals wait under Pending Approval instead of opening a branch. Routine majors only — the vulnerability-alert path overrides this and gets through, which is why ci.yml's 'Verify bounded floor-pins stay in-major' step is the real gate. Rationale: CONTRIBUTING.md.",
+      "matchDepTypes": ["pnpm-workspace.overrides"],
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    }
+  ]
 }
