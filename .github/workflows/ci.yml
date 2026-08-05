@@ -168,10 +168,16 @@ jobs:
           # deliberately NOT matched, so it drops out of `found` and fails the
           # set comparison below. Unrecognised shape must fail closed: a parser
           # that quietly skips what it cannot read is not a guard.
+          # `|| true`, as in the sibling step below: the `grep -v` exits 1 when
+          # it selects nothing — exactly the shape-moved case this guard exists
+          # to catch — and under pipefail that would abort here with no message.
+          # Let the empty result reach the explicit branch so the failure
+          # explains itself. It cannot mask a real drift: a broken pipeline
+          # yields empty or partial output, which never equals `expected`.
           found=$(awk '/^overrides:[[:space:]]*$/{inblk=1;next} inblk && /^[^[:space:]#]/{inblk=0} inblk' pnpm-workspace.yaml \
                   | grep -v '^[[:space:]]*#' \
                   | sed -nE "s/^  ['\"]?([^'\":]+)['\"]?:[[:space:]]*['\"]>=[0-9][0-9.]*[[:space:]]+<([0-9]+)(\.[0-9.]*)?['\"].*/\1 \2/p" \
-                  | sort)
+                  | sort || true)
 
           if [ "${found}" != "${expected}" ]; then
             echo "::error::Bounded floor-pins in pnpm-workspace.yaml no longer match the set this check declares. A bound is a deliberate constraint, not drift (see the notes beside each pin, and CONTRIBUTING.md). If crossing a major is genuinely required, remove the bound in a hand-written commit that says why and update the expected list in this step."
