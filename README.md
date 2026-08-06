@@ -12,6 +12,10 @@ TypeScript SDK for CacheKit — backend-agnostic caching with L1 in-memory, SWR,
 | [@cachekit-io/cachekit-core-ts](./packages/cachekit-core-ts)     | Native bindings (N-API, Node)        |
 | [@cachekit-io/cachekit-core-wasm](./packages/cachekit-core-wasm) | wasm32 bindings (Cloudflare Workers) |
 
+**Live example**: [Skyline](https://github.com/cachekit-io/bluesky-thinking) — this SDK serving
+Bluesky firehose analytics from a Cloudflare Workers edge API, reading cache entries written live
+by the Python SDK on one shared interop namespace.
+
 ## Development
 
 ```bash
