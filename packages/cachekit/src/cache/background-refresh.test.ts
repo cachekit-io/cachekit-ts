@@ -139,20 +139,27 @@ describe('BackgroundRefreshManager', () => {
       expect(JSON.stringify(l1Cache.get('key1'))).not.toContain('000-00-0000');
     });
 
-    it('cancels the refresh when the write returns nothing storable', async () => {
-      // Degraded L2 write on a secure cache: no ciphertext to show for it, so
-      // L1 must keep the stale entry rather than fall back to the plaintext.
+    it('holds the refresh marker when the write returns nothing storable', async () => {
+      // No ciphertext to show for the write, so L1 must keep the stale entry
+      // rather than fall back to the plaintext. Critically the marker is NOT
+      // released: cancelling frees it immediately while expiresAt stays put,
+      // so every later read would re-arm the refresh and hammer the origin.
+      // Letting it lapse via SWR_REFRESH_MARKER_TTL_MS throttles to 1/min/key.
       const degraded = vi.fn(async () => null);
       const computeFn = vi.fn().mockResolvedValue({ data: 'fresh' });
 
-      l1Cache.set('key1', { data: 'stale' }, 3600000, 'test');
-      const { versionToken } = l1Cache.getWithSwr('key1');
+      // ttl well past the SWR threshold so the read below is stale and takes
+      // the marker.
+      l1Cache.set('key1', { data: 'stale' }, 1000, 'test');
+      await new Promise((r) => setTimeout(r, 600));
+      const stale = l1Cache.getWithSwr('key1');
+      expect(stale.shouldRefresh).toBe(true);
 
       manager.scheduleRefresh(
         'key1',
         computeFn,
         { ttl: 3600, namespace: 'test' },
-        versionToken,
+        stale.versionToken,
         l1Cache,
         degraded
       );
@@ -162,8 +169,9 @@ describe('BackgroundRefreshManager', () => {
       });
 
       expect(l1Cache.get('key1')).toEqual({ data: 'stale' });
-      // Marker released, so the key can be refreshed again on a later read.
-      expect(l1Cache.stats.refreshing).toBe(0);
+      expect(l1Cache.stats.refreshing).toBe(1);
+      // A second read must NOT schedule another refresh while the marker holds.
+      expect(l1Cache.getWithSwr('key1').shouldRefresh).toBe(false);
     });
 
     it('should log error and cancel L1 refresh on failure', async () => {

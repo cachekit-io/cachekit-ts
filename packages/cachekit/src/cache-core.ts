@@ -182,6 +182,12 @@ export class CacheImpl implements SecureCache {
   // l1Telemetry hook below).
   private readonly telemetry = { l1Hits: 0, l2Hits: 0, misses: 0 };
   private readonly swrRequiresWaitUntil: boolean;
+  /**
+   * Mirrors ReliabilityExecutor's own default. Read directly so the L1 decrypt
+   * path can honour the same fail-open/fail-closed choice the L2 decrypt path
+   * gets for free by running inside the executor.
+   */
+  private readonly degradationEnabled: boolean;
   private closed = false;
   /** One in-flight cold-miss resolution per cache key (single-flight, LAB-519). */
   private readonly inflight = new Map<string, Promise<unknown>>();
@@ -255,6 +261,7 @@ export class CacheImpl implements SecureCache {
       retry: options.reliability?.retry,
       degradation: options.reliability?.degradation,
     });
+    this.degradationEnabled = options.reliability?.degradation !== false;
 
     // Initialize background refresh manager (SWR)
     this.backgroundRefresh = new BackgroundRefreshManager();
@@ -408,11 +415,36 @@ export class CacheImpl implements SecureCache {
    * The bytes are copied when they are a window into a larger buffer: a Node
    * Buffer from the backend is a view onto a shared 8 KiB pool slab, and
    * retaining one for the entry's TTL pins the whole slab. cachekit-py guards
-   * the same edge by refusing memoryview/bytearray in L1Cache.put.
+   * the same edge by refusing memoryview/bytearray in L1Cache.put. This guards
+   * slab pinning only — it does NOT defend against a backend that mutates a
+   * buffer it already handed over. Every in-tree backend returns an owned,
+   * exact-size Uint8Array (redis, memcached, cachekitio, workers-kv,
+   * workers-cache-api) and file.ts's narrower header view lands in the copy
+   * branch; a third-party Backend that recycles buffers must copy on its side.
    */
-  private l1Payload<T>(value: T, bytes: Uint8Array): unknown {
+  private l1Payload(value: unknown, bytes: Uint8Array): unknown {
     if (!this.encryption) return value;
     return bytes.byteLength === bytes.buffer.byteLength ? bytes : new Uint8Array(bytes);
+  }
+
+  /**
+   * Ciphertext (or envelope) bytes to the value they carry: decrypt +
+   * AAD-verify against the cache key, unpack the ByteStorage envelope, then
+   * deserialize. Shared by the L2 read and the L1 read so the two tiers can
+   * never drift into decoding the same entry differently — a real hazard once
+   * both paths handle AAD (protocol#12 freezes the v0x03 component set).
+   */
+  private async decodeEntry<T>(bytes: Uint8Array, key: string, interop: boolean): Promise<T> {
+    const useEnvelope = this.useEnvelope(interop);
+
+    let plaintext = bytes;
+    if (this.encryption) {
+      plaintext = await this.encryption.decrypt(plaintext, key, useEnvelope);
+    }
+    if (useEnvelope) {
+      plaintext = this.byteStorage!.unpack(plaintext);
+    }
+    return interop ? decodeInteropValue<T>(plaintext) : this.serializer.decode<T>(plaintext);
   }
 
   /**
@@ -421,32 +453,37 @@ export class CacheImpl implements SecureCache {
    * the L2 path runs — an L1 hit is no longer free, which is the price of not
    * keeping plaintext resident. For a plaintext cache it is a cast.
    *
-   * Returns null when a secure entry will not decrypt (rotated key, tampered
-   * heap, an entry written under a different envelope mode). The entry is
-   * dropped first so a poisoned L1 copy cannot outlive remediation of L2, and
-   * the caller falls through to L2, which re-verifies against the same key and
-   * either repopulates L1 or fails on its own path. This mirrors cachekit-py's
-   * L1 handler, which invalidates before applying its fail policy. The failure
-   * is logged rather than swallowed: on this SDK an L2 decrypt failure is
-   * already absorbed by the degradation layer, so a throw here would make an
-   * L1 hit noisier than the same corruption seen one layer down.
+   * Drops the L1 entry and returns null when a secure entry will not decrypt
+   * (rotated key, tampered heap, an entry written under a different envelope
+   * mode), so a poisoned L1 copy cannot outlive remediation of L2 — cachekit-py
+   * invalidates before applying its fail policy for the same reason. The result
+   * is wrapped because a cached value may legitimately BE null: without the
+   * wrapper a secure cache holding null would read as a decrypt failure on
+   * every hit, invalidating and re-fetching a perfectly good entry forever.
+   *
+   * Fail policy follows `reliability.degradation`, the same lever that governs
+   * an L2 decrypt failure (which happens inside run()): degradation on absorbs
+   * the failure and falls through to L2, degradation off rethrows so a tamper
+   * signal reaches the caller. Either way it is counted and logged, never
+   * silently swallowed.
    */
-  private async readL1<T>(key: string, stored: unknown, interop: boolean): Promise<T | null> {
-    if (!this.encryption) return stored as T;
+  private async decodeL1Entry<T>(
+    key: string,
+    stored: unknown,
+    interop: boolean
+  ): Promise<{ value: T } | null> {
+    if (!this.encryption) return { value: stored as T };
 
     try {
-      const useEnvelope = this.useEnvelope(interop);
-      let plaintext = await this.encryption.decrypt(stored as Uint8Array, key, useEnvelope);
-      if (useEnvelope) {
-        plaintext = this.byteStorage!.unpack(plaintext);
-      }
-      return interop ? decodeInteropValue<T>(plaintext) : this.serializer.decode<T>(plaintext);
+      return { value: await this.decodeEntry<T>(stored as Uint8Array, key, interop) };
     } catch (error) {
       this.l1?.invalidateByKey(key);
+      this.recordFailure('l1_decrypt', error);
       logError(
-        '[cachekit] L1 decrypt failed — entry dropped, falling through to L2:',
+        '[cachekit] L1 decrypt failed — entry dropped:',
         error instanceof Error ? error.message : 'Unknown error'
       );
+      if (!this.degradationEnabled) throw error;
       return null;
     }
   }
@@ -467,15 +504,13 @@ export class CacheImpl implements SecureCache {
     if (this.l1) {
       const l1Result = this.l1.get(key);
       if (l1Result !== null) {
-        const decoded = await this.readL1<T>(key, l1Result, interop);
+        const decoded = await this.decodeL1Entry<T>(key, l1Result, interop);
         if (decoded !== null) {
           this.recordHit('l1');
-          return decoded;
+          return decoded.value;
         }
       }
     }
-
-    const useEnvelope = this.useEnvelope(interop);
 
     // Fetch from L2 (backend)
     return this.run('get', null, async (): Promise<T | null> => {
@@ -485,21 +520,8 @@ export class CacheImpl implements SecureCache {
         return null;
       }
 
-      // Decrypt if encryption enabled
-      let plaintext = data;
-      if (this.encryption) {
-        plaintext = await this.encryption.decrypt(data, key, useEnvelope);
-      }
-
-      // Decompress with ByteStorage (after decryption)
-      if (useEnvelope) {
-        plaintext = this.byteStorage!.unpack(plaintext);
-      }
-
-      // Deserialize
-      const value = interop
-        ? decodeInteropValue<T>(plaintext)
-        : this.serializer.decode<T>(plaintext);
+      // Decrypt, unpack, deserialize — the same sequence an L1 hit runs.
+      const value = await this.decodeEntry<T>(data, key, interop);
 
       // Populate L1 with `data` — the bytes the backend returned, still
       // encrypted — not the plaintext `value` decoded above. Interop keys are
@@ -530,7 +552,7 @@ export class CacheImpl implements SecureCache {
    * Returns the payload L1 should hold for this entry, so the SWR refresh
    * path (which defers its L1 write to completeRefresh's version check) can
    * store the ciphertext this produced instead of the caller's plaintext.
-   * Null when the write degraded with nothing L1 may hold — see `degradedL1`.
+   * Null only when nothing storable was ever produced — see `l1Write`.
    */
   private async setEntry<T>(
     key: string,
@@ -551,12 +573,16 @@ export class CacheImpl implements SecureCache {
     const namespace = options?.namespace ?? extractNamespace(key);
     const useEnvelope = this.useEnvelope(interop);
 
-    // What a degraded write (backend down, degradation swallowing it) leaves
-    // for the SWR refresh to put in L1. A plaintext cache still has the value
-    // in hand, so the refresh repopulates L1 exactly as it did before; a
-    // secure cache has no verified ciphertext to show for a write that never
-    // landed, so it declines and L1 keeps the stale entry until it expires.
-    const degradedL1: L1Write | null = this.encryption ? null : { l1: value };
+    // What L1 should hold, captured as soon as it exists rather than returned
+    // from the closure — a degraded backend write (which `run` swallows) must
+    // still yield it. Otherwise an encrypted cache's SWR refresh gets nothing
+    // to store, and since a cancelled refresh leaves `expiresAt` untouched the
+    // entry stays stale and EVERY later read re-arms the refresh: a backend
+    // outage becomes an origin stampede on exactly the encrypted caches that
+    // matter (measured 15 origin calls over 15 reads, vs 1 for plaintext).
+    // Seeded with the plaintext value so a plaintext cache repopulates L1 on a
+    // degraded write exactly as it did before this change.
+    let l1Write: L1Write | null = this.encryption ? null : { l1: value };
 
     // Interop model rejection is a deterministic caller error (spec: values
     // outside the data model MUST error) — it surfaces synchronously and
@@ -566,7 +592,7 @@ export class CacheImpl implements SecureCache {
     // (existing degrade semantics unchanged).
     const interopSerialized = interop ? encodeInteropValue(value) : null;
 
-    return this.run('set', degradedL1, async (): Promise<L1Write> => {
+    await this.run('set', undefined, async (): Promise<void> => {
       // Serialize
       const serialized = interopSerialized ?? this.serializer.encode(value);
 
@@ -577,6 +603,7 @@ export class CacheImpl implements SecureCache {
       if (this.encryption) {
         data = await this.encryption.encrypt(data, key, useEnvelope);
       }
+      l1Write = { l1: this.l1Payload(value, data) };
 
       // Store in backend
       await this.backend.set(key, data, ttl);
@@ -591,13 +618,13 @@ export class CacheImpl implements SecureCache {
       // in L1 but is overwritten in L2 by the refresh's value until the entry
       // next expires or refreshes (a conditional L2 write would need CAS the
       // Backend contract doesn't have).
-      const l1 = this.l1Payload(value, data);
       if (updateL1 && this.l1) {
-        this.l1.set(key, l1, ttl * 1000, namespace);
+        this.l1.set(key, l1Write!.l1, ttl * 1000, namespace);
         this.publishL1Stats();
       }
-      return { l1 };
     });
+
+    return l1Write;
   }
 
   async delete(key: string): Promise<boolean> {
@@ -620,10 +647,14 @@ export class CacheImpl implements SecureCache {
   async exists(key: string): Promise<boolean> {
     this.ensureNotClosed();
 
-    // Check L1 first
+    // Check L1 first. Presence alone is not an answer for a secure cache: L1
+    // holds ciphertext, and after a key rotation every resident entry is
+    // undecryptable, so a bare `get() !== null` would report present for
+    // entries get() verifies, rejects and drops. Decode so exists() and get()
+    // cannot disagree, and so the poisoned entry is dropped here too.
     if (this.l1) {
       const l1Value = this.l1.get(key);
-      if (l1Value !== null) {
+      if (l1Value !== null && (await this.decodeL1Entry(key, l1Value, false)) !== null) {
         this.recordHit('l1');
         return true;
       }
@@ -762,10 +793,10 @@ export class CacheImpl implements SecureCache {
         if (this.swrRequiresWaitUntil && !waitUntil) {
           const l1Value = this.l1.get(cacheKey);
           if (l1Value !== null) {
-            const decoded = await this.readL1<TResult>(cacheKey, l1Value, interop);
+            const decoded = await this.decodeL1Entry<TResult>(cacheKey, l1Value, interop);
             if (decoded !== null) {
               this.recordHit('l1');
-              return decoded;
+              return decoded.value;
             }
           }
         } else {
@@ -775,7 +806,7 @@ export class CacheImpl implements SecureCache {
             // Decode before scheduling: an entry that will not decrypt is
             // already gone, so refreshing it would race the cold path that is
             // about to recompute the same key.
-            const decoded = await this.readL1<TResult>(cacheKey, swrResult.value, interop);
+            const decoded = await this.decodeL1Entry<TResult>(cacheKey, swrResult.value, interop);
             if (decoded === null) {
               // getWithSwr took the refresh marker on our behalf — release it
               // so the slot is not held for a key we are dropping.
@@ -801,7 +832,7 @@ export class CacheImpl implements SecureCache {
                 );
               }
               this.recordHit('l1');
-              return decoded;
+              return decoded.value;
             }
           }
         }

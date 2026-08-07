@@ -66,8 +66,7 @@ function expectCiphertext(stored: unknown, backendBytes: Uint8Array | undefined)
   expect(stored).toBeInstanceOf(Uint8Array);
   // Byte-identical to what L2 holds: the same envelope, still sealed.
   expect(stored).toEqual(backendBytes);
-  // And the secret is nowhere in the resident representation.
-  expect(JSON.stringify(Array.from(stored as Uint8Array))).not.toContain(LEAK_CANARY);
+  // And the canary is nowhere in the resident bytes.
   expect(new TextDecoder().decode(stored as Uint8Array)).not.toContain(LEAK_CANARY);
 }
 
@@ -126,9 +125,11 @@ describe('L1 zero-knowledge for encrypted caches (LAB-238)', () => {
     let generation = 0;
     const load = cache.wrap(
       async (_id: number) => ({ ssn: LEAK_CANARY, generation: ++generation }),
-      // 1s TTL: past the 0.5 default SWR threshold (±10% jitter) after the
-      // wait below, so the next read serves stale and schedules a refresh.
-      { namespace: 'users', ttl: 1 }
+      // 2s TTL, read at 1.4s: 600ms remaining against a 0.5 threshold of
+      // 900-1100ms (±10% jitter), so the read is stale for every jitter draw
+      // and still has 600ms of headroom before the entry expires outright —
+      // a loaded CI box takes the stale path, not the cold path.
+      { namespace: 'users', ttl: 2 }
     );
 
     await load(3);
@@ -136,7 +137,7 @@ describe('L1 zero-knowledge for encrypted caches (LAB-238)', () => {
     expect(generation).toBe(1);
     const firstCiphertext = l1Entry(cache, key);
 
-    await new Promise((r) => setTimeout(r, 700));
+    await new Promise((r) => setTimeout(r, 1400));
 
     // Stale hit: served from L1, refresh scheduled in the background.
     expect(await load(3)).toEqual({ ssn: LEAK_CANARY, generation: 1 });
@@ -166,15 +167,115 @@ describe('L1 zero-knowledge for encrypted caches (LAB-238)', () => {
       l1Of(cache).set('users:victim', attackerBytes, 3600_000, 'users');
 
       expect(await cache.get('users:victim')).toEqual({ ssn: LEAK_CANARY });
+      // AES-GCM tag verification is what rejected it, not a decode error.
       expect(consoleSpy).toHaveBeenCalledWith(
-        '[cachekit] L1 decrypt failed — entry dropped, falling through to L2:',
-        expect.any(String)
+        '[cachekit] L1 decrypt failed — entry dropped:',
+        expect.stringContaining('Authentication verification failed')
       );
       // The poisoned entry was dropped, then refilled from L2 on the way back.
       expectCiphertext(l1Entry(cache, 'users:victim'), backend.store.get('users:victim'));
     } finally {
       consoleSpy.mockRestore();
     }
+  });
+
+  it('serves a legitimately-null cached value from L1 without treating it as tampering', async () => {
+    // decodeL1Entry wraps its result because null is a valid cached value: an
+    // unwrapped null would read as a decrypt failure on every hit, so the
+    // entry would be invalidated and re-fetched from L2 (a billed miss on a
+    // metered backend) for its whole TTL.
+    const backend = new InMemoryBackend();
+    const cache = makeCache(backend);
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      await cache.set('users:null', null);
+      const before = backend.gets;
+
+      expect(await cache.get('users:null')).toBeNull();
+      expect(await cache.get('users:null')).toBeNull();
+
+      // Served from L1 both times, and nothing was logged as a decrypt failure.
+      expect(backend.gets).toBe(before);
+      expect(consoleSpy).not.toHaveBeenCalled();
+      expect(l1Entry(cache, 'users:null')).toBeInstanceOf(Uint8Array);
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it('exists() verifies the L1 entry rather than trusting its presence', async () => {
+    // L1 holds ciphertext, so presence alone is not an answer: after a key
+    // rotation every resident entry is undecryptable and exists() would
+    // otherwise report present for entries get() rejects and drops.
+    const backend = new InMemoryBackend();
+    const cache = makeCache(backend);
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      await cache.set('users:5', { ssn: LEAK_CANARY });
+      expect(await cache.exists('users:5')).toBe(true);
+
+      // Poison L1 with a ciphertext sealed under a different key, then drop
+      // the L2 copy: exists() must not report present off the bad L1 entry.
+      await cache.set('users:6', { other: true });
+      l1Of(cache).set('users:5', backend.store.get('users:6')!, 3600_000, 'users');
+      backend.store.delete('users:5');
+
+      expect(await cache.exists('users:5')).toBe(false);
+      expect(consoleSpy).toHaveBeenCalled();
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it('does not stampede the origin when the L2 write is degraded', async () => {
+    // A degraded write still hands back the ciphertext it produced, so the SWR
+    // refresh repopulates L1 and resets expiresAt. Without that, cancelRefresh
+    // would leave the entry permanently stale and every read would re-arm the
+    // refresh — turning a backend outage into an origin stampede on exactly
+    // the encrypted caches that carry PII.
+    const backend = new InMemoryBackend();
+    let writesFail = false;
+    const flaky: Backend = {
+      ...backend,
+      get: (k) => backend.get(k),
+      set: async (k, v, t) => {
+        if (writesFail) throw new Error('backend down');
+        return backend.set(k, v, t);
+      },
+      delete: (k) => backend.delete(k),
+      exists: (k) => backend.exists(k),
+      close: () => backend.close(),
+    };
+    const cache = makeCache(flaky);
+
+    let originCalls = 0;
+    const load = cache.wrap(async (_id: number) => ({ ssn: LEAK_CANARY, n: ++originCalls }), {
+      namespace: 'users',
+      ttl: 2,
+    });
+
+    await load(7);
+    expect(originCalls).toBe(1);
+
+    writesFail = true;
+    await new Promise((r) => setTimeout(r, 1400));
+
+    // Ten stale reads during the outage, spaced so each scheduled refresh
+    // settles before the next read — otherwise the in-flight marker masks the
+    // behaviour under test. A refresh that stored something resets the entry's
+    // freshness, so the origin is touched a couple of times; one that stored
+    // nothing and released its marker would be re-armed by every single read.
+    for (let i = 0; i < 10; i++) {
+      await load(7);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    await vi.waitFor(() => {
+      expect(originCalls).toBeGreaterThan(1);
+    });
+    expect(originCalls).toBeLessThan(5);
   });
 
   it('leaves plaintext caches storing decoded values (unchanged, non-goal)', async () => {

@@ -104,9 +104,15 @@ export class BackgroundRefreshManager {
         // If version changed during L2 update, L1 update is rejected (stale data protection)
         if (l1Cache) {
           if (!persisted) {
-            // Nothing storable came back (degraded write on a secure cache):
-            // release the marker and leave the stale entry to expire.
-            l1Cache.cancelRefresh(key);
+            // Nothing storable came back — the value could not even be
+            // encrypted (nonce exhausted, manager disposed). Deliberately do
+            // NOT cancelRefresh: a cancel frees the marker immediately while
+            // leaving the stale entry's expiresAt untouched, so the next read
+            // re-arms shouldRefresh and the one after that, hammering the
+            // origin for the rest of the TTL. Letting the marker lapse via
+            // SWR_REFRESH_MARKER_TTL_MS throttles retries to one per key per
+            // minute, and hasRefreshSlot sweeps expired markers so no refresh
+            // slot is wedged.
           } else {
             l1Cache.completeRefresh(
               key,
