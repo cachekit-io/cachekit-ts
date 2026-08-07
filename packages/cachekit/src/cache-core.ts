@@ -475,7 +475,12 @@ export class CacheImpl implements SecureCache {
     if (!this.encryption) return { value: stored as T };
 
     try {
-      return { value: await this.decodeEntry<T>(stored as Uint8Array, key, interop) };
+      if (!(stored instanceof Uint8Array)) {
+        throw new Error(
+          `L1 entry for a secure cache is not ciphertext bytes (got ${typeof stored})`
+        );
+      }
+      return { value: await this.decodeEntry<T>(stored, key, interop) };
     } catch (error) {
       this.l1?.invalidateByKey(key);
       this.recordFailure('l1_decrypt', error);

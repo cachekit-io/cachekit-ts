@@ -15,6 +15,7 @@
  * background refresh.
  */
 
+import { randomBytes } from 'node:crypto';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createCache } from './cache.js';
 import { generateKey } from './serialization/key-generator.js';
@@ -22,7 +23,7 @@ import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
 import type { L1Cache } from './l1/lru-cache.js';
 
-const MASTER_KEY = '61'.repeat(32);
+const MASTER_KEY = randomBytes(32).toString('hex');
 const TENANT = 'lab-238';
 
 /** Distinctive enough that a substring search over any dump is conclusive. */
@@ -63,11 +64,13 @@ function l1Entry(cache: SecureCache, key: string): unknown {
 }
 
 function expectCiphertext(stored: unknown, backendBytes: Uint8Array | undefined): void {
-  expect(stored).toBeInstanceOf(Uint8Array);
+  if (!(stored instanceof Uint8Array)) {
+    throw new Error(`L1 entry is not ciphertext bytes (got ${typeof stored})`);
+  }
   // Byte-identical to what L2 holds: the same envelope, still sealed.
   expect(stored).toEqual(backendBytes);
   // And the canary is nowhere in the resident bytes.
-  expect(new TextDecoder().decode(stored as Uint8Array)).not.toContain(LEAK_CANARY);
+  expect(new TextDecoder().decode(stored)).not.toContain(LEAK_CANARY);
 }
 
 describe('L1 zero-knowledge for encrypted caches (LAB-238)', () => {
