@@ -20,18 +20,21 @@ function mockBindings(overrides?: Partial<EncryptionBindings>) {
   const freed: EncryptionTenantKeys[] = [];
   const derived: EncryptionTenantKeys[] = [];
   const bindings: EncryptionBindings = {
-    deriveTenantKeys: vi.fn((_masterKey: Uint8Array, tenantId: string) => {
-      const keys: EncryptionTenantKeys = {
-        tenantId,
-        encryptionFingerprint: () => new Uint8Array(16),
-        getNonceCounter: () => 0,
-        free() {
-          freed.push(keys);
-        },
-      };
-      derived.push(keys);
-      return keys;
-    }),
+    deriveTenantKeys: vi.fn(
+      (_masterKey: Uint8Array, tenantId: string, previousMasterKeys?: Uint8Array[]) => {
+        const keys: EncryptionTenantKeys = {
+          tenantId,
+          encryptionFingerprint: () => new Uint8Array(16),
+          getNonceCounter: () => 0,
+          keyringEntryCount: () => 1 + (previousMasterKeys?.length ?? 0),
+          free() {
+            freed.push(keys);
+          },
+        };
+        derived.push(keys);
+        return keys;
+      }
+    ),
     encryptWithTenantKeys: vi.fn(() => new Uint8Array([1])),
     decryptWithTenantKeys: vi.fn(() => new Uint8Array([2])),
     ...overrides,
@@ -178,6 +181,60 @@ describe('EncryptionManagerCore keyring config (previousMasterKeys)', () => {
 
     const [, , previous] = vi.mocked(bindings.deriveTenantKeys).mock.calls[0];
     expect(previous).toBeUndefined();
+    manager.dispose();
+  });
+
+  it('rejects duplicate previousMasterKeys entries (case-insensitive)', () => {
+    expect(() => makeManager([K2_HEX, K2_HEX])).toThrow(ConfigurationError);
+    expect(() => makeManager([K2_HEX, K2_HEX.toUpperCase()])).toThrow(/duplicates/);
+  });
+
+  it('refuses to init when a version-skewed binding drops the keyring (no attestation method)', async () => {
+    // An older native binary predates keyringEntryCount AND silently ignores
+    // the third deriveTenantKeys argument — absence of the method must fail
+    // loud instead of silently decrypting with the current key only.
+    const { bindings, freed } = mockBindings();
+    vi.mocked(bindings.deriveTenantKeys).mockImplementation(
+      (_masterKey: Uint8Array, tenantId: string) => {
+        const keys: EncryptionTenantKeys = {
+          tenantId,
+          encryptionFingerprint: () => new Uint8Array(16),
+          getNonceCounter: () => 0,
+          // no keyringEntryCount — pre-keyring binding
+          free() {
+            freed.push(keys);
+          },
+        };
+        return keys;
+      }
+    );
+    const manager = new EncryptionManagerCore(MASTER_KEY_HEX, undefined, async () => bindings, [
+      K2_HEX,
+    ]);
+
+    await expect(manager.encrypt(new Uint8Array([1]), 'ns:k')).rejects.toThrow(
+      /version skew|keyring/
+    );
+    // The orphaned handle must be zeroized, not parked
+    expect(freed.length).toBe(1);
+    manager.dispose();
+  });
+
+  it('refuses to init when the binding reports a wrong keyring entry count', async () => {
+    const { bindings } = mockBindings();
+    vi.mocked(bindings.deriveTenantKeys).mockImplementation(
+      (_masterKey: Uint8Array, tenantId: string) => ({
+        tenantId,
+        encryptionFingerprint: () => new Uint8Array(16),
+        getNonceCounter: () => 0,
+        keyringEntryCount: () => 1, // built no keyring despite the argument
+      })
+    );
+    const manager = new EncryptionManagerCore(MASTER_KEY_HEX, undefined, async () => bindings, [
+      K2_HEX,
+    ]);
+
+    await expect(manager.decrypt(new Uint8Array(28), 'ns:k')).rejects.toThrow(/version skew/);
     manager.dispose();
   });
 });

@@ -94,7 +94,7 @@ export type ProductionOptions = BaseIntentOptions &
 export type SecureOptions = BaseIntentOptions &
   IntentBackendOptions & {
     /**
-     * Master encryption key (hex-encoded, min 32 bytes / 64 hex chars).
+     * Master encryption key (hex-encoded, exactly 32 bytes / 64 hex chars).
      * Falls back to CACHEKIT_MASTER_KEY env var if not provided.
      */
     masterKey?: string;

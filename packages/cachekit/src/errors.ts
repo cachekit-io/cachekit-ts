@@ -107,8 +107,9 @@ export class ValueTooLargeError extends CachekitError {
 export class NonceExhaustedError extends EncryptionError {
   constructor(
     message: string = 'Nonce counter exhausted, key rotation required. ' +
-      'Rotate forward to a NEW master key (never re-promote a retired key): ' +
-      'https://docs.cachekit.io/concepts/key-rotation/',
+      'Rotate forward to a NEW master key (never re-promote a retired key) and move the ' +
+      'exhausted key into previousMasterKeys for the grace window. ' +
+      'Runbook: https://docs.cachekit.io/concepts/key-rotation/',
     options?: ErrorOptions
   ) {
     super(message, options);

@@ -39,6 +39,11 @@ export declare class TenantKeys {
   encryptionFingerprint(): Uint8Array;
   /** Current nonce counter value — rotate before 2^32. */
   getNonceCounter(): number;
+  /**
+   * Keyring entries built at derivation (1 current + decrypt-only previous
+   * keys) — SDK attestation that rotation config survived the boundary.
+   */
+  keyringEntryCount(): number;
 }
 
 /** Derive a 32-byte domain key using HKDF-SHA256 (RFC 5869). */

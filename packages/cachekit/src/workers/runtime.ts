@@ -49,7 +49,7 @@ function wasmEncryptionBindings(): EncryptionBindings {
  */
 export class EncryptionManager extends EncryptionManagerCore {
   /**
-   * @param masterKey - Hex-encoded master key (min 32 bytes = 64 hex chars)
+   * @param masterKey - Hex-encoded master key (exactly 32 bytes = 64 hex chars)
    * @param tenantId - Optional tenant ID for key derivation isolation
    * @param previousMasterKeys - Decrypt-only previous master keys (max 3,
    *   same hex format) for a key-rotation grace window; reads attempt keys

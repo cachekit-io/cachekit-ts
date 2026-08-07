@@ -148,6 +148,10 @@ pub struct TenantKeys {
     /// path on the pre-derived tenant key. All keyring material zeroizes
     /// on drop inside cachekit-core.
     keyring: Option<Keyring>,
+    /// Keyring entries actually built (1 current + decrypt-only keys).
+    /// Exposed so the SDK can attest that rotation config survived the
+    /// FFI boundary — an older binding would silently drop the argument.
+    keyring_entries: u32,
 }
 
 #[wasm_bindgen]
@@ -171,6 +175,14 @@ impl TenantKeys {
     #[wasm_bindgen(js_name = getNonceCounter)]
     pub fn get_nonce_counter(&self) -> f64 {
         self.encryptor.get_nonce_counter() as f64
+    }
+
+    /// Number of keyring entries built at derivation (1 current key +
+    /// decrypt-only previous keys) — SDK attestation that rotation config
+    /// survived the boundary; identical to the NAPI binding.
+    #[wasm_bindgen(js_name = keyringEntryCount)]
+    pub fn keyring_entry_count(&self) -> u32 {
+        self.keyring_entries
     }
 }
 
@@ -225,10 +237,12 @@ pub fn derive_tenant_keys(
         core_derive_tenant_keys(master_key, tenant_id).map_err(|e| JsError::new(&e.to_string()))?;
     let encryptor = ZeroKnowledgeEncryptor::new().map_err(|e| JsError::new(&e.to_string()))?;
 
+    let keyring_entries = 1 + previous.len() as u32;
     Ok(TenantKeys {
         inner,
         encryptor,
         keyring,
+        keyring_entries,
     })
 }
 

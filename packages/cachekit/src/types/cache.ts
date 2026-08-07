@@ -95,7 +95,7 @@ export type WrapOptions = WrapOptionsBase &
  * Encryption configuration for cache.
  */
 export interface EncryptionConfig {
-  /** Master encryption key (hex-encoded, min 32 bytes) */
+  /** Master encryption key (hex-encoded, exactly 32 bytes) */
   masterKey: string;
   /** Tenant ID for key derivation isolation */
   tenantId?: string;

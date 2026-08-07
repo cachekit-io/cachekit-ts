@@ -238,6 +238,10 @@ pub struct TenantKeys {
     /// path on the pre-derived tenant key. All keyring material zeroizes
     /// on drop inside cachekit-core.
     keyring: Option<Keyring>,
+    /// Keyring entries actually built (1 current + decrypt-only keys).
+    /// Exposed so the SDK can attest that rotation config survived the
+    /// FFI boundary — an older binding would silently drop the argument.
+    keyring_entries: u32,
 }
 
 #[napi]
@@ -261,6 +265,18 @@ impl TenantKeys {
     #[napi]
     pub fn get_nonce_counter(&self) -> i64 {
         self.encryptor.get_nonce_counter() as i64
+    }
+
+    /// Number of keyring entries built at derivation (1 current key +
+    /// decrypt-only previous keys).
+    ///
+    /// The SDK asserts this equals `1 + previousMasterKeys.length` right
+    /// after deriveTenantKeys: a version-skewed native binary that ignored
+    /// the keyring argument would otherwise silently decrypt with the
+    /// current key only, turning every pre-rotation entry into a miss.
+    #[napi]
+    pub fn keyring_entry_count(&self) -> u32 {
+        self.keyring_entries
     }
 }
 
@@ -347,10 +363,12 @@ pub fn derive_tenant_keys(
     let encryptor = ZeroKnowledgeEncryptor::new()
         .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
 
+    let keyring_entries = 1 + previous.len() as u32;
     Ok(TenantKeys {
         inner,
         encryptor,
         keyring,
+        keyring_entries,
     })
 }
 

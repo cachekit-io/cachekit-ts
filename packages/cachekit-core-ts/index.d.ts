@@ -89,6 +89,16 @@ export declare class TenantKeys {
    * This matches Python's ZeroKnowledgeEncryptor.get_nonce_counter().
    */
   getNonceCounter(): number
+  /**
+   * Number of keyring entries built at derivation (1 current key +
+   * decrypt-only previous keys).
+   *
+   * The SDK asserts this equals `1 + previousMasterKeys.length` right
+   * after deriveTenantKeys: a version-skewed native binary that ignored
+   * the keyring argument would otherwise silently decrypt with the
+   * current key only, turning every pre-rotation entry into a miss.
+   */
+  keyringEntryCount(): number
 }
 
 /**

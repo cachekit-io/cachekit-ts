@@ -116,13 +116,10 @@ const cache = createCache({
     maxMemory: 50 * 1024 * 1024, // 50MB
   },
 
-  // Optional: Client-side encryption
+  // Optional: Client-side encryption (key rotation: see "Master-Key Rotation" below)
   encryption: {
-    masterKey: process.env.CACHEKIT_MASTER_KEY!, // hex-encoded, 32+ bytes
+    masterKey: process.env.CACHEKIT_MASTER_KEY!, // hex-encoded, exactly 32 bytes
     tenantId: 'tenant-123', // for multi-tenant key isolation
-    // Optional: decrypt-only previous keys during a rotation grace window
-    // (max 3) — see "Master-key rotation" below
-    previousMasterKeys: process.env.CACHEKIT_PREVIOUS_MASTER_KEYS?.split(','),
   },
 
   // Reliability settings
