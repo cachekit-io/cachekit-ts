@@ -14,7 +14,7 @@ import {
   decryptWithTenantKeys,
   TenantKeys,
 } from '@cachekit-io/cachekit-core-ts';
-import { AAD_VERSION, MIN_MASTER_KEY_BYTES } from '../../src/constants.js';
+import { AAD_VERSION } from '../../src/constants.js';
 
 // Test master key (32 bytes for AES-256)
 const TEST_MASTER_KEY = new Uint8Array(32).fill(0x61); // 'a' repeated

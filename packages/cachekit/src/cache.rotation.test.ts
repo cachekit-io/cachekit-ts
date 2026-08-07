@@ -13,8 +13,14 @@ import { createCache } from './cache.js';
 import { EncryptionError } from './errors.js';
 import type { Backend } from './backends/types.js';
 
-const K1_HEX = '11'.repeat(32);
-const K2_HEX = '22'.repeat(32);
+/**
+ * Deterministic test fixture, not a secret: a single byte repeated to the
+ * 32-byte master-key length. Real key material is never a repeated byte.
+ */
+const testMasterKeyHex = (byte: string): string => byte.repeat(32);
+
+const K1_HEX = testMasterKeyHex('11');
+const K2_HEX = testMasterKeyHex('22');
 
 /**
  * In-memory backend shared across cache instances. close() is deliberately
