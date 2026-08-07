@@ -19,9 +19,28 @@ export interface RefreshOptions {
 }
 
 /**
- * Callback for persisting refreshed values to L2 cache.
+ * What L1 should hold for an entry, as produced by the L2 write that just
+ * landed: the ciphertext for a secure cache, the plain value otherwise.
+ *
+ * Wrapped rather than returned bare because a cached value may legitimately be
+ * null or undefined — the wrapper is what distinguishes "store this" from
+ * "there is nothing to store" (LAB-238).
  */
-export type PersistCallback<T> = (key: string, value: T, options: RefreshOptions) => Promise<void>;
+export interface L1Write {
+  readonly l1: unknown;
+}
+
+/**
+ * Callback for persisting refreshed values to L2 cache. Returns the payload
+ * L1 should hold for the entry, or null when the write produced nothing L1 may
+ * hold (a degraded write on a secure cache — no ciphertext to store, and the
+ * refresh must not fall back to the plaintext it computed).
+ */
+export type PersistCallback<T> = (
+  key: string,
+  value: T,
+  options: RefreshOptions
+) => Promise<L1Write | null>;
 
 /**
  * Manages stale-while-revalidate (SWR) background refreshes.
@@ -76,13 +95,27 @@ export class BackgroundRefreshManager {
 
         const result = await computeFn();
 
-        // Update L2 FIRST (before version check)
-        await persistToL2(key, result, options);
+        // Update L2 FIRST (before version check). The write hands back what L1
+        // should hold — for a secure cache the ciphertext it just produced,
+        // never the plaintext `result` computed above (LAB-238).
+        const persisted = await persistToL2(key, result, options);
 
         // Then complete L1 refresh with version check
         // If version changed during L2 update, L1 update is rejected (stale data protection)
         if (l1Cache) {
-          l1Cache.completeRefresh(key, result, options.ttl * 1000, versionToken, options.namespace);
+          if (!persisted) {
+            // Nothing storable came back (degraded write on a secure cache):
+            // release the marker and leave the stale entry to expire.
+            l1Cache.cancelRefresh(key);
+          } else {
+            l1Cache.completeRefresh(
+              key,
+              persisted.l1,
+              options.ttl * 1000,
+              versionToken,
+              options.namespace
+            );
+          }
         }
       } catch (error) {
         // Log error for observability

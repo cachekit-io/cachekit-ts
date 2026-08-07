@@ -14,7 +14,11 @@ import type { MetricsCollector, MetricsConfig } from './metrics/prometheus.js';
 import { logError } from './logger.js';
 import { L1Cache } from './l1/lru-cache.js';
 import { ReliabilityExecutor } from './reliability/executor.js';
-import { BackgroundRefreshManager, type WaitUntil } from './cache/background-refresh.js';
+import {
+  BackgroundRefreshManager,
+  type WaitUntil,
+  type L1Write,
+} from './cache/background-refresh.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
 import {
   generateKey,
@@ -381,6 +385,73 @@ export class CacheImpl implements SecureCache {
   }
 
   /**
+   * Does this entry ride the ByteStorage envelope? Interop entries never do —
+   * they are plain MessagePack with AAD compressed=False regardless of the
+   * cache-level `compression` option, so py/rs can read them byte-for-byte.
+   */
+  private useEnvelope(interop: boolean): boolean {
+    return !interop && this.byteStorage !== null;
+  }
+
+  /**
+   * What L1 should hold for an entry: the same ciphertext L2 holds when the
+   * cache is encrypted, the decoded value otherwise.
+   *
+   * Zero-knowledge is a property of every layer, not just the backend
+   * (LAB-238) — it is what cachekit-py does (its L1Cache stores bytes and
+   * decrypts at read time) and cachekit-rs with it. Holding post-decrypt
+   * plaintext here would put the entire L1 working set into any heap dump,
+   * core dump, or Node diagnostic report for the full TTL, and that plaintext
+   * would outlive the key zeroization in close(), since L1 entries are held
+   * independently of tenant keys.
+   *
+   * The bytes are copied when they are a window into a larger buffer: a Node
+   * Buffer from the backend is a view onto a shared 8 KiB pool slab, and
+   * retaining one for the entry's TTL pins the whole slab. cachekit-py guards
+   * the same edge by refusing memoryview/bytearray in L1Cache.put.
+   */
+  private l1Payload<T>(value: T, bytes: Uint8Array): unknown {
+    if (!this.encryption) return value;
+    return bytes.byteLength === bytes.buffer.byteLength ? bytes : new Uint8Array(bytes);
+  }
+
+  /**
+   * Decode a value served from L1. For a secure cache that is a decrypt +
+   * AAD-verify against the cache key followed by the same unpack/deserialize
+   * the L2 path runs — an L1 hit is no longer free, which is the price of not
+   * keeping plaintext resident. For a plaintext cache it is a cast.
+   *
+   * Returns null when a secure entry will not decrypt (rotated key, tampered
+   * heap, an entry written under a different envelope mode). The entry is
+   * dropped first so a poisoned L1 copy cannot outlive remediation of L2, and
+   * the caller falls through to L2, which re-verifies against the same key and
+   * either repopulates L1 or fails on its own path. This mirrors cachekit-py's
+   * L1 handler, which invalidates before applying its fail policy. The failure
+   * is logged rather than swallowed: on this SDK an L2 decrypt failure is
+   * already absorbed by the degradation layer, so a throw here would make an
+   * L1 hit noisier than the same corruption seen one layer down.
+   */
+  private async readL1<T>(key: string, stored: unknown, interop: boolean): Promise<T | null> {
+    if (!this.encryption) return stored as T;
+
+    try {
+      const useEnvelope = this.useEnvelope(interop);
+      let plaintext = await this.encryption.decrypt(stored as Uint8Array, key, useEnvelope);
+      if (useEnvelope) {
+        plaintext = this.byteStorage!.unpack(plaintext);
+      }
+      return interop ? decodeInteropValue<T>(plaintext) : this.serializer.decode<T>(plaintext);
+    } catch (error) {
+      this.l1?.invalidateByKey(key);
+      logError(
+        '[cachekit] L1 decrypt failed — entry dropped, falling through to L2:',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      return null;
+    }
+  }
+
+  /**
    * L1 + L2 read. Interop entries (interop=true) are plain MessagePack —
    * no ByteStorage envelope and AAD compressed=False — regardless of the
    * cache-level `compression` option. `ttlSeconds` (when known, i.e. from
@@ -390,16 +461,21 @@ export class CacheImpl implements SecureCache {
   private async getEntry<T>(key: string, interop: boolean, ttlSeconds?: number): Promise<T | null> {
     this.ensureNotClosed();
 
-    // Check L1 first
+    // Check L1 first. A secure cache holds ciphertext here, so the hit costs a
+    // decrypt + AAD verify; an entry that fails to verify is dropped and this
+    // falls through to L2 rather than serving or throwing.
     if (this.l1) {
       const l1Result = this.l1.get(key);
       if (l1Result !== null) {
-        this.recordHit('l1');
-        return l1Result as T;
+        const decoded = await this.readL1<T>(key, l1Result, interop);
+        if (decoded !== null) {
+          this.recordHit('l1');
+          return decoded;
+        }
       }
     }
 
-    const useEnvelope = !interop && this.byteStorage !== null;
+    const useEnvelope = this.useEnvelope(interop);
 
     // Fetch from L2 (backend)
     return this.run('get', null, async (): Promise<T | null> => {
@@ -425,12 +501,15 @@ export class CacheImpl implements SecureCache {
         ? decodeInteropValue<T>(plaintext)
         : this.serializer.decode<T>(plaintext);
 
-      // Populate L1. Interop keys are {namespace}:{operation}:{hash} — group
-      // under the user-facing namespace segment so namespace-level
-      // invalidation matches entries written through wrap().
+      // Populate L1 with `data` — the bytes the backend returned, still
+      // encrypted — not the plaintext `value` decoded above. Interop keys are
+      // {namespace}:{operation}:{hash} — group under the user-facing namespace
+      // segment so namespace-level invalidation matches entries written
+      // through wrap().
       if (this.l1) {
         const namespace = interop ? key.slice(0, key.indexOf(':')) : extractNamespace(key);
-        this.l1.set(key, value, (ttlSeconds ?? this.defaultTtl) * 1000, namespace);
+        const ttlMs = (ttlSeconds ?? this.defaultTtl) * 1000;
+        this.l1.set(key, this.l1Payload(value, data), ttlMs, namespace);
         this.publishL1Stats();
       }
 
@@ -440,13 +519,18 @@ export class CacheImpl implements SecureCache {
   }
 
   async set<T>(key: string, value: T, options?: SetOptions): Promise<void> {
-    return this.setEntry(key, value, options, false);
+    await this.setEntry(key, value, options, false);
   }
 
   /**
    * L1 + L2 write. Interop entries (interop=true) serialize to canonical
    * plain MessagePack — never the ByteStorage envelope — and encrypt with
    * AAD compressed=False, matching the Python and Rust SDKs byte-for-byte.
+   *
+   * Returns the payload L1 should hold for this entry, so the SWR refresh
+   * path (which defers its L1 write to completeRefresh's version check) can
+   * store the ciphertext this produced instead of the caller's plaintext.
+   * Null when the write degraded with nothing L1 may hold — see `degradedL1`.
    */
   private async setEntry<T>(
     key: string,
@@ -454,7 +538,7 @@ export class CacheImpl implements SecureCache {
     options: SetOptions | undefined,
     interop: boolean,
     updateL1 = true
-  ): Promise<void> {
+  ): Promise<L1Write | null> {
     this.ensureNotClosed();
 
     const ttl = options?.ttl ?? this.defaultTtl;
@@ -465,7 +549,14 @@ export class CacheImpl implements SecureCache {
     }
 
     const namespace = options?.namespace ?? extractNamespace(key);
-    const useEnvelope = !interop && this.byteStorage !== null;
+    const useEnvelope = this.useEnvelope(interop);
+
+    // What a degraded write (backend down, degradation swallowing it) leaves
+    // for the SWR refresh to put in L1. A plaintext cache still has the value
+    // in hand, so the refresh repopulates L1 exactly as it did before; a
+    // secure cache has no verified ciphertext to show for a write that never
+    // landed, so it declines and L1 keeps the stale entry until it expires.
+    const degradedL1: L1Write | null = this.encryption ? null : { l1: value };
 
     // Interop model rejection is a deterministic caller error (spec: values
     // outside the data model MUST error) — it surfaces synchronously and
@@ -475,7 +566,7 @@ export class CacheImpl implements SecureCache {
     // (existing degrade semantics unchanged).
     const interopSerialized = interop ? encodeInteropValue(value) : null;
 
-    return this.run('set', undefined, async (): Promise<void> => {
+    return this.run('set', degradedL1, async (): Promise<L1Write> => {
       // Serialize
       const serialized = interopSerialized ?? this.serializer.encode(value);
 
@@ -490,19 +581,22 @@ export class CacheImpl implements SecureCache {
       // Store in backend
       await this.backend.set(key, data, ttl);
 
-      // Update L1 for direct writes. The SWR refresh path passes
-      // updateL1=false and writes L1 only through completeRefresh, whose
-      // version token discards the refresh if an explicit write or
-      // invalidation landed meanwhile — the guard is authoritative for L1
-      // ONLY. The backend.set above is unconditional last-write-wins: an
-      // interleaved explicit set() survives in L1 but is overwritten in L2
-      // by the refresh's value until the entry next expires or refreshes
-      // (a conditional L2 write would need CAS the Backend contract doesn't
-      // have).
+      // Update L1 for direct writes, with `data` (the ciphertext just written
+      // to the backend) rather than the caller's plaintext `value` whenever
+      // the cache is encrypted. The SWR refresh path passes updateL1=false and
+      // writes L1 only through completeRefresh, whose version token discards
+      // the refresh if an explicit write or invalidation landed meanwhile —
+      // the guard is authoritative for L1 ONLY. The backend.set above is
+      // unconditional last-write-wins: an interleaved explicit set() survives
+      // in L1 but is overwritten in L2 by the refresh's value until the entry
+      // next expires or refreshes (a conditional L2 write would need CAS the
+      // Backend contract doesn't have).
+      const l1 = this.l1Payload(value, data);
       if (updateL1 && this.l1) {
-        this.l1.set(key, value, ttl * 1000, namespace);
+        this.l1.set(key, l1, ttl * 1000, namespace);
         this.publishL1Stats();
       }
+      return { l1 };
     });
   }
 
@@ -668,35 +762,47 @@ export class CacheImpl implements SecureCache {
         if (this.swrRequiresWaitUntil && !waitUntil) {
           const l1Value = this.l1.get(cacheKey);
           if (l1Value !== null) {
-            this.recordHit('l1');
-            return l1Value as TResult;
+            const decoded = await this.readL1<TResult>(cacheKey, l1Value, interop);
+            if (decoded !== null) {
+              this.recordHit('l1');
+              return decoded;
+            }
           }
         } else {
           const swrResult = this.l1.getWithSwr(cacheKey);
 
           if (swrResult.value !== null) {
-            // Trigger background refresh if needed
-            if (swrResult.shouldRefresh) {
-              this.backgroundRefresh.scheduleRefresh(
-                cacheKey,
-                () => fn(...args),
-                { ttl: options.ttl, namespace: options.namespace },
-                swrResult.versionToken,
-                this.l1,
-                async (key, value, opts) => {
-                  await this.setEntry(
-                    key,
-                    value,
-                    { ttl: opts.ttl, namespace: opts.namespace },
-                    interop,
-                    false
-                  );
-                },
-                waitUntil
-              );
+            // Decode before scheduling: an entry that will not decrypt is
+            // already gone, so refreshing it would race the cold path that is
+            // about to recompute the same key.
+            const decoded = await this.readL1<TResult>(cacheKey, swrResult.value, interop);
+            if (decoded === null) {
+              // getWithSwr took the refresh marker on our behalf — release it
+              // so the slot is not held for a key we are dropping.
+              if (swrResult.shouldRefresh) this.l1.cancelRefresh(cacheKey);
+            } else {
+              // Trigger background refresh if needed
+              if (swrResult.shouldRefresh) {
+                this.backgroundRefresh.scheduleRefresh(
+                  cacheKey,
+                  () => fn(...args),
+                  { ttl: options.ttl, namespace: options.namespace },
+                  swrResult.versionToken,
+                  this.l1,
+                  (key, value, opts) =>
+                    this.setEntry(
+                      key,
+                      value,
+                      { ttl: opts.ttl, namespace: opts.namespace },
+                      interop,
+                      false
+                    ),
+                  waitUntil
+                );
+              }
+              this.recordHit('l1');
+              return decoded;
             }
-            this.recordHit('l1');
-            return swrResult.value as TResult;
           }
         }
       }

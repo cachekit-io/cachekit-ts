@@ -11,7 +11,9 @@ describe('BackgroundRefreshManager', () => {
   beforeEach(() => {
     manager = new BackgroundRefreshManager();
     l1Cache = new L1Cache({ maxEntries: 100 });
-    persistToL2 = vi.fn().mockResolvedValue(undefined);
+    // The L2 write hands back what L1 should hold. For a plaintext cache that
+    // is the value itself; a secure cache would return its ciphertext here.
+    persistToL2 = vi.fn(async (_key: string, value: unknown) => ({ l1: value }));
     consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
@@ -107,6 +109,61 @@ describe('BackgroundRefreshManager', () => {
       // L1 should have updated value
       const cached = l1Cache.get('key1');
       expect(cached).toEqual({ data: 'refreshed' });
+    });
+
+    it('stores what the L2 write returned, not the plaintext it computed (LAB-238)', async () => {
+      // A secure cache's persist callback returns the ciphertext it wrote to
+      // L2. That, and never the factory's plaintext result, is what lands in
+      // L1 — otherwise the SWR refresh re-poisons L1 on every revalidation.
+      const ciphertext = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
+      const secretPersist = vi.fn(async () => ({ l1: ciphertext }));
+      const computeFn = vi.fn().mockResolvedValue({ ssn: '000-00-0000' });
+
+      l1Cache.set('key1', ciphertext, 3600000, 'test');
+      const { versionToken } = l1Cache.getWithSwr('key1');
+
+      manager.scheduleRefresh(
+        'key1',
+        computeFn,
+        { ttl: 3600, namespace: 'test' },
+        versionToken,
+        l1Cache,
+        secretPersist
+      );
+
+      await vi.waitFor(() => {
+        expect(secretPersist).toHaveBeenCalled();
+      });
+
+      expect(l1Cache.get('key1')).toBe(ciphertext);
+      expect(JSON.stringify(l1Cache.get('key1'))).not.toContain('000-00-0000');
+    });
+
+    it('cancels the refresh when the write returns nothing storable', async () => {
+      // Degraded L2 write on a secure cache: no ciphertext to show for it, so
+      // L1 must keep the stale entry rather than fall back to the plaintext.
+      const degraded = vi.fn(async () => null);
+      const computeFn = vi.fn().mockResolvedValue({ data: 'fresh' });
+
+      l1Cache.set('key1', { data: 'stale' }, 3600000, 'test');
+      const { versionToken } = l1Cache.getWithSwr('key1');
+
+      manager.scheduleRefresh(
+        'key1',
+        computeFn,
+        { ttl: 3600, namespace: 'test' },
+        versionToken,
+        l1Cache,
+        degraded
+      );
+
+      await vi.waitFor(() => {
+        expect(degraded).toHaveBeenCalled();
+      });
+
+      expect(l1Cache.get('key1')).toEqual({ data: 'stale' });
+      // Marker released, so the key can be refreshed again on a later read.
+      expect(l1Cache.stats.refreshing).toBe(0);
     });
 
     it('should log error and cancel L1 refresh on failure', async () => {
