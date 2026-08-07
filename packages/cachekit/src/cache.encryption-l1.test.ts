@@ -15,7 +15,7 @@
  * background refresh.
  */
 
-import { randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createCache } from './cache.js';
 import { generateKey } from './serialization/key-generator.js';
@@ -23,7 +23,10 @@ import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
 import type { L1Cache } from './l1/lru-cache.js';
 
-const MASTER_KEY = randomBytes(32).toString('hex');
+// Deterministic (reproducible runs, no random source) yet derived at runtime
+// from a public fixture string — not a hardcoded key literal a secret scanner
+// should ever match. No assertion depends on the key's value.
+const MASTER_KEY = createHash('sha256').update('cachekit LAB-238 test fixture').digest('hex');
 const TENANT = 'lab-238';
 
 /** Distinctive enough that a substring search over any dump is conclusive. */
@@ -148,7 +151,11 @@ describe('L1 zero-knowledge for encrypted caches (LAB-238)', () => {
     // Wait for the refresh to actually land in L1 — the factory running is not
     // enough, completeRefresh only runs once the L2 write has resolved.
     await vi.waitFor(() => {
-      expect(l1Entry(cache, key)).not.toEqual(firstCiphertext);
+      // Present AND changed: a bare not.toEqual would also pass on null once
+      // the TTL expires, misreporting a slow refresh as a format failure below.
+      const entry = l1Entry(cache, key);
+      expect(entry).toBeInstanceOf(Uint8Array);
+      expect(entry).not.toEqual(firstCiphertext);
     });
 
     expectCiphertext(l1Entry(cache, key), backend.store.get(key));
@@ -256,21 +263,27 @@ describe('L1 zero-knowledge for encrypted caches (LAB-238)', () => {
     let originCalls = 0;
     const load = cache.wrap(async (_id: number) => ({ ssn: LEAK_CANARY, n: ++originCalls }), {
       namespace: 'users',
-      ttl: 2,
+      // 4s TTL read from 2.4s: stale against the 1.8-2.2s threshold (0.5
+      // ratio, ±10% jitter) for every jitter draw, with 1.6s of lifetime left
+      // so the whole read loop below finishes well before the entry expires —
+      // an expiry mid-loop would send every later read down the cold path and
+      // count origin calls that have nothing to do with stampede control.
+      ttl: 4,
     });
 
     await load(7);
     expect(originCalls).toBe(1);
 
     writesFail = true;
-    await new Promise((r) => setTimeout(r, 1400));
+    await new Promise((r) => setTimeout(r, 2400));
 
-    // Ten stale reads during the outage, spaced so each scheduled refresh
+    // Stale reads during the outage, spaced so each scheduled refresh
     // settles before the next read — otherwise the in-flight marker masks the
     // behaviour under test. A refresh that stored something resets the entry's
     // freshness, so the origin is touched a couple of times; one that stored
     // nothing and released its marker would be re-armed by every single read.
-    for (let i = 0; i < 10; i++) {
+    const READS = 10;
+    for (let i = 0; i < READS; i++) {
       await load(7);
       await new Promise((r) => setTimeout(r, 10));
     }
@@ -278,7 +291,8 @@ describe('L1 zero-knowledge for encrypted caches (LAB-238)', () => {
     await vi.waitFor(() => {
       expect(originCalls).toBeGreaterThan(1);
     });
-    expect(originCalls).toBeLessThan(5);
+    // The signal is "far fewer origin calls than reads", not an absolute count.
+    expect(originCalls).toBeLessThan(READS / 2);
   });
 
   it('leaves plaintext caches storing decoded values (unchanged, non-goal)', async () => {

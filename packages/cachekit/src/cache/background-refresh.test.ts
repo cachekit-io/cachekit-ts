@@ -135,8 +135,9 @@ describe('BackgroundRefreshManager', () => {
         expect(secretPersist).toHaveBeenCalled();
       });
 
+      // Reference identity to the persist callback's ciphertext is the whole
+      // proof: the factory's plaintext object cannot be this Uint8Array.
       expect(l1Cache.get('key1')).toBe(ciphertext);
-      expect(JSON.stringify(l1Cache.get('key1'))).not.toContain('000-00-0000');
     });
 
     it('holds the refresh marker when the write returns nothing storable', async () => {
@@ -148,10 +149,12 @@ describe('BackgroundRefreshManager', () => {
       const degraded = vi.fn(async () => null);
       const computeFn = vi.fn().mockResolvedValue({ data: 'fresh' });
 
-      // ttl well past the SWR threshold so the read below is stale and takes
-      // the marker.
-      l1Cache.set('key1', { data: 'stale' }, 1000, 'test');
-      await new Promise((r) => setTimeout(r, 600));
+      // Stale but far from expiry: 4s TTL read at 2.4s is past the 1.8-2.2s
+      // threshold (0.5 ratio, ±10% jitter) for every jitter draw, and the
+      // 1.6s of remaining lifetime dwarfs the refresh round-trip — a loaded
+      // box must not expire the entry before the final read asserts on it.
+      l1Cache.set('key1', { data: 'stale' }, 4000, 'test');
+      await new Promise((r) => setTimeout(r, 2400));
       const stale = l1Cache.getWithSwr('key1');
       expect(stale.shouldRefresh).toBe(true);
 

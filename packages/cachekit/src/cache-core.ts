@@ -811,12 +811,17 @@ export class CacheImpl implements SecureCache {
             // Decode before scheduling: an entry that will not decrypt is
             // already gone, so refreshing it would race the cold path that is
             // about to recompute the same key.
-            const decoded = await this.decodeL1Entry<TResult>(cacheKey, swrResult.value, interop);
-            if (decoded === null) {
-              // getWithSwr took the refresh marker on our behalf — release it
-              // so the slot is not held for a key we are dropping.
-              if (swrResult.shouldRefresh) this.l1.cancelRefresh(cacheKey);
-            } else {
+            let decoded: { value: TResult } | null = null;
+            try {
+              decoded = await this.decodeL1Entry<TResult>(cacheKey, swrResult.value, interop);
+            } finally {
+              // Decode failed — by rethrow (degradation off) or by null
+              // (degradation on) — so the entry is dropped either way, and the
+              // marker getWithSwr took on our behalf must not outlive it:
+              // release the slot rather than strand it for the marker TTL.
+              if (decoded === null && swrResult.shouldRefresh) this.l1.cancelRefresh(cacheKey);
+            }
+            if (decoded !== null) {
               // Trigger background refresh if needed
               if (swrResult.shouldRefresh) {
                 this.backgroundRefresh.scheduleRefresh(
