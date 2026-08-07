@@ -47,7 +47,8 @@ const nodeRuntime: CacheRuntime = {
   },
   createMetrics: (config) => createMetrics(true, config),
   createByteStorage: () => new ByteStorage(),
-  createEncryption: (config) => new EncryptionManager(config.masterKey, config.tenantId),
+  createEncryption: (config) =>
+    new EncryptionManager(config.masterKey, config.tenantId, config.previousMasterKeys),
   createInvalidationChannel: (config: InvalidationConfig) =>
     new RedisInvalidationChannel(config.redis, { channelName: config.channelName }),
 };

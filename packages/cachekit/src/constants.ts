@@ -126,6 +126,14 @@ export const MIN_MASTER_KEY_BYTES = 32;
 /** Minimum master key length in hex characters */
 export const MIN_MASTER_KEY_HEX_LENGTH = 64;
 
+/**
+ * Maximum decrypt-only previous master keys in a rotation keyring.
+ * Matches cachekit-core's MAX_DECRYPT_ONLY_KEYS (protocol spec/encryption.md
+ * → "Key Rotation (Keyring)"). Exceeding the cap is a configuration error,
+ * rejected at load — never truncated.
+ */
+export const MAX_PREVIOUS_MASTER_KEYS = 3;
+
 // ============================================================================
 // Stampede / Single-Flight Constants
 // ============================================================================

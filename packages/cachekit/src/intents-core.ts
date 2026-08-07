@@ -98,6 +98,14 @@ export type SecureOptions = BaseIntentOptions &
      * Falls back to CACHEKIT_MASTER_KEY env var if not provided.
      */
     masterKey?: string;
+    /**
+     * Decrypt-only previous master keys (max 3, same hex format as
+     * masterKey) retained during a key-rotation grace window. Falls back to
+     * the CACHEKIT_PREVIOUS_MASTER_KEYS env var (comma-separated hex) if
+     * not provided. More than 3 keys, or repeating masterKey, throws
+     * ConfigurationError at load.
+     */
+    previousMasterKeys?: string[];
     /** Tenant ID for key derivation isolation */
     tenantId?: string;
     /**
@@ -249,6 +257,7 @@ export function buildIntents<TCache extends SecureCache>(
       encryption: {
         masterKey,
         tenantId: options.tenantId,
+        previousMasterKeys: options.previousMasterKeys ?? envPreviousMasterKeys(),
       },
       reliability: mergeReliability(PRODUCTION_RELIABILITY, options.reliability),
       compression: options.compression,
@@ -346,6 +355,23 @@ function withFullL1Defaults(l1: BaseIntentOptions['l1']): CacheOptions['l1'] {
  */
 function envVar(name: string): string | undefined {
   return typeof process !== 'undefined' ? process.env?.[name] : undefined;
+}
+
+/**
+ * Parse CACHEKIT_PREVIOUS_MASTER_KEYS (comma-separated hex) into a keyring
+ * list. Whitespace around entries is tolerated; empty segments are dropped
+ * (a trailing comma is not a key). Per-key validation — hex format, length,
+ * the cap of 3, the masterKey collision — happens in EncryptionManagerCore,
+ * identically to explicitly configured keys.
+ */
+function envPreviousMasterKeys(): string[] | undefined {
+  const raw = envVar('CACHEKIT_PREVIOUS_MASTER_KEYS');
+  if (!raw) return undefined;
+  const keys = raw
+    .split(',')
+    .map((key) => key.trim())
+    .filter((key) => key.length > 0);
+  return keys.length > 0 ? keys : undefined;
 }
 
 function mergeReliability(

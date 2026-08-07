@@ -313,3 +313,71 @@ describe('EncryptionManager with empty tenant ID (Edge Case)', () => {
     }
   });
 });
+
+describe('EncryptionManager keyring rotation (real NAPI keyring loop)', () => {
+  // Distinct 32-byte keys, hex-encoded
+  const K1_HEX = '11'.repeat(32);
+  const K2_HEX = '22'.repeat(32);
+  const DATA = new Uint8Array([0xca, 0xfe, 0xba, 0xbe]);
+  const CACHE_KEY = 'ns:rotation:test';
+
+  it('decrypts a k1-encrypted value with masterKey=k2, previousMasterKeys=[k1]', async () => {
+    const writer = new EncryptionManager(K1_HEX);
+    const rotated = new EncryptionManager(K2_HEX, undefined, [K1_HEX]);
+
+    try {
+      const ciphertext = await writer.encrypt(DATA, CACHE_KEY);
+      const plaintext = await rotated.decrypt(ciphertext, CACHE_KEY);
+      expect(Array.from(plaintext)).toEqual(Array.from(DATA));
+    } finally {
+      writer.dispose();
+      rotated.dispose();
+    }
+  });
+
+  it('fails to decrypt the same value with masterKey=k2 and an empty keyring', async () => {
+    const writer = new EncryptionManager(K1_HEX);
+    const cutOver = new EncryptionManager(K2_HEX);
+
+    try {
+      const ciphertext = await writer.encrypt(DATA, CACHE_KEY);
+      await expect(cutOver.decrypt(ciphertext, CACHE_KEY)).rejects.toThrow(EncryptionError);
+    } finally {
+      writer.dispose();
+      cutOver.dispose();
+    }
+  });
+
+  it('still writes under the current key during a grace window', async () => {
+    // Writes always use masterKey: a value encrypted by the rotated manager
+    // must NOT be readable by a keyring holding only k1.
+    const rotated = new EncryptionManager(K2_HEX, undefined, [K1_HEX]);
+    const oldOnly = new EncryptionManager(K1_HEX);
+
+    try {
+      const ciphertext = await rotated.encrypt(DATA, CACHE_KEY);
+      await expect(oldOnly.decrypt(ciphertext, CACHE_KEY)).rejects.toThrow(EncryptionError);
+      // ...and stays readable by the writer itself (current key, first attempt).
+      const plaintext = await rotated.decrypt(ciphertext, CACHE_KEY);
+      expect(Array.from(plaintext)).toEqual(Array.from(DATA));
+    } finally {
+      rotated.dispose();
+      oldOnly.dispose();
+    }
+  });
+
+  it('enforces the keyring invariants natively too (defense in depth behind NAPI)', async () => {
+    // The JS constructor rejects these at load; the native layer must also
+    // reject them if reached directly — config errors, not auth failures.
+    const napi = await import('@cachekit-io/cachekit-core-ts');
+    const k2 = Buffer.from(K2_HEX, 'hex');
+    const others = ['33', '44', '55', '66'].map((b) => Buffer.from(b.repeat(32), 'hex'));
+
+    // current key in the decrypt-only list (forward-only rule)
+    expect(() => napi.deriveTenantKeys(k2, 'tenant', [k2])).toThrow();
+    // cap of 3 exceeded — rejected, never truncated
+    expect(() => napi.deriveTenantKeys(k2, 'tenant', others)).toThrow();
+    // wrong-length previous key
+    expect(() => napi.deriveTenantKeys(k2, 'tenant', [Buffer.from('aabb', 'hex')])).toThrow();
+  });
+});

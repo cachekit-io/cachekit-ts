@@ -12,7 +12,7 @@ import {
   type EncryptionBindings,
   type EncryptionTenantKeys,
 } from './manager-core.js';
-import { EncryptionError, NonceExhaustedError } from '../errors.js';
+import { ConfigurationError, EncryptionError, NonceExhaustedError } from '../errors.js';
 
 const MASTER_KEY_HEX = 'ab'.repeat(32);
 
@@ -117,5 +117,67 @@ describe('EncryptionManagerCore', () => {
     manager.dispose();
     manager.dispose();
     expect(freed.length).toBe(1);
+  });
+});
+
+describe('EncryptionManagerCore keyring config (previousMasterKeys)', () => {
+  const K2_HEX = 'cd'.repeat(32);
+
+  function makeManager(previousMasterKeys?: readonly string[]) {
+    const mocks = mockBindings();
+    const manager = new EncryptionManagerCore(
+      MASTER_KEY_HEX,
+      undefined,
+      async () => mocks.bindings,
+      previousMasterKeys
+    );
+    return { manager, ...mocks };
+  }
+
+  it('rejects more than 3 previous keys at load — never truncates', () => {
+    const four = ['11', '22', '33', '44'].map((b) => b.repeat(32));
+    expect(() => makeManager(four)).toThrow(ConfigurationError);
+    expect(() => makeManager(four)).toThrow(/at most 3 keys, got 4/);
+  });
+
+  it('accepts exactly 3 previous keys', () => {
+    const three = ['11', '22', '33'].map((b) => b.repeat(32));
+    expect(() => makeManager(three)).not.toThrow();
+  });
+
+  it('rejects masterKey appearing in previousMasterKeys (forward-only rule)', () => {
+    expect(() => makeManager([MASTER_KEY_HEX])).toThrow(ConfigurationError);
+    expect(() => makeManager([K2_HEX, MASTER_KEY_HEX])).toThrow(/forward-only/);
+  });
+
+  it('rejects masterKey collision case-insensitively — hex case is not key identity', () => {
+    expect(() => makeManager([MASTER_KEY_HEX.toUpperCase()])).toThrow(ConfigurationError);
+  });
+
+  it('validates previous keys with rules identical to masterKey', () => {
+    expect(() => makeManager(['zz'.repeat(32)])).toThrow(/hex-encoded/);
+    expect(() => makeManager(['ab'.repeat(16)])).toThrow(/exactly 32 bytes/);
+    expect(() => makeManager([''])).toThrow(ConfigurationError);
+  });
+
+  it('hands decoded previous-key bytes to the bindings exactly once', async () => {
+    const { manager, bindings } = makeManager([K2_HEX]);
+    await manager.encrypt(new Uint8Array([1]), 'ns:k');
+
+    expect(bindings.deriveTenantKeys).toHaveBeenCalledTimes(1);
+    const [, , previous] = vi.mocked(bindings.deriveTenantKeys).mock.calls[0];
+    expect(previous).toHaveLength(1);
+    expect(previous![0]).toBeInstanceOf(Uint8Array);
+    expect(Array.from(previous![0].slice(0, 2))).toEqual([0xcd, 0xcd]);
+    manager.dispose();
+  });
+
+  it('omits the keyring argument entirely when no previous keys are configured', async () => {
+    const { manager, bindings } = makeManager();
+    await manager.encrypt(new Uint8Array([1]), 'ns:k');
+
+    const [, , previous] = vi.mocked(bindings.deriveTenantKeys).mock.calls[0];
+    expect(previous).toBeUndefined();
+    manager.dispose();
   });
 });

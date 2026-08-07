@@ -96,6 +96,11 @@ export declare class TenantKeys {
  *
  * Uses the encryptor stored in TenantKeys for consistency.
  *
+ * With previous master keys configured (rotation grace window), decryption
+ * runs cachekit-core's keyring loop: sequential attempts, current key
+ * first, identical AAD every attempt. Only an AES-GCM authentication
+ * failure advances to the next key; structural errors are terminal.
+ *
  * # Arguments
  * * `ciphertext` - Previously encrypted data
  * * `aad` - Must match AAD used during encryption
@@ -145,17 +150,30 @@ export declare function deriveKey(masterKey: Uint8Array, domain: string, tenantS
  * # Arguments
  * * `master_key` - 32-byte master encryption key
  * * `tenant_id` - Tenant identifier for key isolation
+ * * `previous_master_keys` - Optional decrypt-only previous master keys
+ *   (max 3, each 32 bytes) retained during a key-rotation grace window.
+ *   Reads attempt keys sequentially, current first, identical AAD per
+ *   attempt (protocol `spec/encryption.md` → "Key Rotation (Keyring)").
+ *   Writes always use `master_key`.
  *
  * # Returns
  * TenantKeys object with derived keys (stays in Rust memory)
+ *
+ * # Errors
+ * Returns InvalidArg if any key has the wrong length, more than 3 previous
+ * keys are supplied (rejected, never truncated), or `master_key` also
+ * appears in `previous_master_keys` (forward-only rule: a key that ever
+ * encrypted is never re-promoted).
  *
  * # Example
  * ```javascript
  * const masterKey = Buffer.from(process.env.MASTER_KEY, 'hex');
  * const tenantKeys = deriveTenantKeys(masterKey, 'tenant-123');
+ * // During a rotation grace window:
+ * const rotating = deriveTenantKeys(newKey, 'tenant-123', [oldKey]);
  * ```
  */
-export declare function deriveTenantKeys(masterKey: Uint8Array, tenantId: string): TenantKeys
+export declare function deriveTenantKeys(masterKey: Uint8Array, tenantId: string, previousMasterKeys?: Array<Uint8Array> | undefined | null): TenantKeys
 
 /**
  * Encrypt plaintext using TenantKeys (keys stay in Rust memory).

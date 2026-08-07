@@ -99,6 +99,16 @@ export interface EncryptionConfig {
   masterKey: string;
   /** Tenant ID for key derivation isolation */
   tenantId?: string;
+  /**
+   * Decrypt-only previous master keys (max 3, same hex format as masterKey)
+   * retained during a key-rotation grace window. Entries written under a
+   * previous key stay readable without re-encryption; writes always use
+   * masterKey. Rotation is forward-only: masterKey must not appear here.
+   *
+   * Configuring more than 3 keys, or repeating masterKey, throws
+   * ConfigurationError at load — the list is never truncated.
+   */
+  previousMasterKeys?: string[];
 }
 
 /**

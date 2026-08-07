@@ -48,8 +48,19 @@ export declare function deriveKey(
   tenantSalt: string
 ): Uint8Array;
 
-/** Derive per-tenant keys (encryption / authentication / cache_keys domains). */
-export declare function deriveTenantKeys(masterKey: Uint8Array, tenantId: string): TenantKeys;
+/**
+ * Derive per-tenant keys (encryption / authentication / cache_keys domains).
+ *
+ * `previousMasterKeys` (max 3, each 32 bytes) holds decrypt-only previous
+ * master keys retained during a key-rotation grace window: reads attempt
+ * keys sequentially, current first, identical AAD per attempt; writes always
+ * use `masterKey`.
+ */
+export declare function deriveTenantKeys(
+  masterKey: Uint8Array,
+  tenantId: string,
+  previousMasterKeys?: Uint8Array[] | null
+): TenantKeys;
 
 /** Encrypt with AES-256-GCM: [nonce(12)][ciphertext][auth_tag(16)]. */
 export declare function encryptWithTenantKeys(

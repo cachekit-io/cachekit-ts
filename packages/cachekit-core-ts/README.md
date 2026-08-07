@@ -31,7 +31,9 @@ If your platform isn't listed, the package will fail to load at runtime. Open an
 Public exports (consumed by `@cachekit-io/cachekit`):
 
 - `ByteStorage` — LZ4 compression + xxHash3-64 integrity envelope
-- `TenantKeys` — HKDF-SHA256 per-tenant derived keys with `ZeroizeOnDrop`
+- `TenantKeys` — HKDF-SHA256 per-tenant derived keys with `ZeroizeOnDrop`;
+  optionally holds a decrypt-only keyring (max 3 previous master keys) for
+  key-rotation grace windows — sequential decrypt attempts, current key first
 - `deriveKey` — single-domain HKDF key derivation
 - `encrypt` / `decrypt` — AES-256-GCM with AAD binding
 - `version` — version string from the underlying Cargo crate

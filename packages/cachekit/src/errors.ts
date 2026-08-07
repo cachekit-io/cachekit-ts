@@ -97,10 +97,18 @@ export class ValueTooLargeError extends CachekitError {
 /**
  * Thrown when nonce counter approaches exhaustion.
  * Indicates key rotation is required.
+ *
+ * Rotation is always forward, to a NEW master key — a retired key is never
+ * re-promoted, because that would resume a used, unknowable AES-GCM nonce
+ * budget. Promote a fresh key to `masterKey` and move the exhausted key into
+ * `previousMasterKeys` so existing entries stay readable through the grace
+ * window. Runbook: https://docs.cachekit.io/concepts/key-rotation/
  */
 export class NonceExhaustedError extends EncryptionError {
   constructor(
-    message: string = 'Nonce counter exhausted, key rotation required',
+    message: string = 'Nonce counter exhausted, key rotation required. ' +
+      'Rotate forward to a NEW master key (never re-promote a retired key): ' +
+      'https://docs.cachekit.io/concepts/key-rotation/',
     options?: ErrorOptions
   ) {
     super(message, options);

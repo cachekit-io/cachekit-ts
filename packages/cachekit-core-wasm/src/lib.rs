@@ -18,7 +18,7 @@ use wasm_bindgen::prelude::*;
 use cachekit_core::encryption::key_derivation::{
     derive_tenant_keys as core_derive_tenant_keys, TenantKeys as CoreTenantKeys,
 };
-use cachekit_core::encryption::{derive_domain_key, ZeroKnowledgeEncryptor};
+use cachekit_core::encryption::{derive_domain_key, Keyring, ZeroKnowledgeEncryptor};
 use cachekit_core::ByteStorage as CoreByteStorage;
 
 // Security limits to prevent DoS — identical to the NAPI crate.
@@ -109,11 +109,7 @@ impl ByteStorage {
 
 /// Key derivation using HKDF-SHA256 (RFC 5869). Same validation as NAPI.
 #[wasm_bindgen(js_name = deriveKey)]
-pub fn derive_key(
-    master_key: &[u8],
-    domain: &str,
-    tenant_salt: &str,
-) -> Result<Vec<u8>, JsError> {
+pub fn derive_key(master_key: &[u8], domain: &str, tenant_salt: &str) -> Result<Vec<u8>, JsError> {
     if master_key.len() != 32 {
         return Err(JsError::new(&format!(
             "Master key must be 32 bytes, got {}",
@@ -147,6 +143,11 @@ pub fn derive_key(
 pub struct TenantKeys {
     inner: CoreTenantKeys,
     encryptor: ZeroKnowledgeEncryptor,
+    /// Decrypt keyring, present only during a rotation grace window
+    /// (previousMasterKeys configured). None keeps the single-key decrypt
+    /// path on the pre-derived tenant key. All keyring material zeroizes
+    /// on drop inside cachekit-core.
+    keyring: Option<Keyring>,
 }
 
 #[wasm_bindgen]
@@ -178,8 +179,15 @@ impl TenantKeys {
 /// Matches Python's `derive_tenant_keys()` and the NAPI binding exactly:
 /// encryption_key ("encryption"), authentication_key ("authentication"),
 /// cache_key_salt ("cache_keys").
+/// `previous_master_keys` (optional) holds decrypt-only previous master keys
+/// (max 3, each 32 bytes) retained during a key-rotation grace window —
+/// identical semantics to the NAPI binding.
 #[wasm_bindgen(js_name = deriveTenantKeys)]
-pub fn derive_tenant_keys(master_key: &[u8], tenant_id: &str) -> Result<TenantKeys, JsError> {
+pub fn derive_tenant_keys(
+    master_key: &[u8],
+    tenant_id: &str,
+    previous_master_keys: Option<Vec<js_sys::Uint8Array>>,
+) -> Result<TenantKeys, JsError> {
     if master_key.len() != 32 {
         return Err(JsError::new(&format!(
             "Master key must be exactly 32 bytes, got {}",
@@ -190,11 +198,38 @@ pub fn derive_tenant_keys(master_key: &[u8], tenant_id: &str) -> Result<TenantKe
         return Err(JsError::new("tenant_id cannot be empty"));
     }
 
-    let inner = core_derive_tenant_keys(master_key, tenant_id)
-        .map_err(|e| JsError::new(&e.to_string()))?;
+    let previous: Vec<Vec<u8>> = previous_master_keys
+        .unwrap_or_default()
+        .iter()
+        .map(|key| key.to_vec())
+        .collect();
+    for key in &previous {
+        if key.len() != 32 {
+            return Err(JsError::new(&format!(
+                "Previous master key must be exactly 32 bytes, got {}",
+                key.len()
+            )));
+        }
+    }
+    // Keyring only exists during a rotation grace window; None keeps the
+    // pre-derived single-key decrypt path. Keyring::new re-validates the
+    // cap (3) and the current-key collision (config errors).
+    let keyring = if previous.is_empty() {
+        None
+    } else {
+        let refs: Vec<&[u8]> = previous.iter().map(|k| k.as_slice()).collect();
+        Some(Keyring::new(master_key, &refs).map_err(|e| JsError::new(&e.to_string()))?)
+    };
+
+    let inner =
+        core_derive_tenant_keys(master_key, tenant_id).map_err(|e| JsError::new(&e.to_string()))?;
     let encryptor = ZeroKnowledgeEncryptor::new().map_err(|e| JsError::new(&e.to_string()))?;
 
-    Ok(TenantKeys { inner, encryptor })
+    Ok(TenantKeys {
+        inner,
+        encryptor,
+        keyring,
+    })
 }
 
 /// Encrypt plaintext using TenantKeys (keys stay in wasm memory).
@@ -216,6 +251,10 @@ pub fn encrypt_with_tenant_keys(
 }
 
 /// Decrypt ciphertext using TenantKeys (keys stay in wasm memory).
+///
+/// With previous master keys configured (rotation grace window), decryption
+/// runs cachekit-core's keyring loop: sequential attempts, current key
+/// first, identical AAD every attempt — identical to the NAPI binding.
 #[wasm_bindgen(js_name = decryptWithTenantKeys)]
 pub fn decrypt_with_tenant_keys(
     ciphertext: &[u8],
@@ -224,8 +263,18 @@ pub fn decrypt_with_tenant_keys(
 ) -> Result<Vec<u8>, JsError> {
     validate_decryption_input(ciphertext.len(), aad.len())?;
 
-    tenant_keys
-        .encryptor
-        .decrypt_aes_gcm(ciphertext, &tenant_keys.inner.encryption_key, aad)
-        .map_err(|e| JsError::new(&e.to_string()))
+    match &tenant_keys.keyring {
+        Some(keyring) => keyring
+            .decrypt(
+                &tenant_keys.encryptor,
+                ciphertext,
+                &tenant_keys.inner.tenant_id,
+                aad,
+            )
+            .map_err(|e| JsError::new(&e.to_string())),
+        None => tenant_keys
+            .encryptor
+            .decrypt_aes_gcm(ciphertext, &tenant_keys.inner.encryption_key, aad)
+            .map_err(|e| JsError::new(&e.to_string())),
+    }
 }
