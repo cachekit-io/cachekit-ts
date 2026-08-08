@@ -65,7 +65,8 @@ describe('pluggable logger (LAB-517)', () => {
       { ttl: 60, namespace: 'ns' },
       0,
       null,
-      async () => {}
+      // PersistCallback contract: null = "nothing for L1 to hold".
+      async () => null
     );
 
     await vi.waitFor(() => {
