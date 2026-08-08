@@ -415,6 +415,12 @@ export class L1Cache<T = unknown> {
   }
 
   private estimateSize(value: unknown): number {
+    // Secure caches store the L2 ciphertext here (LAB-238), so the common
+    // entry is a Uint8Array. JSON.stringify turns one into {"0":12,"1":34,…} —
+    // roughly 14x its real size — which would blow the memory budget and evict
+    // most of L1 on the first encrypted entry. Count the buffer instead.
+    if (ArrayBuffer.isView(value)) return value.byteLength;
+
     // Rough estimation - JSON stringify length as proxy
     // m2 Fix: Track visited objects to prevent infinite recursion on circular refs
     const visited = new WeakSet<object>();

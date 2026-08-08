@@ -142,6 +142,25 @@ describe('L1Cache', () => {
       expect(smallCache.stats.entries).toBeLessThan(3);
       expect(smallCache.stats.memoryUsed).toBeLessThanOrEqual(400);
     });
+
+    it('sizes byte payloads by their buffer, not their JSON form (LAB-238)', () => {
+      // Secure caches store the L2 ciphertext here. JSON.stringify of a
+      // Uint8Array yields {"0":12,"1":34,…} — roughly 14x the real size — so
+      // measuring that way would evict most of L1 on the first entry.
+      const bytesCache = new L1Cache<Uint8Array>({ maxEntries: 100, maxMemory: 4096 });
+      const ciphertext = new Uint8Array(256).fill(0xab);
+
+      bytesCache.set('a', ciphertext, 10000, 'test');
+
+      expect(bytesCache.stats.memoryUsed).toBe(256);
+
+      // 16 x 256B fits in a 4 KiB budget; under JSON sizing the second entry
+      // would already have evicted the first.
+      for (let i = 0; i < 15; i++) {
+        bytesCache.set(`k${i}`, new Uint8Array(256).fill(i), 10000, 'test');
+      }
+      expect(bytesCache.stats.entries).toBe(16);
+    });
   });
 
   describe('SWR', () => {

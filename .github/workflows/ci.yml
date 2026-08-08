@@ -176,8 +176,13 @@ jobs:
       # Production deps are the blocking gate (step above). Dev-only transitive
       # advisories (e.g. tmp <0.2.6 path traversal, build-time tooling) are
       # reported for visibility but must not block CI — they ship to no user.
+      # No --audit-level here on purpose: this step cannot fail the build, so a
+      # severity floor buys nothing and only hides findings. It used to inherit
+      # `high`, which is why the medium uuid advisory (GHSA-w5hq-g745-h8pq) was
+      # invisible to CI until someone read the Dependabot list by hand — and
+      # transitive advisories have no bot, so this step is the discovery lane.
       - name: Audit all dependencies (non-blocking)
-        run: pnpm audit --audit-level=high
+        run: pnpm audit
         continue-on-error: true
 
       - name: Install cargo-audit

@@ -51,8 +51,13 @@ allowBuilds:
   sharp: false
 
 # Security floor-pins for vulnerable transitives (formerly pnpm.overrides).
-# Floors are bounded to their current major where a newer major exists —
-# an unbounded floor re-resolves to the newest match, majors included.
+# Floors are bounded to the major of the version they pin, where a newer major
+# exists — an unbounded floor re-resolves to the newest match, majors included.
+# Renovate takes these entries over once they exist (they read as manifest deps)
+# but its idea of maintenance includes WIDENING the bound across majors: see the
+# open PR #94, which proposes 'brace-expansion@2': '>=2.1.3 <3' -> '<6'. Review
+# every bot PR that touches an upper bound here — a bound is a decision, not
+# drift.
 overrides:
   protobufjs: '>=7.6.5 <8' # GHSA-j3f2-48v5-ccww
   vite: '>=8.0.5'
@@ -65,3 +70,13 @@ overrides:
   'brace-expansion@5': '>=5.0.8' # GHSA-3jxr-9vmj-r5cp + GHSA-mh99-v99m-4gvg
   js-yaml: '>=4.3.0 <5' # GHSA-52cp-r559-cp3m
   sharp: '>=0.35.0' # GHSA-f88m-g3jw-g9cj (build denied above; pin is belt+braces)
+  # GHSA-w5hq-g745-h8pq. Dev-only: testcontainers -> dockerode -> uuid, v4 only
+  # (alert #47 mislabels it runtime — it can't read pnpm-lock's dev partition).
+  # 11.1.1 is the advisory's lowest fix, and 10.0.0 is uuid's ONLY 10.x release
+  # (dockerode's declared range is ^10.0.0, which resolves to it), so there is
+  # no in-major fix and the forced major is unavoidable.
+  # <12 IS LOAD-BEARING: uuid >=12 dropped the
+  # `require` export condition and dockerode does `require("uuid").v4`, so
+  # widening breaks Node <22.12 — which engines allow (>=22.0.0) and CI, on
+  # 22-latest, would not catch. Lift only when dockerode moves off ^10.0.0.
+  uuid: '>=11.1.1 <12'

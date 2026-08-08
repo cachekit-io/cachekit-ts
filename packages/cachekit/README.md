@@ -1,12 +1,14 @@
 # @cachekit-io/cachekit
 
-Production-ready Redis caching for TypeScript/Node.js. Hybrid TypeScript-Rust design with L1 in-memory cache, SWR, circuit breaker, and optional client-side encryption.
+Backend-agnostic caching for TypeScript/Node.js — works with Redis, Memcached, File, Workers KV, or CachekitIO. Hybrid TypeScript-Rust design with L1 in-memory cache, SWR, circuit breaker, and optional zero-knowledge encryption.
 
+> **Status: beta** — CacheKit is in closed beta ahead of 1.0. APIs are stabilising; minor breaking changes may still occur between 0.x releases.
+>
 > **Version note**: 0.1.1 was tagged in git but never published to npm (a CI auth bug, fixed in #45). Published versions on npm jump 0.1.0 → 0.1.2. If you're pinning, use 0.1.2 or later.
 
 ## Features
 
-- **Dual-layer caching**: L1 in-memory (~50ns) + pluggable L2 (Redis, CacheKit SaaS, Memcached, local File)
+- **Dual-layer caching**: L1 in-memory (~50ns) + pluggable L2 (Redis, CachekitIO, Memcached, Workers KV, local File)
 - **Stale-while-revalidate**: Serve stale data while refreshing in background
 - **Stampede protection**: Cold-miss single-flight per process (always on) + opt-in cross-process distributed locks
 - **Zero-knowledge encryption**: Optional AES-256-GCM client-side encryption
@@ -114,7 +116,10 @@ const cache = createCache({
     maxMemory: 50 * 1024 * 1024, // 50MB
   },
 
-  // Optional: Client-side encryption
+  // Optional: Client-side encryption. Zero-knowledge covers every layer —
+  // L1 holds the same ciphertext L2 does, so an L1 hit costs a decrypt and
+  // AAD verify rather than being free, and no plaintext is resident in the
+  // heap between reads. Matches cachekit-py and cachekit-rs.
   encryption: {
     masterKey: process.env.CACHEKIT_MASTER_KEY!, // hex-encoded, 32+ bytes
     tenantId: 'tenant-123', // for multi-tenant key isolation
