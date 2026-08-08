@@ -109,6 +109,44 @@ describe('E2E key rotation round-trip', () => {
     await afterStrict.close();
   });
 
+  it('serves a previous-key entry from L1 during the grace window', async () => {
+    // L1 holds ciphertext for a secure cache (LAB-238), so an L2 read under a
+    // previous key repopulates L1 with bytes the CURRENT key cannot open —
+    // every subsequent hit has to run the keyring loop again. If it did not,
+    // decodeL1Entry would drop the entry and fall through to L2 on every read
+    // for the whole grace window: a silent L1 bypass under degradation, and a
+    // throw on every old-key read without it.
+    const backend = new SharedBackend();
+    const key = 'rotate:l1-entry';
+    const value = { user: 'grace', roles: ['reader'] };
+
+    const before = createCache({
+      backend,
+      encryption: { masterKey: K1_HEX },
+      l1: { enabled: false },
+    });
+    await before.set(key, value);
+    await before.close();
+
+    const during = createCache({
+      backend,
+      encryption: { masterKey: K2_HEX, previousMasterKeys: [K1_HEX] },
+      l1: { enabled: true },
+    });
+    const getSpy = vi.spyOn(backend, 'get');
+
+    // First read comes from L2 and seeds L1 with the k1 ciphertext.
+    await expect(during.get(key)).resolves.toEqual(value);
+    expect(getSpy).toHaveBeenCalledTimes(1);
+
+    // Second read is served from L1 — decrypted through the keyring, so the
+    // backend is never consulted again.
+    await expect(during.get(key)).resolves.toEqual(value);
+    expect(getSpy).toHaveBeenCalledTimes(1);
+
+    await during.close();
+  });
+
   it('keeps new writes on the current key during the grace window', async () => {
     const backend = new SharedBackend();
     const key = 'rotate:new-write';
