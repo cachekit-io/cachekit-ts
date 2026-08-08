@@ -2,6 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { BackgroundRefreshManager } from './background-refresh.js';
 import { L1Cache } from '../l1/lru-cache.js';
 
+// Pin the SWR jitter draw so tests are deterministic. 0.5 lands the
+// jitter factor at exactly 1.0, so the refresh threshold is exactly
+// originalTtl * swrThresholdRatio — no probabilistic window in any test here.
+vi.mock('../utils/random.js', () => ({
+  secureRandomFloat: () => 0.5,
+}));
+
 describe('BackgroundRefreshManager', () => {
   let manager: BackgroundRefreshManager;
   let l1Cache: L1Cache;
@@ -11,11 +18,14 @@ describe('BackgroundRefreshManager', () => {
   beforeEach(() => {
     manager = new BackgroundRefreshManager();
     l1Cache = new L1Cache({ maxEntries: 100 });
-    persistToL2 = vi.fn().mockResolvedValue(undefined);
+    // The L2 write hands back what L1 should hold. For a plaintext cache that
+    // is the value itself; a secure cache would return its ciphertext here.
+    persistToL2 = vi.fn(async (_key: string, value: unknown) => ({ l1: value }));
     consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     consoleSpy.mockRestore();
     manager.close();
     l1Cache.clear();
@@ -109,34 +119,121 @@ describe('BackgroundRefreshManager', () => {
       expect(cached).toEqual({ data: 'refreshed' });
     });
 
-    it('should log error and cancel L1 refresh on failure', async () => {
-      const error = new Error('Compute failed');
-      const computeFn = vi.fn().mockRejectedValue(error);
+    it('stores what the L2 write returned, not the plaintext it computed (LAB-238)', async () => {
+      // A secure cache's persist callback returns the ciphertext it wrote to
+      // L2. That, and never the factory's plaintext result, is what lands in
+      // L1 — otherwise the SWR refresh re-poisons L1 on every revalidation.
+      const staleCiphertext = new Uint8Array([0xca, 0xfe, 0xba, 0xbe]);
+      const refreshedCiphertext = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
+      const secretPersist = vi.fn(async () => ({ l1: refreshedCiphertext }));
+      const computeFn = vi.fn().mockResolvedValue({ ssn: '000-00-0000' });
 
-      // Set initial value in L1
-      l1Cache.set('key1', { data: 'old' }, 3600000, 'test');
+      l1Cache.set('key1', staleCiphertext, 3600000, 'test');
+      const { versionToken } = l1Cache.getWithSwr('key1');
 
-      // Trigger SWR to mark as refreshing
-      l1Cache.getWithSwr('key1');
-
+      let refreshDone!: Promise<unknown>;
       manager.scheduleRefresh(
         'key1',
         computeFn,
         { ttl: 3600, namespace: 'test' },
-        0,
+        versionToken,
         l1Cache,
-        persistToL2
+        secretPersist,
+        (promise) => {
+          refreshDone = promise;
+        }
       );
+      // The refresh promise settles only after the L1 update landed.
+      await refreshDone;
 
-      await vi.waitFor(() => {
-        expect(consoleSpy).toHaveBeenCalledWith(
-          '[cachekit] Background refresh failed:',
-          'Compute failed'
-        );
-      });
+      // Reference identity to the persist callback's ciphertext is the whole
+      // proof: neither the stale entry nor the factory's plaintext object can
+      // be this Uint8Array — so the refresh demonstrably replaced L1's entry.
+      expect(l1Cache.get('key1')).toBe(refreshedCiphertext);
+    });
+
+    it('holds the refresh marker when the write returns nothing storable', async () => {
+      // No ciphertext to show for the write, so L1 must keep the stale entry
+      // rather than fall back to the plaintext. Critically the marker is NOT
+      // released: cancelling frees it immediately while expiresAt stays put,
+      // so every later read would re-arm the refresh and hammer the origin.
+      // Letting it lapse via SWR_REFRESH_MARKER_TTL_MS throttles to 1/min/key.
+      const degraded = vi.fn(async () => null);
+      const computeFn = vi.fn().mockResolvedValue({ data: 'fresh' });
+
+      // Frozen clock + pinned jitter (vi.mock at top of file): with a 4s TTL
+      // the refresh threshold is exactly 2s, so a read at t=2.4s is
+      // deterministically stale and the entry deterministically alive until
+      // t=4s. Time only moves when this test says so — no wall-clock races.
+      vi.useFakeTimers();
+      l1Cache.set('key1', { data: 'stale' }, 4000, 'test');
+      vi.advanceTimersByTime(2400);
+      const stale = l1Cache.getWithSwr('key1');
+      expect(stale.shouldRefresh).toBe(true);
+
+      let refreshDone!: Promise<unknown>;
+      manager.scheduleRefresh(
+        'key1',
+        computeFn,
+        { ttl: 3600, namespace: 'test' },
+        stale.versionToken,
+        l1Cache,
+        degraded,
+        (promise) => {
+          refreshDone = promise;
+        }
+      );
+      // The refresh is pure microtasks (no timers) — awaiting its promise
+      // needs no timer advancement and settles after the degraded write.
+      await refreshDone;
+      expect(degraded).toHaveBeenCalled();
+
+      expect(l1Cache.get('key1')).toEqual({ data: 'stale' });
+      expect(l1Cache.stats.refreshing).toBe(1);
+      // A second read must NOT schedule another refresh while the marker holds.
+      expect(l1Cache.getWithSwr('key1').shouldRefresh).toBe(false);
+    });
+
+    it('should log error and cancel L1 refresh on failure', async () => {
+      const error = new Error('Compute failed');
+      const computeFn = vi.fn().mockRejectedValue(error);
+
+      // A fresh entry never takes a refresh marker, which would leave the
+      // cancel half of this test asserting nothing — so make the entry
+      // deterministically stale first (same frozen-clock setup as above).
+      vi.useFakeTimers();
+      l1Cache.set('key1', { data: 'old' }, 4000, 'test');
+      vi.advanceTimersByTime(2400);
+      const stale = l1Cache.getWithSwr('key1');
+      expect(stale.shouldRefresh).toBe(true);
+      expect(l1Cache.stats.refreshing).toBe(1);
+
+      let refreshDone!: Promise<unknown>;
+      manager.scheduleRefresh(
+        'key1',
+        computeFn,
+        { ttl: 3600, namespace: 'test' },
+        stale.versionToken,
+        l1Cache,
+        persistToL2,
+        (promise) => {
+          refreshDone = promise;
+        }
+      );
+      await refreshDone;
+
+      expect(consoleSpy).toHaveBeenCalledWith(
+        '[cachekit] Background refresh failed:',
+        'Compute failed'
+      );
 
       // persistToL2 should not be called on error
       expect(persistToL2).not.toHaveBeenCalled();
+
+      // The failed refresh released its marker via cancelRefresh — unlike
+      // the degraded-write case above, a compute error must allow the next
+      // read to re-arm a refresh immediately.
+      expect(l1Cache.stats.refreshing).toBe(0);
     });
 
     it('should skip refresh if manager is closed', async () => {

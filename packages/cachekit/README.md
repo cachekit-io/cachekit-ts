@@ -116,7 +116,10 @@ const cache = createCache({
     maxMemory: 50 * 1024 * 1024, // 50MB
   },
 
-  // Optional: Client-side encryption
+  // Optional: Client-side encryption. Zero-knowledge covers every layer —
+  // L1 holds the same ciphertext L2 does, so an L1 hit costs a decrypt and
+  // AAD verify rather than being free, and no plaintext is resident in the
+  // heap between reads. Matches cachekit-py and cachekit-rs.
   encryption: {
     masterKey: process.env.CACHEKIT_MASTER_KEY!, // hex-encoded, 32+ bytes
     tenantId: 'tenant-123', // for multi-tenant key isolation
