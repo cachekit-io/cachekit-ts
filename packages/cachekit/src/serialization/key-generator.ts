@@ -1,5 +1,5 @@
 import { blake2b } from '@noble/hashes/blake2.js';
-import { bytesToHex } from '@noble/hashes/utils.js';
+import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 import { MessagePackSerializer } from './serializer.js';
 import { KEY_GEN_MAX_SIZE, KEY_GEN_MAX_DEPTH, CACHE_KEY_HASH_LENGTH } from '../constants.js';
 
@@ -58,6 +58,17 @@ export function generateParamsHash(args: unknown[]): string {
   const serialized = keySerializer.encode(args);
   const hash = blake2b(serialized, { dkLen: 32 });
   return bytesToHex(hash);
+}
+
+/**
+ * `blake2b(utf8(key), digestSize=16)` hex — 32 chars. The SDK's canonical
+ * short key digest, byte-identical to cachekit-py's `_key_to_path` stem: the
+ * File backend's flat filename and the redacted `keyHash=` in size-rejection
+ * logs are the same value, so a logged rejection can be matched to its cache
+ * file (or to a suspect key by recomputing) without ever logging the key.
+ */
+export function blake2b16Hex(key: string): string {
+  return bytesToHex(blake2b(utf8ToBytes(key), { dkLen: 16 }));
 }
 
 /**

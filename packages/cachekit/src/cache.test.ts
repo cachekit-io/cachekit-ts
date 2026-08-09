@@ -494,6 +494,76 @@ describe('Cache Integration', () => {
 
       await writer.close();
     });
+
+    it('uses a freed-immediately throwaway codec for post-close reads on compression-ON caches too', async () => {
+      // Same in-flight-across-close() interleaving as above, but on the
+      // DEFAULT compression-on path: close() frees this.byteStorage, so the
+      // resumed read must not unpack with the freed codec (a use-after-free
+      // on the wasm binding) — it gets a throwaway instead (expert panel,
+      // LAB-1768).
+      const sharedBackend = new InMemoryBackend();
+
+      const writer = createCache({
+        backend: sharedBackend,
+        compression: true,
+        l1: { enabled: false },
+      });
+      await writer.set('test:postclose-on', { data: 'enveloped' });
+
+      const stored = await sharedBackend.get('test:postclose-on');
+      expect(stored).not.toBeNull();
+
+      let releaseGet!: () => void;
+      const gateOpened = new Promise<void>((resolve) => (releaseGet = resolve));
+      let getEntered!: () => void;
+      const getStarted = new Promise<void>((resolve) => (getEntered = resolve));
+      const gatedBackend = new Proxy(sharedBackend, {
+        get(target, prop, receiver) {
+          if (prop === 'get') {
+            return async () => {
+              getEntered();
+              await gateOpened;
+              return stored;
+            };
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+
+      const reader = createCache({
+        backend: gatedBackend,
+        compression: true,
+        l1: { enabled: false },
+      });
+
+      let created = 0;
+      let freed = 0;
+      const impl = reader as unknown as { createByteStorage: () => ByteStorageLike };
+      const realFactory = impl.createByteStorage;
+      impl.createByteStorage = () => {
+        created++;
+        const codec = realFactory();
+        return {
+          pack: (data) => codec.pack(data),
+          unpack: (packed) => codec.unpack(packed),
+          free: () => {
+            freed++;
+            codec.free?.();
+          },
+        };
+      };
+
+      const pending = reader.get('test:postclose-on');
+      await getStarted;
+      await reader.close();
+      releaseGet();
+
+      expect(await pending).toEqual({ data: 'enveloped' });
+      expect(created).toBe(1);
+      expect(freed).toBe(1);
+
+      await writer.close();
+    });
   });
 
   describe('Error Handling', () => {

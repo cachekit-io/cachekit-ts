@@ -11,8 +11,6 @@ import type {
 import type { Backend, L1Metrics, LockableBackend } from './backends/types.js';
 import type { InvalidationEvent } from './l1/types.js';
 import type { MetricsCollector, MetricsConfig } from './metrics/prometheus.js';
-import { blake2b } from '@noble/hashes/blake2.js';
-import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 import { logError } from './logger.js';
 import { L1Cache } from './l1/lru-cache.js';
 import { ReliabilityExecutor } from './reliability/executor.js';
@@ -26,6 +24,7 @@ import {
   generateKey,
   generateParamsHash,
   extractNamespace,
+  blake2b16Hex,
 } from './serialization/key-generator.js';
 import {
   generateInteropKey,
@@ -399,17 +398,35 @@ export class CacheImpl implements SecureCache {
     } catch {
       return null;
     } finally {
-      if (reader !== this.envelopeReader) {
-        try {
-          reader.free?.();
-        } catch (error) {
-          // Never mask the unpack result with a cleanup failure — report it
-          // through the logger instead.
-          logError(
-            `[cachekit] failed to free post-close envelope codec: ${error instanceof Error ? error.message : String(error)}`
-          );
-        }
-      }
+      if (reader !== this.envelopeReader) this.freeThrowawayCodec(reader);
+    }
+  }
+
+  /**
+   * Pack/unpack through the compression-on codec (`byteStorage`) — or, after
+   * close() has freed it, through a throwaway codec freed right here. Same
+   * post-shutdown hazard tryUnwrapEnvelope guards: an in-flight operation
+   * resuming after close() must neither touch freed wasm memory (a
+   * use-after-free on Workers) nor cache a codec nothing will ever free.
+   * Callers must have established useEnvelope (byteStorage non-null).
+   */
+  private withEnvelopeCodec<T>(use: (codec: ByteStorageLike) => T): T {
+    const codec = this.closed ? this.createByteStorage() : this.byteStorage!;
+    try {
+      return use(codec);
+    } finally {
+      if (codec !== this.byteStorage) this.freeThrowawayCodec(codec);
+    }
+  }
+
+  /** Free a post-close throwaway codec without masking the caller's result. */
+  private freeThrowawayCodec(codec: ByteStorageLike): void {
+    try {
+      codec.free?.();
+    } catch (error) {
+      logError(
+        `[cachekit] failed to free post-close envelope codec: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }
 
@@ -432,7 +449,7 @@ export class CacheImpl implements SecureCache {
     // non-reversible digest, not the key itself. Same key → same digest, so
     // repeated rejections still correlate, and holders of a suspect key can
     // recompute the digest to match it.
-    const keyHash = bytesToHex(blake2b(utf8ToBytes(key), { dkLen: 16 }));
+    const keyHash = blake2b16Hex(key);
     logError(
       `[cachekit] set rejected, value NOT cached (keyHash=${keyHash}): ${error.message}.${hint}`
     );
@@ -542,7 +559,7 @@ export class CacheImpl implements SecureCache {
       plaintext = await this.encryption.decrypt(plaintext, key, useEnvelope);
     }
     if (useEnvelope) {
-      plaintext = this.byteStorage!.unpack(plaintext);
+      plaintext = this.withEnvelopeCodec((codec) => codec.unpack(plaintext));
     } else if (!interop && looksLikeEnvelope(plaintext)) {
       // Envelope tolerance (LAB-1388): a compression-off cache can read
       // entries a compression-on writer stored — same store, older SDK
@@ -786,7 +803,9 @@ export class CacheImpl implements SecureCache {
       }
 
       // Compress with ByteStorage (before encryption)
-      let data: Uint8Array = useEnvelope ? this.byteStorage!.pack(serialized) : serialized;
+      let data: Uint8Array = useEnvelope
+        ? this.withEnvelopeCodec((codec) => codec.pack(serialized))
+        : serialized;
 
       // Encrypt if encryption enabled
       if (this.encryption) {
@@ -1292,8 +1311,16 @@ export class CacheImpl implements SecureCache {
 
     // Release the envelope codecs (zeroizes/frees wasm resources on Workers;
     // no-op for the GC-managed NAPI binding)
+    // envelopeReader is also nulled: a freed-but-dangling wasm codec behind a
+    // non-null reference is an instant use-after-free for any future caller
+    // that forgets the `closed` check. byteStorage is readonly and cannot be
+    // nulled — its callers route through withEnvelopeCodec, which checks
+    // `closed` before touching it.
     attempt(() => this.byteStorage?.free?.());
-    attempt(() => this.envelopeReader?.free?.());
+    attempt(() => {
+      this.envelopeReader?.free?.();
+      this.envelopeReader = null;
+    });
 
     // Clear L1 (this also clears L1's internal refreshingKeys)
     attempt(() => this.l1?.clear());

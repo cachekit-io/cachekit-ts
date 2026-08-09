@@ -2,8 +2,7 @@ import { constants as fsConstants } from 'node:fs';
 import fs, { type FileHandle } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { blake2b } from '@noble/hashes/blake2.js';
-import { bytesToHex } from '@noble/hashes/utils.js';
+import { blake2b16Hex } from '../serialization/key-generator.js';
 import { Backend, FileBackendConfig, TTLBackend } from './types.js';
 import { BackendError } from '../errors.js';
 
@@ -262,8 +261,7 @@ export class FileBackend implements Backend, TTLBackend {
    * unset: key identity is preserved, nothing is prefixed on the wire).
    */
   private keyToPath(key: string): string {
-    const hash = bytesToHex(blake2b(new TextEncoder().encode(key), { dkLen: 16 }));
-    return path.join(this.config.cacheDir, hash);
+    return path.join(this.config.cacheDir, blake2b16Hex(key));
   }
 
   /**

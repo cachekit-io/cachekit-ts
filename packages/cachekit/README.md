@@ -182,7 +182,9 @@ The SDK also reports every size rejection through its
 after deploying a new cache. The line carries a non-reversible blake2b digest
 of the cache key rather than the key itself (keys are caller-controlled and
 may embed sensitive data); to match a digest to a suspect key, hash the key
-with blake2b (16-byte output, hex). (Backends have their own hard ceilings too:
+with blake2b (16-byte output, hex). This is the same digest the File backend
+uses as its on-disk filename, so on that backend a logged `keyHash` names the
+entry's cache file directly. (Backends have their own hard ceilings too:
 Workers KV values cap at 25 MiB, Memcached items at 1 MiB server-side,
 CachekitIO per plan.)
 
