@@ -340,6 +340,90 @@ describe('Cache Integration', () => {
   });
 
   describe('Compression Error Handling', () => {
+    /**
+     * Drives the post-close in-flight read interleaving shared by the throwaway-codec
+     * tests: start a get(), suspend it inside the backend, close() the cache, then
+     * release it. Returns before the read settles so each caller asserts its own outcome.
+     *
+     * Only the key, the stored value, and the reader's compression mode vary. The gated
+     * backend, the codec accounting, and the close/release ordering are deliberately a
+     * single fixture — if those drifted between the two callers, one of them would stop
+     * exercising the use-after-free window it exists to pin.
+     */
+    async function startPostCloseRead(opts: {
+      key: string;
+      value: { data: string };
+      readerCompression: boolean;
+    }) {
+      const { key, value, readerCompression } = opts;
+      const sharedBackend = new InMemoryBackend();
+
+      // The writer always envelopes; the reader's compression mode is what varies.
+      const writer = createCache({
+        backend: sharedBackend,
+        compression: true,
+        l1: { enabled: false },
+      });
+      await writer.set(key, value);
+
+      // Capture the enveloped bytes now — closing the caches clears the
+      // shared in-memory store.
+      const stored = await sharedBackend.get(key);
+      expect(stored).not.toBeNull();
+
+      // Backend whose get() blocks until released, so the read can be
+      // suspended across close().
+      let releaseGet!: () => void;
+      const gateOpened = new Promise<void>((resolve) => (releaseGet = resolve));
+      let getEntered!: () => void;
+      const getStarted = new Promise<void>((resolve) => (getEntered = resolve));
+      const gatedBackend = new Proxy(sharedBackend, {
+        get(target, prop, receiver) {
+          if (prop === 'get') {
+            return async () => {
+              getEntered();
+              await gateOpened;
+              return stored;
+            };
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+
+      const reader = createCache({
+        backend: gatedBackend,
+        compression: readerCompression,
+        l1: { enabled: false },
+      });
+
+      // Track every codec the reader creates for envelope tolerance and
+      // every free() on them.
+      const counts = { created: 0, freed: 0 };
+      const impl = reader as unknown as { createByteStorage: () => ByteStorageLike };
+      const realFactory = impl.createByteStorage;
+      impl.createByteStorage = () => {
+        counts.created++;
+        const codec = realFactory();
+        return {
+          pack: (data) => codec.pack(data),
+          unpack: (packed) => codec.unpack(packed),
+          free: () => {
+            counts.freed++;
+            codec.free?.();
+          },
+        };
+      };
+
+      // Start the read (passes the closed guard), then close while it is
+      // suspended inside the backend.
+      const pending = reader.get(key);
+      await getStarted;
+      await reader.close();
+      releaseGet();
+
+      return { reader, pending, counts, writer };
+    }
+
     it('should return null when backend returns corrupted compressed data (graceful degradation)', async () => {
       const corruptBackend = new InMemoryBackend();
       const cache = createCache({
@@ -420,76 +504,17 @@ describe('Cache Integration', () => {
     });
 
     it('frees a throwaway envelope codec when an in-flight read resumes after close()', async () => {
-      const sharedBackend = new InMemoryBackend();
-
-      const writer = createCache({
-        backend: sharedBackend,
-        compression: true,
-        l1: { enabled: false },
+      const { reader, pending, counts, writer } = await startPostCloseRead({
+        key: 'test:postclose',
+        value: { data: 'compressed' },
+        readerCompression: false,
       });
-      await writer.set('test:postclose', { data: 'compressed' });
-
-      // Capture the enveloped bytes now — closing the caches clears the
-      // shared in-memory store.
-      const stored = await sharedBackend.get('test:postclose');
-      expect(stored).not.toBeNull();
-
-      // Backend whose get() blocks until released, so the read can be
-      // suspended across close().
-      let releaseGet!: () => void;
-      const gateOpened = new Promise<void>((resolve) => (releaseGet = resolve));
-      let getEntered!: () => void;
-      const getStarted = new Promise<void>((resolve) => (getEntered = resolve));
-      const gatedBackend = new Proxy(sharedBackend, {
-        get(target, prop, receiver) {
-          if (prop === 'get') {
-            return async () => {
-              getEntered();
-              await gateOpened;
-              return stored;
-            };
-          }
-          return Reflect.get(target, prop, receiver);
-        },
-      });
-
-      const reader = createCache({
-        backend: gatedBackend,
-        compression: false,
-        l1: { enabled: false },
-      });
-
-      // Track every codec the reader creates for envelope tolerance and
-      // every free() on them.
-      let created = 0;
-      let freed = 0;
-      const impl = reader as unknown as { createByteStorage: () => ByteStorageLike };
-      const realFactory = impl.createByteStorage;
-      impl.createByteStorage = () => {
-        created++;
-        const codec = realFactory();
-        return {
-          pack: (data) => codec.pack(data),
-          unpack: (packed) => codec.unpack(packed),
-          free: () => {
-            freed++;
-            codec.free?.();
-          },
-        };
-      };
-
-      // Start the read (passes the closed guard), then close while it is
-      // suspended inside the backend.
-      const pending = reader.get('test:postclose');
-      await getStarted;
-      await reader.close();
-      releaseGet();
 
       // The read still completes correctly — via a throwaway codec that was
       // freed immediately, never cached on the closed instance.
       expect(await pending).toEqual({ data: 'compressed' });
-      expect(created).toBe(1);
-      expect(freed).toBe(1);
+      expect(counts.created).toBe(1);
+      expect(counts.freed).toBe(1);
       expect((reader as unknown as { envelopeReader: unknown }).envelopeReader).toBeNull();
 
       await writer.close();
@@ -501,66 +526,15 @@ describe('Cache Integration', () => {
       // resumed read must not unpack with the freed codec (a use-after-free
       // on the wasm binding) — it gets a throwaway instead (expert panel,
       // LAB-1768).
-      const sharedBackend = new InMemoryBackend();
-
-      const writer = createCache({
-        backend: sharedBackend,
-        compression: true,
-        l1: { enabled: false },
+      const { pending, counts, writer } = await startPostCloseRead({
+        key: 'test:postclose-on',
+        value: { data: 'enveloped' },
+        readerCompression: true,
       });
-      await writer.set('test:postclose-on', { data: 'enveloped' });
-
-      const stored = await sharedBackend.get('test:postclose-on');
-      expect(stored).not.toBeNull();
-
-      let releaseGet!: () => void;
-      const gateOpened = new Promise<void>((resolve) => (releaseGet = resolve));
-      let getEntered!: () => void;
-      const getStarted = new Promise<void>((resolve) => (getEntered = resolve));
-      const gatedBackend = new Proxy(sharedBackend, {
-        get(target, prop, receiver) {
-          if (prop === 'get') {
-            return async () => {
-              getEntered();
-              await gateOpened;
-              return stored;
-            };
-          }
-          return Reflect.get(target, prop, receiver);
-        },
-      });
-
-      const reader = createCache({
-        backend: gatedBackend,
-        compression: true,
-        l1: { enabled: false },
-      });
-
-      let created = 0;
-      let freed = 0;
-      const impl = reader as unknown as { createByteStorage: () => ByteStorageLike };
-      const realFactory = impl.createByteStorage;
-      impl.createByteStorage = () => {
-        created++;
-        const codec = realFactory();
-        return {
-          pack: (data) => codec.pack(data),
-          unpack: (packed) => codec.unpack(packed),
-          free: () => {
-            freed++;
-            codec.free?.();
-          },
-        };
-      };
-
-      const pending = reader.get('test:postclose-on');
-      await getStarted;
-      await reader.close();
-      releaseGet();
 
       expect(await pending).toEqual({ data: 'enveloped' });
-      expect(created).toBe(1);
-      expect(freed).toBe(1);
+      expect(counts.created).toBe(1);
+      expect(counts.freed).toBe(1);
 
       await writer.close();
     });
