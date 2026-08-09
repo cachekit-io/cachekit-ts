@@ -20,6 +20,7 @@ use cachekit_core::encryption::key_derivation::{
 };
 use cachekit_core::encryption::{derive_domain_key, Keyring, ZeroKnowledgeEncryptor};
 use cachekit_core::ByteStorage as CoreByteStorage;
+use zeroize::Zeroizing;
 
 // Security limits to prevent DoS — identical to the NAPI crate.
 const MAX_PLAINTEXT_SIZE: usize = 100 * 1024 * 1024; // 100 MB
@@ -196,10 +197,15 @@ impl TenantKeys {
 /// identical semantics to the NAPI binding.
 #[wasm_bindgen(js_name = deriveTenantKeys)]
 pub fn derive_tenant_keys(
-    master_key: &[u8],
+    master_key: js_sys::Uint8Array,
     tenant_id: &str,
     previous_master_keys: Option<Vec<js_sys::Uint8Array>>,
 ) -> Result<TenantKeys, JsError> {
+    // Taken as a JS handle, not &[u8]: the &[u8] ABI would copy the current
+    // master key into linear memory and free it unwiped. Copying here under
+    // Zeroizing keeps every staging copy wiped on all return paths — same
+    // treatment as the previous keys below.
+    let master_key = Zeroizing::new(master_key.to_vec());
     if master_key.len() != 32 {
         return Err(JsError::new(&format!(
             "Master key must be exactly 32 bytes, got {}",
@@ -210,10 +216,13 @@ pub fn derive_tenant_keys(
         return Err(JsError::new("tenant_id cannot be empty"));
     }
 
-    let previous: Vec<Vec<u8>> = previous_master_keys
+    // Copying out of JS memory is unavoidable here (js_sys::Uint8Array is not
+    // linear memory); Zeroizing wipes the staging copies on every return path,
+    // including the length-check early returns below.
+    let previous: Vec<Zeroizing<Vec<u8>>> = previous_master_keys
         .unwrap_or_default()
         .iter()
-        .map(|key| key.to_vec())
+        .map(|key| Zeroizing::new(key.to_vec()))
         .collect();
     for key in &previous {
         if key.len() != 32 {
@@ -230,11 +239,11 @@ pub fn derive_tenant_keys(
         None
     } else {
         let refs: Vec<&[u8]> = previous.iter().map(|k| k.as_slice()).collect();
-        Some(Keyring::new(master_key, &refs).map_err(|e| JsError::new(&e.to_string()))?)
+        Some(Keyring::new(&master_key, &refs).map_err(|e| JsError::new(&e.to_string()))?)
     };
 
     let inner =
-        core_derive_tenant_keys(master_key, tenant_id).map_err(|e| JsError::new(&e.to_string()))?;
+        core_derive_tenant_keys(&master_key, tenant_id).map_err(|e| JsError::new(&e.to_string()))?;
     let encryptor = ZeroKnowledgeEncryptor::new().map_err(|e| JsError::new(&e.to_string()))?;
 
     let keyring_entries = 1 + previous.len() as u32;

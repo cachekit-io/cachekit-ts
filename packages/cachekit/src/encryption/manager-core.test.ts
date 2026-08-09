@@ -163,15 +163,25 @@ describe('EncryptionManagerCore keyring config (previousMasterKeys)', () => {
     expect(() => makeManager([''])).toThrow(ConfigurationError);
   });
 
-  it('hands decoded previous-key bytes to the bindings exactly once', async () => {
+  it('hands decoded previous-key bytes to the bindings exactly once, then wipes them', async () => {
     const { manager, bindings } = makeManager([K2_HEX]);
+    // Snapshot at call time — the manager zeroizes its staging buffers as
+    // soon as the binding has consumed them, so the retained mock.calls
+    // reference reads zeros afterwards.
+    const original = vi.mocked(bindings.deriveTenantKeys).getMockImplementation()!;
+    const seenAtCallTime: number[][] = [];
+    vi.mocked(bindings.deriveTenantKeys).mockImplementation((masterKey, tenantId, previous) => {
+      for (const bytes of previous ?? []) seenAtCallTime.push(Array.from(bytes.slice(0, 2)));
+      return original(masterKey, tenantId, previous);
+    });
     await manager.encrypt(new Uint8Array([1]), 'ns:k');
 
     expect(bindings.deriveTenantKeys).toHaveBeenCalledTimes(1);
     const [, , previous] = vi.mocked(bindings.deriveTenantKeys).mock.calls[0];
-    expect(previous).toHaveLength(1);
     expect(previous![0]).toBeInstanceOf(Uint8Array);
-    expect(Array.from(previous![0].slice(0, 2))).toEqual([0xcd, 0xcd]);
+    expect(seenAtCallTime).toEqual([[0xcd, 0xcd]]);
+    // Staging buffers hold plaintext key bytes — wiped once the keyring is built.
+    expect(Array.from(previous![0].slice(0, 2))).toEqual([0, 0]);
     manager.dispose();
   });
 
@@ -221,20 +231,20 @@ describe('EncryptionManagerCore keyring config (previousMasterKeys)', () => {
   });
 
   it('refuses to init when the binding reports a wrong keyring entry count', async () => {
-    const { bindings } = mockBindings();
-    vi.mocked(bindings.deriveTenantKeys).mockImplementation(
-      (_masterKey: Uint8Array, tenantId: string) => ({
-        tenantId,
-        encryptionFingerprint: () => new Uint8Array(16),
-        getNonceCounter: () => 0,
-        keyringEntryCount: () => 1, // built no keyring despite the argument
-      })
+    const { bindings, freed } = mockBindings();
+    // Reuse the factory mock but drop the previous-keys argument — the handle
+    // then reports keyringEntryCount() === 1 despite the keyring config.
+    const original = vi.mocked(bindings.deriveTenantKeys).getMockImplementation()!;
+    vi.mocked(bindings.deriveTenantKeys).mockImplementation((masterKey, tenantId) =>
+      original(masterKey, tenantId)
     );
     const manager = new EncryptionManagerCore(MASTER_KEY_HEX, undefined, async () => bindings, [
       K2_HEX,
     ]);
 
     await expect(manager.decrypt(new Uint8Array(28), 'ns:k')).rejects.toThrow(/version skew/);
+    // The orphaned handle must be zeroized, not parked
+    expect(freed.length).toBe(1);
     manager.dispose();
   });
 });

@@ -161,6 +161,7 @@ dependencies = [
  "cachekit-core",
  "js-sys",
  "wasm-bindgen",
+ "zeroize",
 ]
 
 [[package]]

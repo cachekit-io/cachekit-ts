@@ -207,8 +207,11 @@ const cache = createCache.secure({
 // or: CACHEKIT_PREVIOUS_MASTER_KEYS=<hex>,<hex> (comma-separated)
 ```
 
-All key material crosses into native memory once at initialization and is
-zeroized on dispose — the keyring lives behind the NAPI (or wasm) boundary.
+The derived keyring lives behind the NAPI (or wasm) boundary and is zeroized
+on dispose; the decoded key buffers are wiped as soon as the keyring is built.
+The hex key strings themselves (config values, environment variables) live in
+JavaScript memory and cannot be reliably scrubbed — treat them as sensitive
+for the lifetime of the process.
 
 Rules enforced at load (`ConfigurationError`, never truncated or ignored):
 

@@ -23,6 +23,10 @@ wasm-bindgen = "=0.2.121"
 # to the release paired with wasm-bindgen 0.2.121 above.
 js-sys = "=0.3.98"
 cachekit-core = { version = "0.5.0", features = ["encryption"] }
+# Wipes the owned previous-master-key staging buffers on drop (the NAPI crate
+# borrows and never copies; this crate must copy out of JS memory). Already in
+# the tree transitively via cachekit-core — same resolved version.
+zeroize = "1"
 
 # Standalone crate — never join an enclosing cargo workspace.
 [workspace]

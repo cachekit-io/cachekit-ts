@@ -199,16 +199,22 @@ export class EncryptionManagerCore {
 
       // Derive tenant keys (uses cachekit-core's derive_tenant_keys with domain "encryption")
       // Keys stay in binding memory - never copied to the JavaScript heap.
-      // Previous keys build the native decrypt keyring once, here — the
-      // decoded byte buffers are not retained on the JS side past this call
-      // (the hex config strings remain on the manager for init retry, per
-      // the documented masterKey pattern).
+      // Previous keys build the native decrypt keyring once, here. The decoded
+      // byte buffers are wiped in the finally below as soon as the binding has
+      // consumed them — on error paths too (the hex config strings remain on
+      // the manager for init retry, per the documented masterKey pattern).
       const effectiveTenantId = this.tenantId ?? 'default';
-      const tenantKeys = this.native.deriveTenantKeys(
-        masterKeyBytes,
-        effectiveTenantId,
-        previousKeyBytes.length > 0 ? previousKeyBytes : undefined
-      );
+      let tenantKeys: EncryptionTenantKeys;
+      try {
+        tenantKeys = this.native.deriveTenantKeys(
+          masterKeyBytes,
+          effectiveTenantId,
+          previousKeyBytes.length > 0 ? previousKeyBytes : undefined
+        );
+      } finally {
+        masterKeyBytes.fill(0);
+        for (const bytes of previousKeyBytes) bytes.fill(0);
+      }
 
       // Attest the keyring survived the FFI boundary. NAPI silently ignores
       // extra arguments, so a version-skewed native binary that predates

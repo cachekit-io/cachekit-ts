@@ -373,11 +373,17 @@ describe('EncryptionManager keyring rotation (real NAPI keyring loop)', () => {
     const k2 = Buffer.from(K2_HEX, 'hex');
     const others = ['33', '44', '55', '66'].map((b) => Buffer.from(b.repeat(32), 'hex'));
 
-    // current key in the decrypt-only list (forward-only rule)
-    expect(() => napi.deriveTenantKeys(k2, 'tenant', [k2])).toThrow();
-    // cap of 3 exceeded — rejected, never truncated
-    expect(() => napi.deriveTenantKeys(k2, 'tenant', others)).toThrow();
-    // wrong-length previous key
-    expect(() => napi.deriveTenantKeys(k2, 'tenant', [Buffer.from('aabb', 'hex')])).toThrow();
+    // current key in the decrypt-only list (forward-only rule) — cachekit-core Keyring::new
+    expect(() => napi.deriveTenantKeys(k2, 'tenant', [k2])).toThrow(
+      /Current key must not appear in the decrypt-only list/
+    );
+    // cap of 3 exceeded — rejected, never truncated — cachekit-core Keyring::new
+    expect(() => napi.deriveTenantKeys(k2, 'tenant', others)).toThrow(
+      /Keyring cap exceeded: at most 3 decrypt-only keys/
+    );
+    // wrong-length previous key — NAPI binding length check
+    expect(() => napi.deriveTenantKeys(k2, 'tenant', [Buffer.from('aabb', 'hex')])).toThrow(
+      /Previous master key must be exactly 32 bytes/
+    );
   });
 });
