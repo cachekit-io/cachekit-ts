@@ -17,10 +17,12 @@ export type {
   EncryptionConfig,
   ReliabilityConfig,
   StampedeConfig,
+  RedisPubSubLike,
 } from './types/cache.js';
 
 export type {
   Backend,
+  GetWithTtlResult,
   CachekitIOBackendConfig,
   LockableBackend,
   TTLBackend,
