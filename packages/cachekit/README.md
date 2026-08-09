@@ -178,8 +178,11 @@ const cache = createCache.minimal({
 
 The SDK also reports every size rejection through its
 [pluggable logger](#observability) as a rate-limited, greppable
-`[cachekit] set rejected, value NOT cached (key=...)` line — watch for it
-after deploying a new cache. (Backends have their own hard ceilings too:
+`[cachekit] set rejected, value NOT cached (keyHash=...)` line — watch for it
+after deploying a new cache. The line carries a non-reversible blake2b digest
+of the cache key rather than the key itself (keys are caller-controlled and
+may embed sensitive data); to match a digest to a suspect key, hash the key
+with blake2b (16-byte output, hex). (Backends have their own hard ceilings too:
 Workers KV values cap at 25 MiB, Memcached items at 1 MiB server-side,
 CachekitIO per plan.)
 

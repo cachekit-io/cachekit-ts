@@ -11,6 +11,8 @@ import type {
 import type { Backend, L1Metrics, LockableBackend } from './backends/types.js';
 import type { InvalidationEvent } from './l1/types.js';
 import type { MetricsCollector, MetricsConfig } from './metrics/prometheus.js';
+import { blake2b } from '@noble/hashes/blake2.js';
+import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 import { logError } from './logger.js';
 import { L1Cache } from './l1/lru-cache.js';
 import { ReliabilityExecutor } from './reliability/executor.js';
@@ -377,18 +379,37 @@ export class CacheImpl implements SecureCache {
    * Verified unpack of a suspected legacy/foreign ByteStorage envelope on a
    * compression-off cache. Returns null when the bytes aren't actually an
    * envelope (checksum/shape mismatch) — the caller then treats them as
-   * plain serialized data. The codec is created lazily and only once.
+   * plain serialized data. The codec is created lazily and cached — except
+   * after close(), when a throwaway codec is used and freed immediately.
    */
   private tryUnwrapEnvelope(bytes: Uint8Array): Uint8Array | null {
     // Codec construction stays OUTSIDE the try: a broken binding must fail
     // loudly (through the reliability executor), not be conflated with "not
     // an envelope" — that would silently serve raw envelope tuples, the
     // exact corruption this path exists to prevent (expert panel, LAB-1768).
-    this.envelopeReader ??= this.createByteStorage();
+    //
+    // After close() the cached reader has already been freed — an in-flight
+    // read resuming post-shutdown must not resurrect the cache (close() will
+    // never free it again), so it gets a throwaway codec freed right here.
+    const reader = this.closed
+      ? this.createByteStorage()
+      : (this.envelopeReader ??= this.createByteStorage());
     try {
-      return this.envelopeReader.unpack(bytes);
+      return reader.unpack(bytes);
     } catch {
       return null;
+    } finally {
+      if (reader !== this.envelopeReader) {
+        try {
+          reader.free?.();
+        } catch (error) {
+          // Never mask the unpack result with a cleanup failure — report it
+          // through the logger instead.
+          logError(
+            `[cachekit] failed to free post-close envelope codec: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+      }
     }
   }
 
@@ -407,7 +428,14 @@ export class CacheImpl implements SecureCache {
     const hint = interop
       ? ''
       : ' Raise serializer.maxEncodedSize / maxDecodedSize if values this large are expected.';
-    logError(`[cachekit] set rejected, value NOT cached (key=${key}): ${error.message}.${hint}`);
+    // Keys are caller-controlled and may embed PII/credentials — log a
+    // non-reversible digest, not the key itself. Same key → same digest, so
+    // repeated rejections still correlate, and holders of a suspect key can
+    // recompute the digest to match it.
+    const keyHash = bytesToHex(blake2b(utf8ToBytes(key), { dkLen: 16 }));
+    logError(
+      `[cachekit] set rejected, value NOT cached (keyHash=${keyHash}): ${error.message}.${hint}`
+    );
   }
 
   private publishL1Stats(): void {

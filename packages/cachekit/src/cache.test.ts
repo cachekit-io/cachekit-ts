@@ -6,6 +6,7 @@ import { ValueTooLargeError } from './errors.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
+import type { ByteStorageLike } from './cache-core.js';
 
 /**
  * Simple in-memory backend for testing cache integration.
@@ -417,6 +418,82 @@ describe('Cache Integration', () => {
       await rawWriter.close();
       await envelopeReader.close();
     });
+
+    it('frees a throwaway envelope codec when an in-flight read resumes after close()', async () => {
+      const sharedBackend = new InMemoryBackend();
+
+      const writer = createCache({
+        backend: sharedBackend,
+        compression: true,
+        l1: { enabled: false },
+      });
+      await writer.set('test:postclose', { data: 'compressed' });
+
+      // Capture the enveloped bytes now — closing the caches clears the
+      // shared in-memory store.
+      const stored = await sharedBackend.get('test:postclose');
+      expect(stored).not.toBeNull();
+
+      // Backend whose get() blocks until released, so the read can be
+      // suspended across close().
+      let releaseGet!: () => void;
+      const gateOpened = new Promise<void>((resolve) => (releaseGet = resolve));
+      let getEntered!: () => void;
+      const getStarted = new Promise<void>((resolve) => (getEntered = resolve));
+      const gatedBackend = new Proxy(sharedBackend, {
+        get(target, prop, receiver) {
+          if (prop === 'get') {
+            return async () => {
+              getEntered();
+              await gateOpened;
+              return stored;
+            };
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+
+      const reader = createCache({
+        backend: gatedBackend,
+        compression: false,
+        l1: { enabled: false },
+      });
+
+      // Track every codec the reader creates for envelope tolerance and
+      // every free() on them.
+      let created = 0;
+      let freed = 0;
+      const impl = reader as unknown as { createByteStorage: () => ByteStorageLike };
+      const realFactory = impl.createByteStorage;
+      impl.createByteStorage = () => {
+        created++;
+        const codec = realFactory();
+        return {
+          pack: (data) => codec.pack(data),
+          unpack: (packed) => codec.unpack(packed),
+          free: () => {
+            freed++;
+            codec.free?.();
+          },
+        };
+      };
+
+      // Start the read (passes the closed guard), then close while it is
+      // suspended inside the backend.
+      const pending = reader.get('test:postclose');
+      await getStarted;
+      await reader.close();
+      releaseGet();
+
+      // The read still completes correctly — via a throwaway codec that was
+      // freed immediately, never cached on the closed instance.
+      expect(await pending).toEqual({ data: 'compressed' });
+      expect(created).toBe(1);
+      expect(freed).toBe(1);
+      expect((reader as unknown as { envelopeReader: unknown }).envelopeReader).toBeNull();
+
+      await writer.close();
+    });
   });
 
   describe('Error Handling', () => {
@@ -730,6 +807,10 @@ describe('Cache Integration', () => {
       // …but the rejection is reported, once, greppably.
       expect(logs.filter((m) => m.includes('set rejected'))).toHaveLength(1);
       expect(logs[0]).toContain('maxEncodedSize');
+      // Keys are caller-controlled and may embed PII — the line carries a
+      // non-reversible digest, never the raw key.
+      expect(logs[0]).toContain('keyHash=');
+      expect(logs[0]).not.toContain('ns:big');
 
       // Rate-limited: a hot oversized key cannot flood the sink.
       await c.set('ns:big', oversized());
