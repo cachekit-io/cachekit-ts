@@ -380,8 +380,12 @@ export class CacheImpl implements SecureCache {
    * plain serialized data. The codec is created lazily and only once.
    */
   private tryUnwrapEnvelope(bytes: Uint8Array): Uint8Array | null {
+    // Codec construction stays OUTSIDE the try: a broken binding must fail
+    // loudly (through the reliability executor), not be conflated with "not
+    // an envelope" — that would silently serve raw envelope tuples, the
+    // exact corruption this path exists to prevent (expert panel, LAB-1768).
+    this.envelopeReader ??= this.createByteStorage();
     try {
-      this.envelopeReader ??= this.createByteStorage();
       return this.envelopeReader.unpack(bytes);
     } catch {
       return null;
@@ -393,14 +397,17 @@ export class CacheImpl implements SecureCache {
    * (LAB-1388) — the only reliable signal of the rejection when degradation
    * or a consumer catch-block absorbs the ValueTooLargeError itself.
    */
-  private warnValueTooLarge(key: string, error: ValueTooLargeError): void {
+  private warnValueTooLarge(key: string, error: ValueTooLargeError, interop: boolean): void {
     const now = Date.now();
     if (now - this.lastSizeWarnAt < VALUE_TOO_LARGE_WARN_INTERVAL_MS) return;
     this.lastSizeWarnAt = now;
-    logError(
-      `[cachekit] set rejected, value NOT cached (key=${key}): ${error.message}. ` +
-        'Raise serializer.maxEncodedSize / maxDecodedSize if values this large are expected.'
-    );
+    // Interop caps are protocol constants serializer config does not govern
+    // — the remediation hint only holds for the serializer path (expert
+    // panel, LAB-1768).
+    const hint = interop
+      ? ''
+      : ' Raise serializer.maxEncodedSize / maxDecodedSize if values this large are expected.';
+    logError(`[cachekit] set rejected, value NOT cached (key=${key}): ${error.message}.${hint}`);
   }
 
   private publishL1Stats(): void {
@@ -515,9 +522,13 @@ export class CacheImpl implements SecureCache {
       // hygiene: the envelope is itself valid MessagePack (a positional
       // 4-tuple), so a plain decode would "succeed" and serve the envelope
       // structure as the cached value — silent corruption, invisible to
-      // degradation. The unpack's xxHash3 check makes sniff false-positives
-      // vanishingly unlikely, and any unpack failure falls back to treating
-      // the bytes as plain-serialized.
+      // degradation. The unpack's xxHash3 check rejects ACCIDENTAL
+      // look-alikes; it is keyless, so it is not a defense against an
+      // adversarial writer deliberately crafting a valid envelope as its
+      // cached value (accepted eyes-open in LAB-1388/LAB-1768 — blast
+      // radius bounded by maxDecodedSize/maxDepth on the unpacked bytes).
+      // Any unpack failure falls back to treating the bytes as
+      // plain-serialized.
       //
       // Encrypted caches never reach this branch for a genuinely mismatched
       // entry: the AAD binds useEnvelope (frozen v0x03 set, protocol#12), so
@@ -651,7 +662,13 @@ export class CacheImpl implements SecureCache {
         const l1TtlSeconds =
           remainingTtl !== null ? Math.min(capOrForever, remainingTtl) : capOrForever;
         if (l1TtlSeconds > 0) {
-          this.l1.set(key, this.l1Payload(value, data), l1TtlSeconds * 1000, namespace);
+          // Hand L1 its own canonical no-expiry encoding (ttl <= 0), never
+          // Infinity ms: an Infinity originalTtl turns getWithSwr's
+          // freshness check into `Infinity > Infinity` — permanently stale,
+          // arming a spurious background refresh per marker window, forever
+          // (expert panel, LAB-1768).
+          const l1TtlMs = Number.isFinite(l1TtlSeconds) ? l1TtlSeconds * 1000 : 0;
+          this.l1.set(key, this.l1Payload(value, data), l1TtlMs, namespace);
           this.publishL1Stats();
         }
       }
@@ -718,7 +735,7 @@ export class CacheImpl implements SecureCache {
       try {
         interopSerialized = encodeInteropValue(value);
       } catch (error) {
-        if (error instanceof ValueTooLargeError) this.warnValueTooLarge(key, error);
+        if (error instanceof ValueTooLargeError) this.warnValueTooLarge(key, error, true);
         throw error;
       }
     }
@@ -734,7 +751,9 @@ export class CacheImpl implements SecureCache {
       try {
         serialized = interopSerialized ?? this.serializer.encode(value);
       } catch (error) {
-        if (error instanceof ValueTooLargeError) this.warnValueTooLarge(key, error);
+        // Only serializer.encode throws here — a non-null interopSerialized
+        // already survived encodeInteropValue above.
+        if (error instanceof ValueTooLargeError) this.warnValueTooLarge(key, error, false);
         throw error;
       }
 

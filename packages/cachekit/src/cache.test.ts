@@ -667,6 +667,46 @@ describe('Cache Integration', () => {
       await writer.close();
       await reader.close();
     });
+
+    it('keeps a no-expiry L1 re-population SWR-fresh (no phantom refresh loop, LAB-1768)', async () => {
+      const shared = new TtlAwareBackend();
+      const writer = createCache({ backend: shared, defaultTtl: 0 });
+      const reader = createCache({
+        backend: shared,
+        defaultTtl: 0,
+        l1: { swrEnabled: true, swrThresholdRatio: 2 },
+      });
+
+      let computes = 0;
+      const compute = async () => {
+        computes++;
+        return 'v1';
+      };
+
+      // Seed L2 (no expiry) through the writer so the reader's first wrap()
+      // read is an L2 hit that re-populates its L1 through the getWithTtl
+      // path with ttlSeconds: null.
+      const seed = writer.wrap(compute, { namespace: 'noexp', ttl: 0 });
+      expect(await seed()).toBe('v1');
+      expect(computes).toBe(1);
+
+      const read = reader.wrap(compute, { namespace: 'noexp', ttl: 0 });
+      expect(await read()).toBe('v1'); // L2 hit → L1 re-populate
+      expect(computes).toBe(1);
+
+      // Pre-fix, the L1 copy carried originalTtl = Infinity, so getWithSwr's
+      // freshness check compared Infinity > Infinity — permanently stale —
+      // and every read here armed a background refresh that re-ran compute
+      // and rewrote L2, forever, on exactly the entries configured to never
+      // expire.
+      expect(await read()).toBe('v1');
+      expect(await read()).toBe('v1');
+      await Promise.resolve(); // let any (wrongly) scheduled refresh start
+      expect(computes).toBe(1);
+
+      await writer.close();
+      await reader.close();
+    });
   });
 
   describe('oversized-value set() warning (LAB-1388)', () => {
