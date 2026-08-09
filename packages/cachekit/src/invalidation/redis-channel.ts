@@ -1,9 +1,20 @@
-import type { Redis } from 'ioredis';
+// Deliberately NOT `import type { Redis } from 'ioredis'`: this module's
+// types flow into InvalidationConfig, which sits in the shared type closure
+// re-exported by the workers entry — nominal ioredis types would drag
+// @types/node requirements onto every Workers consumer (LAB-1388). The
+// structural RedisPubSubLike covers exactly the Pub/Sub surface used here,
+// and a real ioredis client satisfies it as-is.
+import type { RedisPubSubLike } from '../types/cache.js';
 import type { InvalidationEvent, InvalidationCallback } from '../l1/types.js';
 import { logError } from '../logger.js';
 import { serializeEvent, deserializeEvent } from './event.js';
 
 const DEFAULT_CHANNEL = 'cachekit:invalidate';
+
+/** Channel names are UTF-8; decode explicitly — the structural
+ * RedisPubSubLike types messageBuffer args as Uint8Array, whose own
+ * toString() is NOT utf-8. */
+const utf8 = new TextDecoder();
 
 /**
  * Configuration for RedisInvalidationChannel.
@@ -35,13 +46,13 @@ export interface RedisInvalidationChannelConfig {
  * ```
  */
 export class RedisInvalidationChannel {
-  private readonly redis: Redis;
+  private readonly redis: RedisPubSubLike;
   private readonly channelName: string;
-  private subscriber: Redis | null = null;
+  private subscriber: RedisPubSubLike | null = null;
   private callbacks: InvalidationCallback[] = [];
   private running = false;
 
-  constructor(redis: Redis, config: RedisInvalidationChannelConfig = {}) {
+  constructor(redis: RedisPubSubLike, config: RedisInvalidationChannelConfig = {}) {
     this.redis = redis;
     this.channelName = config.channelName ?? DEFAULT_CHANNEL;
   }
@@ -85,7 +96,7 @@ export class RedisInvalidationChannel {
 
     // Handle incoming messages
     this.subscriber.on('messageBuffer', (channel, message) => {
-      if (channel.toString() !== this.channelName) return;
+      if (utf8.decode(channel) !== this.channelName) return;
 
       try {
         const event = deserializeEvent(new Uint8Array(message));

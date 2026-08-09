@@ -227,7 +227,10 @@ export class L1Cache<T = unknown> {
     const now = Date.now();
     const entry: CacheEntry<T> = {
       value,
-      expiresAt: now + ttl,
+      // ttl <= 0 means "no expiry" (ts-wide Backend contract, LAB-1388) —
+      // without this guard `now + 0` expires the entry on the very next
+      // millisecond instead of caching it forever.
+      expiresAt: ttl > 0 ? now + ttl : Infinity,
       originalTtl: ttl,
       size,
       namespace,

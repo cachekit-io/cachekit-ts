@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Redis as IoRedis, type RedisOptions } from 'ioredis';
-import { LockableBackend, RedisBackendConfig, TTLBackend } from './types.js';
+import { GetWithTtlResult, LockableBackend, RedisBackendConfig, TTLBackend } from './types.js';
+import type { RedisPubSubLike } from '../types/cache.js';
 import { BackendError, TimeoutError } from '../errors.js';
 import { logError } from '../logger.js';
 import {
@@ -22,6 +23,18 @@ const RELEASE_LOCK_SCRIPT = `if redis.call("get", KEYS[1]) == ARGV[1] then
 else
   return 0
 end`;
+
+// Compile-time proof that a real ioredis client satisfies the structural
+// RedisPubSubLike that replaced the nominal ioredis type in
+// InvalidationConfig (LAB-1388). Anchored here because this is the one
+// type-checked src module that already imports ioredis (tests are excluded
+// from `tsc --noEmit`; this module is Node-closure-only, so the ioredis
+// types never reach the workers type surface). Type-only — erased at
+// runtime; if the structural type ever drifts incompatible, `pnpm
+// type-check` fails here instead of in every consumer's build.
+type AssertPubSubCompatible<T extends RedisPubSubLike> = T;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _IoRedisIsPubSubCompatible = AssertPubSubCompatible<IoRedis>;
 
 /**
  * Redis backend implementation using ioredis.
@@ -110,6 +123,57 @@ export class RedisBackend implements LockableBackend, TTLBackend {
     try {
       const result = await this.client.getBuffer(key);
       return result ? new Uint8Array(result) : null;
+    } catch (error) {
+      throw this.wrapError('get', error);
+    }
+  }
+
+  /** One-shot latch for reporting a failing TTL pipeline leg (LAB-1388). */
+  private ttlLegFailureLogged = false;
+
+  /**
+   * See {@link Backend.getWithTtl}: GET + TTL pipelined onto one round trip
+   * (LAB-1388), so CacheImpl can cap L1 re-population at the entry's
+   * remaining lifetime without a second network hop.
+   *
+   * TTL result mapping: -1 (no expiry) → null; 0 (sub-second remainder) and
+   * -2 (expired between the pipelined GET and TTL — pipelines aren't atomic)
+   * → 0, which the caller's `> 0` gate turns into "don't re-populate L1".
+   * Collapsing those to null instead would hand a dying entry the full
+   * default-TTL L1 lifetime — the exact bug this capability fixes.
+   *
+   * A TTL-command failure downgrades to "unknown" rather than failing a
+   * read whose GET succeeded — but it is reported once through the library
+   * logger, because a persistently failing TTL leg (e.g. a Redis-compatible
+   * proxy without TTL) silently reverts L1 bounding to defaultTtl.
+   */
+  async getWithTtl(key: string): Promise<GetWithTtlResult | null> {
+    this.ensureNotClosed();
+
+    try {
+      const results = await this.client.pipeline().getBuffer(key).ttl(key).exec();
+      if (!results || results.length !== 2) {
+        throw new Error('pipeline returned no results');
+      }
+      const [getErr, buf] = results[0] as [Error | null, Buffer | null];
+      if (getErr) throw getErr;
+      if (buf === null) return null;
+      const [ttlErr, ttl] = results[1] as [Error | null, number];
+      let ttlSeconds: number | null;
+      if (ttlErr || typeof ttl !== 'number') {
+        ttlSeconds = null;
+        if (!this.ttlLegFailureLogged) {
+          this.ttlLegFailureLogged = true;
+          logError(
+            '[cachekit] Redis getWithTtl: TTL pipeline leg failed — L1 re-population ' +
+              'falls back to the defaultTtl bound (reported once)',
+            ttlErr ?? undefined
+          );
+        }
+      } else {
+        ttlSeconds = ttl === -1 ? null : Math.max(0, ttl);
+      }
+      return { value: new Uint8Array(buf), ttlSeconds };
     } catch (error) {
       throw this.wrapError('get', error);
     }

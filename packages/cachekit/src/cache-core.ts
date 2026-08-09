@@ -24,6 +24,7 @@ import {
   generateKey,
   generateParamsHash,
   extractNamespace,
+  blake2b16Hex,
 } from './serialization/key-generator.js';
 import {
   generateInteropKey,
@@ -32,13 +33,22 @@ import {
   decodeInteropValue,
 } from './serialization/interop.js';
 import { createInvalidationEvent } from './invalidation/event.js';
-import { BackendError, ConfigurationError } from './errors.js';
+import { BackendError, ConfigurationError, ValueTooLargeError } from './errors.js';
 import {
   DEFAULT_TTL_SECONDS,
   DEFAULT_LOCK_TIMEOUT_MS,
   DEFAULT_LOCK_WAIT_MS,
   DEFAULT_LOCK_POLL_MS,
 } from './constants.js';
+
+/**
+ * Minimum interval between "set rejected: value too large" warnings
+ * (LAB-1388). The rejection itself is often invisible (degradation swallows
+ * set failures; consumers try/catch set), so the SDK reports it through the
+ * logger — rate-limited so a hot oversized key can't flood the sink.
+ * Module-private on purpose: one consumer, not a tuning knob.
+ */
+const VALUE_TOO_LARGE_WARN_INTERVAL_MS = 60_000;
 
 /**
  * Sentinel for "the lock path did not resolve the miss — compute without
@@ -48,6 +58,17 @@ import {
 const LOCK_FALLTHROUGH = Symbol('cachekit.lock-fallthrough');
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Cheap structural sniff for the ByteStorage envelope: a positional msgpack
+ * 4-tuple whose first element is binary — fixarray(4) marker followed by a
+ * bin8/bin16/bin32 marker. User values matching this shape are possible but
+ * the verified unpack (xxHash3-64 over the payload) disambiguates; the sniff
+ * only exists so ordinary reads never pay an unpack attempt.
+ */
+function looksLikeEnvelope(bytes: Uint8Array): boolean {
+  return bytes.length > 2 && bytes[0] === 0x94 && bytes[1] >= 0xc4 && bytes[1] <= 0xc6;
+}
 
 /**
  * Metrics fallback when the runtime supplies no collector (Workers, or
@@ -173,6 +194,10 @@ export class CacheImpl implements SecureCache {
   private readonly backgroundRefresh: BackgroundRefreshManager;
   private readonly encryption: EncryptionLike | null;
   private readonly byteStorage: ByteStorageLike | null;
+  private readonly createByteStorage: () => ByteStorageLike;
+  /** Lazily-created codec for envelope-tolerant reads on compression-off
+   * caches (LAB-1388) — see decodeEntry. */
+  private envelopeReader: ByteStorageLike | null = null;
   private readonly serializer: MessagePackSerializer;
   private readonly defaultTtl: number;
   private readonly invalidationChannel: InvalidationChannelLike | null = null;
@@ -270,8 +295,16 @@ export class CacheImpl implements SecureCache {
     // Initialize encryption
     this.encryption = options.encryption ? runtime.createEncryption(options.encryption) : null;
 
-    // Initialize ByteStorage (LZ4 compression + xxHash3-64 integrity)
-    this.byteStorage = (options.compression ?? true) ? runtime.createByteStorage() : null;
+    // Initialize ByteStorage (LZ4 compression + xxHash3-64 integrity). The
+    // default honors the backend's advertised preference (LAB-1388): stores
+    // that already compress values at rest (the Cache API) advertise false so
+    // the default config doesn't compress twice. An explicit option wins.
+    const compressionEnabled = options.compression ?? this.backend.compressionDefault ?? true;
+    this.byteStorage = compressionEnabled ? runtime.createByteStorage() : null;
+    // Kept for lazy envelope-tolerant reads (see decodeEntry): a
+    // compression-off cache still needs a codec the first time it meets an
+    // enveloped entry.
+    this.createByteStorage = () => runtime.createByteStorage();
 
     // Initialize serializer
     this.serializer = new MessagePackSerializer(options.serializer);
@@ -336,6 +369,90 @@ export class CacheImpl implements SecureCache {
   private recordFailure(operation: string, error: unknown): void {
     void this.metrics.recordOperation(operation, 'error');
     void this.metrics.recordError(error instanceof Error ? error.constructor.name : 'Unknown');
+  }
+
+  /** Timestamp of the last oversized-value warning (rate limiting). */
+  private lastSizeWarnAt = 0;
+
+  /**
+   * Verified unpack of a suspected legacy/foreign ByteStorage envelope on a
+   * compression-off cache. Returns null when the bytes aren't actually an
+   * envelope (checksum/shape mismatch) — the caller then treats them as
+   * plain serialized data. The codec is created lazily and cached — except
+   * after close(), when a throwaway codec is used and freed immediately.
+   */
+  private tryUnwrapEnvelope(bytes: Uint8Array): Uint8Array | null {
+    // Codec construction stays OUTSIDE the try: a broken binding must fail
+    // loudly (through the reliability executor), not be conflated with "not
+    // an envelope" — that would silently serve raw envelope tuples, the
+    // exact corruption this path exists to prevent (expert panel, LAB-1768).
+    //
+    // After close() the cached reader has already been freed — an in-flight
+    // read resuming post-shutdown must not resurrect the cache (close() will
+    // never free it again), so it gets a throwaway codec freed right here.
+    const reader = this.closed
+      ? this.createByteStorage()
+      : (this.envelopeReader ??= this.createByteStorage());
+    try {
+      return reader.unpack(bytes);
+    } catch {
+      return null;
+    } finally {
+      if (reader !== this.envelopeReader) this.freeThrowawayCodec(reader);
+    }
+  }
+
+  /**
+   * Pack/unpack through the compression-on codec (`byteStorage`) — or, after
+   * close() has freed it, through a throwaway codec freed right here. Same
+   * post-shutdown hazard tryUnwrapEnvelope guards: an in-flight operation
+   * resuming after close() must neither touch freed wasm memory (a
+   * use-after-free on Workers) nor cache a codec nothing will ever free.
+   * Callers must have established useEnvelope (byteStorage non-null).
+   */
+  private withEnvelopeCodec<T>(use: (codec: ByteStorageLike) => T): T {
+    const codec = this.closed ? this.createByteStorage() : this.byteStorage!;
+    try {
+      return use(codec);
+    } finally {
+      if (codec !== this.byteStorage) this.freeThrowawayCodec(codec);
+    }
+  }
+
+  /** Free a post-close throwaway codec without masking the caller's result. */
+  private freeThrowawayCodec(codec: ByteStorageLike): void {
+    try {
+      codec.free?.();
+    } catch (error) {
+      logError(
+        `[cachekit] failed to free post-close envelope codec: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * One-line, greppable, rate-limited report of a set() rejected for size
+   * (LAB-1388) — the only reliable signal of the rejection when degradation
+   * or a consumer catch-block absorbs the ValueTooLargeError itself.
+   */
+  private warnValueTooLarge(key: string, error: ValueTooLargeError, interop: boolean): void {
+    const now = Date.now();
+    if (now - this.lastSizeWarnAt < VALUE_TOO_LARGE_WARN_INTERVAL_MS) return;
+    this.lastSizeWarnAt = now;
+    // Interop caps are protocol constants serializer config does not govern
+    // — the remediation hint only holds for the serializer path (expert
+    // panel, LAB-1768).
+    const hint = interop
+      ? ''
+      : ' Raise serializer.maxEncodedSize / maxDecodedSize if values this large are expected.';
+    // Keys are caller-controlled and may embed PII/credentials — log a
+    // non-reversible digest, not the key itself. Same key → same digest, so
+    // repeated rejections still correlate, and holders of a suspect key can
+    // recompute the digest to match it.
+    const keyHash = blake2b16Hex(key);
+    logError(
+      `[cachekit] set rejected, value NOT cached (keyHash=${keyHash}): ${error.message}.${hint}`
+    );
   }
 
   private publishL1Stats(): void {
@@ -442,7 +559,34 @@ export class CacheImpl implements SecureCache {
       plaintext = await this.encryption.decrypt(plaintext, key, useEnvelope);
     }
     if (useEnvelope) {
-      plaintext = this.byteStorage!.unpack(plaintext);
+      plaintext = this.withEnvelopeCodec((codec) => codec.unpack(plaintext));
+    } else if (!interop && looksLikeEnvelope(plaintext)) {
+      // Envelope tolerance (LAB-1388): a compression-off cache can read
+      // entries a compression-on writer stored — same store, older SDK
+      // default, or a mixed-version fleet mid-rollout. This is NOT optional
+      // hygiene: the envelope is itself valid MessagePack (a positional
+      // 4-tuple), so a plain decode would "succeed" and serve the envelope
+      // structure as the cached value — silent corruption, invisible to
+      // degradation. The unpack's xxHash3 check rejects ACCIDENTAL
+      // look-alikes; it is keyless, so it is not a defense against an
+      // adversarial writer deliberately crafting a valid envelope as its
+      // cached value (accepted eyes-open in LAB-1388/LAB-1768 — blast
+      // radius bounded by maxDecodedSize/maxDepth on the unpacked bytes).
+      // Any unpack failure falls back to treating the bytes as
+      // plain-serialized.
+      //
+      // Encrypted caches never reach this branch for a genuinely mismatched
+      // entry: the AAD binds useEnvelope (frozen v0x03 set, protocol#12), so
+      // a compression-off secure cache reading a compression-on entry fails
+      // AAD verification in decrypt() above — a loud, counted decrypt
+      // failure (miss / L1 drop), never a silent wrong decode. Tolerance
+      // after a SUCCESSFUL decrypt only guards the same-AAD case: a writer
+      // that declared compressed=false yet stored envelope bytes, or a
+      // plaintext user value that happens to look like one — both resolved
+      // by the verified unpack. We deliberately do NOT retry decrypt() with
+      // the flipped AAD flag: that would reintroduce exactly the envelope-
+      // mode ambiguity the AAD binding exists to rule out.
+      plaintext = this.tryUnwrapEnvelope(plaintext) ?? plaintext;
     }
     return interop ? decodeInteropValue<T>(plaintext) : this.serializer.decode<T>(plaintext);
   }
@@ -499,6 +643,10 @@ export class CacheImpl implements SecureCache {
    * cache-level `compression` option. `ttlSeconds` (when known, i.e. from
    * wrap()) bounds the L1 repopulation lifetime so an entry never outlives
    * its declared TTL in L1 long after L2 and the other SDKs expired it.
+   * On backends that surface the remaining TTL on read (getWithTtl), the
+   * bound tightens to the entry's actual remaining lifetime — a plain get()
+   * at t=29s of a 30s entry re-populates L1 for 1s, not defaultTtl
+   * (LAB-1388).
    */
   private async getEntry<T>(key: string, interop: boolean, ttlSeconds?: number): Promise<T | null> {
     this.ensureNotClosed();
@@ -519,7 +667,18 @@ export class CacheImpl implements SecureCache {
 
     // Fetch from L2 (backend)
     return this.run('get', null, async (): Promise<T | null> => {
-      const data = await this.backend.get(key);
+      // When L1 will be re-populated, prefer the TTL-carrying read (same
+      // storage round trip — see Backend.getWithTtl) so the L1 copy can be
+      // capped at the entry's remaining lifetime below (LAB-1388).
+      let data: Uint8Array | null;
+      let remainingTtl: number | null = null;
+      if (this.l1 && this.backend.getWithTtl) {
+        const result = await this.backend.getWithTtl(key);
+        data = result?.value ?? null;
+        remainingTtl = result?.ttlSeconds ?? null;
+      } else {
+        data = await this.backend.get(key);
+      }
       if (data === null) {
         this.recordMiss();
         return null;
@@ -532,12 +691,31 @@ export class CacheImpl implements SecureCache {
       // encrypted — not the plaintext `value` decoded above. Interop keys are
       // {namespace}:{operation}:{hash} — group under the user-facing namespace
       // segment so namespace-level invalidation matches entries written
-      // through wrap().
+      // through wrap(). The lifetime is the declared TTL (or defaultTtl on a
+      // plain get), capped at the L2 entry's remaining TTL when the backend
+      // surfaced it — so the L1 copy never outlives the entry it was read
+      // from (LAB-1388).
       if (this.l1) {
         const namespace = interop ? key.slice(0, key.indexOf(':')) : extractNamespace(key);
-        const ttlMs = (ttlSeconds ?? this.defaultTtl) * 1000;
-        this.l1.set(key, this.l1Payload(value, data), ttlMs, namespace);
-        this.publishL1Stats();
+        const capSeconds = ttlSeconds ?? this.defaultTtl;
+        // ttl <= 0 means "no expiry" (ts-wide Backend contract) — treat it
+        // as infinite here so Math.min still caps to a real remainingTtl
+        // when the backend reports one, instead of collapsing to 0 and
+        // tripping the skip-guard below for an entry that should never
+        // expire in L1 (LAB-1388).
+        const capOrForever = capSeconds > 0 ? capSeconds : Infinity;
+        const l1TtlSeconds =
+          remainingTtl !== null ? Math.min(capOrForever, remainingTtl) : capOrForever;
+        if (l1TtlSeconds > 0) {
+          // Hand L1 its own canonical no-expiry encoding (ttl <= 0), never
+          // Infinity ms: an Infinity originalTtl turns getWithSwr's
+          // freshness check into `Infinity > Infinity` — permanently stale,
+          // arming a spurious background refresh per marker window, forever
+          // (expert panel, LAB-1768).
+          const l1TtlMs = Number.isFinite(l1TtlSeconds) ? l1TtlSeconds * 1000 : 0;
+          this.l1.set(key, this.l1Payload(value, data), l1TtlMs, namespace);
+          this.publishL1Stats();
+        }
       }
 
       this.recordHit('l2');
@@ -594,15 +772,40 @@ export class CacheImpl implements SecureCache {
     // never reaches the reliability executor, where degradation would
     // silently swallow it and retry/circuit-breaker would count it as a
     // backend failure. Auto-mode encoding stays inside the executor
-    // (existing degrade semantics unchanged).
-    const interopSerialized = interop ? encodeInteropValue(value) : null;
+    // (existing degrade semantics unchanged). A size rejection still routes
+    // through the LAB-1388 warning: degradation never hides this path, but
+    // a consumer's own try/catch around set() does.
+    let interopSerialized: Uint8Array | null = null;
+    if (interop) {
+      try {
+        interopSerialized = encodeInteropValue(value);
+      } catch (error) {
+        if (error instanceof ValueTooLargeError) this.warnValueTooLarge(key, error, true);
+        throw error;
+      }
+    }
 
     await this.run('set', undefined, async (): Promise<void> => {
-      // Serialize
-      const serialized = interopSerialized ?? this.serializer.encode(value);
+      // Serialize. A size rejection here is invisible in production configs
+      // — degradation (on by default) swallows set() failures, and careful
+      // consumers try/catch set() anyway — so a cache whose hottest values
+      // exceed maxEncodedSize silently never stores them (LAB-1388). Emit
+      // one greppable, rate-limited warning before the error continues into
+      // the reliability stack.
+      let serialized: Uint8Array;
+      try {
+        serialized = interopSerialized ?? this.serializer.encode(value);
+      } catch (error) {
+        // Only serializer.encode throws here — a non-null interopSerialized
+        // already survived encodeInteropValue above.
+        if (error instanceof ValueTooLargeError) this.warnValueTooLarge(key, error, false);
+        throw error;
+      }
 
       // Compress with ByteStorage (before encryption)
-      let data: Uint8Array = useEnvelope ? this.byteStorage!.pack(serialized) : serialized;
+      let data: Uint8Array = useEnvelope
+        ? this.withEnvelopeCodec((codec) => codec.pack(serialized))
+        : serialized;
 
       // Encrypt if encryption enabled
       if (this.encryption) {
@@ -1106,9 +1309,18 @@ export class CacheImpl implements SecureCache {
     // Dispose encryption (zeroizes key material)
     attempt(() => this.encryption?.dispose());
 
-    // Release the envelope codec (zeroizes/frees wasm resources on Workers;
+    // Release the envelope codecs (zeroizes/frees wasm resources on Workers;
     // no-op for the GC-managed NAPI binding)
+    // envelopeReader is also nulled: a freed-but-dangling wasm codec behind a
+    // non-null reference is an instant use-after-free for any future caller
+    // that forgets the `closed` check. byteStorage is readonly and cannot be
+    // nulled — its callers route through withEnvelopeCodec, which checks
+    // `closed` before touching it.
     attempt(() => this.byteStorage?.free?.());
+    attempt(() => {
+      this.envelopeReader?.free?.();
+      this.envelopeReader = null;
+    });
 
     // Clear L1 (this also clears L1's internal refreshingKeys)
     attempt(() => this.l1?.clear());

@@ -121,6 +121,37 @@ describe.skipIf(!dockerAvailable)('RedisBackend Integration (Testcontainers)', (
     }
   });
 
+  describe('getWithTtl (LAB-1388)', () => {
+    it('returns the value and remaining TTL in one round trip', async () => {
+      await backend.set('gwt-key', new Uint8Array([7, 8]), 60);
+      const result = await backend.getWithTtl('gwt-key');
+      expect(result).not.toBeNull();
+      expect(result!.value).toEqual(new Uint8Array([7, 8]));
+      expect(result!.ttlSeconds).toBeGreaterThan(0);
+      expect(result!.ttlSeconds).toBeLessThanOrEqual(60);
+    });
+
+    it('returns null for a missing key', async () => {
+      expect(await backend.getWithTtl('gwt-missing')).toBeNull();
+    });
+
+    it('returns null TTL for a key without expiry', async () => {
+      await client.set(`${testPrefix}gwt-persistent`, 'v');
+      const result = await backend.getWithTtl('gwt-persistent');
+      expect(result).not.toBeNull();
+      expect(result!.ttlSeconds).toBeNull();
+    });
+
+    it('respects the keyPrefix (pipeline commands are prefixed like get/set)', async () => {
+      await backend.set('gwt-prefixed', new Uint8Array([9]), 60);
+      // The raw client sees the prefixed key; getWithTtl reads it back
+      // through the same prefixing.
+      expect(await client.exists(`${testPrefix}gwt-prefixed`)).toBe(1);
+      const result = await backend.getWithTtl('gwt-prefixed');
+      expect(result!.value).toEqual(new Uint8Array([9]));
+    });
+  });
+
   describe('TTLBackend', () => {
     it('getTTL returns remaining seconds for a key with expiry', async () => {
       await backend.set('ttl-key', new Uint8Array([1]), 60);

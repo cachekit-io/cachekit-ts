@@ -27,6 +27,26 @@ export interface Backend {
   get(key: string): Promise<Uint8Array | null>;
 
   /**
+   * Retrieve a value together with its remaining TTL — in the SAME storage
+   * round trip as a plain get (LAB-1388). Optional capability: implement it
+   * only when the store surfaces the expiry on read for free (Cache API
+   * response headers, Redis GET+TTL pipeline). Do NOT implement it as
+   * get + a second TTL request — CacheImpl calls this on every L2 hit when
+   * L1 is enabled, and a second round trip there doubles read latency (and
+   * on metered backends, cost).
+   *
+   * CacheImpl uses the returned `ttlSeconds` to cap L1 re-population at the
+   * entry's remaining lifetime, so an L1 copy never outlives the L2 entry it
+   * was read from. Backends without this capability fall back to `get()`,
+   * where L1 re-population is bounded only by the cache's default TTL.
+   *
+   * @returns The stored bytes plus remaining TTL in seconds (`null` TTL =
+   *   unknown or no expiry), or `null` when the key is missing
+   * @throws {BackendError} if the operation fails
+   */
+  getWithTtl?(key: string): Promise<GetWithTtlResult | null>;
+
+  /**
    * Store a value with optional TTL.
    *
    * @param key - Cache key
@@ -98,6 +118,29 @@ export interface Backend {
    * Like `keyPrefix`, the value MUST be constant from construction onward.
    */
   readonly transformsKeys?: boolean;
+
+  /**
+   * The backend's preferred default for the ByteStorage compression
+   * envelope (LAB-1388). Left unset, the cache-level default stays `true`.
+   * Backends whose store already compresses values at rest (the Cloudflare
+   * Cache API stores `Response` bodies compressed) advertise `false` here so
+   * the default configuration doesn't spend CPU compressing twice. An
+   * explicit `compression:` option on the cache always wins.
+   *
+   * Like `keyPrefix`, the value MUST be constant from construction onward.
+   */
+  readonly compressionDefault?: boolean;
+}
+
+/** Result of {@link Backend.getWithTtl}: the bytes plus remaining lifetime. */
+export interface GetWithTtlResult {
+  /** The stored bytes. */
+  value: Uint8Array;
+  /**
+   * Remaining TTL in seconds, or `null` when unknown / no expiry (matches
+   * {@link TTLBackend.getTTL}'s collapse of Redis's -1).
+   */
+  ttlSeconds: number | null;
 }
 
 /**
