@@ -58,7 +58,7 @@ Instead of manually wiring backends, reliability, and encryption, declare what y
 ```typescript
 import { createCache } from '@cachekit-io/cachekit';
 
-// Speed-first — no circuit breaker, no retry (product catalogs, public APIs)
+// Speed-first — no circuit breaker, retry, or graceful degradation; errors propagate
 const fast = createCache.minimal({
   url: 'redis://localhost:6379',
   ttl: 300,
@@ -85,12 +85,12 @@ const managed = createCache.io({
 
 Each intent pre-configures the full stack with sensible defaults:
 
-| Intent       | Backend     | Circuit Breaker   | Retry | L1 SWR | Encryption  | Default TTL |
-| ------------ | ----------- | ----------------- | ----- | ------ | ----------- | ----------- |
-| `minimal`    | Redis       | Off               | Off   | Off    | No          | 300s        |
-| `production` | Redis       | On (threshold: 5) | On    | On     | No          | 600s        |
-| `secure`     | Redis       | On (threshold: 5) | On    | On     | AES-256-GCM | 600s        |
-| `io`         | cachekit.io | On (threshold: 5) | On    | On     | Optional    | 3600s       |
+| Intent       | Backend     | Circuit Breaker   | Retry | Degradation            | L1 SWR | Encryption  | Default TTL |
+| ------------ | ----------- | ----------------- | ----- | ---------------------- | ------ | ----------- | ----------- |
+| `minimal`    | Redis       | Off               | Off   | Off — errors propagate | Off    | No          | 300s        |
+| `production` | Redis       | On (threshold: 5) | On    | On                     | On     | No          | 600s        |
+| `secure`     | Redis       | On (threshold: 5) | On    | On                     | On     | AES-256-GCM | 600s        |
+| `io`         | cachekit.io | On (threshold: 5) | On    | On                     | On     | Optional    | 3600s       |
 
 All defaults are overridable — pass `reliability`, `l1`, or `metrics` to customize.
 
@@ -156,8 +156,11 @@ const cache = createCache({
 `serializer.maxEncodedSize` — **1 MiB by default** — with `ValueTooLargeError`.
 Two things make this rejection easy to miss in production:
 
-- **Graceful degradation is on by default**, and it treats a failed `set()`
-  as "skip silently" — the call resolves normally.
+- **Graceful degradation is on for `production`, `secure`, and `io`**, and it
+  treats a failed `set()` as "skip silently" — the call resolves normally.
+- **`minimal` disables graceful degradation**, so an oversized `set()` throws
+  `ValueTooLargeError` loudly; the caller's own try/catch is the failure
+  boundary. The `minimal` example below raises the limit to avoid that failure.
 - Consumers that guard `set()` with try/catch (correctly — cache failures
   shouldn't fail requests) absorb the error the same way.
 

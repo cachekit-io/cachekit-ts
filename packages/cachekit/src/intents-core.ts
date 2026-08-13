@@ -62,6 +62,9 @@ type IntentBackendOptions =
  * Options for `createCache.minimal()` — speed-first, no protection.
  *
  * Disables circuit breaker, retry, and degradation for maximum throughput.
+ * With degradation off, backend or decode failures make `get()`, `set()`, and
+ * `wrap()` throw rather than return null or skip a cache write; the caller's
+ * own try/catch is the failure boundary.
  * Use for read-heavy, non-critical caching (product catalogs, public APIs).
  *
  * Read-heavy public APIs routinely serve multi-MB responses — mind the
@@ -160,7 +163,7 @@ export interface CreateCacheFn<TCache extends SecureCache = SecureCache> {
   /** Create a cache with explicit options. */
   (options: CacheOptions): TCache;
 
-  /** Speed-first cache: no circuit breaker, no retry, minimal L1. */
+  /** Speed-first cache: no circuit breaker, retry, or degradation; errors propagate. */
   minimal(options: MinimalOptions): TCache;
 
   /** Reliability-first cache: circuit breaker + retry + degradation + full L1. */
