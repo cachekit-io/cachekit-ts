@@ -120,8 +120,9 @@ const cache = createCache({
   // L1 holds the same ciphertext L2 does, so an L1 hit costs a decrypt and
   // AAD verify rather than being free, and no plaintext is resident in the
   // heap between reads. Matches cachekit-py and cachekit-rs.
+  // Key rotation: see "Master-Key Rotation" below.
   encryption: {
-    masterKey: process.env.CACHEKIT_MASTER_KEY!, // hex-encoded, 32+ bytes
+    masterKey: process.env.CACHEKIT_MASTER_KEY!, // hex-encoded, exactly 32 bytes
     tenantId: 'tenant-123', // for multi-tenant key isolation
   },
 
@@ -187,6 +188,45 @@ uses as its on-disk filename, so on that backend a logged `keyHash` names the
 entry's cache file directly. (Backends have their own hard ceilings too:
 Workers KV values cap at 25 MiB, Memcached items at 1 MiB server-side,
 CachekitIO per plan.)
+
+## Master-Key Rotation
+
+Rotate the encryption master key without invalidating existing entries:
+configure up to **3** decrypt-only previous keys for the grace window. Reads
+attempt keys sequentially (current key first, identical AAD every attempt);
+writes always use the current `masterKey`. Old-key entries age out via TTL —
+nothing is re-encrypted on read, and nothing on the wire changes.
+
+```typescript
+// Grace window after promoting k2: old k1 entries stay readable
+const cache = createCache.secure({
+  url: 'redis://localhost:6379',
+  masterKey: process.env.CACHEKIT_MASTER_KEY!, // k2 (current)
+  previousMasterKeys: [process.env.OLD_MASTER_KEY!], // k1 (decrypt-only)
+});
+// or: CACHEKIT_PREVIOUS_MASTER_KEYS=<hex>,<hex> (comma-separated)
+```
+
+The derived keyring lives behind the NAPI (or wasm) boundary and is zeroized
+on dispose; the decoded key buffers are wiped as soon as the keyring is built.
+The hex key strings themselves (config values, environment variables) live in
+JavaScript memory and cannot be reliably scrubbed — treat them as sensitive
+for the lifetime of the process.
+
+Rules enforced at load (`ConfigurationError`, never truncated or ignored):
+
+- Each previous key uses the same hex format and length as `masterKey`.
+- More than 3 previous keys is rejected.
+- `masterKey` must not appear in `previousMasterKeys` — **rotation is
+  forward-only, always to a NEW key**. A retired key is never re-promoted:
+  that would resume a used, unknowable AES-GCM nonce budget.
+
+Once a previous key is dropped from the list, entries written under it fail
+authentication: a miss under the default graceful degradation, an
+`EncryptionError` with `reliability: { degradation: false }`.
+
+Full choreography (three-phase zero-miss rotation, compromise response):
+see the [key rotation runbook](https://docs.cachekit.io/concepts/key-rotation/).
 
 ## Stampede Protection
 

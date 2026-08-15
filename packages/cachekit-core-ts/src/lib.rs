@@ -6,7 +6,7 @@ use napi_derive::napi;
 use cachekit_core::encryption::key_derivation::{
     derive_tenant_keys as core_derive_tenant_keys, TenantKeys as CoreTenantKeys,
 };
-use cachekit_core::encryption::{derive_domain_key, ZeroKnowledgeEncryptor};
+use cachekit_core::encryption::{derive_domain_key, Keyring, ZeroKnowledgeEncryptor};
 use cachekit_core::ByteStorage as CoreByteStorage;
 
 // Security limits to prevent DoS
@@ -233,6 +233,15 @@ pub struct TenantKeys {
     /// Shared encryptor for consistent nonce tracking across operations.
     /// Matches Python pattern where each EncryptionWrapper has ONE encryptor.
     encryptor: ZeroKnowledgeEncryptor,
+    /// Decrypt keyring, present only during a rotation grace window
+    /// (previousMasterKeys configured). None keeps the single-key decrypt
+    /// path on the pre-derived tenant key. All keyring material zeroizes
+    /// on drop inside cachekit-core.
+    keyring: Option<Keyring>,
+    /// Keyring entries actually built (1 current + decrypt-only keys).
+    /// Exposed so the SDK can attest that rotation config survived the
+    /// FFI boundary — an older binding would silently drop the argument.
+    keyring_entries: u32,
 }
 
 #[napi]
@@ -257,6 +266,18 @@ impl TenantKeys {
     pub fn get_nonce_counter(&self) -> i64 {
         self.encryptor.get_nonce_counter() as i64
     }
+
+    /// Number of keyring entries built at derivation (1 current key +
+    /// decrypt-only previous keys).
+    ///
+    /// The SDK asserts this equals `1 + previousMasterKeys.length` right
+    /// after deriveTenantKeys: a version-skewed native binary that ignored
+    /// the keyring argument would otherwise silently decrypt with the
+    /// current key only, turning every pre-rotation entry into a miss.
+    #[napi]
+    pub fn keyring_entry_count(&self) -> u32 {
+        self.keyring_entries
+    }
 }
 
 /// Derive per-tenant keys using HKDF-SHA256.
@@ -269,17 +290,34 @@ impl TenantKeys {
 /// # Arguments
 /// * `master_key` - 32-byte master encryption key
 /// * `tenant_id` - Tenant identifier for key isolation
+/// * `previous_master_keys` - Optional decrypt-only previous master keys
+///   (max 3, each 32 bytes) retained during a key-rotation grace window.
+///   Reads attempt keys sequentially, current first, identical AAD per
+///   attempt (protocol `spec/encryption.md` → "Key Rotation (Keyring)").
+///   Writes always use `master_key`.
 ///
 /// # Returns
 /// TenantKeys object with derived keys (stays in Rust memory)
+///
+/// # Errors
+/// Returns InvalidArg if any key has the wrong length, more than 3 previous
+/// keys are supplied (rejected, never truncated), or `master_key` also
+/// appears in `previous_master_keys` (forward-only rule: a key that ever
+/// encrypted is never re-promoted).
 ///
 /// # Example
 /// ```javascript
 /// const masterKey = Buffer.from(process.env.MASTER_KEY, 'hex');
 /// const tenantKeys = deriveTenantKeys(masterKey, 'tenant-123');
+/// // During a rotation grace window:
+/// const rotating = deriveTenantKeys(newKey, 'tenant-123', [oldKey]);
 /// ```
 #[napi]
-pub fn derive_tenant_keys(master_key: Uint8Array, tenant_id: String) -> Result<TenantKeys> {
+pub fn derive_tenant_keys(
+    master_key: Uint8Array,
+    tenant_id: String,
+    previous_master_keys: Option<Vec<Uint8Array>>,
+) -> Result<TenantKeys> {
     if master_key.len() != 32 {
         return Err(Error::new(
             Status::InvalidArg,
@@ -294,13 +332,44 @@ pub fn derive_tenant_keys(master_key: Uint8Array, tenant_id: String) -> Result<T
         return Err(Error::new(Status::InvalidArg, "tenant_id cannot be empty"));
     }
 
+    let previous = previous_master_keys.unwrap_or_default();
+    for key in &previous {
+        if key.len() != 32 {
+            return Err(Error::new(
+                Status::InvalidArg,
+                format!(
+                    "Previous master key must be exactly 32 bytes, got {}",
+                    key.len()
+                ),
+            ));
+        }
+    }
+    // Keyring only exists during a rotation grace window; None keeps the
+    // pre-derived single-key decrypt path. Keyring::new re-validates the
+    // cap (3) and the current-key collision — config errors, hence InvalidArg.
+    let keyring = if previous.is_empty() {
+        None
+    } else {
+        let refs: Vec<&[u8]> = previous.iter().map(|k| k.as_ref()).collect();
+        Some(
+            Keyring::new(&master_key, &refs)
+                .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?,
+        )
+    };
+
     let inner = core_derive_tenant_keys(&master_key, &tenant_id)
         .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
 
     let encryptor = ZeroKnowledgeEncryptor::new()
         .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
 
-    Ok(TenantKeys { inner, encryptor })
+    let keyring_entries = 1 + previous.len() as u32;
+    Ok(TenantKeys {
+        inner,
+        encryptor,
+        keyring,
+        keyring_entries,
+    })
 }
 
 /// Encrypt plaintext using TenantKeys (keys stay in Rust memory).
@@ -335,6 +404,11 @@ pub fn encrypt_with_tenant_keys(
 ///
 /// Uses the encryptor stored in TenantKeys for consistency.
 ///
+/// With previous master keys configured (rotation grace window), decryption
+/// runs cachekit-core's keyring loop: sequential attempts, current key
+/// first, identical AAD every attempt. Only an AES-GCM authentication
+/// failure advances to the next key; structural errors are terminal.
+///
 /// # Arguments
 /// * `ciphertext` - Previously encrypted data
 /// * `aad` - Must match AAD used during encryption
@@ -350,9 +424,20 @@ pub fn decrypt_with_tenant_keys(
 ) -> Result<Uint8Array> {
     validate_decryption_input(ciphertext.len(), aad.len())?;
 
-    tenant_keys
-        .encryptor
-        .decrypt_aes_gcm(&ciphertext, &tenant_keys.inner.encryption_key, &aad)
-        .map(|plaintext| plaintext.into())
-        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
+    match &tenant_keys.keyring {
+        Some(keyring) => keyring
+            .decrypt(
+                &tenant_keys.encryptor,
+                &ciphertext,
+                &tenant_keys.inner.tenant_id,
+                &aad,
+            )
+            .map(|plaintext| plaintext.into())
+            .map_err(|e| Error::new(Status::GenericFailure, e.to_string())),
+        None => tenant_keys
+            .encryptor
+            .decrypt_aes_gcm(&ciphertext, &tenant_keys.inner.encryption_key, &aad)
+            .map(|plaintext| plaintext.into())
+            .map_err(|e| Error::new(Status::GenericFailure, e.to_string())),
+    }
 }

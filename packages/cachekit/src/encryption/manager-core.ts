@@ -1,5 +1,10 @@
 import { EncryptionError, ConfigurationError, NonceExhaustedError } from '../errors.js';
-import { AAD_VERSION, MIN_MASTER_KEY_BYTES, MIN_MASTER_KEY_HEX_LENGTH } from '../constants.js';
+import {
+  AAD_VERSION,
+  MAX_PREVIOUS_MASTER_KEYS,
+  MASTER_KEY_BYTES,
+  MASTER_KEY_HEX_LENGTH,
+} from '../constants.js';
 
 /**
  * Tenant keys handle exposed by a bindings implementation (NAPI or wasm).
@@ -11,6 +16,14 @@ export interface EncryptionTenantKeys {
   encryptionFingerprint(): Uint8Array;
   /** Get the current nonce counter from the Rust encryptor (for monitoring) */
   getNonceCounter(): number;
+  /**
+   * Keyring entries actually built at derivation (1 current key +
+   * decrypt-only previous keys). Optional in the type because older binding
+   * binaries predate it — the manager treats its absence, when
+   * previousMasterKeys are configured, as version skew and refuses to init
+   * rather than silently decrypting with the current key only.
+   */
+  keyringEntryCount?(): number;
   /**
    * Deterministic zeroize-and-release (wasm bindings). NAPI handles zeroize
    * via GC finalizer instead and don't expose this.
@@ -31,7 +44,16 @@ export interface EncryptionTenantKeys {
  * a core wording change must update this contract and the classifier below.
  */
 export interface EncryptionBindings {
-  deriveTenantKeys(masterKey: Uint8Array, tenantId: string): EncryptionTenantKeys;
+  /**
+   * `previousMasterKeys` (max 3, each 32 bytes) are decrypt-only keys for a
+   * rotation grace window. The binding constructs the cachekit-core keyring
+   * natively — key bytes cross the boundary once and stay there.
+   */
+  deriveTenantKeys(
+    masterKey: Uint8Array,
+    tenantId: string,
+    previousMasterKeys?: Uint8Array[]
+  ): EncryptionTenantKeys;
   encryptWithTenantKeys(
     plaintext: Uint8Array,
     aad: Uint8Array,
@@ -42,6 +64,21 @@ export interface EncryptionBindings {
     aad: Uint8Array,
     tenantKeys: EncryptionTenantKeys
   ): Uint8Array;
+}
+
+/**
+ * Validate a hex-encoded master key. Identical rules for the current key and
+ * every previousMasterKeys entry — one validator, so they cannot drift.
+ */
+function validateKeyHex(key: string, label: string): void {
+  if (!/^[0-9a-fA-F]+$/.test(key)) {
+    throw new ConfigurationError(`${label} must be hex-encoded`);
+  }
+  if (key.length !== MASTER_KEY_HEX_LENGTH) {
+    throw new ConfigurationError(
+      `${label} must be exactly ${MASTER_KEY_BYTES} bytes (${MASTER_KEY_HEX_LENGTH} hex characters), got ${key.length} hex characters`
+    );
+  }
 }
 
 /**
@@ -75,25 +112,58 @@ export class EncryptionManagerCore {
    * - Use encrypted swap
    * - Rotate master keys periodically (recommended: 24-48 hours)
    *
-   * @param masterKey - Hex-encoded master key (min 32 bytes = 64 hex chars)
+   * Keyring exposure is all-keys exposure: during a rotation grace window
+   * this process holds the current AND previous master keys — treat exposure
+   * of the keyring configuration as exposure of every key in it.
+   *
+   * @param masterKey - Hex-encoded master key (exactly 32 bytes = 64 hex chars)
    * @param tenantId - Optional tenant ID for key derivation isolation
    * @param loadBindings - Platform bindings loader (NAPI or wasm)
-   * @throws {ConfigurationError} if masterKey is invalid
+   * @param previousMasterKeys - Decrypt-only previous master keys (max 3,
+   *   same hex format as masterKey) retained during a key-rotation grace
+   *   window. Reads attempt keys sequentially, current first; writes always
+   *   use masterKey. Rotation is forward-only: masterKey must not appear
+   *   here — a key that ever encrypted is never re-promoted.
+   * @throws {ConfigurationError} if any key is invalid, more than 3 previous
+   *   keys are configured (rejected, never truncated), or masterKey appears
+   *   in previousMasterKeys
    */
   constructor(
     private readonly masterKey: string,
     private readonly tenantId: string | undefined,
-    private readonly loadBindings: () => Promise<EncryptionBindings>
+    private readonly loadBindings: () => Promise<EncryptionBindings>,
+    private readonly previousMasterKeys: readonly string[] = []
   ) {
-    // Validate master key format
-    if (!/^[0-9a-fA-F]+$/.test(masterKey)) {
-      throw new ConfigurationError('Master key must be hex-encoded');
-    }
-    if (masterKey.length !== MIN_MASTER_KEY_HEX_LENGTH) {
+    validateKeyHex(masterKey, 'Master key');
+    if (previousMasterKeys.length > MAX_PREVIOUS_MASTER_KEYS) {
       throw new ConfigurationError(
-        `Master key must be exactly ${MIN_MASTER_KEY_BYTES} bytes (${MIN_MASTER_KEY_HEX_LENGTH} hex characters), got ${masterKey.length} hex characters`
+        `previousMasterKeys accepts at most ${MAX_PREVIOUS_MASTER_KEYS} keys, got ${previousMasterKeys.length} — drop retired keys explicitly, the list is never truncated`
       );
     }
+    // Case-insensitive comparisons throughout: hex case differences encode
+    // the same key bytes.
+    const current = masterKey.toLowerCase();
+    const seen = new Set<string>();
+    previousMasterKeys.forEach((key, index) => {
+      validateKeyHex(key, `Previous master key ${index + 1}`);
+      const canonical = key.toLowerCase();
+      // Forward-only rule (protocol decisions/key-rotation.md): a key that
+      // ever occupied the encrypting slot is never re-promoted, because that
+      // would resume a used, unknowable AES-GCM nonce budget.
+      if (canonical === current) {
+        throw new ConfigurationError(
+          'masterKey must not appear in previousMasterKeys — rotation is forward-only to a new key; a retired key is never re-promoted'
+        );
+      }
+      // Duplicates are config errors too: they silently burn keyring slots
+      // (cap of 3) and double the decrypt attempts for old entries.
+      if (seen.has(canonical)) {
+        throw new ConfigurationError(
+          `previousMasterKeys entry ${index + 1} duplicates an earlier entry — each decrypt-only key may appear once`
+        );
+      }
+      seen.add(canonical);
+    });
   }
 
   /**
@@ -125,11 +195,43 @@ export class EncryptionManagerCore {
 
       // Decode hex master key to bytes
       const masterKeyBytes = this.hexToBytes(this.masterKey);
+      const previousKeyBytes = this.previousMasterKeys.map((key) => this.hexToBytes(key));
 
       // Derive tenant keys (uses cachekit-core's derive_tenant_keys with domain "encryption")
-      // Keys stay in binding memory - never copied to the JavaScript heap
+      // Keys stay in binding memory - never copied to the JavaScript heap.
+      // Previous keys build the native decrypt keyring once, here. The decoded
+      // byte buffers are wiped in the finally below as soon as the binding has
+      // consumed them — on error paths too (the hex config strings remain on
+      // the manager for init retry, per the documented masterKey pattern).
       const effectiveTenantId = this.tenantId ?? 'default';
-      const tenantKeys = this.native.deriveTenantKeys(masterKeyBytes, effectiveTenantId);
+      let tenantKeys: EncryptionTenantKeys;
+      try {
+        tenantKeys = this.native.deriveTenantKeys(
+          masterKeyBytes,
+          effectiveTenantId,
+          previousKeyBytes.length > 0 ? previousKeyBytes : undefined
+        );
+      } finally {
+        masterKeyBytes.fill(0);
+        for (const bytes of previousKeyBytes) bytes.fill(0);
+      }
+
+      // Attest the keyring survived the FFI boundary. NAPI silently ignores
+      // extra arguments, so a version-skewed native binary that predates
+      // previousMasterKeys would build a single-key handle and every
+      // pre-rotation entry would silently degrade to a miss (LAB-241 class).
+      // Absence of keyringEntryCount on the handle is itself the skew signal.
+      if (previousKeyBytes.length > 0) {
+        const built = tenantKeys.keyringEntryCount?.() ?? 1;
+        if (built !== 1 + previousKeyBytes.length) {
+          tenantKeys.free?.();
+          throw new ConfigurationError(
+            `previousMasterKeys configured (${previousKeyBytes.length} keys) but the native bindings ` +
+              `built a keyring with ${built} entr${built === 1 ? 'y' : 'ies'} — ` +
+              'native module version skew; reinstall dependencies so the bindings match the SDK version'
+          );
+        }
+      }
       if (this.disposed) {
         // dispose() ran while init was in flight — zeroize immediately
         // instead of parking live key material on a disposed manager.
@@ -173,7 +275,9 @@ export class EncryptionManagerCore {
         message.includes('Nonce counter exhausted') ||
         message.includes('NonceCounterExhausted')
       ) {
-        throw new NonceExhaustedError(`Nonce counter exhausted. Key rotation required.`, {
+        // Guidance (forward-only rotation + runbook link) lives once, in the
+        // NonceExhaustedError default message.
+        throw new NonceExhaustedError(undefined, {
           cause: error instanceof Error ? error : undefined,
         });
       }
@@ -187,6 +291,11 @@ export class EncryptionManagerCore {
    * Decrypt data and verify AAD binding.
    *
    * Uses TenantKeys pattern - keys never leave binding memory.
+   *
+   * With previousMasterKeys configured, the binding runs cachekit-core's
+   * keyring loop natively: sequential attempts, current key first, the
+   * identical AAD rebuilt for every attempt (ts entries carry no per-entry
+   * key identity — protocol spec/encryption.md "Key Rotation (Keyring)").
    *
    * @param ciphertext - Encrypted data
    * @param cacheKey - Cache key that was bound during encryption

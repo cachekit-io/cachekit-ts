@@ -36,6 +36,7 @@ describe('Intent-based Cache API', () => {
 
   afterEach(() => {
     delete process.env.CACHEKIT_MASTER_KEY;
+    delete process.env.CACHEKIT_PREVIOUS_MASTER_KEYS;
     delete process.env.CACHEKIT_API_KEY;
   });
 
@@ -195,6 +196,48 @@ describe('Intent-based Cache API', () => {
       createCache.secure({ url: 'redis://localhost:6379', masterKey: MASTER_KEY });
 
       expect(capturedOptions!.encryption?.masterKey).toBe(MASTER_KEY);
+    });
+
+    it('passes previousMasterKeys to encryption config', () => {
+      const previous = ['b'.repeat(64), 'c'.repeat(64)];
+      createCache.secure({
+        url: 'redis://localhost:6379',
+        masterKey: MASTER_KEY,
+        previousMasterKeys: previous,
+      });
+
+      expect(capturedOptions!.encryption?.previousMasterKeys).toEqual(previous);
+    });
+
+    it('resolves previousMasterKeys from CACHEKIT_PREVIOUS_MASTER_KEYS (comma-separated hex)', () => {
+      // Whitespace tolerated, empty segments (trailing comma) dropped
+      process.env.CACHEKIT_PREVIOUS_MASTER_KEYS = `${'b'.repeat(64)}, ${'c'.repeat(64)},`;
+
+      createCache.secure({ url: 'redis://localhost:6379', masterKey: MASTER_KEY });
+
+      expect(capturedOptions!.encryption?.previousMasterKeys).toEqual([
+        'b'.repeat(64),
+        'c'.repeat(64),
+      ]);
+    });
+
+    it('explicit previousMasterKeys takes precedence over env var', () => {
+      process.env.CACHEKIT_PREVIOUS_MASTER_KEYS = 'd'.repeat(64);
+      const previous = ['b'.repeat(64)];
+
+      createCache.secure({
+        url: 'redis://localhost:6379',
+        masterKey: MASTER_KEY,
+        previousMasterKeys: previous,
+      });
+
+      expect(capturedOptions!.encryption?.previousMasterKeys).toEqual(previous);
+    });
+
+    it('leaves previousMasterKeys undefined when neither option nor env is set', () => {
+      createCache.secure({ url: 'redis://localhost:6379', masterKey: MASTER_KEY });
+
+      expect(capturedOptions!.encryption?.previousMasterKeys).toBeUndefined();
     });
   });
 

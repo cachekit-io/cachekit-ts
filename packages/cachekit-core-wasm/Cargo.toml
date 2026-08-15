@@ -18,7 +18,15 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wasm-bindgen = "=0.2.121"
-cachekit-core = { version = "0.4.0", features = ["encryption"] }
+# js-sys ships from the wasm-bindgen workspace and tracks its ABI; needed to
+# accept Uint8Array[] (previous master keys) across the boundary. Exact-pinned
+# to the release paired with wasm-bindgen 0.2.121 above.
+js-sys = "=0.3.98"
+cachekit-core = { version = "0.5.0", features = ["encryption"] }
+# Wipes the owned previous-master-key staging buffers on drop (the NAPI crate
+# borrows and never copies; this crate must copy out of JS memory). Already in
+# the tree transitively via cachekit-core — same resolved version.
+zeroize = "1"
 
 # Standalone crate — never join an enclosing cargo workspace.
 [workspace]

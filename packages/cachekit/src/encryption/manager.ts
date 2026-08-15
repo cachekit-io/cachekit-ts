@@ -42,11 +42,15 @@ export class EncryptionManager extends EncryptionManagerCore {
   /**
    * Create an EncryptionManager backed by the NAPI bindings (lazy-loaded).
    *
-   * @param masterKey - Hex-encoded master key (min 32 bytes = 64 hex chars)
+   * @param masterKey - Hex-encoded master key (exactly 32 bytes = 64 hex chars)
    * @param tenantId - Optional tenant ID for key derivation isolation
-   * @throws {ConfigurationError} if masterKey is invalid
+   * @param previousMasterKeys - Decrypt-only previous master keys (max 3,
+   *   same hex format) for a key-rotation grace window; reads attempt keys
+   *   sequentially, current first, writes always use masterKey
+   * @throws {ConfigurationError} if any key is invalid, more than 3 previous
+   *   keys are configured, or masterKey appears in previousMasterKeys
    */
-  constructor(masterKey: string, tenantId?: string) {
-    super(masterKey, tenantId, loadNapiBindings);
+  constructor(masterKey: string, tenantId?: string, previousMasterKeys?: readonly string[]) {
+    super(masterKey, tenantId, loadNapiBindings, previousMasterKeys);
   }
 }

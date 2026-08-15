@@ -36,6 +36,13 @@ const tenantKeys = deriveTenantKeys(masterKeyBytes, 'tenant-123');
 const ciphertext = encryptWithTenantKeys(plaintext, aad, tenantKeys);
 const plaintext2 = decryptWithTenantKeys(ciphertext, aad, tenantKeys);
 tenantKeys.free(); // zeroizes key material deterministically
+
+// Key-rotation grace window: up to 3 decrypt-only previous keys. Decrypt
+// attempts keys sequentially (current first, identical AAD); encrypt always
+// uses the current key.
+const rotating = deriveTenantKeys(newKeyBytes, 'tenant-123', [oldKeyBytes]);
+const old = decryptWithTenantKeys(oldCiphertext, aad, rotating);
+rotating.free(); // zeroize the whole keyring when the grace window ends
 ```
 
 ## Security notes

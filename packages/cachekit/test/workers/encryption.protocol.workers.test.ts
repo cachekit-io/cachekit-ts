@@ -269,3 +269,26 @@ describe('encryption + envelope composition (wasm end-to-end)', () => {
     }
   });
 });
+
+describe('keyring rotation — Workers EncryptionManager (wasm keyring loop)', () => {
+  const K1_HEX = '11'.repeat(32);
+  const K2_HEX = '22'.repeat(32);
+  const CACHE_KEY = 'ns:workers:rotation';
+
+  it('decrypts a k1-encrypted value with masterKey=k2, previousMasterKeys=[k1]; fails without it', async () => {
+    const writer = new EncryptionManager(K1_HEX, tenantId);
+    const rotated = new EncryptionManager(K2_HEX, tenantId, [K1_HEX]);
+    const cutOver = new EncryptionManager(K2_HEX, tenantId);
+    try {
+      const data = new TextEncoder().encode('rotate me');
+      const ciphertext = await writer.encrypt(data, CACHE_KEY, false);
+
+      expect(await rotated.decrypt(ciphertext, CACHE_KEY, false)).toEqual(data);
+      await expect(cutOver.decrypt(ciphertext, CACHE_KEY, false)).rejects.toThrow();
+    } finally {
+      writer.dispose();
+      rotated.dispose();
+      cutOver.dispose();
+    }
+  });
+});

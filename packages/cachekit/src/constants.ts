@@ -120,11 +120,19 @@ export const REDIS_RETRY_MAX_DELAY = 30000;
 /** AAD version byte (v0x03 includes cache_key binding) */
 export const AAD_VERSION = 0x03;
 
-/** Minimum master key length in bytes */
-export const MIN_MASTER_KEY_BYTES = 32;
+/** Required master key length in bytes (exact — validation rejects any other length) */
+export const MASTER_KEY_BYTES = 32;
 
-/** Minimum master key length in hex characters */
-export const MIN_MASTER_KEY_HEX_LENGTH = 64;
+/** Required master key length in hex characters (exact) */
+export const MASTER_KEY_HEX_LENGTH = 64;
+
+/**
+ * Maximum decrypt-only previous master keys in a rotation keyring.
+ * Matches cachekit-core's MAX_DECRYPT_ONLY_KEYS (protocol spec/encryption.md
+ * → "Key Rotation (Keyring)"). Exceeding the cap is a configuration error,
+ * rejected at load — never truncated.
+ */
+export const MAX_PREVIOUS_MASTER_KEYS = 3;
 
 // ============================================================================
 // Stampede / Single-Flight Constants
