@@ -32,7 +32,10 @@ jobs:
       cachekit--release_created: ${{ steps.release.outputs['packages/cachekit--release_created'] }}
       cachekit--tag_name: ${{ steps.release.outputs['packages/cachekit--tag_name'] }}
       cachekit--version: ${{ steps.release.outputs['packages/cachekit--version'] }}
-      # cachekit-core-ts outputs (triggers build-native.yml via tag)
+      # cachekit-core-ts outputs — currently unconsumed: App-created tags do
+      # NOT trigger build-native.yml's push workflow, and core-ts publishing
+      # is manual today (see build-native.yml's header; a CI publish path
+      # consuming these outputs is LAB-1390's follow-up).
       core-ts--release_created: ${{ steps.release.outputs['packages/cachekit-core-ts--release_created'] }}
       core-ts--tag_name: ${{ steps.release.outputs['packages/cachekit-core-ts--tag_name'] }}
       # cachekit-core-wasm publishes here because tags created by the GitHub

@@ -1,5 +1,25 @@
 name: Build Native
 
+# This workflow BUILDS and TESTS only — it must not publish.
+#
+# @cachekit-io/cachekit-core-ts has never published from CI: 0.1.0 and 0.1.2
+# were both manual (`cachekit-ray`, no provenance attestations), and the old
+# tag-gated publish job here never ran once — GitHub App-created release tags
+# don't trigger this workflow, and the repo has no NPM_TOKEN secret so it
+# would have died ENEEDAUTH anyway (LAB-831, LAB-1390). It was deleted rather
+# than migrated; do not re-add npm-token auth here.
+#
+# Until a working CI publish path exists (needs a release-please.yml job plus
+# a package-level npm trusted publisher — tracked as LAB-1390's follow-up),
+# publishing stays manual. Runbook facts the deleted job used to encode:
+# push the cachekit-core-ts-v* tag by hand — that runs the full matrix here
+# as pre-publish validation, and its bindings-* artifacts (expire ~90 days)
+# are the only source of the darwin/windows .node binaries you cannot
+# cross-build locally. napi-rs scaffolds npm/<platform>/package.json at the
+# version present when `napi build` first ran and never bumps it, so run
+# `npx napi version` before `npx napi prepublish -t npm --no-gh-release`
+# (the 0.1.2 lesson). Publish platform dirs as `npm publish ./npm/<dir>` —
+# a bare `npm/<dir>` parses as GitHub shorthand and dies on ssh.
 on:
   push:
     branches: [main]
@@ -28,8 +48,9 @@ jobs:
       - id: set
         # PRs build the cheap linux-x64 target only (catches the vast majority
         # of compile errors on the self-hosted runner). Full cross-platform
-        # validation runs on push to main and on release tags, which is what
-        # actually gates publication — keeping the macOS/Windows cost off the
+        # validation runs on push to main and on manually pushed
+        # cachekit-core-ts-v* tags — the validation a (currently manual, see
+        # header) publish relies on — keeping the macOS/Windows cost off the
         # PR review loop without losing coverage where it matters.
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
@@ -132,74 +153,3 @@ jobs:
       - name: Test native module
         working-directory: packages/cachekit-core-ts
         run: node -e "const m = require('.'); console.log('Version:', m.version())"
-
-  publish:
-    if: startsWith(github.ref, 'refs/tags/cachekit-core-ts-v')
-    needs: [build, test]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
-        with:
-          node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          path: packages/cachekit-core-ts/artifacts
-          merge-multiple: true
-
-      - name: Install dependencies
-        run: pnpm install
-
-      - name: Move artifacts to platform packages
-        working-directory: packages/cachekit-core-ts
-        # @napi-rs/cli v3 renamed --artifacts-dir to --output-dir.
-        run: npx napi artifacts --output-dir artifacts
-
-      # napi-rs scaffolds npm/<platform>/package.json files at the
-      # version present when `napi build` first ran; they don't update
-      # on subsequent version bumps. Without this sync, the platform
-      # packages publish at whatever stale version was scaffolded
-      # (caught locally during the 0.1.2 bootstrap publish).
-      - name: Sync platform package versions to main package version
-        working-directory: packages/cachekit-core-ts
-        run: npx napi version
-
-      - name: List platform packages
-        working-directory: packages/cachekit-core-ts
-        run: ls -la npm/*/
-
-      - name: Publish platform packages
-        working-directory: packages/cachekit-core-ts
-        # The ./ prefix forces local-directory interpretation. Without
-        # it, `npm publish npm/darwin-arm64` is treated as the GitHub
-        # shorthand <user>/<repo>, attempts ssh://git@github.com/npm/
-        # darwin-arm64.git, and fails with Permission denied.
-        run: |
-          find npm -mindepth 1 -maxdepth 1 -type d -exec npm publish ./{} --access public --provenance \;
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Prepare main package
-        working-directory: packages/cachekit-core-ts
-        # @napi-rs/cli v3 removed --skip-gh-release. The negation is now
-        # the clipanion-auto-generated --no-gh-release. Stated explicitly
-        # so a future default flip can't change behavior silently.
-        run: npx napi prepublish -t npm --no-gh-release
-
-      - name: Publish main package
-        working-directory: packages/cachekit-core-ts
-        run: npm publish --access public --provenance --ignore-scripts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

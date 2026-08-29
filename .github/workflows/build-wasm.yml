@@ -5,9 +5,18 @@ name: Build Wasm
 #
 # Tags only: the ci.yml `workers` job (required via ci-success) already runs
 # the identical build:wasm — size budget, version pin, drift check — on every
-# PR and main push. Releases created by release-please publish from
-# release-please.yml because GitHub App-created tags do not trigger this
-# workflow; this path remains for manually pushed recovery tags.
+# PR and main push.
+#
+# This workflow BUILDS only — it must not publish. ALL wasm publishing goes
+# through release-please.yml's publish-cachekit-core-wasm job (pnpm OIDC
+# trusted publishing): normal releases via release-please outputs, and
+# recovery of an existing tag via the `wasm_tag` workflow_dispatch input.
+# Do not re-add a publish job here: the repo has no NPM_TOKEN secret, and
+# npm-token auth from this workflow dies ENEEDAUTH (LAB-831 — its single
+# lifetime run, on manually pushed tag cachekit-core-wasm-v0.1.1, failed
+# exactly that way; the package actually published via release-please.yml).
+# GitHub App-created release tags do not trigger this workflow; what remains
+# is build validation for manually pushed recovery tags.
 on:
   push:
     tags: ['cachekit-core-wasm-v*']
@@ -73,39 +82,3 @@ jobs:
 
       - name: Build wasm artifact (size budget + API drift asserted)
         run: pnpm --filter @cachekit-io/cachekit-core-wasm build:wasm
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
-        with:
-          name: wasm-pkg
-          path: packages/cachekit-core-wasm/pkg/
-          if-no-files-found: error
-
-  publish:
-    if: startsWith(github.ref, 'refs/tags/cachekit-core-wasm-v')
-    needs: [build]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
-        with:
-          node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Download wasm artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: wasm-pkg
-          path: packages/cachekit-core-wasm/pkg
-
-      - name: Publish
-        working-directory: packages/cachekit-core-wasm
-        run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
