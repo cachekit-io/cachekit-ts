@@ -753,6 +753,13 @@ export class CacheImpl implements SecureCache {
       throw new ConfigurationError(`Invalid TTL: ${ttl}. Must be a non-negative finite number.`);
     }
 
+    // A backend with hard TTL bounds (CachekitIO: reject 0 / > 30 days per
+    // protocol) rejects here, synchronously — for the same reason as the
+    // interop rejection below: inside `run`, degradation would swallow the
+    // deterministic caller error (set() would silently never store) and
+    // retry/circuit-breaker would count it as backend failures.
+    this.backend.validateTtl?.(ttl);
+
     const namespace = options?.namespace ?? extractNamespace(key);
     const useEnvelope = this.useEnvelope(interop);
 

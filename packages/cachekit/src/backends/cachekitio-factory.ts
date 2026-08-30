@@ -38,6 +38,11 @@ class CachekitIO implements LockableBackend, TTLBackend {
   set(key: string, value: Uint8Array, ttl?: number) {
     return this.lockable.set(key, value, ttl);
   }
+  // Forwarded like keyPrefix — hiding it would let CacheImpl's reliability
+  // stack swallow the inner backend's TTL rejection. See Backend.validateTtl.
+  validateTtl(ttl: number) {
+    this.lockable.validateTtl(ttl);
+  }
   delete(key: string) {
     return this.lockable.delete(key);
   }

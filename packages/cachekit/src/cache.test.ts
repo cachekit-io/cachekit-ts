@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createCache } from './cache.js';
 import { generateKey } from './serialization/key-generator.js';
 import { setLogger } from './logger.js';
-import { ValueTooLargeError } from './errors.js';
+import { ConfigurationError, ValueTooLargeError } from './errors.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
@@ -238,6 +238,39 @@ describe('Cache Integration', () => {
       expect(attempts).toBe(2); // First failed, second succeeded
 
       await retryCache.close();
+    });
+
+    // LAB-239 regression: a backend's TTL rejection (Backend.validateTtl,
+    // e.g. CachekitIO's protocol bounds) is a deterministic caller error and
+    // must surface to the caller — default-on degradation swallows anything
+    // thrown inside the executor, which would turn set(ttl: 0) into a cache
+    // that silently never stores.
+    it('surfaces a backend TTL rejection despite default-on degradation', async () => {
+      let setCalls = 0;
+      const inner = new InMemoryBackend();
+      const boundedBackend: Backend = {
+        get: (key) => inner.get(key),
+        async set(key, value, ttl) {
+          setCalls++;
+          return inner.set(key, value, ttl!);
+        },
+        validateTtl(ttl) {
+          if (ttl <= 0) throw new ConfigurationError(`TTL must be greater than 0, got ${ttl}`);
+        },
+        delete: (key) => inner.delete(key),
+        exists: (key) => inner.exists(key),
+        close: () => inner.close(),
+      };
+
+      const boundedCache = createCache({ backend: boundedBackend, l1: { enabled: false } });
+      await expect(boundedCache.set('test:ttl0', 'value', { ttl: 0 })).rejects.toThrow(
+        ConfigurationError
+      );
+      expect(setCalls).toBe(0); // rejected before the reliability executor ran
+
+      await boundedCache.set('test:ttl-ok', 'value', { ttl: 60 });
+      expect(setCalls).toBe(1);
+      await boundedCache.close();
     });
   });
 

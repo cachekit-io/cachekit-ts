@@ -121,7 +121,7 @@ describe('CachekitIO Backend', () => {
   // ── SET ───────────────────────────────────────────────────
 
   describe('set', () => {
-    it('sends PUT with body and X-TTL', async () => {
+    it('sends PUT with body and X-CacheKit-TTL', async () => {
       fetchSpy.mockResolvedValueOnce(mockResponse(200));
       const value = new Uint8Array([10, 20, 30]);
 
@@ -132,7 +132,8 @@ describe('CachekitIO Backend', () => {
       expect(opts.method).toBe('PUT');
 
       const headers = opts.headers as Record<string, string>;
-      expect(headers['X-TTL']).toBe('600');
+      expect(headers['X-CacheKit-TTL']).toBe('600');
+      expect(headers['X-TTL']).toBeUndefined(); // deprecated, removed at protocol 2.0
       expect(headers['Content-Type']).toBe('application/octet-stream');
     });
 
@@ -142,7 +143,7 @@ describe('CachekitIO Backend', () => {
 
       const [, opts] = fetchSpy.mock.calls[0] as [string, RequestInit];
       const headers = opts.headers as Record<string, string>;
-      expect(headers['X-TTL']).toBe('3600'); // DEFAULT_TTL_SECONDS
+      expect(headers['X-CacheKit-TTL']).toBe('3600'); // DEFAULT_TTL_SECONDS
     });
 
     it('throws BackendError on 500', async () => {
@@ -325,12 +326,54 @@ describe('CachekitIO Backend', () => {
   // ── Set edge cases ─────────────────────────────────────────
 
   describe('set edge cases', () => {
-    it('omits X-TTL header when TTL is 0', async () => {
+    // Protocol TTL Validation Rules (protocol/spec/saas-api.md): TTL=0,
+    // negative, and > 30 days MUST be rejected at the SDK boundary.
+    it('rejects TTL of 0', async () => {
+      await expect(backend.set('key', new Uint8Array([1]), 0)).rejects.toThrow(ConfigurationError);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('rejects negative TTL', async () => {
+      await expect(backend.set('key', new Uint8Array([1]), -5)).rejects.toThrow(ConfigurationError);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('rejects TTL above 2,592,000 (30 days)', async () => {
+      await expect(backend.set('key', new Uint8Array([1]), 2_592_001)).rejects.toThrow(
+        ConfigurationError
+      );
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('accepts TTL at the 30-day ceiling', async () => {
       fetchSpy.mockResolvedValueOnce(mockResponse(200));
-      await backend.set('key', new Uint8Array([1]), 0);
+      await backend.set('key', new Uint8Array([1]), 2_592_000);
       const [, opts] = fetchSpy.mock.calls[0] as [string, RequestInit];
-      const headers = opts.headers as Record<string, string>;
-      expect(headers['X-TTL']).toBeUndefined();
+      expect((opts.headers as Record<string, string>)['X-CacheKit-TTL']).toBe('2592000');
+    });
+
+    it('ceils sub-second TTL to 1, never truncates to 0', async () => {
+      fetchSpy.mockResolvedValueOnce(mockResponse(200));
+      await backend.set('key', new Uint8Array([1]), 0.5);
+      const [, opts] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect((opts.headers as Record<string, string>)['X-CacheKit-TTL']).toBe('1');
+    });
+
+    it('rejects non-finite TTL', async () => {
+      await expect(backend.set('key', new Uint8Array([1]), Number.NaN)).rejects.toThrow(
+        ConfigurationError
+      );
+      await expect(backend.set('key', new Uint8Array([1]), Infinity)).rejects.toThrow(
+        ConfigurationError
+      );
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('rejects invalid defaultTtl at construction', () => {
+      expect(() => cachekitio({ ...validConfig, defaultTtl: 0 })).toThrow(ConfigurationError);
+      expect(() => cachekitio({ ...validConfig, defaultTtl: 2_592_001 })).toThrow(
+        ConfigurationError
+      );
     });
 
     it('closed state rejects set', async () => {

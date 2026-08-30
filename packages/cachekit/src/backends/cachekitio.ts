@@ -9,6 +9,25 @@ import { validateCachekitUrl } from './url-validator.js';
 const DEFAULT_API_URL = 'https://api.cachekit.io';
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+/** Protocol TTL ceiling: 30 days in seconds (protocol/spec/saas-api.md, TTL Validation Rules). */
+const MAX_TTL_SECONDS = 2_592_000;
+
+/**
+ * Validate a TTL per the protocol's normative TTL Validation Rules
+ * (protocol/spec/saas-api.md): zero, negative, non-finite, and values over
+ * 30 days are rejected; sub-second/fractional durations are ceiled to whole
+ * seconds (never truncated to 0). Exported for the TTL decorator's
+ * refreshTTL, which sends the same value in the PATCH body.
+ */
+export function validateTtl(ttl: number): number {
+  if (!Number.isFinite(ttl) || ttl <= 0 || ttl > MAX_TTL_SECONDS) {
+    throw new ConfigurationError(
+      `TTL must be greater than 0 and at most ${MAX_TTL_SECONDS} seconds (30 days), got ${ttl}`
+    );
+  }
+  return Math.ceil(ttl);
+}
+
 /**
  * CachekitIO backend — HTTP client for the cachekit.io SaaS.
  *
@@ -50,7 +69,7 @@ export class CachekitIOCore implements Backend {
 
     this.apiUrl = apiUrl.replace(/\/+$/, '');
     this.apiKey = config.apiKey;
-    this.defaultTtl = config.defaultTtl ?? DEFAULT_TTL_SECONDS;
+    this.defaultTtl = validateTtl(config.defaultTtl ?? DEFAULT_TTL_SECONDS);
     this.timeout = config.timeout ?? DEFAULT_TIMEOUT_MS;
     this.metricsProvider = config.metricsProvider;
   }
@@ -76,14 +95,17 @@ export class CachekitIOCore implements Backend {
     }
   }
 
+  /** Backend.validateTtl capability — lets CacheImpl reject an invalid TTL
+   * synchronously, before the reliability executor can swallow it. */
+  validateTtl(ttl: number): void {
+    validateTtl(ttl);
+  }
+
   async set(key: string, value: Uint8Array, ttl?: number): Promise<void> {
     this.ensureNotClosed();
 
-    const effectiveTtl = ttl ?? this.defaultTtl;
-    const headers: Record<string, string> = {};
-    if (effectiveTtl > 0) {
-      headers['X-TTL'] = String(effectiveTtl);
-    }
+    const effectiveTtl = validateTtl(ttl ?? this.defaultTtl);
+    const headers: Record<string, string> = { 'X-CacheKit-TTL': String(effectiveTtl) };
 
     try {
       const response = await this.request('PUT', this.cacheUrl(key), {
