@@ -1,7 +1,11 @@
 import { encode, decode } from '@msgpack/msgpack';
 import type { InvalidationLevel, InvalidationEvent } from '../l1/types.js';
-import { boundedDecodeOptions } from '../serialization/serializer.js';
-import { DEFAULT_MAX_COLLECTION_SIZE, DEFAULT_MAX_DECODED_SIZE } from '../constants.js';
+import { assertDecodeDepth, boundedDecodeOptions } from '../serialization/serializer.js';
+import {
+  DEFAULT_MAX_COLLECTION_SIZE,
+  DEFAULT_MAX_INVALIDATION_EVENT_SIZE,
+  MAX_INVALIDATION_EVENT_DEPTH,
+} from '../constants.js';
 import { SerializationError } from '../errors.js';
 
 /**
@@ -48,19 +52,22 @@ export function serializeEvent(event: InvalidationEvent): Uint8Array {
  *
  * Pub/sub bytes are untrusted (same backend-write attacker as cache reads),
  * so decoding is bounded — full rationale: boundedDecodeOptions in
- * serializer.ts.
+ * serializer.ts. An event is a fixed flat map of scalars, so this path is
+ * held to a much tighter size + depth cap than a general cache value
+ * (least privilege: a forged event cannot ride the 10MB value ceiling).
  *
  * @throws {SerializationError} if input exceeds the decode size cap
  */
 export function deserializeEvent(data: Uint8Array): InvalidationEvent {
-  if (data.length > DEFAULT_MAX_DECODED_SIZE) {
+  if (data.length > DEFAULT_MAX_INVALIDATION_EVENT_SIZE) {
     throw new SerializationError(
-      `Invalidation event size ${data.length} exceeds max ${DEFAULT_MAX_DECODED_SIZE}`
+      `Invalidation event size ${data.length} exceeds max ${DEFAULT_MAX_INVALIDATION_EVENT_SIZE}`
     );
   }
+  assertDecodeDepth(data, MAX_INVALIDATION_EVENT_DEPTH);
   const compact = decode(
     data,
-    boundedDecodeOptions(DEFAULT_MAX_COLLECTION_SIZE, DEFAULT_MAX_DECODED_SIZE)
+    boundedDecodeOptions(DEFAULT_MAX_COLLECTION_SIZE, DEFAULT_MAX_INVALIDATION_EVENT_SIZE)
   ) as CompactEvent;
 
   return {

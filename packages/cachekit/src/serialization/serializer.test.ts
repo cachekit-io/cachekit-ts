@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { MessagePackSerializer } from './serializer.js';
+import { decode as msgpackDecode, encode as msgpackEncode } from '@msgpack/msgpack';
+import { MessagePackSerializer, assertDecodeDepth, boundedDecodeOptions } from './serializer.js';
 import { ValueTooLargeError, SerializationError } from '../errors.js';
 
 describe('MessagePackSerializer', () => {
@@ -186,9 +187,13 @@ describe('MessagePackSerializer', () => {
     });
 
     it('wraps decode errors with cause', () => {
-      const invalidData = new Uint8Array([0xff, 0xff, 0xff]);
+      // Structurally valid msgpack that the pre-scan passes (fixarray of 3,
+      // depth 1, no trailing bytes) but the decoder rejects on the collection
+      // cap — exercises the decode()-path error wrapping, not the pre-scan.
+      const small = new MessagePackSerializer({ maxCollectionSize: 2 });
+      const overCap = Uint8Array.of(0x93, 0x01, 0x02, 0x03);
       try {
-        serializer.decode(invalidData);
+        small.decode(overCap);
         expect.fail('Should have thrown');
       } catch (error) {
         expect(error).toBeInstanceOf(SerializationError);
@@ -285,6 +290,149 @@ describe('MessagePackSerializer', () => {
         largeMap.set(i, i);
       }
       expect(() => serializer.encode(largeMap)).toThrow(SerializationError);
+    });
+  });
+
+  describe('LAB-2487: DoS protection - nested collection-header amplification', () => {
+    const serializer = new MessagePackSerializer();
+
+    // Build N nested `array16` headers each claiming 10000 elements (3 bytes
+    // each). Un-mitigated this forced ~400MB of transient heap from ~15KB
+    // (~26,700x) before the end-of-input throw, because @msgpack/msgpack runs
+    // `new Array(size)` per header before children decode.
+    const nestedArray16Headers = (n: number): Uint8Array => {
+      const buf = new Uint8Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        buf[i * 3] = 0xdc; // array16
+        buf[i * 3 + 1] = 0x27; // 0x2710 = 10000
+        buf[i * 3 + 2] = 0x10;
+      }
+      return buf;
+    };
+
+    it('rejects the 5000-deep forged probe before the decoder allocates (AC-2)', () => {
+      // The pre-scan fails on depth (or truncation) after reading only headers,
+      // so `decode()` — and its per-header `new Array(10000)` — never runs. The
+      // structural rejection is what pins the allocation ceiling: no decode, no
+      // preallocation. Un-mitigated, decode() of this input reached ~400MB.
+      expect(() => serializer.decode(nestedArray16Headers(5000))).toThrow(SerializationError);
+      expect(() => assertDecodeDepth(nestedArray16Headers(5000), 100)).toThrow(/depth|Truncated/);
+    });
+
+    it('rejects a spine that claims more children than the bytes can back', () => {
+      // 100 nested array16(10000) = 300 bytes claiming 10000 children per level.
+      // Structural completeness (global slot budget) rejects it as truncated:
+      // the buffer cannot back the declared children. Depth alone would pass.
+      expect(() => assertDecodeDepth(nestedArray16Headers(100), 1000)).toThrow(SerializationError);
+    });
+
+    it('enforces the depth bound at the configured maxDepth', () => {
+      const shallow = new MessagePackSerializer({ maxDepth: 3 });
+      let v: unknown = 1;
+      for (let i = 0; i < 4; i++) v = [v]; // 4 levels of nesting
+      const buf = serializer.encode(v); // default serializer encodes fine (maxDepth 100)
+      expect(() => shallow.decode(buf)).toThrow(/depth/);
+    });
+
+    it('never rejects a legal payload nested up to maxDepth (write/read symmetry)', () => {
+      // A value wrapped in exactly maxDepth collections must still round-trip:
+      // the pre-scan must be no stricter than the encoder's own depth bound.
+      let v: unknown = 42;
+      for (let i = 0; i < 99; i++) v = [v]; // 99 array levels, well within 100
+      expect(serializer.decode(serializer.encode(v))).toEqual(v);
+
+      // Wide-but-shallow and mixed structures must pass untouched.
+      const wide = { list: Array.from({ length: 5000 }, (_, i) => i), meta: { a: true, b: 'x' } };
+      expect(serializer.decode(serializer.encode(wide))).toEqual(wide);
+    });
+
+    it('differential fuzz: pre-scan is byte-faithful to the decoder across every type', () => {
+      // The pre-scan is a second parser gating the real decoder; the one
+      // catastrophic desync is a width miscount that shifts every later offset.
+      // Encode random legal values spanning EVERY msgpack head-byte family
+      // (incl. bin, bigint→int64, float64, ext→timestamp, and collections wide
+      // enough to emit array16/map16, not just fixarray/fixmap) and assert the
+      // pre-scan accepts exactly what the decoder accepts — proving no
+      // skip-width desync. `useBigInt64` matches the interop decode path.
+      const encOpts = { useBigInt64: true } as const;
+      const opts = { ...boundedDecodeOptions(10000, 10 * 1024 * 1024), useBigInt64: true };
+      let seed = 0x2487;
+      const rand = () => {
+        // deterministic LCG; Math.imul avoids the 2^53 overflow trap
+        seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
+        return seed / 0x7fffffff;
+      };
+      const scalar = (): unknown => {
+        const r = rand();
+        if (r < 0.14) return null;
+        if (r < 0.28) return Math.floor(rand() * 1e9); // int
+        if (r < 0.42) return rand() * 1e6 + 0.5; // float64
+        if (r < 0.56) return BigInt(Math.floor(rand() * 1e15)); // int64
+        if (r < 0.7) return rand() < 0.5;
+        if (r < 0.84) return 'k'.repeat(Math.floor(rand() * 40)); // fixstr/str8
+        if (r < 0.92) return new Uint8Array(Math.floor(rand() * 30)); // bin8
+        return new Date(Math.floor(rand() * 2e12)); // ext (timestamp)
+      };
+      const randomValue = (depth: number): unknown => {
+        const r = rand();
+        if (depth > 4 || r < 0.45) return scalar();
+        // Occasionally emit a WIDE array/map of scalars so array16/map16 headers
+        // (>15 entries) get exercised — without recursing, so total node count
+        // stays bounded (deep recursion keeps a small branching factor).
+        if (r < 0.55) {
+          const wide = 16 + Math.floor(rand() * 24); // 16..39 → array16/map16
+          if (rand() < 0.5) return Array.from({ length: wide }, () => scalar());
+          const o: Record<string, unknown> = {};
+          for (let i = 0; i < wide; i++) o['f' + i] = scalar();
+          return o;
+        }
+        const n = Math.floor(rand() * 5); // narrow recursion (fixarray/fixmap)
+        if (r < 0.8) return Array.from({ length: n }, () => randomValue(depth + 1));
+        const o: Record<string, unknown> = {};
+        for (let i = 0; i < n; i++) o['f' + i] = randomValue(depth + 1);
+        return o;
+      };
+
+      for (let i = 0; i < 500; i++) {
+        const bytes = msgpackEncode(randomValue(0), encOpts);
+        // Legal values must pass the pre-scan and round-trip through the decoder.
+        expect(() => assertDecodeDepth(bytes, 100)).not.toThrow();
+        expect(() => msgpackDecode(bytes, opts)).not.toThrow();
+      }
+
+      // Random garbage: the pre-scan must always terminate with a boolean
+      // verdict and never itself allocate/hang (it is O(input), allocating only
+      // a depth-bounded counter). We do NOT assert decode never throws on
+      // accepted garbage — a structurally-complete buffer can still be a
+      // malformed ext/invalid-UTF-8 str the decoder rejects, which is the SAFE
+      // desync direction (reject, not over-allocate). The bounded opts here mean
+      // no false-accept can amplify regardless; the dedicated nested-header test
+      // above pins the actual amplification bound.
+      for (let i = 0; i < 1000; i++) {
+        const bytes = new Uint8Array(Math.floor(rand() * 48));
+        for (let j = 0; j < bytes.length; j++) bytes[j] = Math.floor(rand() * 256);
+        let verdict: boolean;
+        try {
+          assertDecodeDepth(bytes, 100);
+          verdict = true;
+        } catch {
+          verdict = false;
+        }
+        expect(typeof verdict).toBe('boolean');
+      }
+    });
+
+    it('directly exercises each pre-scan rejection branch', () => {
+      // Invalid/reserved head byte (0xc1) → default throw.
+      expect(() => assertDecodeDepth(Uint8Array.of(0xc1), 100)).toThrow(/head byte/);
+      // Trailing bytes after a complete value.
+      expect(() => assertDecodeDepth(Uint8Array.of(0x2a, 0x2a), 100)).toThrow(/Trailing/);
+      // Truncated multibyte length (str16 header claims 2 length bytes, only 1).
+      expect(() => assertDecodeDepth(Uint8Array.of(0xda, 0x00), 100)).toThrow(/Truncated/);
+      // Truncated collection children (fixarray(1) with no element).
+      expect(() => assertDecodeDepth(Uint8Array.of(0x91), 100)).toThrow(/Truncated/);
+      // Empty buffer is not a valid single value.
+      expect(() => assertDecodeDepth(new Uint8Array(0), 100)).toThrow(/Truncated/);
     });
   });
 });

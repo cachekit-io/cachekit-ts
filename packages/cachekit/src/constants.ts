@@ -47,6 +47,20 @@ export const DEFAULT_MAX_DEPTH = 100;
 /** Maximum collection size for Maps, Sets, Arrays, Objects */
 export const DEFAULT_MAX_COLLECTION_SIZE = 10000;
 
+/**
+ * Maximum decoded size for an invalidation pub/sub event (4KB).
+ *
+ * Events are a fixed flat map of 5 scalar fields — a generous one encodes to a
+ * few hundred bytes. The pub/sub bytes are untrusted (same backend-write
+ * attacker as cache reads), so this least-privilege cap keeps a forged event
+ * from riding the 10MB value ceiling; combined with a shallow depth bound it
+ * shrinks the decode blast radius on this path by ~1000x.
+ */
+export const DEFAULT_MAX_INVALIDATION_EVENT_SIZE = 4096;
+
+/** Maximum nesting depth for an invalidation event (a flat map — no nesting). */
+export const MAX_INVALIDATION_EVENT_DEPTH = 3;
+
 /** Maximum size for key generation (64KB) */
 export const KEY_GEN_MAX_SIZE = 64 * 1024;
 
