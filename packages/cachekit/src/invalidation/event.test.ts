@@ -41,4 +41,12 @@ describe('InvalidationEvent serialization', () => {
     // Compact keys should keep payload small
     expect(serialized.length).toBeLessThan(50);
   });
+
+  it('rejects a forged giant collection header before preallocating (LAB-281 DoS)', () => {
+    // array32 claiming 2^32-1 elements in 5 bytes — must fail on the length
+    // cap, not attempt new Array(4294967295). Pub/sub bytes are untrusted.
+    expect(() => deserializeEvent(Uint8Array.of(0xdd, 0xff, 0xff, 0xff, 0xff))).toThrow();
+    // map16 claiming 65535 entries.
+    expect(() => deserializeEvent(Uint8Array.of(0xde, 0xff, 0xff))).toThrow();
+  });
 });

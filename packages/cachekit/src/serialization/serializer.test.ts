@@ -209,6 +209,32 @@ describe('MessagePackSerializer', () => {
     });
   });
 
+  describe('LAB-281: DoS protection - forged collection headers on decode', () => {
+    it('rejects a forged giant collection header before preallocating (DoS)', () => {
+      // array32 claiming 2^32-1 elements in 5 bytes — must fail on the length
+      // cap, not attempt new Array(4294967295).
+      expect(() => serializer.decode(Uint8Array.of(0xdd, 0xff, 0xff, 0xff, 0xff))).toThrow(
+        SerializationError
+      );
+      // map16 claiming 65535 entries.
+      expect(() => serializer.decode(Uint8Array.of(0xde, 0xff, 0xff))).toThrow(SerializationError);
+    });
+
+    it('applies the configured maxCollectionSize, not a hardcoded constant', () => {
+      const small = new MessagePackSerializer({ maxCollectionSize: 2 });
+      // fixarray of 3 fixints — legal msgpack, over the configured cap.
+      expect(() => small.decode(Uint8Array.of(0x93, 0x01, 0x02, 0x03))).toThrow(SerializationError);
+      // fixarray of 2 fixints — at the cap, decodes fine.
+      expect(small.decode(Uint8Array.of(0x92, 0x01, 0x02))).toEqual([1, 2]);
+    });
+
+    it('never rejects what encode legally produces (write/read symmetry)', () => {
+      const s = new MessagePackSerializer({ maxCollectionSize: 100 });
+      const atLimit = Array.from({ length: 100 }, (_, i) => i);
+      expect(s.decode(s.encode(atLimit))).toEqual(atLimit);
+    });
+  });
+
   describe('M9: DoS protection - maxCollectionSize', () => {
     it('throws SerializationError for oversized Map', () => {
       const serializer = new MessagePackSerializer({ maxCollectionSize: 100 });
