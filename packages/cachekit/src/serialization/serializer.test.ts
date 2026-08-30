@@ -400,25 +400,24 @@ describe('MessagePackSerializer', () => {
         expect(() => msgpackDecode(bytes, opts)).not.toThrow();
       }
 
-      // Random garbage: the pre-scan must always terminate with a boolean
-      // verdict and never itself allocate/hang (it is O(input), allocating only
-      // a depth-bounded counter). We do NOT assert decode never throws on
-      // accepted garbage — a structurally-complete buffer can still be a
-      // malformed ext/invalid-UTF-8 str the decoder rejects, which is the SAFE
-      // desync direction (reject, not over-allocate). The bounded opts here mean
-      // no false-accept can amplify regardless; the dedicated nested-header test
-      // above pins the actual amplification bound.
+      // Random garbage: the pre-scan must either accept or reject through
+      // SerializationError — never fault with a raw RangeError/TypeError (a bad
+      // skip width or out-of-range DataView read, i.e. a walker bug). We do NOT
+      // assert decode never throws on accepted garbage — a structurally-complete
+      // buffer can still be a malformed ext/invalid-UTF-8 str the decoder
+      // rejects, which is the SAFE desync direction (reject, not over-allocate).
+      // The bounded opts here mean no false-accept can amplify regardless; the
+      // dedicated nested-header test above pins the actual amplification bound.
       for (let i = 0; i < 1000; i++) {
         const bytes = new Uint8Array(Math.floor(rand() * 48));
         for (let j = 0; j < bytes.length; j++) bytes[j] = Math.floor(rand() * 256);
-        let verdict: boolean;
         try {
           assertDecodeDepth(bytes, 100);
-          verdict = true;
-        } catch {
-          verdict = false;
+        } catch (error) {
+          // A non-SerializationError means the walker itself faulted, not a
+          // structural rejection.
+          expect(error).toBeInstanceOf(SerializationError);
         }
-        expect(typeof verdict).toBe('boolean');
       }
     });
 

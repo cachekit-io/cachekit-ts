@@ -29,6 +29,13 @@ interface CompactEvent {
 
 /**
  * Serialize an InvalidationEvent to bytes for transmission.
+ *
+ * Enforces the same size cap as {@link deserializeEvent}: an event over the
+ * cap would be rejected by every subscriber — the invalidation silently lost
+ * and stale L1 entries kept — so it fails HERE, at the publisher, where the
+ * caller (whose namespace makes the event oversized) can act on the error.
+ *
+ * @throws {SerializationError} if the encoded event exceeds the event size cap
  */
 export function serializeEvent(event: InvalidationEvent): Uint8Array {
   const compact: CompactEvent = {
@@ -44,7 +51,13 @@ export function serializeEvent(event: InvalidationEvent): Uint8Array {
     compact.ph = event.paramsHash;
   }
 
-  return encode(compact);
+  const bytes = encode(compact);
+  if (bytes.length > DEFAULT_MAX_INVALIDATION_EVENT_SIZE) {
+    throw new SerializationError(
+      `Invalidation event size ${bytes.length} exceeds max ${DEFAULT_MAX_INVALIDATION_EVENT_SIZE}`
+    );
+  }
+  return bytes;
 }
 
 /**
