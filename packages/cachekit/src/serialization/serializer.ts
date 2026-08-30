@@ -17,7 +17,11 @@ export interface SerializerConfig {
   maxDecodedSize: number;
   /** Maximum object nesting depth (default: 100) */
   maxDepth: number;
-  /** Maximum collection size for Maps, Sets, Arrays, Objects (default: 10000) */
+  /**
+   * Maximum collection size for Maps, Sets, Arrays, Objects (default: 10000).
+   * Enforced on encode and decode; decode-time rejections report the
+   * underlying @msgpack/msgpack option names (maxArrayLength/maxMapLength).
+   */
   maxCollectionSize: number;
 }
 
@@ -27,6 +31,27 @@ const DEFAULT_CONFIG: SerializerConfig = {
   maxDepth: DEFAULT_MAX_DEPTH,
   maxCollectionSize: DEFAULT_MAX_COLLECTION_SIZE,
 };
+
+/**
+ * Build @msgpack/msgpack decode options that bound header-declared sizes.
+ *
+ * Backend bytes are untrusted: without explicit bounds @msgpack/msgpack
+ * preallocates arrays/maps from their headers (`new Array(size)`), so a few
+ * forged bytes claiming a 2^32-element array would OOM the reader before a
+ * single element is decoded. Collection headers are capped up front; string
+ * and bin lengths are additionally bounded by each caller's input-size cap.
+ *
+ * Package-internal: shared by the auto-mode serializer, the interop decoder,
+ * and the invalidation-event decoder so the bounds cannot drift apart.
+ */
+export function boundedDecodeOptions(maxCollectionSize: number, maxDecodedSize: number) {
+  return {
+    maxArrayLength: maxCollectionSize,
+    maxMapLength: maxCollectionSize,
+    maxStrLength: maxDecodedSize,
+    maxBinLength: maxDecodedSize,
+  };
+}
 
 /**
  * Serializer interface for pluggable serialization strategies.
@@ -135,10 +160,12 @@ function normalize(
  *
  * Features:
  * - Deterministic output (sorted keys, normalized values)
- * - Three-layer DoS protection (C4 fix):
- *   1. maxDecodedSize - limit input size to decode()
+ * - Four-layer DoS protection (C4 fix; decode bounds added in LAB-281):
+ *   1. maxDecodedSize - limit input size to decode() and str/bin lengths inside it
  *   2. maxEncodedSize - limit output size from encode()
  *   3. maxDepth - limit nesting depth to prevent stack overflow
+ *   4. maxCollectionSize - bound collection headers at decode time (no
+ *      preallocation from forged headers) and collection sizes at encode time
  */
 export class MessagePackSerializer implements Serializer {
   private readonly config: SerializerConfig;
@@ -206,7 +233,10 @@ export class MessagePackSerializer implements Serializer {
     }
 
     try {
-      const decoded = decode(data);
+      const decoded = decode(
+        data,
+        boundedDecodeOptions(this.config.maxCollectionSize, this.config.maxDecodedSize)
+      );
 
       // Validate depth of decoded object (DoS protection)
       this.validateDepth(decoded, 0);

@@ -1,5 +1,8 @@
 import { encode, decode } from '@msgpack/msgpack';
 import type { InvalidationLevel, InvalidationEvent } from '../l1/types.js';
+import { boundedDecodeOptions } from '../serialization/serializer.js';
+import { DEFAULT_MAX_COLLECTION_SIZE, DEFAULT_MAX_DECODED_SIZE } from '../constants.js';
+import { SerializationError } from '../errors.js';
 
 /**
  * Compact MessagePack keys for wire format.
@@ -42,9 +45,23 @@ export function serializeEvent(event: InvalidationEvent): Uint8Array {
 
 /**
  * Deserialize bytes to an InvalidationEvent.
+ *
+ * Pub/sub bytes are untrusted (same backend-write attacker as cache reads),
+ * so decoding is bounded — full rationale: boundedDecodeOptions in
+ * serializer.ts.
+ *
+ * @throws {SerializationError} if input exceeds the decode size cap
  */
 export function deserializeEvent(data: Uint8Array): InvalidationEvent {
-  const compact = decode(data) as CompactEvent;
+  if (data.length > DEFAULT_MAX_DECODED_SIZE) {
+    throw new SerializationError(
+      `Invalidation event size ${data.length} exceeds max ${DEFAULT_MAX_DECODED_SIZE}`
+    );
+  }
+  const compact = decode(
+    data,
+    boundedDecodeOptions(DEFAULT_MAX_COLLECTION_SIZE, DEFAULT_MAX_DECODED_SIZE)
+  ) as CompactEvent;
 
   return {
     level: compact.l as InvalidationLevel,

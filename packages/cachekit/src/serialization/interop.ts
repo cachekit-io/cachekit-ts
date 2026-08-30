@@ -2,6 +2,7 @@ import { decode as msgpackDecode } from '@msgpack/msgpack';
 import { blake2b } from '@noble/hashes/blake2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { ConfigurationError, SerializationError, ValueTooLargeError } from '../errors.js';
+import { boundedDecodeOptions } from './serializer.js';
 import {
   DEFAULT_MAX_ENCODED_SIZE,
   DEFAULT_MAX_DECODED_SIZE,
@@ -598,17 +599,11 @@ export function decodeInteropValue<T>(data: Uint8Array): T {
   }
   let decoded: unknown;
   try {
-    // Backend bytes are untrusted: without explicit bounds @msgpack/msgpack
-    // preallocates arrays/maps from their headers (`new Array(size)`), so a
-    // few forged bytes claiming a 2^32-element array would OOM the reader
-    // before any element is decoded. Cap collection sizes up front; string,
-    // bin and ext lengths are additionally bounded by the input-size cap.
+    // Backend bytes are untrusted — bound header preallocation (full
+    // rationale: boundedDecodeOptions in serializer.ts).
     decoded = msgpackDecode(data, {
       useBigInt64: true,
-      maxArrayLength: DEFAULT_MAX_COLLECTION_SIZE,
-      maxMapLength: DEFAULT_MAX_COLLECTION_SIZE,
-      maxStrLength: DEFAULT_MAX_DECODED_SIZE,
-      maxBinLength: DEFAULT_MAX_DECODED_SIZE,
+      ...boundedDecodeOptions(DEFAULT_MAX_COLLECTION_SIZE, DEFAULT_MAX_DECODED_SIZE),
     });
   } catch (error) {
     throw new SerializationError(
