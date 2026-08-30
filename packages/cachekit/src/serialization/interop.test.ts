@@ -199,6 +199,50 @@ describe('interop Set encoding budgets (encodeCanonical, shared by both profiles
   });
 });
 
+describe('interop map/object collection cap timing (encodeMapEntries)', () => {
+  it('rejects an over-cap Map before iterating a single entry', () => {
+    // Map.size is O(1), so the cap must fire before the entry loop runs —
+    // otherwise 10,001 tuples materialise pre-cap. The own-property iterator
+    // spy shadows Map.prototype[Symbol.iterator] and counts pulls.
+    const m = new Map(Array.from({ length: 10_001 }, (_, i) => [`k${i}`, 0]));
+    let iterated = 0;
+    const inner = Map.prototype[Symbol.iterator].bind(m);
+    Object.defineProperty(m, Symbol.iterator, {
+      value: function* (): Generator<[string, number]> {
+        for (const e of inner()) {
+          iterated++;
+          yield e as [string, number];
+        }
+      },
+    });
+    expect(() => encodeInteropValue(m)).toThrow(ValueTooLargeError);
+    expect(iterated).toBe(0);
+  });
+
+  it('rejects an over-cap plain object before any key is UTF-8 encoded or sorted', () => {
+    // The first-iterated key is a lone surrogate: if any key reached
+    // utf8Strict, the encoder would throw SerializationError (well-formedness)
+    // instead of ValueTooLargeError. The cap winning pins the ordering — the
+    // count check fires before key materialisation.
+    const obj: Record<string, number> = { '\ud800': 0 };
+    for (let i = 0; i < 10_001; i++) obj[`k${i}`] = 0;
+    expect(() => encodeInteropValue(obj)).toThrow(ValueTooLargeError);
+    // Same object one key under the cap: key encoding now runs and the lone
+    // surrogate is what rejects it (proves the spy key is actually live).
+    const under: Record<string, number> = { '\ud800': 0 };
+    for (let i = 0; i < 9_998; i++) under[`k${i}`] = 0;
+    expect(() => encodeInteropValue(under)).toThrow(/well-formed Unicode|lone surrogates/);
+  });
+
+  it('accepts a Map at exactly the cap with unchanged canonical bytes', () => {
+    const atCap = new Map(Array.from({ length: 10_000 }, (_, i) => [`k${i}`, i]));
+    const bytes = encodeInteropValue(atCap);
+    // Object form of the same entries encodes byte-identically (shared
+    // encodeMapEntries path, key-sorted canonical form).
+    expect(hex(encodeInteropValue(Object.fromEntries(atCap)))).toBe(hex(bytes));
+  });
+});
+
 describe('interop value encoding (value profile)', () => {
   it('maps undefined to nil (no cross-SDK arity contract for values)', () => {
     expect(hex(encodeInteropValue(undefined))).toBe('c0');
