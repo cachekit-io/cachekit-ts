@@ -181,7 +181,7 @@ describe('RedisInvalidationChannel', () => {
       const event = {
         level: 'namespace' as const,
         namespace: 'users',
-        timestamp: Date.now(),
+        timestamp: 12345,
         sourceInstance: 'inst-1',
       };
       channel.publish(event);
@@ -200,7 +200,7 @@ describe('RedisInvalidationChannel', () => {
       channel.publish({
         level: 'namespace',
         namespace: 'users',
-        timestamp: Date.now(),
+        timestamp: 12345,
         sourceInstance: 'inst-1',
       });
 
@@ -387,7 +387,7 @@ describe('RedisInvalidationChannel', () => {
       const oversized = {
         level: 'namespace' as const,
         namespace: 'n'.repeat(5000),
-        timestamp: Date.now(),
+        timestamp: 12345,
         sourceInstance: 'instance-1',
       };
       // publish() is fire-and-forget by contract: the serializeEvent size
