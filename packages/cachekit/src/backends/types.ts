@@ -57,6 +57,27 @@ export interface Backend {
   set(key: string, value: Uint8Array, ttl?: number): Promise<void>;
 
   /**
+   * Optional capability: synchronously reject a TTL this backend cannot
+   * store, BEFORE any I/O. CacheImpl calls this ahead of the reliability
+   * executor, because a deterministic caller error must surface to the
+   * caller — inside the executor, degradation (on by default) would swallow
+   * it, so a `set()` with an invalid TTL would silently never store, and
+   * retry/circuit-breaker would count the caller's mistake as backend
+   * failures. Same rationale as the interop-rejection path in CacheImpl.
+   *
+   * Implement only where the backend has hard TTL bounds (CachekitIO's
+   * protocol rules: reject 0/negative/> 30 days). Backends that map
+   * out-of-range TTLs to a defined behavior (e.g. `ttl <= 0` = no expiry
+   * on Redis/File/Workers KV) omit it.
+   *
+   * Delegating wrappers MUST forward the inner backend's implementation,
+   * or they hide the rejection from CacheImpl.
+   *
+   * @throws {ConfigurationError} when the TTL is invalid for this backend
+   */
+  validateTtl?(ttl: number): void;
+
+  /**
    * Delete a key from the cache.
    *
    * @param key - Cache key to delete
@@ -242,7 +263,13 @@ export interface CachekitIOBackendConfig {
   apiKey: string;
   /** API endpoint URL (default: "https://api.cachekit.io"). Must be HTTPS. */
   apiUrl?: string;
-  /** Default TTL in seconds for set operations without explicit TTL */
+  /**
+   * Default TTL in seconds for set operations without explicit TTL.
+   * Protocol bounds apply (saas-api.md TTL Validation Rules): must be
+   * greater than 0 and at most 2,592,000 (30 days) — out-of-range values
+   * throw ConfigurationError at construction. Unlike File/Memcached,
+   * `0` does NOT mean "never expire" here; the protocol rejects it.
+   */
   defaultTtl?: number;
   /** Request timeout in milliseconds (default: 30000) */
   timeout?: number;

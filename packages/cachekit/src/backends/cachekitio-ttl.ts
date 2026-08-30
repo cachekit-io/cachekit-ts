@@ -1,5 +1,5 @@
 import type { TTLBackend } from './types.js';
-import { CachekitIOCore } from './cachekitio.js';
+import { CachekitIOCore, validateTtl } from './cachekitio.js';
 import { BackendError, TimeoutError } from '../errors.js';
 import { classifyHttpError, classifyNetworkError } from './error-classifier.js';
 
@@ -19,6 +19,11 @@ export class TTLCachekitIO implements TTLBackend {
   }
   set(key: string, value: Uint8Array, ttl?: number) {
     return this.inner.set(key, value, ttl);
+  }
+  // Forwarded like keyPrefix — hiding it would let CacheImpl's reliability
+  // stack swallow the inner backend's TTL rejection. See Backend.validateTtl.
+  validateTtl(ttl: number) {
+    this.inner.validateTtl(ttl);
   }
   delete(key: string) {
     return this.inner.delete(key);
@@ -58,9 +63,12 @@ export class TTLCachekitIO implements TTLBackend {
   }
 
   async refreshTTL(key: string, ttl: number): Promise<boolean> {
+    // Same normative rules as X-CacheKit-TTL (spec: PATCH body follows them).
+    // Before the try — the catch below would wrap it as a BackendError.
+    const validTtl = validateTtl(ttl);
     try {
       const url = `${this.inner['apiUrl']}/v1/cache/${encodeURIComponent(key)}/ttl`;
-      const response = await this.inner.requestJson('PATCH', url, { ttl });
+      const response = await this.inner.requestJson('PATCH', url, { ttl: validTtl });
       if (response.status === 404) return false;
       if (!response.ok)
         throw new BackendError(

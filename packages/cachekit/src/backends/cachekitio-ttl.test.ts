@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { TTLCachekitIO } from './cachekitio-ttl.js';
 import { CachekitIOCore } from './cachekitio.js';
+import { ConfigurationError } from '../errors.js';
 
 function mockResponse(status: number, body?: object): Response {
   return new Response(body ? JSON.stringify(body) : null, {
@@ -49,6 +50,30 @@ describe('TTLCachekitIO', () => {
   it('refreshTTL returns false on 404', async () => {
     fetchSpy.mockResolvedValueOnce(new Response(null, { status: 404 }));
     expect(await ttlBackend.refreshTTL('missing', 3600)).toBe(false);
+  });
+
+  // Protocol TTL Validation Rules apply to the PATCH body too — client-side,
+  // like every sibling TTL backend (redis/memcached/file), not a server 400.
+  it('refreshTTL rejects TTL of 0 without hitting the network', async () => {
+    await expect(ttlBackend.refreshTTL('key', 0)).rejects.toThrow(ConfigurationError);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('refreshTTL rejects TTL above 2,592,000 (30 days)', async () => {
+    await expect(ttlBackend.refreshTTL('key', 2_592_001)).rejects.toThrow(ConfigurationError);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('refreshTTL ceils fractional TTL to whole seconds in the PATCH body', async () => {
+    fetchSpy.mockResolvedValueOnce(mockResponse(200, { success: true }));
+    await ttlBackend.refreshTTL('key', 0.5);
+    const [, opts] = fetchSpy.mock.calls[0];
+    expect(JSON.parse(new TextDecoder().decode(opts.body))).toEqual({ ttl: 1 });
+  });
+
+  it('forwards validateTtl from the core backend', () => {
+    expect(() => ttlBackend.validateTtl(0)).toThrow(ConfigurationError);
+    expect(() => ttlBackend.validateTtl(600)).not.toThrow();
   });
 
   it('sends JSON content type for TTL operations', async () => {

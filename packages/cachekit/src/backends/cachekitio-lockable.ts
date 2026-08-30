@@ -28,6 +28,11 @@ export class LockableCachekitIO implements LockableBackend {
   set(key: string, value: Uint8Array, ttl?: number) {
     return this.inner.set(key, value, ttl);
   }
+  // Forwarded like keyPrefix — hiding it would let CacheImpl's reliability
+  // stack swallow the inner backend's TTL rejection. See Backend.validateTtl.
+  validateTtl(ttl: number) {
+    this.inner.validateTtl(ttl);
+  }
   delete(key: string) {
     return this.inner.delete(key);
   }

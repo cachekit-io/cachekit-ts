@@ -279,12 +279,12 @@ failure mode it prevents.
 
 Four backends implement the same `Backend` interface (raw bytes in/out) and plug into `createCache({ backend })` interchangeably:
 
-| Backend           | Import                                                      | Runtime    | Notes                                                                                |
-| ----------------- | ----------------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------ |
-| Redis             | `redis` from `@cachekit-io/cachekit`                        | Node       | ioredis; TTL inspection + distributed locking                                        |
-| CachekitIO (SaaS) | `cachekitio` from `@cachekit-io/cachekit`                   | Node, edge | fetch-based; TTL + locking variants                                                  |
-| Memcached         | `memcached` from `@cachekit-io/cachekit/backends/memcached` | Node       | memjs (binary protocol, multi-server); requires the optional `memjs` peer dependency |
-| File              | `file` from `@cachekit-io/cachekit/backends/file`           | Node       | local disk, on-disk format shared with cachekit-py                                   |
+| Backend           | Import                                                      | Runtime    | Notes                                                                                                                                                                                 |
+| ----------------- | ----------------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Redis             | `redis` from `@cachekit-io/cachekit`                        | Node       | ioredis; TTL inspection + distributed locking                                                                                                                                         |
+| CachekitIO (SaaS) | `cachekitio` from `@cachekit-io/cachekit`                   | Node, edge | fetch-based; TTL + locking variants; accepts finite TTLs > 0 up to 2,592,000 s (30 days), fractional values round up; invalid values throw `ConfigurationError` per the protocol spec |
+| Memcached         | `memcached` from `@cachekit-io/cachekit/backends/memcached` | Node       | memjs (binary protocol, multi-server); requires the optional `memjs` peer dependency                                                                                                  |
+| File              | `file` from `@cachekit-io/cachekit/backends/file`           | Node       | local disk, on-disk format shared with cachekit-py                                                                                                                                    |
 
 The Memcached and File backends are **Node-runtime only** and live behind subpath exports, so browser/edge bundles that import the package root never pull in `memjs` or `node:fs`.
 
