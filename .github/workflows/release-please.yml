@@ -72,9 +72,34 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      checks: read
       id-token: write
 
     steps:
+      # The tag path needs no check: release-please only tags commits on main,
+      # where "CI Success" is a required check. A force_release dispatch
+      # produces no tag, so the checkout below falls back to github.sha — the
+      # tip of whatever ref was selected at dispatch, which may never have
+      # passed CI. Verify that commit before any step can mint the OIDC token.
+      # Keying off the empty tag (not the force_release input) targets exactly
+      # the case where the fallback is taken. This is an API query, so unlike
+      # the test step it replaces, it runs no dependency code beside the token.
+      - name: Verify CI passed for forced publish
+        if: needs.release-please.outputs.cachekit--tag_name == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          conclusion=$(gh api "repos/$REPO/commits/$SHA/check-runs" \
+            --jq '[.check_runs[] | select(.name == "CI Success")]
+                  | sort_by(.started_at) | last | .conclusion // "missing"')
+          if [ "$conclusion" != "success" ]; then
+            echo "::error::Refusing to publish $SHA — 'CI Success' is '$conclusion', not 'success'."
+            exit 1
+          fi
+          echo "CI Success verified for $SHA"
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ needs.release-please.outputs.cachekit--tag_name || github.sha }}
@@ -103,9 +128,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      # No test step: ci.yml already ran build+test on this exact commit
-      # (required "CI Success" check on main), and every extra step here runs
-      # dependency code beside the OIDC token.
+      # No test step: ci.yml already ran build+test on this exact commit, and
+      # every extra step here runs dependency code beside the OIDC token. That
+      # holds on the tag path via the required "CI Success" check on main, and
+      # on the forced path via the verification step above.
       - name: Build
         run: pnpm build
 
