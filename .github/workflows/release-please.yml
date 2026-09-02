@@ -91,9 +91,18 @@ jobs:
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
         run: |
-          conclusion=$(gh api "repos/$REPO/commits/$SHA/check-runs" \
-            --jq '[.check_runs[] | select(.name == "CI Success")]
-                  | sort_by(.started_at) | last | .conclusion // "missing"')
+          # check_name filters server-side so the default 30-item page cannot
+          # hide the run we need — a commit on main accumulates check-runs from
+          # every workflow plus the ci.yml node matrix and any re-runs.
+          # --paginate --slurp keeps it correct even past 100 re-runs of that
+          # one check. Both halves are load-bearing: --paginate alone applies
+          # gh's own --jq once per page and concatenates the results, which
+          # would make $conclusion multi-line and never equal "success"; and
+          # --slurp is rejected by gh when combined with --jq, so the filter
+          # has to run in a piped jq (preinstalled on ubuntu-latest).
+          conclusion=$(gh api --paginate --slurp \
+            "repos/$REPO/commits/$SHA/check-runs?check_name=CI+Success&per_page=100" \
+            | jq -r '[.[].check_runs[]] | sort_by(.started_at) | last | .conclusion // "missing"')
           if [ "$conclusion" != "success" ]; then
             echo "::error::Refusing to publish $SHA — 'CI Success' is '$conclusion', not 'success'."
             exit 1
