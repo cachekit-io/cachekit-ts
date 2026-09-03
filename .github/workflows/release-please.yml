@@ -59,11 +59,22 @@ jobs:
           config-file: release-please-config.json
           token: ${{ steps.app-token.outputs.token }}
 
-      - name: Assign release PR
-        if: ${{ steps.release.outputs.pr }}
-        run: gh pr edit "${{ fromJson(steps.release.outputs.pr).number }}" --repo "${{ github.repository }}" --add-assignee 27Bslash6
+      # outputs.pr is only prs[0]; under separate-pull-requests a cycle can
+      # open one PR per package, so iterate outputs.prs (all of them, LAB-898).
+      - name: Assign release PRs
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # Via env, not inline ${{ }} in the script — the PR JSON carries
+          # branch/title text and inline interpolation is an injection vector.
+          PRS: ${{ steps.release.outputs.prs }}
+        # Explicit `shell: bash` for pipefail, so a jq parse failure fails the
+        # step instead of silently assigning nothing.
+        shell: bash
+        run: |
+          jq -r '.[].number' <<<"$PRS" | while read -r pr_number; do
+            gh pr edit "$pr_number" --repo "$GITHUB_REPOSITORY" --add-assignee 27Bslash6
+          done
 
   publish-cachekit:
     name: Publish @cachekit-io/cachekit
