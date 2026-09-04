@@ -339,6 +339,13 @@ function encodeMapEntries(
   depth: number,
   sink: ChunkSink
 ): void {
+  // Cap BEFORE materialising key encodings: map keys are unique by
+  // construction, so the entry count is final up front — unlike Sets, no
+  // dedupe can shrink it. Checking here (rather than in encodeMapHeader
+  // after the map/sort below) keeps an over-cap map from forcing N
+  // Uint8Array allocations plus an O(N log N) sort that never pass through
+  // pushChunk's byte budget.
+  checkCollectionSize(entries.length, 'map');
   // Sort keys by UTF-8 byte order (== Unicode code point order). The default
   // Array.prototype.sort comparator orders UTF-16 code units and gets
   // supplementary-plane characters backwards (map_key_sort_supplementary).
@@ -454,6 +461,9 @@ function encodeCanonical(
       encodeCanonical(item, profile, depth + 1, sink);
     }
   } else if (v instanceof Map) {
+    // Map.size is O(1) — reject over-cap maps before iterating at all, so
+    // the tuple materialisation below is also bounded.
+    checkCollectionSize(v.size, 'map');
     const entries: [string, unknown][] = [];
     for (const [k, val] of v) {
       if (typeof k !== 'string') {
