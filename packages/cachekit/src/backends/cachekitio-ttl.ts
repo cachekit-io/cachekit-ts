@@ -1,5 +1,5 @@
 import type { TTLBackend } from './types.js';
-import { CachekitIOCore, validateTtl } from './cachekitio.js';
+import { CachekitIOCore, validateTtl, encodeKey } from './cachekitio.js';
 import { BackendError, TimeoutError } from '../errors.js';
 import { classifyHttpError, classifyNetworkError } from './error-classifier.js';
 
@@ -37,7 +37,7 @@ export class TTLCachekitIO implements TTLBackend {
 
   async getTTL(key: string): Promise<number | null> {
     try {
-      const url = `${this.inner['apiUrl']}/v1/cache/${encodeURIComponent(key)}/ttl`;
+      const url = `${this.inner['apiUrl']}/v1/cache/${encodeKey(key)}/ttl`;
       const response = await this.inner.requestJson('GET', url);
       if (response.status === 404) return null;
       if (!response.ok)
@@ -67,7 +67,7 @@ export class TTLCachekitIO implements TTLBackend {
     // Before the try — the catch below would wrap it as a BackendError.
     const validTtl = validateTtl(ttl);
     try {
-      const url = `${this.inner['apiUrl']}/v1/cache/${encodeURIComponent(key)}/ttl`;
+      const url = `${this.inner['apiUrl']}/v1/cache/${encodeKey(key)}/ttl`;
       const response = await this.inner.requestJson('PATCH', url, { ttl: validTtl });
       if (response.status === 404) return false;
       if (!response.ok)

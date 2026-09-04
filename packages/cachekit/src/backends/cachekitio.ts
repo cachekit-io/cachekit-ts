@@ -6,6 +6,34 @@ import { buildMetricsHeaders } from './metrics-headers.js';
 import { classifyHttpError, classifyNetworkError } from './error-classifier.js';
 import { validateCachekitUrl } from './url-validator.js';
 
+/**
+ * Percent-encode a cache key for use as a single URL path segment.
+ *
+ * `encodeURIComponent` leaves `.` untouched (RFC-3986 unreserved), so a key
+ * of exactly `.` or `..` triggers dot-segment removal in the HTTP client's
+ * URL parser — the request escapes /v1/cache/ before it hits the wire
+ * (CWE-22).
+ *
+ * Python's fix encodes dots to `%2E`, which works because Python HTTP
+ * clients (httpx/requests) use RFC-3986 where `%2E` is opaque. In JS,
+ * `fetch`/undici parse URLs per the WHATWG URL Standard, which treats `%2E`
+ * identically to `.` for dot-segment removal — there is no percent-encoding
+ * of `.` that survives WHATWG normalisation in a path segment. We reject
+ * these keys instead: fail-fast with a clear error rather than silently
+ * sending an authenticated request to the wrong path.
+ */
+export function encodeKey(key: string): string {
+  const encoded = encodeURIComponent(key);
+  if (encoded === '.' || encoded === '..') {
+    throw new ConfigurationError(
+      `Cache key "${key}" is a bare dot-segment and cannot be used as a URL path segment — ` +
+        `the WHATWG URL parser (used by fetch) would collapse it, sending the request outside ` +
+        `/v1/cache/ (CWE-22). Use a namespaced key instead.`
+    );
+  }
+  return encoded;
+}
+
 const DEFAULT_API_URL = 'https://api.cachekit.io';
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -199,7 +227,7 @@ export class CachekitIOCore implements Backend {
   // ── Internal ──────────────────────────────────────────────
 
   private cacheUrl(key: string): string {
-    return `${this.apiUrl}/v1/cache/${encodeURIComponent(key)}`;
+    return `${this.apiUrl}/v1/cache/${encodeKey(key)}`;
   }
 
   private async request(
