@@ -83,30 +83,77 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      checks: read
       id-token: write
 
     steps:
+      # The tag path needs no check: release-please only tags commits on main,
+      # where "CI Success" is a required check. A force_release dispatch
+      # produces no tag, so the checkout below falls back to github.sha — the
+      # tip of whatever ref was selected at dispatch, which may never have
+      # passed CI. Verify that commit before any step can mint the OIDC token.
+      # Keying off the empty tag (not the force_release input) targets exactly
+      # the case where the fallback is taken. This is an API query, so unlike
+      # the test step it replaces, it runs no dependency code beside the token.
+      - name: Verify CI passed for forced publish
+        if: needs.release-please.outputs.cachekit--tag_name == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          # check_name filters server-side so the default 30-item page cannot
+          # hide the run we need — a commit on main accumulates check-runs from
+          # every workflow plus the ci.yml node matrix and any re-runs.
+          # --paginate --slurp keeps it correct even past 100 re-runs of that
+          # one check. Both halves are load-bearing: --paginate alone applies
+          # gh's own --jq once per page and concatenates the results, which
+          # would make $conclusion multi-line and never equal "success"; and
+          # --slurp is rejected by gh when combined with --jq, so the filter
+          # has to run in a piped jq (preinstalled on ubuntu-latest).
+          conclusion=$(gh api --paginate --slurp \
+            "repos/$REPO/commits/$SHA/check-runs?check_name=CI+Success&per_page=100" \
+            | jq -r '[.[].check_runs[]] | sort_by(.started_at) | last | .conclusion // "missing"')
+          if [ "$conclusion" != "success" ]; then
+            echo "::error::Refusing to publish $SHA — 'CI Success' is '$conclusion', not 'success'."
+            exit 1
+          fi
+          echo "CI Success verified for $SHA"
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ needs.release-please.outputs.cachekit--tag_name || github.sha }}
+          # Publish-only job (no git writes); don't leave the token on disk.
+          persist-credentials: false
 
+      # No `registry-url`: it writes a token-era .npmrc whose
+      # `_authToken=${NODE_AUTH_TOKEN}` placeholder has no env to resolve
+      # (pnpm: `[WARN] Failed to replace env in config`). pnpm publishes to its
+      # default registry (registry.npmjs.org) and OIDC supplies the auth.
       - name: Setup Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
 
       - name: Install pnpm
         uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
 
+      # This job can mint the npm OIDC publish token. --ignore-scripts closes
+      # the wormable install-time vector (Shai-Hulud-class lifecycle scripts,
+      # including pnpm-workspace.yaml's allowBuilds allowlist — nothing here
+      # needs them); --frozen-lockfile pins the graph to what CI verified.
+      # The build below still executes dependency code beside the token, so
+      # exposure is narrowed, not closed — the structural fix is build/publish
+      # job separation (LAB-2731).
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
+      # No test step: ci.yml already ran build+test on this exact commit, and
+      # every extra step here runs dependency code beside the OIDC token. That
+      # holds on the tag path via the required "CI Success" check on main, and
+      # on the forced path via the verification step above.
       - name: Build
         run: pnpm build
-
-      - name: Test
-        run: pnpm test
 
       # Auth is npm OIDC trusted publishing via a package-level trusted
       # publisher on npmjs.com — the repo has NO npm token secret (LAB-831).
@@ -136,11 +183,11 @@ jobs:
           # Publish-only job (no git writes); don't leave the token on disk.
           persist-credentials: false
 
+      # No `registry-url` — same reason as publish-cachekit.
       - name: Setup Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
 
       - name: Install pnpm
         uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
@@ -169,8 +216,11 @@ jobs:
           cp "/tmp/binaryen-version_${BINARYEN_VERSION}/bin/wasm-opt" "$HOME/.local/bin/"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      # --ignore-scripts: same OIDC-exposure rule as publish-cachekit; build.sh
+      # is pure cargo/wasm-bindgen/wasm-opt and needs no dependency scripts.
+      # cargo build.rs/proc-macros still run beside the token — LAB-2731.
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Build wasm artifact
         run: pnpm --filter @cachekit-io/cachekit-core-wasm build:wasm
