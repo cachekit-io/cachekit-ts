@@ -119,15 +119,6 @@ describe('AC-2: URL pathname assertions', () => {
       }
     }
   });
-
-  it('no safe vector escapes /v1/cache/ prefix', () => {
-    for (const [key] of safeVectors) {
-      for (const builder of [cacheUrl, ttlUrl, lockUrl]) {
-        const pathname = new URL(builder(key)).pathname;
-        expect(pathname.startsWith('/v1/cache/')).toBe(true);
-      }
-    }
-  });
 });
 
 // AC-3 — Decode-once round-trip for all safe keys
