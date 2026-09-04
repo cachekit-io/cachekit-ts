@@ -181,7 +181,7 @@ describe('RedisInvalidationChannel', () => {
       const event = {
         level: 'namespace' as const,
         namespace: 'users',
-        timestamp: Date.now(),
+        timestamp: 12345,
         sourceInstance: 'inst-1',
       };
       channel.publish(event);
@@ -200,7 +200,7 @@ describe('RedisInvalidationChannel', () => {
       channel.publish({
         level: 'namespace',
         namespace: 'users',
-        timestamp: Date.now(),
+        timestamp: 12345,
         sourceInstance: 'inst-1',
       });
 
@@ -377,6 +377,23 @@ describe('RedisInvalidationChannel', () => {
       await channel.start();
       // Stop should not throw even if cleanup fails
       await expect(channel.stop()).resolves.toBeUndefined();
+    });
+  });
+
+  describe('LAB-2487: oversized event on publish', () => {
+    it('publish() never throws and never transmits an event serializeEvent rejects', () => {
+      const mockRedis = createMockRedis();
+      const channel = new RedisInvalidationChannel(mockRedis);
+      const oversized = {
+        level: 'namespace' as const,
+        namespace: 'n'.repeat(5000),
+        timestamp: 12345,
+        sourceInstance: 'instance-1',
+      };
+      // publish() is fire-and-forget by contract: the serializeEvent size
+      // rejection must be logged, not propagated into the caller's write path.
+      expect(() => channel.publish(oversized)).not.toThrow();
+      expect(mockRedis.publish).not.toHaveBeenCalled();
     });
   });
 });

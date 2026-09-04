@@ -64,7 +64,20 @@ export class RedisInvalidationChannel {
    * This is intentional: invalidation is best-effort optimization.
    */
   publish(event: InvalidationEvent): void {
-    const data = serializeEvent(event);
+    let data: Uint8Array;
+    try {
+      data = serializeEvent(event);
+    } catch (err) {
+      // serializeEvent throws on an oversized event (LAB-2487) — every
+      // subscriber would reject it anyway, so log loudly here rather than let
+      // the invalidation vanish downstream. publish() stays never-throw: a
+      // failed best-effort invalidation must not fail the caller's write.
+      logError(
+        '[cachekit] Failed to serialize invalidation event:',
+        err instanceof Error ? err.message : String(err)
+      );
+      return;
+    }
 
     // Fire-and-forget - don't await, don't throw
     this.redis.publish(this.channelName, Buffer.from(data)).catch((err) => {

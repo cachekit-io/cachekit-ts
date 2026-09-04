@@ -49,4 +49,24 @@ describe('InvalidationEvent serialization', () => {
     // map16 claiming 65535 entries.
     expect(() => deserializeEvent(Uint8Array.of(0xde, 0xff, 0xff))).toThrow();
   });
+
+  it('rejects an oversized event at the PUBLISHER, not just the subscriber (LAB-2487)', () => {
+    // If only deserializeEvent enforced the cap, an oversized event would be
+    // silently rejected by every subscriber — invalidation lost, stale L1
+    // served — with no signal to the publisher. serializeEvent must throw so
+    // the caller can act.
+    const oversized = createInvalidationEvent('namespace', 'instance-1', {
+      namespace: 'n'.repeat(5000),
+    });
+    expect(() => serializeEvent(oversized)).toThrow(/exceeds max/);
+
+    // Publish/subscribe symmetry: anything serializeEvent accepts,
+    // deserializeEvent must accept back (no event a publisher can emit is
+    // droppable on read for size).
+    const atSanityEdge = createInvalidationEvent('params', 'instance-1', {
+      namespace: 'n'.repeat(1000),
+      paramsHash: 'f'.repeat(64),
+    });
+    expect(deserializeEvent(serializeEvent(atSanityEdge)).namespace).toBe('n'.repeat(1000));
+  });
 });

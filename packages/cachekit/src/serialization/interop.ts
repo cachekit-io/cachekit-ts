@@ -2,7 +2,7 @@ import { decode as msgpackDecode } from '@msgpack/msgpack';
 import { blake2b } from '@noble/hashes/blake2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { ConfigurationError, SerializationError, ValueTooLargeError } from '../errors.js';
-import { boundedDecodeOptions } from './serializer.js';
+import { assertDecodeDepth, boundedDecodeOptions } from './serializer.js';
 import {
   DEFAULT_MAX_ENCODED_SIZE,
   DEFAULT_MAX_DECODED_SIZE,
@@ -597,6 +597,9 @@ export function decodeInteropValue<T>(data: Uint8Array): T {
       `Input size ${data.length} exceeds max ${DEFAULT_MAX_DECODED_SIZE}`
     );
   }
+  // Bound nesting depth before the decoder eagerly preallocates per-header
+  // collections (LAB-2487, full rationale: assertDecodeDepth in serializer.ts).
+  assertDecodeDepth(data, DEFAULT_MAX_DEPTH);
   let decoded: unknown;
   try {
     // Backend bytes are untrusted — bound header preallocation (full
