@@ -1,5 +1,5 @@
 import type { LockableBackend } from './types.js';
-import { CachekitIOCore } from './cachekitio.js';
+import { CachekitIOCore, encodeKey } from './cachekitio.js';
 import { BackendError, TimeoutError } from '../errors.js';
 import { classifyHttpError, classifyNetworkError } from './error-classifier.js';
 
@@ -33,6 +33,9 @@ export class LockableCachekitIO implements LockableBackend {
   validateTtl(ttl: number) {
     this.inner.validateTtl(ttl);
   }
+  validateKey(key: string) {
+    this.inner.validateKey(key);
+  }
   delete(key: string) {
     return this.inner.delete(key);
   }
@@ -44,8 +47,9 @@ export class LockableCachekitIO implements LockableBackend {
   }
 
   async acquireLock(key: string, timeoutMs = 5000): Promise<string | null> {
+    // Before the try — the catch below would wrap encodeKey's ConfigurationError as a BackendError.
+    const url = `${this.inner['apiUrl']}/v1/cache/${encodeKey(key)}/lock`;
     try {
-      const url = `${this.inner['apiUrl']}/v1/cache/${encodeURIComponent(key)}/lock`;
       const response = await this.inner.requestJson('POST', url, { timeout_ms: timeoutMs });
       // Contested lock: the protocol spec (saas-api.md) answers 409 Conflict;
       // the deployed SaaS currently answers 200 {lock_id: null}. Both mean
@@ -75,8 +79,9 @@ export class LockableCachekitIO implements LockableBackend {
   }
 
   async releaseLock(key: string, lockId: string): Promise<boolean> {
+    // Before the try — the catch below would wrap encodeKey's ConfigurationError as a BackendError.
+    const url = `${this.inner['apiUrl']}/v1/cache/${encodeKey(key)}/lock`;
     try {
-      const url = `${this.inner['apiUrl']}/v1/cache/${encodeURIComponent(key)}/lock`;
       const response = await this.inner.requestJson('DELETE', url, undefined, {
         [LOCK_ID_HEADER]: lockId,
       });

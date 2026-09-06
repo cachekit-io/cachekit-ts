@@ -272,6 +272,53 @@ describe('Cache Integration', () => {
       expect(setCalls).toBe(1);
       await boundedCache.close();
     });
+
+    // LAB-2877 regression: a backend's key rejection (Backend.validateKey —
+    // CachekitIO's reserved path segments) is the same kind of deterministic
+    // caller error: inside the executor it would be retried, counted by the
+    // circuit breaker, and swallowed by degradation into a silent miss or a
+    // set() that never stores.
+    it('surfaces a backend key rejection despite default-on degradation', async () => {
+      const inner = new InMemoryBackend();
+      const calls: string[] = [];
+      const guardedBackend: Backend = {
+        async get(key) {
+          calls.push('get');
+          return inner.get(key);
+        },
+        async set(key, value, ttl) {
+          calls.push('set');
+          return inner.set(key, value, ttl!);
+        },
+        async delete(key) {
+          calls.push('delete');
+          return inner.delete(key);
+        },
+        async exists(key) {
+          calls.push('exists');
+          return inner.exists(key);
+        },
+        close: () => inner.close(),
+        validateKey(key) {
+          if (key === '..') throw new ConfigurationError('reserved path segment');
+        },
+      };
+
+      const guardedCache = createCache({
+        backend: guardedBackend,
+        compression: false,
+        l1: { enabled: false },
+      });
+      await expect(guardedCache.get('..')).rejects.toThrow(ConfigurationError);
+      await expect(guardedCache.set('..', 'value')).rejects.toThrow(ConfigurationError);
+      await expect(guardedCache.delete('..')).rejects.toThrow(ConfigurationError);
+      await expect(guardedCache.exists('..')).rejects.toThrow(ConfigurationError);
+      expect(calls).toEqual([]); // rejected before the reliability executor ran
+
+      await guardedCache.set('test:key-ok', 'value');
+      expect(calls).toEqual(['set']);
+      await guardedCache.close();
+    });
   });
 
   describe('Compression (ByteStorage)', () => {

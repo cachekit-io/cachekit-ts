@@ -6,6 +6,43 @@ import { buildMetricsHeaders } from './metrics-headers.js';
 import { classifyHttpError, classifyNetworkError } from './error-classifier.js';
 import { validateCachekitUrl } from './url-validator.js';
 
+/**
+ * Path segments a key may never encode to (protocol spec/saas-api.md
+ * § Cache-Key Path Encoding, rule 2). `.` / `..` are dot segments that every
+ * WHATWG parser — fetch's and the SaaS worker's own — removes before routing,
+ * `%2E` forms included, so no encoding keeps them inside /v1/cache/ (CWE-22).
+ * `health` / `ttl` / `lock` are live route tokens at that level. The SaaS
+ * router matches all five exactly and case-sensitively, so only these
+ * lowercase words are reserved: `a:..`, `..a`, `HEALTH`, `ttls` transmit.
+ */
+const RESERVED_SEGMENTS = new Set(['.', '..', 'health', 'ttl', 'lock']);
+
+/**
+ * Percent-encode a cache key as a single URL path segment, or throw
+ * `ConfigurationError` if it is a reserved segment (RESERVED_SEGMENTS) or
+ * malformed UTF-16. Every other key is exactly `encodeURIComponent(key)`:
+ * decode-equivalent to cachekit-py and cachekit-rs, which additionally
+ * encode `! * ' ( )` (spec rule 4; fixture `encoded_alternates`).
+ */
+export function encodeKey(key: string): string {
+  let encoded: string;
+  try {
+    encoded = encodeURIComponent(key);
+  } catch (error) {
+    // Lone surrogate: encodeURIComponent throws a raw URIError. Every SDK error is a CachekitError.
+    throw new ConfigurationError('Cache key is not well-formed UTF-16 (lone surrogate)', {
+      cause: error,
+    });
+  }
+  if (RESERVED_SEGMENTS.has(encoded)) {
+    throw new ConfigurationError(
+      `Cache key "${key}" is a reserved path segment (one of ${[...RESERVED_SEGMENTS].join(' ')}) ` +
+        `and cannot be addressed at /v1/cache/{key} (CWE-22). Use a namespaced key instead.`
+    );
+  }
+  return encoded;
+}
+
 const DEFAULT_API_URL = 'https://api.cachekit.io';
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -76,9 +113,10 @@ export class CachekitIOCore implements Backend {
 
   async get(key: string): Promise<Uint8Array | null> {
     this.ensureNotClosed();
+    const url = this.cacheUrl(key);
 
     try {
-      const response = await this.request('GET', this.cacheUrl(key));
+      const response = await this.request('GET', url);
 
       if (response.status === 404) {
         return null;
@@ -101,14 +139,21 @@ export class CachekitIOCore implements Backend {
     validateTtl(ttl);
   }
 
+  /** Backend.validateKey capability — rejects a reserved path segment
+   * synchronously, before the reliability executor can swallow it. */
+  validateKey(key: string): void {
+    encodeKey(key);
+  }
+
   async set(key: string, value: Uint8Array, ttl?: number): Promise<void> {
     this.ensureNotClosed();
 
     const effectiveTtl = validateTtl(ttl ?? this.defaultTtl);
     const headers: Record<string, string> = { 'X-CacheKit-TTL': String(effectiveTtl) };
+    const url = this.cacheUrl(key);
 
     try {
-      const response = await this.request('PUT', this.cacheUrl(key), {
+      const response = await this.request('PUT', url, {
         body: value,
         headers,
       });
@@ -124,9 +169,10 @@ export class CachekitIOCore implements Backend {
 
   async delete(key: string): Promise<boolean> {
     this.ensureNotClosed();
+    const url = this.cacheUrl(key);
 
     try {
-      const response = await this.request('DELETE', this.cacheUrl(key));
+      const response = await this.request('DELETE', url);
 
       if (response.status === 404) {
         return false;
@@ -145,9 +191,10 @@ export class CachekitIOCore implements Backend {
 
   async exists(key: string): Promise<boolean> {
     this.ensureNotClosed();
+    const url = this.cacheUrl(key);
 
     try {
-      const response = await this.request('HEAD', this.cacheUrl(key));
+      const response = await this.request('HEAD', url);
 
       if (response.status === 404) {
         return false;
@@ -198,8 +245,10 @@ export class CachekitIOCore implements Backend {
 
   // ── Internal ──────────────────────────────────────────────
 
+  /** Call before the network `try`: encodeKey's ConfigurationError must reach
+   * the caller as-is, not wrapped by the catch as a BackendError. */
   private cacheUrl(key: string): string {
-    return `${this.apiUrl}/v1/cache/${encodeURIComponent(key)}`;
+    return `${this.apiUrl}/v1/cache/${encodeKey(key)}`;
   }
 
   private async request(
