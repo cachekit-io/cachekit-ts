@@ -16,7 +16,7 @@ Instead, use [GitHub's private vulnerability reporting](https://github.com/cache
 
 ## Cache-Key Path Encoding (CWE-22)
 
-The CachekitIO backend transmits cache keys as a single URL path segment (`/v1/cache/{key}`). Keys are percent-encoded with `encodeURIComponent`; keys that are exactly `.` or `..` are rejected with a `ConfigurationError` because the WHATWG URL Standard (used by `fetch` / undici / Cloudflare Workers) treats both literal and percent-encoded dots (`%2E`) as dot-segments and removes them before the request reaches the wire.
+The CachekitIO backend transmits cache keys as a single URL path segment (`/v1/cache/{key}`, `…/{key}/ttl`, `…/{key}/lock`). Keys are percent-encoded with `encodeURIComponent`; a key that is exactly `.`, `..`, `health`, `ttl` or `lock` is rejected with a `ConfigurationError` before any request is built ([protocol `spec/saas-api.md` § Cache-Key Path Encoding](https://github.com/cachekit-io/protocol/blob/main/spec/saas-api.md#cache-key-path-encoding), rule 2): the WHATWG URL parser behind `fetch` removes literal and percent-encoded (`%2E`) dot segments before the request reaches the wire, and the other three words are live route tokens at that path level. Every other key — including `a:..` and every canonical `ns:…` key — is sent unchanged and decodes once server-side to the original key.
 
 ## Scope
 

@@ -7,28 +7,38 @@ import { classifyHttpError, classifyNetworkError } from './error-classifier.js';
 import { validateCachekitUrl } from './url-validator.js';
 
 /**
- * Percent-encode a cache key for use as a single URL path segment.
+ * Reserved `{key}` path segments (protocol spec/saas-api.md § Cache-Key Path
+ * Encoding, rule 2). Two hazards, one CWE-22 class — both land the bearer
+ * token on a route the SaaS key validator never sees:
  *
- * `encodeURIComponent` leaves `.` untouched (RFC-3986 unreserved), so a key
- * of exactly `.` or `..` triggers dot-segment removal in the HTTP client's
- * URL parser — the request escapes /v1/cache/ before it hits the wire
- * (CWE-22).
+ * - Dot segments `.` / `..`: `encodeURIComponent` leaves `.` raw (RFC-3986
+ *   unreserved), and the WHATWG URL parser behind `fetch` (undici, Workers)
+ *   removes the segment before the request leaves the process — `..` → `/v1/`,
+ *   `../ttl` → `/v1/ttl`. `%2E` does not help: WHATWG treats `%2e`/`%2e%2e`
+ *   as dot segments too, and so does the SaaS worker's own `new URL()`.
+ * - Route tokens `health` / `ttl` / `lock`: `/v1/cache/health` IS the health
+ *   endpoint, and a trailing `ttl` / `lock` selects a sub-resource, so the
+ *   key routes elsewhere or is read as an empty key. The SaaS router matches
+ *   these case-sensitively and exactly, so only the lowercase words are reserved.
  *
- * Python's fix encodes dots to `%2E`, which works because Python HTTP
- * clients (httpx/requests) use RFC-3986 where `%2E` is opaque. In JS,
- * `fetch`/undici parse URLs per the WHATWG URL Standard, which treats `%2E`
- * identically to `.` for dot-segment removal — there is no percent-encoding
- * of `.` that survives WHATWG normalisation in a path segment. We reject
- * these keys instead: fail-fast with a clear error rather than silently
- * sending an authenticated request to the wrong path.
+ * Case-sensitive, exact: `a:..`, `..a`, `HEALTH`, `ttls` are inert and
+ * transmitted unchanged.
+ */
+const RESERVED_SEGMENTS = new Set(['.', '..', 'health', 'ttl', 'lock']);
+
+/**
+ * Percent-encode a cache key as a single URL path segment, or throw
+ * `ConfigurationError` if it is a reserved segment (see RESERVED_SEGMENTS).
+ * Every other key is exactly `encodeURIComponent(key)`, so wire bytes match
+ * cachekit-rs (`encode_key`) and decode-equivalently match cachekit-py.
  */
 export function encodeKey(key: string): string {
   const encoded = encodeURIComponent(key);
-  if (encoded === '.' || encoded === '..') {
+  if (RESERVED_SEGMENTS.has(encoded)) {
     throw new ConfigurationError(
-      `Cache key "${key}" is a bare dot-segment and cannot be used as a URL path segment — ` +
-        `the WHATWG URL parser (used by fetch) would collapse it, sending the request outside ` +
-        `/v1/cache/ (CWE-22). Use a namespaced key instead.`
+      `Cache key "${key}" is a reserved path segment (one of . .. health ttl lock) and cannot ` +
+        `be addressed at /v1/cache/{key}: the URL parser or the SaaS router would route it ` +
+        `elsewhere (CWE-22). Use a namespaced key instead.`
     );
   }
   return encoded;
@@ -104,9 +114,10 @@ export class CachekitIOCore implements Backend {
 
   async get(key: string): Promise<Uint8Array | null> {
     this.ensureNotClosed();
+    const url = this.cacheUrl(key);
 
     try {
-      const response = await this.request('GET', this.cacheUrl(key));
+      const response = await this.request('GET', url);
 
       if (response.status === 404) {
         return null;
@@ -134,9 +145,10 @@ export class CachekitIOCore implements Backend {
 
     const effectiveTtl = validateTtl(ttl ?? this.defaultTtl);
     const headers: Record<string, string> = { 'X-CacheKit-TTL': String(effectiveTtl) };
+    const url = this.cacheUrl(key);
 
     try {
-      const response = await this.request('PUT', this.cacheUrl(key), {
+      const response = await this.request('PUT', url, {
         body: value,
         headers,
       });
@@ -152,9 +164,10 @@ export class CachekitIOCore implements Backend {
 
   async delete(key: string): Promise<boolean> {
     this.ensureNotClosed();
+    const url = this.cacheUrl(key);
 
     try {
-      const response = await this.request('DELETE', this.cacheUrl(key));
+      const response = await this.request('DELETE', url);
 
       if (response.status === 404) {
         return false;
@@ -173,9 +186,10 @@ export class CachekitIOCore implements Backend {
 
   async exists(key: string): Promise<boolean> {
     this.ensureNotClosed();
+    const url = this.cacheUrl(key);
 
     try {
-      const response = await this.request('HEAD', this.cacheUrl(key));
+      const response = await this.request('HEAD', url);
 
       if (response.status === 404) {
         return false;
@@ -226,6 +240,8 @@ export class CachekitIOCore implements Backend {
 
   // ── Internal ──────────────────────────────────────────────
 
+  /** Call before the network `try`: encodeKey's ConfigurationError must reach
+   * the caller as-is, not wrapped by the catch as a BackendError. */
   private cacheUrl(key: string): string {
     return `${this.apiUrl}/v1/cache/${encodeKey(key)}`;
   }
