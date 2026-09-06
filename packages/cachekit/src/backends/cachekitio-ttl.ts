@@ -25,6 +25,9 @@ export class TTLCachekitIO implements TTLBackend {
   validateTtl(ttl: number) {
     this.inner.validateTtl(ttl);
   }
+  validateKey(key: string) {
+    this.inner.validateKey(key);
+  }
   delete(key: string) {
     return this.inner.delete(key);
   }

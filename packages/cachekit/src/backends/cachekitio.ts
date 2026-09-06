@@ -7,38 +7,37 @@ import { classifyHttpError, classifyNetworkError } from './error-classifier.js';
 import { validateCachekitUrl } from './url-validator.js';
 
 /**
- * Reserved `{key}` path segments (protocol spec/saas-api.md § Cache-Key Path
- * Encoding, rule 2). Two hazards, one CWE-22 class — both land the bearer
- * token on a route the SaaS key validator never sees:
- *
- * - Dot segments `.` / `..`: `encodeURIComponent` leaves `.` raw (RFC-3986
- *   unreserved), and the WHATWG URL parser behind `fetch` (undici, Workers)
- *   removes the segment before the request leaves the process — `..` → `/v1/`,
- *   `../ttl` → `/v1/ttl`. `%2E` does not help: WHATWG treats `%2e`/`%2e%2e`
- *   as dot segments too, and so does the SaaS worker's own `new URL()`.
- * - Route tokens `health` / `ttl` / `lock`: `/v1/cache/health` IS the health
- *   endpoint, and a trailing `ttl` / `lock` selects a sub-resource, so the
- *   key routes elsewhere or is read as an empty key. The SaaS router matches
- *   these case-sensitively and exactly, so only the lowercase words are reserved.
- *
- * Case-sensitive, exact: `a:..`, `..a`, `HEALTH`, `ttls` are inert and
- * transmitted unchanged.
+ * Path segments a key may never encode to (protocol spec/saas-api.md
+ * § Cache-Key Path Encoding, rule 2). `.` / `..` are dot segments that every
+ * WHATWG parser — fetch's and the SaaS worker's own — removes before routing,
+ * `%2E` forms included, so no encoding keeps them inside /v1/cache/ (CWE-22).
+ * `health` / `ttl` / `lock` are live route tokens at that level. The SaaS
+ * router matches all five exactly and case-sensitively, so only these
+ * lowercase words are reserved: `a:..`, `..a`, `HEALTH`, `ttls` transmit.
  */
 const RESERVED_SEGMENTS = new Set(['.', '..', 'health', 'ttl', 'lock']);
 
 /**
  * Percent-encode a cache key as a single URL path segment, or throw
- * `ConfigurationError` if it is a reserved segment (see RESERVED_SEGMENTS).
- * Every other key is exactly `encodeURIComponent(key)`, so wire bytes match
- * cachekit-rs (`encode_key`) and decode-equivalently match cachekit-py.
+ * `ConfigurationError` if it is a reserved segment (RESERVED_SEGMENTS) or
+ * malformed UTF-16. Every other key is exactly `encodeURIComponent(key)`:
+ * decode-equivalent to cachekit-py and cachekit-rs, which additionally
+ * encode `! * ' ( )` (spec rule 4; fixture `encoded_alternates`).
  */
 export function encodeKey(key: string): string {
-  const encoded = encodeURIComponent(key);
+  let encoded: string;
+  try {
+    encoded = encodeURIComponent(key);
+  } catch (error) {
+    // Lone surrogate: encodeURIComponent throws a raw URIError. Every SDK error is a CachekitError.
+    throw new ConfigurationError('Cache key is not well-formed UTF-16 (lone surrogate)', {
+      cause: error,
+    });
+  }
   if (RESERVED_SEGMENTS.has(encoded)) {
     throw new ConfigurationError(
-      `Cache key "${key}" is a reserved path segment (one of . .. health ttl lock) and cannot ` +
-        `be addressed at /v1/cache/{key}: the URL parser or the SaaS router would route it ` +
-        `elsewhere (CWE-22). Use a namespaced key instead.`
+      `Cache key "${key}" is a reserved path segment (one of ${[...RESERVED_SEGMENTS].join(' ')}) ` +
+        `and cannot be addressed at /v1/cache/{key} (CWE-22). Use a namespaced key instead.`
     );
   }
   return encoded;
@@ -138,6 +137,12 @@ export class CachekitIOCore implements Backend {
    * synchronously, before the reliability executor can swallow it. */
   validateTtl(ttl: number): void {
     validateTtl(ttl);
+  }
+
+  /** Backend.validateKey capability — rejects a reserved path segment
+   * synchronously, before the reliability executor can swallow it. */
+  validateKey(key: string): void {
+    encodeKey(key);
   }
 
   async set(key: string, value: Uint8Array, ttl?: number): Promise<void> {

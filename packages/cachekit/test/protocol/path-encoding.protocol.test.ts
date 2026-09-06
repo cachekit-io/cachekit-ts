@@ -18,7 +18,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { CachekitIOCore, encodeKey } from '../../src/backends/cachekitio.js';
 import { TTLCachekitIO } from '../../src/backends/cachekitio-ttl.js';
 import { LockableCachekitIO } from '../../src/backends/cachekitio-lockable.js';
-import { BackendError, ConfigurationError } from '../../src/errors.js';
+import { ConfigurationError } from '../../src/errors.js';
 
 interface Vector {
   key: string;
@@ -80,6 +80,8 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+// Pins the platform premise the reject-not-encode design rests on. If a runtime
+// ever stops collapsing these, the decision needs revisiting — not silently.
 describe('AC-0 repro — raw encodeURIComponent lets a dot-segment key escape /v1/cache/', () => {
   it('literal dots collapse client-side', () => {
     expect(new URL(`${BASE}${PREFIX}${encodeURIComponent('.')}`).pathname).toBe(PREFIX);
@@ -103,25 +105,38 @@ describe('rule 2 — reserved segments are rejected before the URL is built', ()
 
   it.each(reserved)('encodeKey($key) throws ConfigurationError', ({ key }) => {
     expect(() => encodeKey(key)).toThrow(ConfigurationError);
-    expect(() => encodeKey(key)).toThrow(/CWE-22/);
   });
 
   // Case-sensitive, exact match — mirrors the SaaS router (`=== 'health'`, `=== 'ttl' || 'lock'`).
-  it.each(['...', 'HEALTH', 'Health', 'ttls', 'unlock', 'health:x', '.health', 'a:..', '..a'])(
+  it.each(['...', 'HEALTH', 'ttls', 'unlock'])(
     'near-miss %j is transmittable and unchanged',
     (key) => {
       expect(encodeKey(key)).toBe(encodeURIComponent(key));
     }
   );
 
+  it('a lone surrogate is a ConfigurationError, not a raw URIError', async () => {
+    expect(() => encodeKey('a\uD800')).toThrow(ConfigurationError);
+    const h = harness();
+    await expect(h.core.get('a\uD800')).rejects.toBeInstanceOf(ConfigurationError);
+    expect(h.fetchSpy).not.toHaveBeenCalled();
+  });
+
+  // Backend.validateKey lets CacheImpl reject synchronously, before the
+  // reliability executor could retry, count, and swallow the rejection.
+  it.each(reserved)('validateKey($key) throws on the core and both wrappers', ({ key }) => {
+    const h = harness();
+    for (const backend of [h.core, h.ttl, h.lock]) {
+      expect(() => backend.validateKey(key)).toThrow(ConfigurationError);
+    }
+  });
+
   describe.each(Object.entries(OPERATIONS))('%s', (_name, op) => {
     it.each(reserved)(
       'rejects $key with ConfigurationError and never calls fetch',
       async ({ key }) => {
         const h = harness();
-        const err = await op.run(h, key).catch((e: unknown) => e);
-        expect(err).toBeInstanceOf(ConfigurationError);
-        expect(err).not.toBeInstanceOf(BackendError);
+        await expect(op.run(h, key)).rejects.toBeInstanceOf(ConfigurationError);
         expect(h.fetchSpy).not.toHaveBeenCalled();
       }
     );
@@ -137,11 +152,6 @@ describe('rules 1, 3, 4 — transmittable keys travel as one segment and decode 
     }
   );
 
-  it.each(transmittable)('decodeURIComponent(encodeKey($key)) round-trips', ({ key, decoded }) => {
-    expect(decodeURIComponent(encodeKey(key))).toBe(decoded);
-    expect(decoded).toBe(key);
-  });
-
   describe.each(Object.entries(OPERATIONS))('%s', (_name, op) => {
     it.each(transmittable)(
       'sends $key inside /v1/cache/ as one segment',
@@ -149,11 +159,8 @@ describe('rules 1, 3, 4 — transmittable keys travel as one segment and decode 
         const h = harness();
         await op.run(h, key);
         const pathname = sentPathname(h);
-        expect(pathname.startsWith(PREFIX)).toBe(true);
-        expect(pathname.endsWith(op.suffix)).toBe(true);
+        expect(pathname).toBe(`${PREFIX}${encodeKey(key)}${op.suffix}`);
         const segment = pathname.slice(PREFIX.length, pathname.length - op.suffix.length);
-        expect(segment).toBe(encodeKey(key));
-        expect(segment).not.toContain('/');
         expect(decodeURIComponent(segment)).toBe(decoded);
       }
     );

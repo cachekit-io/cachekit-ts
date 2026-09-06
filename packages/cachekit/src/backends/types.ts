@@ -78,6 +78,20 @@ export interface Backend {
   validateTtl?(ttl: number): void;
 
   /**
+   * Reject a key this backend cannot address, synchronously and before the
+   * reliability executor runs — CachekitIO refuses the reserved path
+   * segments `.` `..` `health` `ttl` `lock` (protocol spec/saas-api.md
+   * § Cache-Key Path Encoding). Same contract as validateTtl: inside `run`,
+   * degradation would swallow the deterministic caller error and
+   * retry/circuit-breaker would count it as backend failures.
+   *
+   * Delegating wrappers MUST forward the inner backend's implementation.
+   *
+   * @throws {ConfigurationError} when the key is rejected by this backend
+   */
+  validateKey?(key: string): void;
+
+  /**
    * Delete a key from the cache.
    *
    * @param key - Cache key to delete
