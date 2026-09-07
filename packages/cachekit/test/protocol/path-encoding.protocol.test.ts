@@ -143,10 +143,13 @@ describe('rule 2 — reserved segments are rejected before the URL is built', ()
   });
 });
 
-describe('rule 2 — the empty key is rejected before the URL is built', () => {
-  // An empty key is not a fixture vector (it has no wire form): `/v1/cache/${''}`
-  // collapses to the `/v1/cache/` collection path, the same escape class as `.`,
-  // reached without hitting RESERVED_SEGMENTS. Guard it here.
+describe('empty-key precondition — rejected before the URL is built (no shared fixture vector yet)', () => {
+  // The empty key is the same CWE-22 escape class as the `.`/`..` reject rows —
+  // `/v1/cache/${''}` collapses to the `/v1/cache/` collection path — but it is
+  // not yet a row in the vendored cross-SDK fixture, so it is enforced here as a
+  // local precondition guard rather than claimed as a spec rule-2 vector. Adding
+  // the empty-key reject row to protocol/test-vectors/path-encoding.json (and
+  // re-vendoring) is tracked as cross-SDK parity follow-up.
   it('the platform premise: an empty segment collapses to the collection path', () => {
     expect(new URL(`${BASE}${PREFIX}${encodeURIComponent('')}`).pathname).toBe(PREFIX);
   });
