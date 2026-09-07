@@ -665,6 +665,9 @@ export class CacheImpl implements SecureCache {
       }
     }
 
+    // Reserved-key pre-flight — see Backend.validateKey.
+    this.backend.validateKey?.(key);
+
     // Fetch from L2 (backend)
     return this.run('get', null, async (): Promise<T | null> => {
       // When L1 will be re-populated, prefer the TTL-carrying read (same
@@ -754,11 +757,13 @@ export class CacheImpl implements SecureCache {
     }
 
     // A backend with hard TTL bounds (CachekitIO: reject 0 / > 30 days per
-    // protocol) rejects here, synchronously — for the same reason as the
+    // protocol) or a key it cannot address (CachekitIO's reserved path
+    // segments) rejects here, synchronously — for the same reason as the
     // interop rejection below: inside `run`, degradation would swallow the
     // deterministic caller error (set() would silently never store) and
     // retry/circuit-breaker would count it as backend failures.
     this.backend.validateTtl?.(ttl);
+    this.backend.validateKey?.(key);
 
     const namespace = options?.namespace ?? extractNamespace(key);
     const useEnvelope = this.useEnvelope(interop);
@@ -844,6 +849,7 @@ export class CacheImpl implements SecureCache {
 
   async delete(key: string): Promise<boolean> {
     this.ensureNotClosed();
+    this.backend.validateKey?.(key); // see Backend.validateKey
 
     return this.run('delete', false, async (): Promise<boolean> => {
       // Delete from backend
@@ -861,6 +867,7 @@ export class CacheImpl implements SecureCache {
 
   async exists(key: string): Promise<boolean> {
     this.ensureNotClosed();
+    this.backend.validateKey?.(key); // see Backend.validateKey
 
     // Check L1 first. Presence alone is not an answer for a secure cache: L1
     // holds ciphertext, and after a key rotation every resident entry is

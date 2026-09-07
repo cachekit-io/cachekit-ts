@@ -43,6 +43,9 @@ class CachekitIO implements LockableBackend, TTLBackend {
   validateTtl(ttl: number) {
     this.lockable.validateTtl(ttl);
   }
+  validateKey(key: string) {
+    this.lockable.validateKey(key);
+  }
   delete(key: string) {
     return this.lockable.delete(key);
   }
