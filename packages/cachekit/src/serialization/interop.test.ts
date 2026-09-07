@@ -234,6 +234,32 @@ describe('interop map/object collection cap timing (encodeMapEntries)', () => {
     expect(() => encodeInteropValue(under)).toThrow(/well-formed Unicode|lone surrogates/);
   });
 
+  it('rejects an over-cap plain object without reading properties past the cap', () => {
+    // The (cap+1)th key in enumeration order is a getter spy: Object.entries
+    // would invoke it while materialising every tuple; the key-count
+    // pre-check must throw before anything reads it.
+    let reads = 0;
+    const build = (plainKeys: number): Record<string, number> => {
+      const obj: Record<string, number> = {};
+      for (let i = 0; i < plainKeys; i++) obj[`k${i}`] = 0;
+      Object.defineProperty(obj, 'spy', {
+        enumerable: true,
+        get: () => {
+          reads++;
+          return 0;
+        },
+      });
+      return obj;
+    };
+    expect(() => encodeInteropValue(build(10_000))).toThrow(ValueTooLargeError);
+    expect(reads).toBe(0);
+    // One key under the cap: the spy is the 10,000th key, so it is read
+    // exactly once and the object encodes (proves the spy is live).
+    reads = 0;
+    encodeInteropValue(build(9_999));
+    expect(reads).toBe(1);
+  });
+
   it('accepts a Map at exactly the cap with unchanged canonical bytes', () => {
     const atCap = new Map(Array.from({ length: 10_000 }, (_, i) => [`k${i}`, i]));
     const bytes = encodeInteropValue(atCap);

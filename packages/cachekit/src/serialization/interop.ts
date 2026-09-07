@@ -473,6 +473,13 @@ function encodeCanonical(
     }
     encodeMapEntries(entries, profile, depth, sink);
   } else if (typeof v === 'object' && isPlainObject(v)) {
+    // Plain objects have no O(1) size, and Object.entries materialises a
+    // tuple per property before the cap could see the count. Object.keys is
+    // the cheapest own-enumerable count V8 offers (one pointer array — a
+    // for...in snapshots the same list, it is not lazy), so an over-cap
+    // object is rejected before any tuple is built or value read, mirroring
+    // the Map branch's .size check. Throw-only: the emitter call is unchanged.
+    checkCollectionSize(Object.keys(v).length, 'map');
     encodeMapEntries(Object.entries(v), profile, depth, sink);
   } else {
     // Closed data model: a value that encodes on one SDK and errors on
