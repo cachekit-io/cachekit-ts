@@ -143,6 +143,34 @@ describe('rule 2 — reserved segments are rejected before the URL is built', ()
   });
 });
 
+describe('rule 2 — the empty key is rejected before the URL is built', () => {
+  // An empty key is not a fixture vector (it has no wire form): `/v1/cache/${''}`
+  // collapses to the `/v1/cache/` collection path, the same escape class as `.`,
+  // reached without hitting RESERVED_SEGMENTS. Guard it here.
+  it('the platform premise: an empty segment collapses to the collection path', () => {
+    expect(new URL(`${BASE}${PREFIX}${encodeURIComponent('')}`).pathname).toBe(PREFIX);
+  });
+
+  it('encodeKey("") throws ConfigurationError', () => {
+    expect(() => encodeKey('')).toThrow(ConfigurationError);
+  });
+
+  it('validateKey("") throws on the core and both wrappers', () => {
+    const h = harness();
+    for (const backend of [h.core, h.ttl, h.lock]) {
+      expect(() => backend.validateKey('')).toThrow(ConfigurationError);
+    }
+  });
+
+  describe.each(Object.entries(OPERATIONS))('%s', (_name, op) => {
+    it('rejects "" with ConfigurationError and never calls fetch', async () => {
+      const h = harness();
+      await expect(op.run(h, '')).rejects.toBeInstanceOf(ConfigurationError);
+      expect(h.fetchSpy).not.toHaveBeenCalled();
+    });
+  });
+});
+
 describe('rules 1, 3, 4 — transmittable keys travel as one segment and decode once to the key', () => {
   it.each(transmittable)(
     'encodeKey($key) is a conformant wire form',

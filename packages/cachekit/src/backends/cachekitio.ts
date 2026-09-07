@@ -25,6 +25,15 @@ const RESERVED_SEGMENTS = new Set(['.', '..', 'health', 'ttl', 'lock']);
  * encode `! * ' ( )` (spec rule 4; fixture `encoded_alternates`).
  */
 export function encodeKey(key: string): string {
+  // An empty key encodes to an empty segment, so `/v1/cache/${''}` collapses to
+  // the `/v1/cache/` collection path — the same CWE-22 escape as a dot segment,
+  // reached without ever hitting RESERVED_SEGMENTS. Reject it up front.
+  if (key === '') {
+    throw new ConfigurationError(
+      'Cache key must not be empty: an empty key addresses the /v1/cache/ collection path, ' +
+        'not a keyed resource (CWE-22). Use a non-empty, namespaced key.'
+    );
+  }
   let encoded: string;
   try {
     encoded = encodeURIComponent(key);
