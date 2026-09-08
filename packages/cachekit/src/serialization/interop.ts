@@ -252,6 +252,11 @@ function encodeArrayHeader(n: number, sink: ChunkSink): void {
 }
 
 function encodeMapHeader(n: number, sink: ChunkSink): void {
+  // Emitter backstop: never the sole gate on today's callers — encodeMapEntries,
+  // the Map branch (.size) and the plain-object branch (Object.keys) all reject
+  // over-cap before reaching here, so no test routes an over-cap map through
+  // this line. Retained deliberately as the last guard for any future direct
+  // caller; do NOT cut on coverage grounds (that reopens the DoS this fix closes).
   checkCollectionSize(n, 'map');
   if (n <= 15) pushChunk(sink, Uint8Array.of(0x80 | n));
   else if (n <= 0xffff) pushChunk(sink, uintBE(0xde, n, 2));
@@ -339,6 +344,18 @@ function encodeMapEntries(
   depth: number,
   sink: ChunkSink
 ): void {
+  // Cap BEFORE materialising key encodings: map keys are unique by
+  // construction, so the entry count is final up front — unlike Sets, no
+  // dedupe can shrink it. Checking here (rather than in encodeMapHeader
+  // after the map/sort below) keeps an over-cap map from forcing N
+  // Uint8Array allocations plus an O(N log N) sort that never pass through
+  // pushChunk's byte budget.
+  // Shared chokepoint for every map caller: the Map/plain-object branches
+  // pre-check .size/Object.keys upstream and the datetime sentinel is a fixed
+  // 2-entry literal, so no current path relies on this as the effective guard
+  // (a test won't fail if it's removed). It stays as future-caller insurance —
+  // do NOT "prove it dead" by coverage and cut it.
+  checkCollectionSize(entries.length, 'map');
   // Sort keys by UTF-8 byte order (== Unicode code point order). The default
   // Array.prototype.sort comparator orders UTF-16 code units and gets
   // supplementary-plane characters backwards (map_key_sort_supplementary).
@@ -454,6 +471,9 @@ function encodeCanonical(
       encodeCanonical(item, profile, depth + 1, sink);
     }
   } else if (v instanceof Map) {
+    // Map.size is O(1) — reject over-cap maps before iterating at all, so
+    // the tuple materialisation below is also bounded.
+    checkCollectionSize(v.size, 'map');
     const entries: [string, unknown][] = [];
     for (const [k, val] of v) {
       if (typeof k !== 'string') {
@@ -463,6 +483,13 @@ function encodeCanonical(
     }
     encodeMapEntries(entries, profile, depth, sink);
   } else if (typeof v === 'object' && isPlainObject(v)) {
+    // Plain objects have no O(1) size, and Object.entries materialises a
+    // tuple per property before the cap could see the count. Object.keys is
+    // the cheapest own-enumerable count V8 offers (one pointer array — a
+    // for...in snapshots the same list, it is not lazy), so an over-cap
+    // object is rejected before any tuple is built or value read, mirroring
+    // the Map branch's .size check. Throw-only: the emitter call is unchanged.
+    checkCollectionSize(Object.keys(v).length, 'map');
     encodeMapEntries(Object.entries(v), profile, depth, sink);
   } else {
     // Closed data model: a value that encodes on one SDK and errors on
