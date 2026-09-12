@@ -123,11 +123,21 @@ jobs:
       - name: Test with coverage
         run: pnpm test:coverage
 
+      # fail_ci_if_error is also the wrapper's signature-enforcement switch: with
+      # false, a failed `gpg --verify` of the CLI's SHA256SUM is only logged and
+      # the unverified binary still executes — which v6.0.0 did on every run after
+      # Codecov moved its public key off the keybase account v6.0.0 fetched it
+      # from (codecov/codecov-action#1956, 2026-06-07). Keep it true so the step
+      # aborts before exec; continue-on-error keeps the upload from reddening CI.
+      # When this step is orange, read the log: "Could not verify signature" is
+      # the guard working (never silence it); an upload error (token, network)
+      # only loses that upload.
       - name: Upload coverage
-        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        continue-on-error: true
         with:
           files: ./packages/cachekit/coverage/lcov.info
-          fail_ci_if_error: false
+          fail_ci_if_error: true
 
   security:
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
