@@ -58,6 +58,13 @@ function build(v: Vector): Buffer {
 
 const serializer = new MessagePackSerializer();
 
+/** What each accept vector must decode to on the value paths (keyed by name; a
+ * re-vendored accept vector fails the pin test until it is added here). */
+const EXPECTED: Record<string, unknown> = {
+  nested_fixarray_depth_32: Array.from({ length: 32 }).reduce<unknown>((inner) => [inner], null),
+  array16_256_backed_nils: new Array<null>(256).fill(null),
+};
+
 /**
  * The error class alone is a false green: with the pre-scan deleted, the
  * decoder still throws (wrapped as SerializationError) when it runs out of
@@ -89,6 +96,7 @@ describe('Protocol decode-bounds vectors (spec/interop-mode.md#decode-bounds)', 
     expect(vectors.spec).toBe('spec/interop-mode.md#decode-bounds');
     expect(vectors.reject_vectors).toHaveLength(13);
     expect(vectors.accept_vectors).toHaveLength(2);
+    expect(vectors.accept_vectors.map((v) => v.name).sort()).toEqual(Object.keys(EXPECTED).sort());
   });
 
   it('every construction reproduces its input_hex', () => {
@@ -107,11 +115,11 @@ describe('Protocol decode-bounds vectors (spec/interop-mode.md#decode-bounds)', 
 
   describe('accept vectors', () => {
     it.each(vectors.accept_vectors)('MessagePackSerializer.decode accepts $name', (v) => {
-      expect(() => serializer.decode(build(v))).not.toThrow();
+      expect(serializer.decode(build(v))).toEqual(EXPECTED[v.name]);
     });
 
     it.each(vectors.accept_vectors)('decodeInteropValue accepts $name', (v) => {
-      expect(() => decodeInteropValue(build(v))).not.toThrow();
+      expect(decodeInteropValue(build(v))).toEqual(EXPECTED[v.name]);
     });
 
     /**
