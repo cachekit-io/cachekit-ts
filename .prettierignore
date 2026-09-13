@@ -5,3 +5,5 @@ pnpm-lock.yaml
 # release-please owns CHANGELOG formatting (asterisk bullets); prettier
 # re-styling them creates permanent dirty-tree churn in hook runs.
 CHANGELOG.md
+# Vendored cachekit-io/protocol fixtures: must stay byte-identical to upstream; never reformat.
+packages/cachekit/test/protocol/fixtures/
