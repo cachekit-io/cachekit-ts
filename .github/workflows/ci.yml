@@ -285,17 +285,17 @@ jobs:
       # Drift protection for maintainers only: a fork PR runs its own copy of
       # this workflow (a fork can't remove its own guard), so this catches an
       # accidental self-hosted `runs-on` creeping back onto main/push, not a
-      # malicious fork PR. The server-side control (runner group scoped away
-      # from public repos) is LAB-1161 stage 2.
+      # malicious fork PR. The server-side control for fork PRs lives in
+      # repository and org runner settings, outside this file.
       #
       # This is a line-oriented heuristic (case-insensitive grep over
       # runs-on:/os:/runner: keys and JSON "os": values), not a schema-aware
       # YAML parse — a determined bypass via a renamed matrix key or a YAML
       # anchor/multi-line block scalar would slip past it. That tradeoff is
       # deliberate: closing it properly means defeating a determined bypass,
-      # which is what the settings-level runner-group scope (stage 2) is for,
-      # not this maintainer sanity check.
-      - name: Fail if any workflow still targets the self-hosted pool
+      # which is what the settings-level runner controls are for, not this
+      # maintainer sanity check.
+      - name: Fail if any workflow still targets a self-hosted runner
         run: |
           set -euo pipefail
           hits=$(grep -rnE '^[[:space:]]*runs-on:|^[[:space:]]*(os|runner):|"os":' .github/workflows/ \
