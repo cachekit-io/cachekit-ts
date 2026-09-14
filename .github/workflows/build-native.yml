@@ -47,17 +47,17 @@ jobs:
     steps:
       - id: set
         # PRs build the cheap linux-x64 target only (catches the vast majority
-        # of compile errors on the self-hosted runner). Full cross-platform
-        # validation runs on push to main and on manually pushed
-        # cachekit-core-ts-v* tags — the validation a (currently manual, see
-        # header) publish relies on — keeping the macOS/Windows cost off the
-        # PR review loop without losing coverage where it matters.
+        # of compile errors fast). Full cross-platform validation runs on
+        # push to main and on manually pushed cachekit-core-ts-v* tags — the
+        # validation a (currently manual, see header) publish relies on —
+        # keeping the macOS/Windows cost off the PR review loop without
+        # losing coverage where it matters.
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            builds='[{"target":"x86_64-unknown-linux-gnu","os":"cachekit-lean"}]'
+            builds='[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-latest"}]'
           else
             builds='[
-              {"target":"x86_64-unknown-linux-gnu","os":"cachekit-lean"},
+              {"target":"x86_64-unknown-linux-gnu","os":"ubuntu-latest"},
               {"target":"aarch64-unknown-linux-gnu","os":"ubuntu-latest"},
               {"target":"x86_64-apple-darwin","os":"macos-latest"},
               {"target":"aarch64-apple-darwin","os":"macos-latest"},
@@ -78,25 +78,19 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Configure Rust paths (self-hosted)
-        if: matrix.os == 'cachekit-lean'
-        run: |
-          echo "RUSTUP_HOME=/tmp/rustup" >> "$GITHUB_ENV"
-          echo "CARGO_HOME=/tmp/cargo" >> "$GITHUB_ENV"
-
-      - name: Setup Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
-        with:
-          node-version: '22'
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
+      - uses: ./.github/actions/setup-pnpm-node
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # stable
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: packages/cachekit-core-ts
+          shared-key: ${{ matrix.target }}
 
       - name: Install aarch64 cross-compiler
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -125,16 +119,14 @@ jobs:
     needs: build
     strategy:
       matrix:
-        os: [cachekit-lean]
         node: [22, 24]
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Setup Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+      - uses: ./.github/actions/setup-pnpm-node
         with:
           node-version: ${{ matrix.node }}
 
@@ -143,9 +135,6 @@ jobs:
         with:
           name: bindings-x86_64-unknown-linux-gnu
           path: packages/cachekit-core-ts
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
 
       - name: Install dependencies
         run: pnpm install
