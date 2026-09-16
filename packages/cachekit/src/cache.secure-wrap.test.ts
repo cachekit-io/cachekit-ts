@@ -16,7 +16,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createCache } from './cache.js';
 import { ConfigurationError } from './errors.js';
 import { CacheImpl, type ExecutionContextLike } from './cache-core.js';
-import type { SecureCache } from './types/cache.js';
+import type { CacheOptions, SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
 
 // Derived at runtime from a public fixture string — not a key literal a
@@ -25,6 +25,8 @@ const MASTER_KEY = createHash('sha256').update('cachekit LAB-513 test fixture').
 /** Distinctive enough that a substring search over stored bytes is conclusive. */
 const CANARY = 'ssn-000-00-0000-do-not-leak';
 const OPTIONS = { namespace: 'patients:records', ttl: 300 };
+/** Threshold ratio above 1 makes every L1 entry stale on its first hit. */
+const ALWAYS_STALE_L1 = { swrEnabled: true, swrThresholdRatio: 2 };
 
 class InMemoryBackend implements Backend {
   store = new Map<string, Uint8Array>();
@@ -49,13 +51,19 @@ function viewOf(
   cache: SecureCache,
   ctx: ExecutionContextLike = { waitUntil: () => {} }
 ): SecureCache {
-  return (cache as unknown as CacheImpl).withExecutionContext(ctx);
+  if (!(cache instanceof CacheImpl)) {
+    throw new Error('createCache() returned something other than CacheImpl');
+  }
+  return cache.withExecutionContext(ctx);
 }
 
 describe('secure.wrap() fails closed without encryption (LAB-513)', () => {
   const caches: SecureCache[] = [];
 
-  function makeCache(encrypted: boolean): { cache: SecureCache; backend: InMemoryBackend } {
+  function makeCache(
+    encrypted: boolean,
+    l1?: CacheOptions['l1']
+  ): { cache: SecureCache; backend: InMemoryBackend } {
     const backend = new InMemoryBackend();
     const cache = createCache({
       backend,
@@ -66,6 +74,7 @@ describe('secure.wrap() fails closed without encryption (LAB-513)', () => {
       // compression off, only AES-GCM stands between MessagePack and the
       // backend, so "canary absent" means "encrypted" and nothing else.
       compression: false,
+      ...(l1 ? { l1 } : {}),
       ...(encrypted ? { encryption: { masterKey: MASTER_KEY } } : {}),
     });
     caches.push(cache);
@@ -73,7 +82,6 @@ describe('secure.wrap() fails closed without encryption (LAB-513)', () => {
   }
 
   afterEach(async () => {
-    vi.restoreAllMocks();
     await Promise.all(caches.splice(0).map((c) => c.close()));
   });
 
@@ -106,19 +114,26 @@ describe('secure.wrap() fails closed without encryption (LAB-513)', () => {
     });
   });
 
-  it('forwards the request waitUntil handle to wrap() on the view (Workers SWR)', () => {
-    const { cache } = makeCache(true);
-    const ctx: ExecutionContextLike = { waitUntil: vi.fn() };
-    const wrapSpy = vi.spyOn(CacheImpl.prototype, 'wrap');
-
-    viewOf(cache, ctx).secure.wrap(async (id: string) => ({ id }), OPTIONS);
-
+  it('hands the SWR refresh to the request waitUntil through view.secure.wrap (Workers contract)', async () => {
     // Before LAB-513 the view's secure.wrap WAS wrapWith and inherited its
-    // waitUntil; now it is its own closure, so pin the plumbing explicitly.
-    const handle = wrapSpy.mock.lastCall?.[2];
-    expect(handle).toBeTypeOf('function');
-    handle?.(Promise.resolve());
+    // waitUntil plumbing; now it is its own closure, so drive the real
+    // stale-while-revalidate path and observe the handle being used.
+    const { cache } = makeCache(true, ALWAYS_STALE_L1);
+    const ctx = { waitUntil: vi.fn<(refresh: Promise<unknown>) => void>() };
+    let calls = 0;
+    const getRecord = viewOf(cache, ctx).secure.wrap(
+      async (id: string) => ({ id, gen: ++calls }),
+      OPTIONS
+    );
+
+    expect(await getRecord('p1')).toEqual({ id: 'p1', gen: 1 }); // miss: compute + store
+    expect(await getRecord('p1')).toEqual({ id: 'p1', gen: 1 }); // stale hit: serve, schedule refresh
+
     expect(ctx.waitUntil).toHaveBeenCalledOnce();
+    const refresh = ctx.waitUntil.mock.calls[0][0];
+    expect(refresh).toBeInstanceOf(Promise);
+    await refresh;
+    expect(calls).toBe(2); // the promise handed to ctx was the refresh itself
   });
 
   it('plain wrap() on an unencrypted cache is unaffected — and is the plaintext control', async () => {
