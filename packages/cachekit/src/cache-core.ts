@@ -1197,10 +1197,34 @@ export class CacheImpl implements SecureCache {
     wrap: <TArgs extends unknown[], TResult>(
       fn: (...args: TArgs) => Promise<TResult>,
       options: WrapOptions
-    ): ((...args: TArgs) => Promise<TResult>) => {
-      return this.wrap(fn, options);
-    },
+    ): ((...args: TArgs) => Promise<TResult>) => this.secureWrap(fn, options),
   };
+
+  /**
+   * `secure.wrap` for both the instance and the `withExecutionContext` view.
+   * Fails closed at wrap time: a cache built without `encryption` (plain
+   * `createCache({ backend })`, or the `minimal` / `production` / `io`
+   * intents — all typed `SecureCache`, so `.secure` is always present) used
+   * to store plaintext here with no error, warning, or type error (LAB-513,
+   * CWE-311). Python raises at decoration time and Rust's `secure()` returns
+   * `Err`; this is the same contract. Deliberately no opt-in to run
+   * unencrypted — any escape hatch under a security-labelled path is the
+   * downgrade this guard exists to close. Plaintext callers use `wrap()`.
+   */
+  private secureWrap<TArgs extends unknown[], TResult>(
+    fn: (...args: TArgs) => Promise<TResult>,
+    options: WrapOptions,
+    waitUntil?: WaitUntil
+  ): (...args: TArgs) => Promise<TResult> {
+    if (!this.encryption) {
+      throw new ConfigurationError(
+        'cache.secure.wrap() requires encryption, but this cache has none configured. ' +
+          'Create it with createCache.secure() or pass `encryption` in CacheOptions; ' +
+          'for unencrypted caching call cache.wrap() instead.'
+      );
+    }
+    return this.wrap(fn, options, waitUntil);
+  }
 
   /**
    * Bind a request's execution context, returning a request-scoped view of
@@ -1234,7 +1258,7 @@ export class CacheImpl implements SecureCache {
       exists: (key) => this.exists(key),
       wrap: wrapWith,
       with: (options) => (fn) => wrapWith(fn, options),
-      secure: { wrap: wrapWith },
+      secure: { wrap: (fn, options) => this.secureWrap(fn, options, waitUntil) },
       invalidate: (level, options) => this.invalidate(level, options),
       close: () => this.close(),
     };

@@ -343,7 +343,11 @@ export interface Cache {
  */
 export interface SecureCache extends Cache {
   /**
-   * Secure version of wrap that always encrypts.
+   * Encrypting version of `wrap`. Fails closed: throws `ConfigurationError`
+   * at wrap time — not on first call — when the cache has no `encryption`
+   * configured, so a function registered as secure can never cache
+   * plaintext. With encryption configured it behaves exactly like `wrap`.
+   * There is no option to run it unencrypted; use `wrap` for that.
    */
   secure: {
     wrap<TArgs extends unknown[], TResult>(
