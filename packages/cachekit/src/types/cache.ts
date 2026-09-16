@@ -338,8 +338,9 @@ export interface Cache {
 }
 
 /**
- * Secure cache interface with encryption.
- * Extends Cache with secure-only wrap method.
+ * `Cache` plus `secure.wrap`. Every `createCache()` call and intent returns
+ * this type whether or not `encryption` is configured; encryption is enforced
+ * by `secure.wrap` at wrap time, not by the type.
  */
 export interface SecureCache extends Cache {
   /**

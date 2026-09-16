@@ -1193,23 +1193,16 @@ export class CacheImpl implements SecureCache {
       this.wrap(fn, options);
   }
 
-  secure = {
-    wrap: <TArgs extends unknown[], TResult>(
-      fn: (...args: TArgs) => Promise<TResult>,
-      options: WrapOptions
-    ): ((...args: TArgs) => Promise<TResult>) => this.secureWrap(fn, options),
-  };
+  secure: SecureCache['secure'] = { wrap: (fn, options) => this.secureWrap(fn, options) };
 
   /**
-   * `secure.wrap` for both the instance and the `withExecutionContext` view.
-   * Fails closed at wrap time: a cache built without `encryption` (plain
-   * `createCache({ backend })`, or the `minimal` / `production` / `io`
-   * intents — all typed `SecureCache`, so `.secure` is always present) used
-   * to store plaintext here with no error, warning, or type error (LAB-513,
-   * CWE-311). Python raises at decoration time and Rust's `secure()` returns
-   * `Err`; this is the same contract. Deliberately no opt-in to run
-   * unencrypted — any escape hatch under a security-labelled path is the
-   * downgrade this guard exists to close. Plaintext callers use `wrap()`.
+   * Both `secure.wrap` sites (instance and `withExecutionContext` view) route
+   * here. Fails closed at wrap time: every intent is typed `SecureCache`, so
+   * `.secure` exists on caches with no `encryption` configured, and this guard
+   * is all that stands between a "secure" registration and plaintext at rest
+   * (LAB-513). Deliberately no opt-in to run unencrypted — an escape hatch
+   * under a security-labelled path is the downgrade this closes. Plaintext
+   * callers use `wrap()`.
    */
   private secureWrap<TArgs extends unknown[], TResult>(
     fn: (...args: TArgs) => Promise<TResult>,
