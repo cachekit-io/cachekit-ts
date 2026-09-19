@@ -1193,14 +1193,31 @@ export class CacheImpl implements SecureCache {
       this.wrap(fn, options);
   }
 
-  secure = {
-    wrap: <TArgs extends unknown[], TResult>(
-      fn: (...args: TArgs) => Promise<TResult>,
-      options: WrapOptions
-    ): ((...args: TArgs) => Promise<TResult>) => {
-      return this.wrap(fn, options);
-    },
-  };
+  secure: SecureCache['secure'] = { wrap: (fn, options) => this.secureWrap(fn, options) };
+
+  /**
+   * Both `secure.wrap` sites (instance and `withExecutionContext` view) route
+   * here. Fails closed at wrap time: every intent is typed `SecureCache`, so
+   * `.secure` exists on caches with no `encryption` configured, and this guard
+   * is all that stands between a "secure" registration and plaintext at rest
+   * (LAB-513). Deliberately no opt-in to run unencrypted — an escape hatch
+   * under a security-labelled path is the downgrade this closes. Plaintext
+   * callers use `wrap()`.
+   */
+  private secureWrap<TArgs extends unknown[], TResult>(
+    fn: (...args: TArgs) => Promise<TResult>,
+    options: WrapOptions,
+    waitUntil?: WaitUntil
+  ): (...args: TArgs) => Promise<TResult> {
+    if (!this.encryption) {
+      throw new ConfigurationError(
+        'cache.secure.wrap() requires encryption, but this cache has none configured. ' +
+          'Create it with createCache.secure() or pass `encryption` in CacheOptions; ' +
+          'for unencrypted caching call cache.wrap() instead.'
+      );
+    }
+    return this.wrap(fn, options, waitUntil);
+  }
 
   /**
    * Bind a request's execution context, returning a request-scoped view of
@@ -1234,7 +1251,7 @@ export class CacheImpl implements SecureCache {
       exists: (key) => this.exists(key),
       wrap: wrapWith,
       with: (options) => (fn) => wrapWith(fn, options),
-      secure: { wrap: wrapWith },
+      secure: { wrap: (fn, options) => this.secureWrap(fn, options, waitUntil) },
       invalidate: (level, options) => this.invalidate(level, options),
       close: () => this.close(),
     };
