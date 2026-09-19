@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.2.0](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.1.5...cachekit-v0.2.0) (2026-09-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cache:** secure.wrap() fails closed when encryption is not configured (LAB-513) ([#123](https://github.com/cachekit-io/cachekit-ts/issues/123))
+
+### Features
+
+* **encryption:** previousMasterKeys keyring rotation surface (LAB-685) ([#103](https://github.com/cachekit-io/cachekit-ts/issues/103)) ([e7d1a8f](https://github.com/cachekit-io/cachekit-ts/commit/e7d1a8fffe7833078d363bed23b30199653327dd))
+
+
+### Bug Fixes
+
+* **cachekitio:** reject reserved cache-key segments in request path (CWE-22, LAB-2877) ([#118](https://github.com/cachekit-io/cachekit-ts/issues/118)) ([c93083b](https://github.com/cachekit-io/cachekit-ts/commit/c93083b27a53fd1e7bdd1bd96b8c20e10f834a79))
+* **cachekitio:** send X-CacheKit-TTL and reject invalid TTLs per protocol spec (LAB-239) ([#110](https://github.com/cachekit-io/cachekit-ts/issues/110)) ([0862629](https://github.com/cachekit-io/cachekit-ts/commit/0862629d88cafd127bcf132b31b15fac594d5a8d))
+* **cache:** secure.wrap() fails closed when encryption is not configured (LAB-513) ([#123](https://github.com/cachekit-io/cachekit-ts/issues/123)) ([87dee26](https://github.com/cachekit-io/cachekit-ts/commit/87dee26ffd8d3e433a4f681c93cfd2dc85d95144))
+* **interop:** fire map/object collection cap before key materialisation (LAB-413) ([#113](https://github.com/cachekit-io/cachekit-ts/issues/113)) ([403b1b3](https://github.com/cachekit-io/cachekit-ts/commit/403b1b3a0d8c06e06982696fcd94619b26e240fe))
+* L1 TTL cap, loud size rejections, Cache API compression default, Node-free workers types (LAB-1388) ([#98](https://github.com/cachekit-io/cachekit-ts/issues/98)) ([13a3345](https://github.com/cachekit-io/cachekit-ts/commit/13a3345a8136f92e094995e6d68413e52c94a8b4))
+* **security:** store ciphertext in L1 for encrypted caches (LAB-238) ([#104](https://github.com/cachekit-io/cachekit-ts/issues/104)) ([0b1b2f8](https://github.com/cachekit-io/cachekit-ts/commit/0b1b2f8d55768ed6fb31a17a067b5da998feff33))
+* **serialization:** bound msgpack decode at all untrusted call sites (LAB-281) ([#111](https://github.com/cachekit-io/cachekit-ts/issues/111)) ([19ad90c](https://github.com/cachekit-io/cachekit-ts/commit/19ad90c5c9d3208a7a74a46e3a1da680cca8f4d9))
+* **serialization:** bound msgpack decode nesting depth before allocation (LAB-2487) ([#112](https://github.com/cachekit-io/cachekit-ts/issues/112)) ([906942d](https://github.com/cachekit-io/cachekit-ts/commit/906942d6ccaa130e3bdfba9cd4c90762ecc32de0))
+
 ## [0.1.5](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.1.4...cachekit-v0.1.5) (2026-08-03)
 
 
