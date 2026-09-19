@@ -1,3 +1,3 @@
 # Vendored protocol fixtures are sha256-pinned by their tests; keep bytes
 # identical on every platform (no CRLF rewrite under core.autocrlf).
-packages/cachekit/test/protocol/fixtures/* -text
+packages/cachekit/test/protocol/fixtures/** -text
