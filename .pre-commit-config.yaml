@@ -73,8 +73,13 @@ repos:
     rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # v6.0.0  # pragma: allowlist secret
     hooks:
       - id: trailing-whitespace
-        exclude: \.md$ # markdown uses trailing whitespace for line breaks
+        # markdown uses trailing whitespace for line breaks; the protocol
+        # fixtures are sha256-pinned byte-for-byte against cachekit-io/protocol
+        exclude: (\.md|^packages/cachekit/test/protocol/fixtures/.*)$
       - id: end-of-file-fixer
+        # never append a newline to a byte-pinned vendored fixture: the pin
+        # would then be refreshed against our mutation, not upstream's bytes
+        exclude: ^packages/cachekit/test/protocol/fixtures/.*$
       - id: check-yaml
       - id: check-json
         exclude: ^(\.vscode/|tsconfig.*\.json$) # tsconfig allows comments
