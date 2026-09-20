@@ -19,8 +19,14 @@ const COMPACT_KEYS = {
   sourceInstance: 'src',
 } as const;
 
+const INVALIDATION_LEVELS: ReadonlySet<string> = new Set<InvalidationLevel>([
+  'global',
+  'namespace',
+  'params',
+]);
+
 interface CompactEvent {
-  [COMPACT_KEYS.level]: string;
+  [COMPACT_KEYS.level]: InvalidationLevel;
   [COMPACT_KEYS.namespace]?: string;
   [COMPACT_KEYS.paramsHash]?: string;
   [COMPACT_KEYS.timestamp]: number;
@@ -29,8 +35,9 @@ interface CompactEvent {
 
 /**
  * Shape check for a decoded pub/sub payload. Anything the decoder accepts is
- * still untrusted: a well-formed array, scalar, or map missing `l`/`ts`/`src`
- * must not become an event assembled from `undefined` fields.
+ * still untrusted: a well-formed array, scalar, map missing `l`/`ts`/`src`, or
+ * map with an unknown level must not become an event assembled from
+ * `undefined` or unchecked fields.
  */
 function isCompactEvent(value: unknown): value is CompactEvent {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -39,6 +46,7 @@ function isCompactEvent(value: unknown): value is CompactEvent {
   const v = value as Record<string, unknown>;
   return (
     typeof v.l === 'string' &&
+    INVALIDATION_LEVELS.has(v.l) &&
     typeof v.ts === 'number' &&
     typeof v.src === 'string' &&
     (v.ns === undefined || typeof v.ns === 'string') &&
@@ -90,8 +98,8 @@ export function serializeEvent(event: InvalidationEvent): Uint8Array {
  *
  * @throws {SerializationError} if input exceeds the decode size or depth cap,
  *   is not well-formed MessagePack (the decoder failure is attached as
- *   `cause`), or decodes to anything other than a map carrying string `l`,
- *   number `ts` and string `src`
+ *   `cause`), or decodes to anything other than a map carrying a known level
+ *   `l`, number `ts`, string `src`, and string `ns`/`ph` when present
  */
 export function deserializeEvent(data: Uint8Array): InvalidationEvent {
   if (data.length > DEFAULT_MAX_INVALIDATION_EVENT_SIZE) {
@@ -109,17 +117,18 @@ export function deserializeEvent(data: Uint8Array): InvalidationEvent {
   } catch (error) {
     throw new SerializationError(
       `Failed to decode invalidation event: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      { cause: error instanceof Error ? error : undefined }
+      { cause: error }
     );
   }
   if (!isCompactEvent(compact)) {
     throw new SerializationError(
-      'Invalidation event payload is not a map with required keys l (string), ts (number), src (string)'
+      'Invalidation event payload is not a map with a known level l, number ts, string src, ' +
+        'and string ns/ph when present'
     );
   }
 
   return {
-    level: compact.l as InvalidationLevel,
+    level: compact.l,
     namespace: compact.ns,
     paramsHash: compact.ph,
     timestamp: compact.ts,
