@@ -121,4 +121,23 @@ describe('InvalidationEvent serialization', () => {
       sourceInstance: 'i',
     });
   });
+
+  it('accepts nil-encoded optionals and normalizes them to undefined (LAB-4336)', () => {
+    // A struct/dict encoder emits nil for an unset field instead of omitting
+    // the key — msgpack.packb({'ns': None}) in Python does. Rejecting this
+    // payload would drop a whole-cache invalidation and leave L1 stale until
+    // TTL — RedisInvalidationChannel only logs the deserialize failure, so the
+    // publisher never learns its invalidation went nowhere.
+    // Level 'global' on purpose — invalidateAll() reads neither optional, so
+    // this is the payload where acceptance actually prevents staleness.
+    expect(
+      deserializeEvent(encode({ l: 'global', ts: 1, src: 'i', ns: null, ph: null }))
+    ).toStrictEqual({
+      level: 'global',
+      namespace: undefined,
+      paramsHash: undefined,
+      timestamp: 1,
+      sourceInstance: 'i',
+    });
+  });
 });

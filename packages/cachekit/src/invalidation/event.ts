@@ -27,10 +27,22 @@ const INVALIDATION_LEVELS: ReadonlySet<string> = new Set<InvalidationLevel>([
 
 interface CompactEvent {
   [COMPACT_KEYS.level]: InvalidationLevel;
-  [COMPACT_KEYS.namespace]?: string;
-  [COMPACT_KEYS.paramsHash]?: string;
+  // Only the read side sees nil; serializeEvent omits the key instead.
+  [COMPACT_KEYS.namespace]?: string | null;
+  [COMPACT_KEYS.paramsHash]?: string | null;
   [COMPACT_KEYS.timestamp]: number;
   [COMPACT_KEYS.sourceInstance]: string;
+}
+
+/**
+ * MessagePack nil in an optional field says what a missing key says, and is
+ * what a struct/dict encoder emits for an unset one. Rejecting it buys no
+ * safety — nil carries nothing — and loses a well-formed invalidation, leaving
+ * L1 stale until TTL with nothing but a log line in the subscriber's process
+ * to say so. Required fields stay strict; only `ns`/`ph` use this.
+ */
+function isAbsentOrString(value: unknown): value is string | null | undefined {
+  return value === undefined || value === null || typeof value === 'string';
 }
 
 /**
@@ -49,8 +61,8 @@ function isCompactEvent(value: unknown): value is CompactEvent {
     INVALIDATION_LEVELS.has(v.l) &&
     typeof v.ts === 'number' &&
     typeof v.src === 'string' &&
-    (v.ns === undefined || typeof v.ns === 'string') &&
-    (v.ph === undefined || typeof v.ph === 'string')
+    isAbsentOrString(v.ns) &&
+    isAbsentOrString(v.ph)
   );
 }
 
@@ -96,10 +108,13 @@ export function serializeEvent(event: InvalidationEvent): Uint8Array {
  * held to a much tighter size + depth cap than a general cache value
  * (least privilege: a forged event cannot ride the 10MB value ceiling).
  *
+ * An optional field encoded as nil is read as absent and returned as
+ * `undefined`.
+ *
  * @throws {SerializationError} if input exceeds the decode size or depth cap,
  *   is not well-formed MessagePack (the decoder failure is attached as
  *   `cause`), or decodes to anything other than a map carrying a known level
- *   `l`, number `ts`, string `src`, and string `ns`/`ph` when present
+ *   `l`, number `ts`, string `src`, and string-or-nil `ns`/`ph` when present
  */
 export function deserializeEvent(data: Uint8Array): InvalidationEvent {
   if (data.length > DEFAULT_MAX_INVALIDATION_EVENT_SIZE) {
@@ -123,14 +138,14 @@ export function deserializeEvent(data: Uint8Array): InvalidationEvent {
   if (!isCompactEvent(compact)) {
     throw new SerializationError(
       'Invalidation event payload is not a map with a known level l, number ts, string src, ' +
-        'and string ns/ph when present'
+        'and string-or-nil ns/ph when present'
     );
   }
 
   return {
     level: compact.l,
-    namespace: compact.ns,
-    paramsHash: compact.ph,
+    namespace: compact.ns ?? undefined,
+    paramsHash: compact.ph ?? undefined,
     timestamp: compact.ts,
     sourceInstance: compact.src,
   };
