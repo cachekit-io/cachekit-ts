@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { encode, DecodeError } from '@msgpack/msgpack';
 import { serializeEvent, deserializeEvent, createInvalidationEvent } from './event';
+import { SerializationError } from '../errors';
 
 describe('InvalidationEvent serialization', () => {
   it('round-trips global event', () => {
@@ -68,5 +70,52 @@ describe('InvalidationEvent serialization', () => {
       paramsHash: 'f'.repeat(64),
     });
     expect(deserializeEvent(serializeEvent(atSanityEdge)).namespace).toBe('n'.repeat(1000));
+  });
+
+  it('wraps a decoder failure in SerializationError with cause (LAB-3477)', () => {
+    // fixext1 with an unrecognised timestamp payload: passes the size and depth
+    // checks (3 bytes, no collections) and fails INSIDE @msgpack's decoder. The
+    // documented contract is SerializationError, not a raw DecodeError.
+    const run = (): unknown => deserializeEvent(Uint8Array.of(0xd4, 0xff, 0x00));
+    expect(run).toThrow(SerializationError);
+    expect(run).toThrow(/Failed to decode invalidation event/);
+    let cause: unknown;
+    try {
+      run();
+    } catch (err) {
+      cause = (err as SerializationError).cause;
+    }
+    expect(cause).toBeInstanceOf(DecodeError);
+  });
+
+  it('rejects a well-formed payload that is not a map (LAB-3477)', () => {
+    for (const notAMap of [[], [1, 2, 3], 'global', 42, null, true]) {
+      expect(() => deserializeEvent(encode(notAMap))).toThrow(SerializationError);
+    }
+  });
+
+  it('rejects a map missing or mistyping a required key (LAB-3477)', () => {
+    const valid = { l: 'global', ts: 1, src: 'i' };
+    const bad: unknown[] = [
+      {},
+      { ts: 1, src: 'i' },
+      { l: 'global', src: 'i' },
+      { l: 'global', ts: 1 },
+      { ...valid, l: 7 },
+      { ...valid, ts: 'now' },
+      { ...valid, src: null },
+      { ...valid, ns: 1 },
+      { ...valid, ph: [] },
+    ];
+    for (const payload of bad) {
+      expect(() => deserializeEvent(encode(payload))).toThrow(SerializationError);
+    }
+    expect(deserializeEvent(encode(valid))).toStrictEqual({
+      level: 'global',
+      namespace: undefined,
+      paramsHash: undefined,
+      timestamp: 1,
+      sourceInstance: 'i',
+    });
   });
 });

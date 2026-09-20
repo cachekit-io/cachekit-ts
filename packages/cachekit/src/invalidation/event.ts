@@ -28,6 +28,25 @@ interface CompactEvent {
 }
 
 /**
+ * Shape check for a decoded pub/sub payload. Anything the decoder accepts is
+ * still untrusted: a well-formed array, scalar, or map missing `l`/`ts`/`src`
+ * must not become an event assembled from `undefined` fields.
+ */
+function isCompactEvent(value: unknown): value is CompactEvent {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.l === 'string' &&
+    typeof v.ts === 'number' &&
+    typeof v.src === 'string' &&
+    (v.ns === undefined || typeof v.ns === 'string') &&
+    (v.ph === undefined || typeof v.ph === 'string')
+  );
+}
+
+/**
  * Serialize an InvalidationEvent to bytes for transmission.
  *
  * Enforces the same size cap as {@link deserializeEvent}: an event over the
@@ -69,7 +88,10 @@ export function serializeEvent(event: InvalidationEvent): Uint8Array {
  * held to a much tighter size + depth cap than a general cache value
  * (least privilege: a forged event cannot ride the 10MB value ceiling).
  *
- * @throws {SerializationError} if input exceeds the decode size cap
+ * @throws {SerializationError} if input exceeds the decode size or depth cap,
+ *   is not well-formed MessagePack (the decoder failure is attached as
+ *   `cause`), or decodes to anything other than a map carrying string `l`,
+ *   number `ts` and string `src`
  */
 export function deserializeEvent(data: Uint8Array): InvalidationEvent {
   if (data.length > DEFAULT_MAX_INVALIDATION_EVENT_SIZE) {
@@ -78,10 +100,23 @@ export function deserializeEvent(data: Uint8Array): InvalidationEvent {
     );
   }
   assertDecodeDepth(data, MAX_INVALIDATION_EVENT_DEPTH);
-  const compact = decode(
-    data,
-    boundedDecodeOptions(DEFAULT_MAX_COLLECTION_SIZE, DEFAULT_MAX_INVALIDATION_EVENT_SIZE)
-  ) as CompactEvent;
+  let compact: unknown;
+  try {
+    compact = decode(
+      data,
+      boundedDecodeOptions(DEFAULT_MAX_COLLECTION_SIZE, DEFAULT_MAX_INVALIDATION_EVENT_SIZE)
+    );
+  } catch (error) {
+    throw new SerializationError(
+      `Failed to decode invalidation event: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      { cause: error instanceof Error ? error : undefined }
+    );
+  }
+  if (!isCompactEvent(compact)) {
+    throw new SerializationError(
+      'Invalidation event payload is not a map with required keys l (string), ts (number), src (string)'
+    );
+  }
 
   return {
     level: compact.l as InvalidationLevel,
