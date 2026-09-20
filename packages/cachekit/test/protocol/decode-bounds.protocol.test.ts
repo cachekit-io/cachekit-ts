@@ -175,9 +175,19 @@ describe('Protocol decode-bounds vectors (spec/interop-mode.md#decode-bounds)', 
   it('every reject vector exhibits the rule it is tagged with', () => {
     for (const v of vectors.reject_vectors) {
       const inputLen = v.input_hex.length / 2;
-      for (const reason of v.reject_reasons ?? []) {
-        if (reason === 'depth') expect(v.nesting_depth, v.name).toBeGreaterThan(1024);
-        if (reason === 'overclaim') expect(v.declared_slots, v.name).toBeGreaterThan(inputLen - 1);
+      const reasons = v.reject_reasons ?? [];
+      expect(reasons.length, `${v.name}: missing reject reason`).toBeGreaterThan(0);
+      for (const reason of reasons) {
+        switch (reason) {
+          case 'depth':
+            expect(v.nesting_depth, v.name).toBeGreaterThan(1024);
+            break;
+          case 'overclaim':
+            expect(v.declared_slots, v.name).toBeGreaterThan(inputLen - 1);
+            break;
+          default:
+            throw new Error(`${v.name}: unknown reject reason ${String(reason)}`);
+        }
       }
     }
     // The depth ceiling rests on the vectors that violate depth ALONE; if a
