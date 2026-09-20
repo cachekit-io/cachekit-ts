@@ -108,10 +108,18 @@ export interface InvalidationEvent {
   /** Level of invalidation */
   level: InvalidationLevel;
 
-  /** Namespace to invalidate (required if level is 'namespace' or 'params') */
+  /**
+   * Namespace to invalidate. NOT required and not enforced, despite what a
+   * 'namespace' level implies: `CacheCore.invalidate()` publishes whatever
+   * the caller passed, and a namespace-level event arriving without one
+   * invalidates nothing (handleInvalidationEvent logs and moves on).
+   */
   namespace?: string;
 
-  /** Specific params hash to invalidate (required if level is 'params') */
+  /**
+   * Params hash to invalidate. Published but never consumed — no read path
+   * acts on it and params-level events are a no-op in L1.
+   */
   paramsHash?: string;
 
   /** When this event was created (Unix timestamp in ms) */

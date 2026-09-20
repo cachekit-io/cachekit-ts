@@ -1263,6 +1263,15 @@ export class CacheImpl implements SecureCache {
   ): Promise<void> {
     this.ensureNotClosed();
 
+    if (level === 'namespace' && !options?.namespace) {
+      // Nothing to invalidate here and nothing a peer could act on, so this
+      // would publish an event every subscriber must discard. Report it in
+      // the process that made the call — the only one that can fix it —
+      // rather than fanning a log line across the fleet.
+      logError('[cachekit] invalidate("namespace") called with no namespace; nothing invalidated');
+      return;
+    }
+
     // Invalidate L1
     if (this.l1) {
       switch (level) {

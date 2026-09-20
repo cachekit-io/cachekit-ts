@@ -167,6 +167,28 @@ describe('Cache Integration', () => {
       // Note: Backend still has data, but L1 is invalidated
     });
 
+    it('reports invalidate("namespace") with no namespace at the caller (LAB-4336)', async () => {
+      // Nothing can carry this out, so it must not go on the wire: every peer
+      // would discard it and log a mistake it cannot fix. The report belongs
+      // in the process that made the call.
+      const reported: string[] = [];
+      setLogger((message) => reported.push(message));
+      try {
+        await cache.set('ns:key1', 'value1', { namespace: 'ns' });
+        await cache.invalidate('namespace');
+        expect(reported).toEqual([
+          '[cachekit] invalidate("namespace") called with no namespace; nothing invalidated',
+        ]);
+
+        // A well-formed call stays quiet — the guard must not be broader.
+        reported.length = 0;
+        await cache.invalidate('namespace', { namespace: 'ns' });
+        expect(reported).toEqual([]);
+      } finally {
+        setLogger(null);
+      }
+    });
+
     it('should invalidate all', async () => {
       await cache.set('key1', 'value1');
       await cache.set('key2', 'value2');

@@ -122,6 +122,18 @@ describe('InvalidationEvent serialization', () => {
     });
   });
 
+  it('reads an empty-string optional as absent, keeping the pair inverse (LAB-4336)', () => {
+    expect(
+      deserializeEvent(encode({ l: 'namespace', ts: 1, src: 'i', ns: '', ph: '' }))
+    ).toStrictEqual({
+      level: 'namespace',
+      namespace: undefined,
+      paramsHash: undefined,
+      timestamp: 1,
+      sourceInstance: 'i',
+    });
+  });
+
   it('accepts nil-encoded optionals and normalizes them to undefined (LAB-4336)', () => {
     // A struct/dict encoder emits nil for an unset field instead of omitting
     // the key — msgpack.packb({'ns': None}) in Python does. Rejecting this

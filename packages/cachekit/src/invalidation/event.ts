@@ -108,8 +108,8 @@ export function serializeEvent(event: InvalidationEvent): Uint8Array {
  * held to a much tighter size + depth cap than a general cache value
  * (least privilege: a forged event cannot ride the 10MB value ceiling).
  *
- * An optional field encoded as nil is read as absent and returned as
- * `undefined`.
+ * A nil or empty-string optional is read as absent: `serializeEvent` emits
+ * neither, so the two functions stay exact inverses.
  *
  * @throws {SerializationError} if input exceeds the decode size or depth cap,
  *   is not well-formed MessagePack (the decoder failure is attached as
@@ -144,8 +144,8 @@ export function deserializeEvent(data: Uint8Array): InvalidationEvent {
 
   return {
     level: compact.l,
-    namespace: compact.ns ?? undefined,
-    paramsHash: compact.ph ?? undefined,
+    namespace: compact.ns || undefined,
+    paramsHash: compact.ph || undefined,
     timestamp: compact.ts,
     sourceInstance: compact.src,
   };

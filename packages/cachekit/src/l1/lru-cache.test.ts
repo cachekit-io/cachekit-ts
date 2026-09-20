@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { L1Cache } from './lru-cache';
+import { setLogger } from '../logger';
 import type { InvalidationEvent } from './types';
 
 describe('L1Cache', () => {
@@ -453,6 +454,35 @@ describe('L1Cache', () => {
       expect(cache.get('ns1:a')).toBeNull();
       expect(cache.get('ns1:b')).toBeNull();
       expect(cache.get('ns2:c')).toBe('value3');
+    });
+
+    it('handleInvalidationEvent - reports a namespace event with no namespace (LAB-4336)', () => {
+      // It invalidates nothing, so the publisher's intent is lost. That must
+      // not vanish: before nil was accepted, such an event failed to
+      // deserialize and the channel logged it. Accepting it must not cost
+      // the signal. Empty string is the same case — it is falsy here.
+      const reported: { message: string; data?: unknown }[] = [];
+      setLogger((message, data) => reported.push({ message, data }));
+      const forged = 'other-instance\n[cachekit] FORGED LINE';
+      try {
+        cache.set('ns1:a', 'value1', 10000, 'ns1');
+        cache.handleInvalidationEvent({
+          level: 'namespace',
+          namespace: undefined,
+          timestamp: Date.now(),
+          sourceInstance: forged,
+        });
+        expect(cache.get('ns1:a')).toBe('value1');
+      } finally {
+        setLogger(null);
+      }
+
+      expect(reported).toHaveLength(1);
+      expect(reported[0].message).toMatch(/Ignored namespace-level invalidation.*no namespace/);
+      // Fails the moment someone tidies the object wrapper into a template
+      // literal: only object string VALUES get control chars escaped.
+      expect(reported[0].message).not.toContain('FORGED LINE');
+      expect(reported[0].data).toEqual({ sourceInstance: forged });
     });
 
     it('handleInvalidationEvent - ignores events from self', () => {
