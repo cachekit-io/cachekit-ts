@@ -109,10 +109,14 @@ export interface InvalidationEvent {
   level: InvalidationLevel;
 
   /**
-   * Namespace to invalidate. NOT required and not enforced, despite what a
-   * 'namespace' level implies: `CacheCore.invalidate()` publishes whatever
-   * the caller passed, and a namespace-level event arriving without one
-   * invalidates nothing (handleInvalidationEvent logs and moves on).
+   * Namespace to invalidate. Optional on the wire and not enforced by the
+   * shape guard, despite what a 'namespace' level implies.
+   *
+   * This SDK never publishes one without it: `CacheImpl.invalidate()` reports
+   * a namespace-level call with no namespace to its own caller and returns
+   * without publishing. So a namespace-level event that arrives without one
+   * came from some other publisher, and it invalidates nothing —
+   * `handleInvalidationEvent` logs it and moves on.
    */
   namespace?: string;
 
