@@ -486,12 +486,8 @@ describe('L1Cache', () => {
     });
 
     it('handleInvalidationEvent - the report is total and bounded (LAB-4336)', () => {
-      // L1Cache is exported, so a JS caller reaches this method with a
-      // hand-built object and no compiler to stop it. Every other field of a
-      // contract-violating event no-ops here; only the report's sourceInstance
-      // is dereferenced, and a log on an error path must never be the thing
-      // that crashes it. The 64-char bound is asserted here too: the forged
-      // fixture above is short, so that test passes with the bound deleted.
+      // Why this exists next to the test above: that fixture is a short
+      // string, so it passes with both the typeof guard and the bound deleted.
       const reported: unknown[] = [];
       const report = (sourceInstance: unknown) => {
         cache.handleInvalidationEvent({

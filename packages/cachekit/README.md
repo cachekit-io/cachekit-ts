@@ -389,10 +389,22 @@ await cache.invalidate('params', { key: 'users:getUser:abc123...' });
 ```
 
 `'global'` and `'namespace'` reach other instances through the invalidation
-channel. **`'params'` does not.** It deletes the key from L2 and from the
-calling instance's L1, but peers keep serving that key from their own L1
-until it expires. Invalidate at `'namespace'` level when a key must be
-cleared fleet-wide.
+channel. **`'params'` does not** — it deletes the key from L2 and from the
+calling instance's L1, but peers keep serving it from their own L1 until it
+expires.
+
+Clearing one key fleet-wide therefore takes both calls, `'params'` first so
+that no peer can backfill from L2 in between:
+
+```typescript
+// L2 + this instance's L1
+await cache.invalidate('params', { key: 'users:getUser:abc123...' });
+// peers drop their L1 copies
+await cache.invalidate('namespace', { namespace: 'users' });
+```
+
+The second call evicts the whole namespace from every peer's L1, and neither
+`'namespace'` nor `'global'` purges L2 — that needs a Redis `SCAN`.
 
 ### cache.close()
 
