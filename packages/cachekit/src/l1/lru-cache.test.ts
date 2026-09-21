@@ -485,6 +485,37 @@ describe('L1Cache', () => {
       expect(reported[0].data).toEqual({ sourceInstance: forged });
     });
 
+    it('handleInvalidationEvent - the report is total and bounded (LAB-4336)', () => {
+      // L1Cache is exported, so a JS caller reaches this method with a
+      // hand-built object and no compiler to stop it. Every other field of a
+      // contract-violating event no-ops here; only the report's sourceInstance
+      // is dereferenced, and a log on an error path must never be the thing
+      // that crashes it. The 64-char bound is asserted here too: the forged
+      // fixture above is short, so that test passes with the bound deleted.
+      const reported: unknown[] = [];
+      const report = (sourceInstance: unknown) => {
+        cache.handleInvalidationEvent({
+          level: 'namespace',
+          timestamp: 0,
+          sourceInstance,
+        } as InvalidationEvent);
+      };
+      setLogger((_message, data) => reported.push(data));
+      try {
+        for (const bad of [undefined, null, 123, { a: 1 }, Symbol('s')]) {
+          expect(() => report(bad)).not.toThrow();
+        }
+        report('x'.repeat(80));
+      } finally {
+        setLogger(null);
+      }
+
+      expect(reported).toEqual([
+        ...Array(5).fill({ sourceInstance: 'unknown' }),
+        { sourceInstance: 'x'.repeat(64) },
+      ]);
+    });
+
     it('handleInvalidationEvent - ignores events from self', () => {
       cache.set('a', '1', 10000, 'ns');
 

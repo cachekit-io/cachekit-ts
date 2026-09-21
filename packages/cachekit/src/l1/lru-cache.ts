@@ -340,13 +340,16 @@ export class L1Cache<T = unknown> {
           // This class used to fail the shape guard and get logged by the
           // channel; accepting nil must not cost that signal.
           logError('[cachekit] Ignored namespace-level invalidation: no namespace on the event', {
-            // Wrapped in an object deliberately. sourceInstance is unvalidated
-            // text off an untrusted payload; util.inspect escapes control
-            // characters in object string VALUES, so a forged newline cannot
-            // open a log line. A bare string second argument is NOT escaped —
-            // do not flatten this. Sliced because the only bound on it is the
-            // 4KB event cap, and a real instance id is a uuid.
-            sourceInstance: event.sourceInstance.slice(0, 64),
+            // Object-wrapped deliberately: sourceInstance is untrusted text and only
+            // object string VALUES get control chars escaped — a bare string arg would
+            // let a forged newline open a log line. Do not flatten. typeof, not `?.`:
+            // L1Cache is exported, so a JS caller reaches this method with any value at
+            // all, and the report on an error path must not be what throws. Sliced
+            // because the only bound on it is the 4KB event cap.
+            sourceInstance:
+              typeof event.sourceInstance === 'string'
+                ? event.sourceInstance.slice(0, 64)
+                : 'unknown',
           });
         }
         break;

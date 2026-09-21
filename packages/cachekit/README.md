@@ -388,6 +388,12 @@ await cache.invalidate('namespace', { namespace: 'users' });
 await cache.invalidate('params', { key: 'users:getUser:abc123...' });
 ```
 
+`'global'` and `'namespace'` reach other instances through the invalidation
+channel. **`'params'` does not.** It deletes the key from L2 and from the
+calling instance's L1, but peers keep serving that key from their own L1
+until it expires. Invalidate at `'namespace'` level when a key must be
+cleared fleet-wide.
+
 ### cache.close()
 
 Close connections and release resources.
