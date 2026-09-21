@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { L1Cache } from './lru-cache';
 import type { InvalidationEvent } from './types';
 
@@ -7,6 +7,12 @@ describe('L1Cache', () => {
 
   beforeEach(() => {
     cache = new L1Cache({ maxEntries: 10 });
+  });
+
+  afterEach(() => {
+    // Fake timers are process-global; a failing assertion before a trailing
+    // vi.useRealTimers() would otherwise freeze the clock for every later test.
+    vi.useRealTimers();
   });
 
   describe('basic operations', () => {
@@ -24,7 +30,6 @@ describe('L1Cache', () => {
       cache.set('key', 'value', 100, 'test');
       vi.advanceTimersByTime(200);
       expect(cache.get('key')).toBeNull();
-      vi.useRealTimers();
     });
 
     it('updates lastAccess on get', () => {
@@ -32,7 +37,6 @@ describe('L1Cache', () => {
       cache.set('key', 'value', 10000, 'test');
       vi.advanceTimersByTime(1000);
       cache.get('key'); // Should update lastAccess
-      vi.useRealTimers();
     });
 
     it('ttl <= 0 never expires (LAB-1388: matches the ts-wide "no expiry" contract)', () => {
@@ -42,7 +46,6 @@ describe('L1Cache', () => {
       vi.advanceTimersByTime(1000 * 60 * 60 * 24 * 365); // 1 year
       expect(cache.get('zero')).toBe('value');
       expect(cache.get('negative')).toBe('value');
-      vi.useRealTimers();
     });
 
     it('deletes key and returns true', () => {
@@ -126,8 +129,6 @@ describe('L1Cache', () => {
       expect(smallCache.get('b')).toBeNull();
       expect(smallCache.get('c')).toBe(3);
       expect(smallCache.get('d')).toBe(4);
-
-      vi.useRealTimers();
     });
 
     it('evicts when maxMemory exceeded', () => {
@@ -190,8 +191,6 @@ describe('L1Cache', () => {
       const result = cache.getWithSwr('key');
       expect(result.value).toBe('value');
       // May or may not be marked for refresh due to jitter
-
-      vi.useRealTimers();
     });
 
     it('does not return value when fully expired', () => {
@@ -202,8 +201,6 @@ describe('L1Cache', () => {
       const result = cache.getWithSwr('key');
       expect(result.value).toBeNull();
       expect(result.shouldRefresh).toBe(false);
-
-      vi.useRealTimers();
     });
 
     it('completeRefresh updates cache if version matches', () => {
@@ -239,8 +236,6 @@ describe('L1Cache', () => {
         cache.cancelRefresh('key');
         expect(cache.stats.refreshing).toBe(0);
       }
-
-      vi.useRealTimers();
     });
 
     it('C3 fix: limits concurrent refreshes', () => {
@@ -271,8 +266,6 @@ describe('L1Cache', () => {
       // Should be at most 2 (maxConcurrentRefreshes)
       expect(refreshCount).toBeLessThanOrEqual(2);
       expect(limitedCache.stats.refreshing).toBeLessThanOrEqual(2);
-
-      vi.useRealTimers();
     });
 
     it('allows new refresh after completing previous one', () => {
@@ -305,8 +298,6 @@ describe('L1Cache', () => {
       // Now second refresh should work
       const r3 = limitedCache.getWithSwr('b');
       expect(r3.shouldRefresh).toBe(true);
-
-      vi.useRealTimers();
     });
 
     it('expires a refresh marker that is never cleared (torn-down refresh cannot wedge the key)', () => {
@@ -331,8 +322,6 @@ describe('L1Cache', () => {
       // …but once the marker expires, the key becomes refreshable again.
       vi.advanceTimersByTime(60_000);
       expect(cache.getWithSwr('key').shouldRefresh).toBe(true);
-
-      vi.useRealTimers();
     });
 
     it('sweeps expired markers at the concurrency limit (wedged markers free their slots)', () => {
@@ -360,8 +349,6 @@ describe('L1Cache', () => {
       vi.advanceTimersByTime(65_000);
       expect(limitedCache.getWithSwr('key2').shouldRefresh).toBe(true);
       expect(limitedCache.stats.refreshing).toBe(1);
-
-      vi.useRealTimers();
     });
   });
 

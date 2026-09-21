@@ -200,6 +200,12 @@ describe('m3: RetryPolicy Cancellable Sleep', () => {
 // ========== m4: Missing Cleanup of refreshingKeys on Close ==========
 
 describe('m4: refreshingKeys Cleanup on Close', () => {
+  afterEach(() => {
+    // A failure between useFakeTimers/useRealTimers below must not leak a
+    // frozen clock into the m5 suite.
+    vi.useRealTimers();
+  });
+
   it('should clear refreshingKeys when cache is closed', async () => {
     const backend = new InMemoryBackend();
     const cache = createCache({
