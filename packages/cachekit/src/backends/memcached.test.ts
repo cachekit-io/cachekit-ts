@@ -21,7 +21,7 @@ const mockClient = {
   quit: vi.fn(),
 };
 
-const clientCreate = vi.fn(() => mockClient);
+const clientCreate = vi.fn((..._args: unknown[]) => mockClient);
 
 vi.mock('memjs', () => ({
   Client: {

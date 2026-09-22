@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { L1Cache } from './lru-cache';
-import type { InvalidationEvent } from './types';
+import { L1Cache } from './lru-cache.js';
+import type { InvalidationEvent } from './types.js';
 
 describe('L1Cache', () => {
   let cache: L1Cache<string>;

@@ -10,7 +10,7 @@ import {
   ValueTooLargeError,
   NonceExhaustedError,
   SerializationError,
-} from './errors';
+} from './errors.js';
 
 describe('Error types', () => {
   it('CachekitError is instanceof Error', () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { withDegradation, withDegradationFn, degradationBehaviors } from './degradation';
+import { withDegradation, withDegradationFn, degradationBehaviors } from './degradation.js';
 
 describe('withDegradation', () => {
   it('returns result on success', async () => {

@@ -10,7 +10,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { ByteStorage } from '../../src/workers/runtime.js';
-import fixture from './fixtures/wire-format.json';
+import fixture from './fixtures/wire-format.json' with { type: 'json' };
 
 interface WireVector {
   name: string;

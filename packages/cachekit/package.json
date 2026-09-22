@@ -60,6 +60,7 @@
     "test:protocol": "vitest run test/protocol",
     "lint": "eslint src/",
     "type-check": "tsc --noEmit",
+    "type-check:tests": "tsc -p tsconfig.test.json",
     "clean": "rm -rf dist *.tsbuildinfo",
     "test:workers": "vitest run --config vitest.workers.config.ts",
     "check:workers-bundle": "node scripts/check-workers-bundle.mjs"
