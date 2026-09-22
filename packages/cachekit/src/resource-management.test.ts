@@ -70,6 +70,7 @@ describe('m1: InvalidationChannel Initialization', () => {
     // Create cache with invalidation configuration
     const cache = createCache({
       backend: new InMemoryBackend(),
+      defaultTtl: 3600,
       l1: { enabled: true, maxEntries: 100 },
       invalidation: {
         redis: mockRedis,
@@ -91,6 +92,7 @@ describe('m1: InvalidationChannel Initialization', () => {
     // Create cache WITHOUT invalidation configuration
     const cache = createCache({
       backend: new InMemoryBackend(),
+      defaultTtl: 3600,
       l1: { enabled: true, maxEntries: 100 },
     });
 
@@ -117,6 +119,7 @@ describe('m1: InvalidationChannel Initialization', () => {
 
     const cache = createCache({
       backend: new InMemoryBackend(),
+      defaultTtl: 3600,
       invalidation: {
         redis: mockRedis,
         channelName: 'test:invalidate',
