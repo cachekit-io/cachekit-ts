@@ -70,7 +70,6 @@ describe('m1: InvalidationChannel Initialization', () => {
     // Create cache with invalidation configuration
     const cache = createCache({
       backend: new InMemoryBackend(),
-      defaultTtl: 3600,
       l1: { enabled: true, maxEntries: 100 },
       invalidation: {
         redis: mockRedis,
@@ -92,7 +91,6 @@ describe('m1: InvalidationChannel Initialization', () => {
     // Create cache WITHOUT invalidation configuration
     const cache = createCache({
       backend: new InMemoryBackend(),
-      defaultTtl: 3600,
       l1: { enabled: true, maxEntries: 100 },
     });
 
@@ -119,7 +117,6 @@ describe('m1: InvalidationChannel Initialization', () => {
 
     const cache = createCache({
       backend: new InMemoryBackend(),
-      defaultTtl: 3600,
       invalidation: {
         redis: mockRedis,
         channelName: 'test:invalidate',
@@ -211,7 +208,6 @@ describe('m4: refreshingKeys Cleanup on Close', () => {
     vi.useFakeTimers();
     const cache = createCache({
       backend: new InMemoryBackend(),
-      defaultTtl: 3600,
       l1: {
         enabled: true,
         maxEntries: 100,
@@ -228,7 +224,7 @@ describe('m4: refreshingKeys Cleanup on Close', () => {
     // never settles, so the refresh is still in flight when close() runs —
     // the only state in which close() has a marker to clear.
     const compute = vi
-      .fn<() => Promise<unknown>>()
+      .fn()
       .mockResolvedValueOnce({ computed: true })
       .mockReturnValue(new Promise<never>(() => {}));
     const wrapped = cache.wrap(compute, { namespace: 'test:slow', ttl: 3600 });
