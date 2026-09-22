@@ -351,7 +351,14 @@ export class EncryptionManagerCore {
    */
   async isHardwareAccelerated(): Promise<boolean | null> {
     await this.ensureInitialized();
-    return this.tenantKeys!.hardwareAccelerationEnabled?.() ?? null;
+    // ensureInitialized() returns early on an already-initialised manager, so
+    // dispose() can land while this call is suspended at the await. encrypt()
+    // and decrypt() convert the resulting null read inside their catch; this
+    // path has none, so it checks explicitly rather than trusting a `!`.
+    if (this.disposed || !this.tenantKeys) {
+      throw new EncryptionError('EncryptionManager has been disposed');
+    }
+    return this.tenantKeys.hardwareAccelerationEnabled?.() ?? null;
   }
 
   /**

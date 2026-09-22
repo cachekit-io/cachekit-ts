@@ -274,4 +274,18 @@ describe('EncryptionManagerCore keyring config (previousMasterKeys)', () => {
     expect(await manager.isHardwareAccelerated()).toBeNull();
     manager.dispose();
   });
+
+  it('rejects with EncryptionError, not TypeError, when dispose races an initialised read', async () => {
+    const { bindings } = mockBindings();
+    const manager = new TestManager(async () => bindings);
+
+    // Initialise first, so ensureInitialized() takes its early-return path and
+    // the read below resumes only after dispose() has nulled tenantKeys.
+    expect(await manager.isHardwareAccelerated()).toBe(true);
+
+    const inFlight = manager.isHardwareAccelerated();
+    manager.dispose();
+
+    await expect(inFlight).rejects.toThrow(EncryptionError);
+  });
 });
