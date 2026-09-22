@@ -458,7 +458,7 @@ automatically from the cache's live L1/L2 hit and miss counters; pass your own
 encryption manager forwards cachekit-core's detection. Informational only: the
 crypto backend picks its implementation independently, so use it to explain
 `.secure` latency, not to change behaviour. It initialises the bindings if
-needed, and returns `null` (unknown) only when the installed native binding
+needed, and returns `null` (unknown) only when the installed binding
 predates the accessor. The per-architecture semantics are core's — as of
 cachekit-core 0.6 a runtime AES-NI probe on x86/x86_64, `true` on every aarch64
 build (a NEON check, not the Crypto Extension), and `false` on Cloudflare
