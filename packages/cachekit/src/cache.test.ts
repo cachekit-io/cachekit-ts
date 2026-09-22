@@ -604,8 +604,7 @@ describe('Cache Integration', () => {
       // Same in-flight-across-close() interleaving as above, but on the
       // DEFAULT compression-on path: close() frees this.byteStorage, so the
       // resumed read must not unpack with the freed codec (a use-after-free
-      // on the wasm binding) — it gets a throwaway instead (expert panel,
-      // LAB-1768).
+      // on the wasm binding) — it gets a throwaway instead (LAB-1768).
       const { pending, counts, writer } = await startPostCloseRead({
         key: 'test:postclose-on',
         value: { data: 'enveloped' },
