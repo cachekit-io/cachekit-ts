@@ -385,7 +385,7 @@ export class CacheImpl implements SecureCache {
     // Codec construction stays OUTSIDE the try: a broken binding must fail
     // loudly (through the reliability executor), not be conflated with "not
     // an envelope" — that would silently serve raw envelope tuples, the
-    // exact corruption this path exists to prevent (expert panel, LAB-1768).
+    // exact corruption this path exists to prevent (LAB-1768).
     //
     // After close() the cached reader has already been freed — an in-flight
     // read resuming post-shutdown must not resurrect the cache (close() will
@@ -714,7 +714,7 @@ export class CacheImpl implements SecureCache {
           // Infinity ms: an Infinity originalTtl turns getWithSwr's
           // freshness check into `Infinity > Infinity` — permanently stale,
           // arming a spurious background refresh per marker window, forever
-          // (expert panel, LAB-1768).
+          // (LAB-1768).
           const l1TtlMs = Number.isFinite(l1TtlSeconds) ? l1TtlSeconds * 1000 : 0;
           this.l1.set(key, this.l1Payload(value, data), l1TtlMs, namespace);
           this.publishL1Stats();
