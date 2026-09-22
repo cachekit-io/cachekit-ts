@@ -227,7 +227,7 @@ describe('m4: refreshingKeys Cleanup on Close', () => {
     // never settles, so the refresh is still in flight when close() runs —
     // the only state in which close() has a marker to clear.
     const compute = vi
-      .fn()
+      .fn<() => Promise<{ computed: boolean }>>()
       .mockResolvedValueOnce({ computed: true })
       .mockReturnValue(new Promise<never>(() => {}));
     const wrapped = cache.wrap(compute, { namespace: 'test:slow', ttl: 3600 });
