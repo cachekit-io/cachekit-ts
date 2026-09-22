@@ -186,10 +186,8 @@ impl TenantKeys {
         self.keyring_entries
     }
 
-    /// Whether cachekit-core detected AES hardware support. Always `false` on
-    /// wasm32 — no AES instructions to detect, `aes-gcm` runs in software —
-    /// exposed so the handle matches the NAPI binding and callers get an
-    /// honest answer instead of `undefined`.
+    /// Forwards cachekit-core's AES hardware detection — `false` on wasm32
+    /// (no AES instructions); present so the handle matches the NAPI binding.
     #[wasm_bindgen(js_name = hardwareAccelerationEnabled)]
     pub fn hardware_acceleration_enabled(&self) -> bool {
         self.encryptor.hardware_acceleration_enabled()

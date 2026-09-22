@@ -25,10 +25,8 @@ export interface EncryptionTenantKeys {
    */
   keyringEntryCount?(): number;
   /**
-   * Whether cachekit-core detected AES hardware support on this host
-   * (informational — the crypto backend dispatches independently). Optional
-   * because older binding binaries predate it; the manager reports `null`
-   * (unknown) rather than guessing `false`.
+   * cachekit-core's AES hardware detection (informational). Optional: older
+   * binding binaries predate it, and the manager reports `null` for those.
    */
   hardwareAccelerationEnabled?(): boolean;
   /**
@@ -345,14 +343,9 @@ export class EncryptionManagerCore {
 
   /**
    * Whether AES-256-GCM is hardware-accelerated on this host, per
-   * cachekit-core's detection: a runtime AES-NI probe on x86/x86_64,
-   * compile-time target features on aarch64, always `false` on wasm32
-   * (Workers). Informational — the crypto backend picks its implementation
-   * independently; use it to explain `.secure` latency, not to change
-   * behaviour. Initialises the bindings if needed, so it answers at startup
-   * before the first encrypt. `null` means unknown: the installed binding
-   * predates the accessor. Same signal as Python's
-   * `hardware_acceleration_enabled`.
+   * cachekit-core's detection (informational — see the README). Initialises
+   * the bindings if needed, so it answers at startup. `null` = unknown: the
+   * installed binding predates the accessor.
    *
    * @throws {EncryptionError} if the manager is disposed or bindings fail to load
    */

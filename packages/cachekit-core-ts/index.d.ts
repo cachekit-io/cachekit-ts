@@ -102,11 +102,8 @@ export declare class TenantKeys {
   /**
    * Whether cachekit-core detected AES hardware support on this host.
    *
-   * Informational only — `ring` picks its AES implementation independently
-   * of this flag. Runtime AES-NI probe on x86/x86_64, compile-time target
-   * features on aarch64. Same signal as Python's
-   * `hardware_acceleration_enabled` and cachekit-rs's
-   * `EncryptionLayer::hardware_acceleration_enabled()`.
+   * Forwards `ZeroKnowledgeEncryptor::hardware_acceleration_enabled()`.
+   * Informational only — `ring` dispatches independently of it.
    */
   hardwareAccelerationEnabled(): boolean
 }

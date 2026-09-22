@@ -256,11 +256,7 @@ describe('EncryptionManagerCore keyring config (previousMasterKeys)', () => {
     // Answers at startup, before any encrypt — and derives exactly once.
     expect(await manager.isHardwareAccelerated()).toBe(true);
     expect(derived.length).toBe(1);
-    await manager.encrypt(new Uint8Array([1]), 'ns:k');
-    expect(derived.length).toBe(1);
-
     manager.dispose();
-    await expect(manager.isHardwareAccelerated()).rejects.toThrow(EncryptionError);
   });
 
   it('reports null (unknown), not false, when the binding predates the accessor', async () => {

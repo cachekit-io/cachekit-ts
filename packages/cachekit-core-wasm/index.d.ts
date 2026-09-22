@@ -44,10 +44,7 @@ export declare class TenantKeys {
    * keys) — SDK attestation that rotation config survived the boundary.
    */
   keyringEntryCount(): number;
-  /**
-   * Whether cachekit-core detected AES hardware support — always `false` on
-   * wasm32 (software `aes-gcm`); present so the handle matches the NAPI binding.
-   */
+  /** cachekit-core's AES hardware detection — `false` on wasm32; matches the NAPI binding. */
   hardwareAccelerationEnabled(): boolean;
 }
 
