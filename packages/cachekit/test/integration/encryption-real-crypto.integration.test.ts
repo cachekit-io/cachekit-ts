@@ -81,6 +81,11 @@ describe('Real Crypto Integration (No Mocks)', () => {
       expect(freshKeys.getNonceCounter()).toBe(0);
     });
 
+    it('reports AES hardware acceleration as a boolean from the real binding', () => {
+      // The installed binding carries the accessor: a boolean, never undefined.
+      expect(typeof tenantKeys.hardwareAccelerationEnabled()).toBe('boolean');
+    });
+
     it('produces different keys for different tenants', () => {
       const keys1 = deriveTenantKeys(TEST_MASTER_KEY, 'tenant-1');
       const keys2 = deriveTenantKeys(TEST_MASTER_KEY, 'tenant-2');

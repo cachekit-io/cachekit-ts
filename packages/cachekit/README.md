@@ -454,6 +454,25 @@ With the CachekitIO backend, the `X-CacheKit-L1-*` telemetry headers are wired
 automatically from the cache's live L1/L2 hit and miss counters; pass your own
 `metricsProvider` in the backend config to override.
 
+**Is AES hardware-accelerated on this host?** `isHardwareAccelerated()` on the
+encryption manager reports cachekit-core's detection — a runtime AES-NI probe on
+x86/x86_64, compile-time target features on aarch64, and always `false` on
+Cloudflare Workers (wasm32 has no AES instructions; `aes-gcm` runs in software).
+Informational: the crypto backend picks its implementation independently, so use
+it to explain `.secure` latency on a host without AES instructions, not to change
+behaviour. It initialises the bindings if needed, so it answers at startup, and
+returns `null` (unknown) only when the installed native binding predates the
+accessor. Same signal as cachekit-py's `hardware_acceleration_enabled` and
+cachekit-rs's `hardware_acceleration_enabled()`.
+
+```typescript
+import { EncryptionManager } from '@cachekit-io/cachekit';
+
+const manager = new EncryptionManager(process.env.CACHEKIT_MASTER_KEY!, 'tenant-123');
+console.log('AES hardware acceleration:', await manager.isHardwareAccelerated());
+manager.dispose();
+```
+
 ## Cloudflare Workers
 
 The SDK ships a Workers-native entrypoint: `@cachekit-io/cachekit/workers`

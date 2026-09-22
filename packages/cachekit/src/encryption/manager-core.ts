@@ -25,6 +25,13 @@ export interface EncryptionTenantKeys {
    */
   keyringEntryCount?(): number;
   /**
+   * Whether cachekit-core detected AES hardware support on this host
+   * (informational — the crypto backend dispatches independently). Optional
+   * because older binding binaries predate it; the manager reports `null`
+   * (unknown) rather than guessing `false`.
+   */
+  hardwareAccelerationEnabled?(): boolean;
+  /**
    * Deterministic zeroize-and-release (wasm bindings). NAPI handles zeroize
    * via GC finalizer instead and don't expose this.
    */
@@ -334,6 +341,24 @@ export class EncryptionManagerCore {
   async getKeyFingerprint(): Promise<Uint8Array | null> {
     if (!this.tenantKeys) return null;
     return this.tenantKeys.encryptionFingerprint();
+  }
+
+  /**
+   * Whether AES-256-GCM is hardware-accelerated on this host, per
+   * cachekit-core's detection: a runtime AES-NI probe on x86/x86_64,
+   * compile-time target features on aarch64, always `false` on wasm32
+   * (Workers). Informational — the crypto backend picks its implementation
+   * independently; use it to explain `.secure` latency, not to change
+   * behaviour. Initialises the bindings if needed, so it answers at startup
+   * before the first encrypt. `null` means unknown: the installed binding
+   * predates the accessor. Same signal as Python's
+   * `hardware_acceleration_enabled`.
+   *
+   * @throws {EncryptionError} if the manager is disposed or bindings fail to load
+   */
+  async isHardwareAccelerated(): Promise<boolean | null> {
+    await this.ensureInitialized();
+    return this.tenantKeys!.hardwareAccelerationEnabled?.() ?? null;
   }
 
   /**

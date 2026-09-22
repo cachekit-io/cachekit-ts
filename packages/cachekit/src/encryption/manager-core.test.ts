@@ -27,6 +27,7 @@ function mockBindings(overrides?: Partial<EncryptionBindings>) {
           encryptionFingerprint: () => new Uint8Array(16),
           getNonceCounter: () => 0,
           keyringEntryCount: () => 1 + (previousMasterKeys?.length ?? 0),
+          hardwareAccelerationEnabled: () => true,
           free() {
             freed.push(keys);
           },
@@ -245,6 +246,36 @@ describe('EncryptionManagerCore keyring config (previousMasterKeys)', () => {
     await expect(manager.decrypt(new Uint8Array(28), 'ns:k')).rejects.toThrow(/version skew/);
     // The orphaned handle must be zeroized, not parked
     expect(freed.length).toBe(1);
+    manager.dispose();
+  });
+
+  it('reports hardware acceleration from the binding, initialising on demand', async () => {
+    const { bindings, derived } = mockBindings();
+    const manager = new TestManager(async () => bindings);
+
+    // Answers at startup, before any encrypt — and derives exactly once.
+    expect(await manager.isHardwareAccelerated()).toBe(true);
+    expect(derived.length).toBe(1);
+    await manager.encrypt(new Uint8Array([1]), 'ns:k');
+    expect(derived.length).toBe(1);
+
+    manager.dispose();
+    await expect(manager.isHardwareAccelerated()).rejects.toThrow(EncryptionError);
+  });
+
+  it('reports null (unknown), not false, when the binding predates the accessor', async () => {
+    const { bindings } = mockBindings();
+    vi.mocked(bindings.deriveTenantKeys).mockImplementation(
+      (_masterKey: Uint8Array, tenantId: string) => ({
+        tenantId,
+        encryptionFingerprint: () => new Uint8Array(16),
+        getNonceCounter: () => 0,
+        // no hardwareAccelerationEnabled — older binding
+      })
+    );
+    const manager = new TestManager(async () => bindings);
+
+    expect(await manager.isHardwareAccelerated()).toBeNull();
     manager.dispose();
   });
 });

@@ -44,6 +44,11 @@ export declare class TenantKeys {
    * keys) — SDK attestation that rotation config survived the boundary.
    */
   keyringEntryCount(): number;
+  /**
+   * Whether cachekit-core detected AES hardware support — always `false` on
+   * wasm32 (software `aes-gcm`); present so the handle matches the NAPI binding.
+   */
+  hardwareAccelerationEnabled(): boolean;
 }
 
 /** Derive a 32-byte domain key using HKDF-SHA256 (RFC 5869). */
