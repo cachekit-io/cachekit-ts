@@ -202,6 +202,26 @@ entry's cache file directly. (Backends have their own hard ceilings too:
 Workers KV values cap at 25 MiB, Memcached items at 1 MiB server-side,
 CachekitIO per plan.)
 
+### Binary values
+
+A `Uint8Array`, including a Node `Buffer`, is stored as MessagePack `bin` and
+read back as a `Uint8Array` with the same bytes (a `Buffer` comes back as a plain
+`Uint8Array`). It counts against `serializer.maxEncodedSize` like any other
+value, so the 1 MiB default above applies. Other binary types — `Float32Array`
+and the other typed arrays, `DataView`, a bare `ArrayBuffer` — throw
+`SerializationError` on `set()`, because they would read back as a `Uint8Array`
+rather than the type you stored. Store the bytes and rebuild the type on read:
+
+```typescript
+await cache.set('embedding', new Uint8Array(vec.buffer, vec.byteOffset, vec.byteLength));
+const bytes = await cache.get<Uint8Array>('embedding');
+// Copy first: the result can be an unaligned view into a larger buffer.
+const restored = bytes && new Float32Array(bytes.slice().buffer);
+```
+
+Function arguments are different: keys are hashed, never decoded, so a
+`wrap()`ed function can take any binary type and it hashes by its bytes.
+
 ## Master-Key Rotation
 
 Rotate the encryption master key without invalidating existing entries:

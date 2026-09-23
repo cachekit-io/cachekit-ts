@@ -245,12 +245,17 @@ export interface Serializer {
  * - Convert undefined to null
  * - Track depth to prevent stack overflow
  * - M9 Fix: Check collection size to prevent DoS via large collections
+ * - Pass Uint8Array (incl. Buffer) through as msgpack bin; reject other binary
+ *   values, but hash any binary key argument (`forKey`) by its bytes
+ *
+ * Package-internal: key generation calls it with `forKey` set.
  */
-function normalize(
+export function normalize(
   value: unknown,
   depth: number,
   maxDepth: number,
-  maxCollectionSize: number
+  maxCollectionSize: number,
+  forKey: boolean
 ): unknown {
   if (depth > maxDepth) {
     throw new SerializationError(`Max depth of ${maxDepth} exceeded`);
@@ -279,7 +284,7 @@ function normalize(
         `Array size ${value.length} exceeds max collection size ${maxCollectionSize}`
       );
     }
-    return value.map((item) => normalize(item, depth + 1, maxDepth, maxCollectionSize));
+    return value.map((item) => normalize(item, depth + 1, maxDepth, maxCollectionSize, forKey));
   }
 
   if (value instanceof Date) {
@@ -296,7 +301,7 @@ function normalize(
     const obj: Record<string, unknown> = {};
     const sortedKeys = Array.from(value.keys()).sort();
     for (const key of sortedKeys) {
-      obj[String(key)] = normalize(value.get(key), depth + 1, maxDepth, maxCollectionSize);
+      obj[String(key)] = normalize(value.get(key), depth + 1, maxDepth, maxCollectionSize, forKey);
     }
     return obj;
   }
@@ -309,8 +314,23 @@ function normalize(
       );
     }
     return Array.from(value)
-      .map((item) => normalize(item, depth + 1, maxDepth, maxCollectionSize))
+      .map((item) => normalize(item, depth + 1, maxDepth, maxCollectionSize, forKey))
       .sort();
+  }
+
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
+    // Tag, not instanceof, so a Buffer or another realm's Uint8Array (vm, jest)
+    // passes. @msgpack/msgpack emits it as bin, bounded by maxEncodedSize.
+    const type = Object.prototype.toString.call(value).slice(8, -1);
+    if (type === 'Uint8Array') return value;
+    // A key argument is hashed, never decoded, so any binary hashes by its bytes.
+    if (forKey) return ArrayBuffer.isView(value) ? value : new Uint8Array(value);
+    // A value would decode as a Uint8Array — a silent type change — so reject
+    // it with the fix instead (LAB-4839).
+    throw new SerializationError(
+      `Cannot serialize ${type}: binary values must be a Uint8Array or Buffer ` +
+        '(view the bytes with new Uint8Array(buffer, byteOffset, byteLength))'
+    );
   }
 
   // Plain object - sort keys
@@ -327,7 +347,7 @@ function normalize(
   const sortedKeys = keys.sort();
   const result: Record<string, unknown> = {};
   for (const key of sortedKeys) {
-    result[key] = normalize(obj[key], depth + 1, maxDepth, maxCollectionSize);
+    result[key] = normalize(obj[key], depth + 1, maxDepth, maxCollectionSize, forKey);
   }
   return result;
 }
@@ -363,7 +383,13 @@ export class MessagePackSerializer implements Serializer {
    */
   encode<T>(value: T): Uint8Array {
     // Normalize for deterministic output (also checks depth and collection size)
-    const normalized = normalize(value, 0, this.config.maxDepth, this.config.maxCollectionSize);
+    const normalized = normalize(
+      value,
+      0,
+      this.config.maxDepth,
+      this.config.maxCollectionSize,
+      false
+    );
 
     // Encode to MessagePack
     const encoded = encode(normalized);
@@ -398,7 +424,8 @@ export class MessagePackSerializer implements Serializer {
       for (const item of value) {
         this.validateDepth(item, depth + 1);
       }
-    } else if (value !== null && typeof value === 'object') {
+    } else if (value !== null && typeof value === 'object' && !ArrayBuffer.isView(value)) {
+      // bin decodes to a Uint8Array: its elements are bytes, not children.
       for (const v of Object.values(value)) {
         this.validateDepth(v, depth + 1);
       }

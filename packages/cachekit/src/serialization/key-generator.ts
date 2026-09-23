@@ -1,14 +1,27 @@
+import { encode } from '@msgpack/msgpack';
 import { blake2b } from '@noble/hashes/blake2.js';
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
-import { MessagePackSerializer } from './serializer.js';
-import { KEY_GEN_MAX_SIZE, KEY_GEN_MAX_DEPTH, CACHE_KEY_HASH_LENGTH } from '../constants.js';
+import { normalize } from './serializer.js';
+import { ValueTooLargeError } from '../errors.js';
+import {
+  KEY_GEN_MAX_SIZE,
+  KEY_GEN_MAX_DEPTH,
+  DEFAULT_MAX_COLLECTION_SIZE,
+  CACHE_KEY_HASH_LENGTH,
+} from '../constants.js';
 
-// Use a dedicated serializer for key generation with strict limits
-const keySerializer = new MessagePackSerializer({
-  maxEncodedSize: KEY_GEN_MAX_SIZE,
-  maxDecodedSize: KEY_GEN_MAX_SIZE,
-  maxDepth: KEY_GEN_MAX_DEPTH,
-});
+/**
+ * Deterministic MessagePack of key arguments, with strict limits. Not the value
+ * serializer: key arguments are hashed, never decoded, so any binary argument
+ * (typed array, DataView, ArrayBuffer) hashes by its bytes (LAB-4839).
+ */
+function encodeArgs(args: unknown[]): Uint8Array {
+  const encoded = encode(normalize(args, 0, KEY_GEN_MAX_DEPTH, DEFAULT_MAX_COLLECTION_SIZE, true));
+  if (encoded.length > KEY_GEN_MAX_SIZE) {
+    throw new ValueTooLargeError(`Encoded size ${encoded.length} exceeds max ${KEY_GEN_MAX_SIZE}`);
+  }
+  return encoded;
+}
 
 /**
  * Generate a cache key from namespace and arguments.
@@ -32,7 +45,7 @@ const keySerializer = new MessagePackSerializer({
  */
 export function generateKey(namespace: string, args: unknown[]): string {
   // Serialize arguments deterministically (sorted keys, normalized values)
-  const serialized = keySerializer.encode(args);
+  const serialized = encodeArgs(args);
 
   // Hash with Blake2b-256
   const hash = blake2b(serialized, { dkLen: 32 }); // 32 bytes = 256 bits
@@ -55,7 +68,7 @@ export function generateKey(namespace: string, args: unknown[]): string {
  * @returns 64-character hex hash string
  */
 export function generateParamsHash(args: unknown[]): string {
-  const serialized = keySerializer.encode(args);
+  const serialized = encodeArgs(args);
   const hash = blake2b(serialized, { dkLen: 32 });
   return bytesToHex(hash);
 }

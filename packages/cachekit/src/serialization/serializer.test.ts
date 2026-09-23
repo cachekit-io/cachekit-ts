@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { runInNewContext } from 'node:vm';
 import { decode as msgpackDecode, encode as msgpackEncode } from '@msgpack/msgpack';
 import { MessagePackSerializer, assertDecodeDepth, boundedDecodeOptions } from './serializer.js';
 import { ValueTooLargeError, SerializationError } from '../errors.js';
@@ -52,6 +53,35 @@ describe('MessagePackSerializer', () => {
       const encoded = serializer.encode(set);
       const decoded = serializer.decode<number[]>(encoded);
       expect(decoded).toEqual([1, 2, 3]); // sorted values
+    });
+
+    it('encodes Uint8Array and Buffer as msgpack bin, decodes to Uint8Array (LAB-4839)', () => {
+      const bin = Uint8Array.of(0xc4, 0x03, 1, 2, 3);
+      expect(serializer.encode(Uint8Array.of(1, 2, 3))).toEqual(bin);
+      expect(serializer.encode(Buffer.from([1, 2, 3]))).toEqual(bin);
+      // Another realm's Uint8Array (vm, jest) fails instanceof but is still binary.
+      expect(serializer.encode(runInNewContext('Uint8Array.of(1, 2, 3)'))).toEqual(bin);
+      const decoded = serializer.decode(bin);
+      expect(decoded).toBeInstanceOf(Uint8Array);
+      expect(decoded).toEqual(Uint8Array.of(1, 2, 3));
+    });
+
+    it('bounds binary by maxEncodedSize, not maxCollectionSize (LAB-4839)', () => {
+      const big = new Uint8Array(20_000).fill(7);
+      expect(serializer.decode(serializer.encode(big))).toEqual(big);
+      expect(() =>
+        new MessagePackSerializer({ maxEncodedSize: 100 }).encode(new Uint8Array(200))
+      ).toThrow(ValueTooLargeError);
+    });
+
+    it.each([
+      ['Float64Array', new Float64Array([1.5])],
+      ['Uint8ClampedArray', new Uint8ClampedArray(2)],
+      ['DataView', new DataView(new ArrayBuffer(2))],
+      ['ArrayBuffer', new ArrayBuffer(2)],
+    ])('rejects %s rather than map-encoding it (LAB-4839)', (name, value) => {
+      expect(() => serializer.encode(value)).toThrow(SerializationError);
+      expect(() => serializer.encode({ nested: value })).toThrow(`Cannot serialize ${name}`);
     });
   });
 

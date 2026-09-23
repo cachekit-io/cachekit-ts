@@ -37,6 +37,26 @@ describe('generateKey', () => {
     const key2 = generateKey('test', [{ a: 1, b: 2 }]);
     expect(key1).toBe(key2); // Object keys are sorted
   });
+
+  it('hashes a Uint8Array argument as msgpack bin, not as an index map (LAB-4839)', () => {
+    const bin = generateKey('test', [Uint8Array.of(1, 2, 3)]);
+    expect(bin).not.toBe(generateKey('test', [{ 0: 1, 1: 2, 2: 3 }]));
+    expect(generateKey('test', [Buffer.from([1, 2, 3])])).toBe(bin);
+    // Past maxCollectionSize (10,000), which used to throw.
+    expect(() => generateKey('test', [new Uint8Array(20_000)])).not.toThrow();
+  });
+
+  it('hashes any other binary argument by its bytes (LAB-4839)', () => {
+    const f32 = new Float32Array([1.5, -2]);
+    expect(generateKey('test', [f32])).toBe(generateKey('test', [new Uint8Array(f32.buffer)]));
+    expect(generateKey('test', [new DataView(f32.buffer)])).toBe(generateKey('test', [f32]));
+    // Every ArrayBuffer and DataView used to hash as {} — distinct buffers shared one key.
+    const a = Uint8Array.of(1).buffer;
+    const b = Uint8Array.of(2).buffer;
+    expect(generateKey('test', [a])).not.toBe(generateKey('test', [b]));
+    expect(generateKey('test', [new DataView(a)])).not.toBe(generateKey('test', [new DataView(b)]));
+    expect(generateKey('test', [a])).toBe(generateKey('test', [Uint8Array.of(1)]));
+  });
 });
 
 describe('generateParamsHash', () => {
