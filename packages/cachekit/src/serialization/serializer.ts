@@ -239,7 +239,8 @@ export interface Serializer {
 }
 
 // Intrinsic getters, captured once: they read internal slots, so they cannot be
-// fooled by Symbol.toStringTag and work on another realm's objects.
+// fooled by Symbol.toStringTag and work on another realm's objects. The
+// %TypedArray% name getter returns undefined for a DataView.
 const typedArrayName = Object.getOwnPropertyDescriptor(
   Object.getPrototypeOf(Uint8Array.prototype),
   Symbol.toStringTag
@@ -264,14 +265,32 @@ function hasBufferBrand(value: object, byteLength: () => number): value is Array
 }
 
 /**
+ * The bytes as a Uint8Array view, not a copy. A detached (transferred) buffer
+ * throws on any view but holds no bytes, so it reads as empty, as it would in
+ * the caller's own function, rather than throwing from key generation.
+ */
+function bytesOf(value: ArrayBufferView | ArrayBufferLike): Uint8Array {
+  try {
+    return ArrayBuffer.isView(value)
+      ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+      : new Uint8Array(value);
+  } catch {
+    return new Uint8Array(0);
+  }
+}
+
+/**
  * A binary value's type and bytes, from its brand; undefined if `value` is not
  * binary. Not instanceof, which another realm's buffers (vm, jest) fail, nor
  * Symbol.toStringTag, which any object can set (LAB-4839).
  */
-function binary(value: object): [type: string, bytes: ArrayBufferView] | undefined {
-  if (ArrayBuffer.isView(value)) return [typedArrayName?.call(value) ?? 'DataView', value];
+function binary(value: object): [type: string, bytes: Uint8Array] | undefined {
+  if (ArrayBuffer.isView(value)) {
+    return [typedArrayName?.call(value) ?? 'DataView', bytesOf(value)];
+  }
   // The tag only picks which brand to check, so a plain object never pays for a
-  // throw. Only a buffer that retags itself is missed: it encodes as a map.
+  // throw. Only a buffer that retags itself is missed: it encodes as {}, and
+  // every such key argument shares one key.
   const tag = Object.prototype.toString.call(value).slice(8, -1);
   const byteLength =
     tag === 'ArrayBuffer'
@@ -280,7 +299,7 @@ function binary(value: object): [type: string, bytes: ArrayBufferView] | undefin
         ? sharedArrayBufferByteLength
         : undefined;
   if (!byteLength || !hasBufferBrand(value, byteLength)) return undefined;
-  return [tag, new Uint8Array(value)];
+  return [tag, bytesOf(value)];
 }
 
 /**

@@ -73,6 +73,19 @@ describe('generateKey', () => {
       Object.defineProperty({ a }, Symbol.toStringTag, { value: 'ArrayBuffer' });
     expect(key(tagged(1))).not.toBe(key(tagged(2)));
   });
+
+  it('hashes a detached binary argument as empty instead of throwing (LAB-4839)', () => {
+    const key = (arg: unknown) => generateKey('test', [arg]);
+    const detached = <T>(view: (buf: ArrayBuffer) => T): T => {
+      const buf = new ArrayBuffer(4);
+      const result = view(buf);
+      structuredClone(buf, { transfer: [buf] });
+      return result;
+    };
+    expect(key(detached((buf) => buf))).toBe(key(new ArrayBuffer(0)));
+    expect(key(detached((buf) => new Uint8Array(buf)))).toBe(key(new Uint8Array(0)));
+    expect(key(detached((buf) => new DataView(buf)))).toBe(key(new DataView(new ArrayBuffer(0))));
+  });
 });
 
 describe('generateParamsHash', () => {

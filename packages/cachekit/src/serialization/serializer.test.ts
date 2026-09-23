@@ -6,6 +6,10 @@ import { ValueTooLargeError, SerializationError } from '../errors.js';
 
 const retag = <T extends object>(value: T, tag: string): T =>
   Object.defineProperty(value, Symbol.toStringTag, { value: tag });
+const detach = (buf: ArrayBuffer) => {
+  structuredClone(buf, { transfer: [buf] });
+  return buf;
+};
 
 describe('MessagePackSerializer', () => {
   const serializer = new MessagePackSerializer();
@@ -76,11 +80,19 @@ describe('MessagePackSerializer', () => {
       ['ArrayBuffer', new ArrayBuffer(2)],
       ['ArrayBuffer', runInNewContext('new ArrayBuffer(2)')], // another realm
       ['SharedArrayBuffer', new SharedArrayBuffer(2)],
+      ['ArrayBuffer', detach(new ArrayBuffer(2))],
       // Retagged: the brand, not Symbol.toStringTag, decides the type.
       ['Float64Array', retag(new Float64Array([1.5]), 'Uint8Array')],
     ])('rejects %s rather than map-encoding it (LAB-4839)', (name, value) => {
       expect(() => serializer.encode(value)).toThrow(SerializationError);
       expect(() => serializer.encode({ nested: value })).toThrow(`Cannot serialize ${name}`);
+    });
+
+    it('encodes a detached Uint8Array as empty bin (LAB-4839)', () => {
+      const buf = new ArrayBuffer(4);
+      const view = new Uint8Array(buf);
+      detach(buf);
+      expect(serializer.encode(view)).toEqual(Uint8Array.of(0xc4, 0));
     });
 
     it('encodes a plain object tagged as a buffer as a map (LAB-4839)', () => {

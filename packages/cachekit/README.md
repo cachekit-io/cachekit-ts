@@ -223,7 +223,9 @@ const restored = bytes && new Float32Array(new Uint8Array(bytes).buffer);
 
 In auto mode, function arguments are different: keys are hashed, never decoded,
 so a `wrap()`ed function can take any binary type, hashed by its type and bytes.
-Interop mode accepts only `Uint8Array` arguments.
+All of a call's arguments share one 64 KiB encoded limit; past it, the call
+throws `ValueTooLargeError` rather than bypassing the cache. Interop mode accepts
+only `Uint8Array` arguments.
 
 ## Master-Key Rotation
 
