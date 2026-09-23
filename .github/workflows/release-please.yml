@@ -82,13 +82,16 @@ jobs:
   # not to a job — so a compromised build dependency (turbo, tsc, a cargo
   # build.rs or proc-macro) running beside the token could publish EITHER
   # package at any version. Split, it can only influence the tarball its own
-  # build job hands over, and the publish job refuses a tarball whose
-  # name/version is not the package being released.
+  # build job hands over: the publish job refuses a tarball whose sha256 is not
+  # the one that build job reported, or whose name/version (as pnpm itself
+  # reads them) is not the package being released.
   build-cachekit:
     name: Build @cachekit-io/cachekit
     needs: release-please
     if: needs.release-please.outputs.cachekit--release_created == 'true' || github.event.inputs.force_release == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      sha256: ${{ steps.pack.outputs.sha256 }}
     permissions:
       contents: read
       checks: read
@@ -155,15 +158,18 @@ jobs:
       # pnpm pack is what `pnpm publish <dir>` runs internally: it rewrites the
       # workspace:* deps to concrete versions, which needs the install above.
       - name: Pack
+        id: pack
         working-directory: packages/cachekit
-        run: pnpm pack --out "$RUNNER_TEMP/package.tgz"
+        run: |
+          pnpm pack --out "$RUNNER_TEMP/package.tgz"
+          echo "sha256=$(sha256sum "$RUNNER_TEMP/package.tgz" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
         with:
           name: cachekit-tarball
           path: ${{ runner.temp }}/package.tgz
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   publish-cachekit:
     name: Publish @cachekit-io/cachekit
@@ -199,14 +205,25 @@ jobs:
           name: cachekit-tarball
           path: ${{ runner.temp }}
 
-      # The tarball came from a job that ran dependency code, so pin it to the
-      # package this job publishes. Exactly one manifest entry: a tarball with
-      # two could show this check one and the publisher the other.
-      - name: Verify tarball name and version
+      # The tarball came from a job that ran dependency code, so pin it twice.
+      # sha256 against build-cachekit's job output: any job in the run can
+      # replace an artifact by name, none can rewrite another job's outputs.
+      # Name/version from pnpm's own dry run, not tar: pnpm picks the first
+      # entry that normalises to package/package.json, so a `./package/...`
+      # entry ahead of the real one would show tar a decoy manifest.
+      - name: Verify tarball
+        shell: bash
+        env:
+          SHA256: ${{ needs.build-cachekit.outputs.sha256 }}
+          MANIFEST: packages/cachekit/package.json
         run: |
-          tar -xzOf "$RUNNER_TEMP/package.tgz" package/package.json \
-            | jq -es --slurpfile want packages/cachekit/package.json \
-              'length == 1 and .[0].name == $want[0].name and .[0].version == $want[0].version'
+          echo "$SHA256  $RUNNER_TEMP/package.tgz" | sha256sum -c -
+          got=$(pnpm publish "$RUNNER_TEMP/package.tgz" --dry-run --json --access public --no-git-checks | jq -r .id)
+          want=$(jq -r '.name + "@" + .version' "$MANIFEST")
+          if [ "$got" != "$want" ]; then
+            echo "::error::Tarball is '$got', expected '$want' — refusing to publish."
+            exit 1
+          fi
 
       # Auth is npm OIDC trusted publishing via a package-level trusted
       # publisher on npmjs.com — the repo has NO npm token secret (LAB-831).
@@ -218,6 +235,8 @@ jobs:
     needs: release-please
     if: needs.release-please.outputs.core-wasm--release_created == 'true' || github.event.inputs.wasm_tag != ''
     runs-on: ubuntu-latest
+    outputs:
+      sha256: ${{ steps.pack.outputs.sha256 }}
     permissions:
       contents: read
 
@@ -268,15 +287,18 @@ jobs:
         run: pnpm --filter @cachekit-io/cachekit-core-wasm build:wasm
 
       - name: Pack
+        id: pack
         working-directory: packages/cachekit-core-wasm
-        run: pnpm pack --out "$RUNNER_TEMP/package.tgz"
+        run: |
+          pnpm pack --out "$RUNNER_TEMP/package.tgz"
+          echo "sha256=$(sha256sum "$RUNNER_TEMP/package.tgz" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
         with:
           name: cachekit-core-wasm-tarball
           path: ${{ runner.temp }}/package.tgz
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   publish-cachekit-core-wasm:
     name: Publish @cachekit-io/cachekit-core-wasm
@@ -313,11 +335,20 @@ jobs:
           name: cachekit-core-wasm-tarball
           path: ${{ runner.temp }}
 
-      - name: Verify tarball name and version
+      # Same two pins as publish-cachekit.
+      - name: Verify tarball
+        shell: bash
+        env:
+          SHA256: ${{ needs.build-cachekit-core-wasm.outputs.sha256 }}
+          MANIFEST: packages/cachekit-core-wasm/package.json
         run: |
-          tar -xzOf "$RUNNER_TEMP/package.tgz" package/package.json \
-            | jq -es --slurpfile want packages/cachekit-core-wasm/package.json \
-              'length == 1 and .[0].name == $want[0].name and .[0].version == $want[0].version'
+          echo "$SHA256  $RUNNER_TEMP/package.tgz" | sha256sum -c -
+          got=$(pnpm publish "$RUNNER_TEMP/package.tgz" --dry-run --json --access public --no-git-checks | jq -r .id)
+          want=$(jq -r '.name + "@" + .version' "$MANIFEST")
+          if [ "$got" != "$want" ]; then
+            echo "::error::Tarball is '$got', expected '$want' — refusing to publish."
+            exit 1
+          fi
 
       # Auth is npm OIDC trusted publishing — the repo has NO NPM_TOKEN secret
       # (the old token-auth steps resolved an empty token and died ENEEDAUTH,
