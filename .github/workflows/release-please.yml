@@ -83,8 +83,8 @@ jobs:
   # build.rs or proc-macro) running beside the token could publish EITHER
   # package at any version. Split, it can only influence the tarball its own
   # build job hands over: the publish job refuses a tarball whose sha256 is not
-  # the one that build job reported, or whose name/version (as pnpm itself
-  # reads them) is not the package being released.
+  # the one that build job reported, or whose name/version or registry (as
+  # pnpm itself reads them) is not the package being released on npmjs.org.
   build-cachekit:
     name: Build @cachekit-io/cachekit
     needs: release-please
@@ -205,25 +205,14 @@ jobs:
           name: cachekit-tarball
           path: ${{ runner.temp }}
 
-      # The tarball came from a job that ran dependency code, so pin it twice.
-      # sha256 against build-cachekit's job output: any job in the run can
-      # replace an artifact by name, none can rewrite another job's outputs.
-      # Name/version from pnpm's own dry run, not tar: pnpm picks the first
-      # entry that normalises to package/package.json, so a `./package/...`
-      # entry ahead of the real one would show tar a decoy manifest.
+      # The tarball came from a job that ran dependency code: pin its digest,
+      # identity and target registry before the token is used (see the script).
       - name: Verify tarball
         shell: bash
         env:
           SHA256: ${{ needs.build-cachekit.outputs.sha256 }}
           MANIFEST: packages/cachekit/package.json
-        run: |
-          echo "$SHA256  $RUNNER_TEMP/package.tgz" | sha256sum -c -
-          got=$(pnpm publish "$RUNNER_TEMP/package.tgz" --dry-run --json --access public --no-git-checks | jq -r .id)
-          want=$(jq -r '.name + "@" + .version' "$MANIFEST")
-          if [ "$got" != "$want" ]; then
-            echo "::error::Tarball is '$got', expected '$want' — refusing to publish."
-            exit 1
-          fi
+        run: .github/scripts/verify-tarball.sh "$RUNNER_TEMP/package.tgz" "$MANIFEST" "$SHA256"
 
       # Auth is npm OIDC trusted publishing via a package-level trusted
       # publisher on npmjs.com — the repo has NO npm token secret (LAB-831).
@@ -335,20 +324,13 @@ jobs:
           name: cachekit-core-wasm-tarball
           path: ${{ runner.temp }}
 
-      # Same two pins as publish-cachekit.
+      # Same pins as publish-cachekit.
       - name: Verify tarball
         shell: bash
         env:
           SHA256: ${{ needs.build-cachekit-core-wasm.outputs.sha256 }}
           MANIFEST: packages/cachekit-core-wasm/package.json
-        run: |
-          echo "$SHA256  $RUNNER_TEMP/package.tgz" | sha256sum -c -
-          got=$(pnpm publish "$RUNNER_TEMP/package.tgz" --dry-run --json --access public --no-git-checks | jq -r .id)
-          want=$(jq -r '.name + "@" + .version' "$MANIFEST")
-          if [ "$got" != "$want" ]; then
-            echo "::error::Tarball is '$got', expected '$want' — refusing to publish."
-            exit 1
-          fi
+        run: .github/scripts/verify-tarball.sh "$RUNNER_TEMP/package.tgz" "$MANIFEST" "$SHA256"
 
       # Auth is npm OIDC trusted publishing — the repo has NO NPM_TOKEN secret
       # (the old token-auth steps resolved an empty token and died ENEEDAUTH,
