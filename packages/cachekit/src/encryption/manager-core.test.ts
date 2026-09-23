@@ -143,7 +143,6 @@ describe('EncryptionManagerCore', () => {
     const [, aad] = vi.mocked(bindings.encryptWithTenantKeys).mock.calls[0];
     expect(derivedTenantId).toBe('default');
     expect(decodeAadTenantId(aad)).toBe('default');
-    expect(decodeAadTenantId(aad)).toBe(derivedTenantId);
     manager.dispose();
   });
 

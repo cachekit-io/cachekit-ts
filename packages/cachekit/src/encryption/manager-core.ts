@@ -99,14 +99,7 @@ export class EncryptionManagerCore {
   private native: EncryptionBindings | null = null;
   private disposed = false;
   private initPromise: Promise<void> | null = null;
-  /**
-   * Single resolution site for the tenant identifier — both HKDF derivation
-   * (doInitialize) and AAD construction (buildAAD) MUST read this same value.
-   * A second `this.tenantId ?? ...` fallback anywhere else re-splits the two
-   * uses and reintroduces the "default" (HKDF) vs "" (AAD) mismatch that
-   * makes ciphertext unauthenticatable (spec/intent-presets.md § Master Key
-   * Input, rule 5; LAB-4668).
-   */
+  /** Single source of truth for tenant_id — read by both HKDF derivation and AAD construction. */
   private readonly effectiveTenantId: string;
   // Note: Nonce tracking is done in Rust via getNonceCounter().
   // The Rust encryptor throws NonceCounterExhausted when the limit is reached.
@@ -139,7 +132,7 @@ export class EncryptionManagerCore {
    */
   constructor(
     private readonly masterKey: string,
-    private readonly tenantId: string | undefined,
+    tenantId: string | undefined,
     private readonly loadBindings: () => Promise<EncryptionBindings>,
     private readonly previousMasterKeys: readonly string[] = []
   ) {
