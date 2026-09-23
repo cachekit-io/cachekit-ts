@@ -1,8 +1,16 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, type Mock } from 'vitest';
 import { RedisInvalidationChannel } from './redis-channel.js';
 import type { Redis } from 'ioredis';
 
-type OnFn = (event: string, listener: (...args: unknown[]) => void) => void;
+// Mirrors the only listener RedisInvalidationChannel registers on its subscriber.
+type MessageListener = (channel: Buffer, message: Buffer) => void;
+type OnFn = (event: 'messageBuffer', listener: MessageListener) => void;
+
+function messageListener(on: Mock<OnFn>): MessageListener {
+  const listener = on.mock.calls.find((c) => c[0] === 'messageBuffer')?.[1];
+  if (!listener) throw new Error('start() did not register a messageBuffer listener');
+  return listener;
+}
 
 describe('RedisInvalidationChannel', () => {
   // Mock Redis client
@@ -236,9 +244,7 @@ describe('RedisInvalidationChannel', () => {
       await channel.start();
 
       // Simulate incoming message by calling the messageBuffer handler
-      const messageHandler = mockSubscriber.on.mock.calls.find(
-        (c) => c[0] === 'messageBuffer'
-      )?.[1] as (channel: Buffer, message: Buffer) => void;
+      const messageHandler = messageListener(mockSubscriber.on);
 
       // Serialize a test event
       const { serializeEvent } = await import('./event.js');
@@ -276,9 +282,7 @@ describe('RedisInvalidationChannel', () => {
       channel.subscribe((event) => received.push(event));
       await channel.start();
 
-      const messageHandler = mockSubscriber.on.mock.calls.find(
-        (c) => c[0] === 'messageBuffer'
-      )?.[1] as (channel: Buffer, message: Buffer) => void;
+      const messageHandler = messageListener(mockSubscriber.on);
 
       messageHandler(Buffer.from('wrong:channel'), Buffer.from([0x90]));
       expect(received).toHaveLength(0);
@@ -303,9 +307,7 @@ describe('RedisInvalidationChannel', () => {
       const channel = new RedisInvalidationChannel(mockRedis);
       await channel.start();
 
-      const messageHandler = mockSubscriber.on.mock.calls.find(
-        (c) => c[0] === 'messageBuffer'
-      )?.[1] as (channel: Buffer, message: Buffer) => void;
+      const messageHandler = messageListener(mockSubscriber.on);
 
       // Send invalid msgpack data
       messageHandler(Buffer.from('cachekit:invalidate'), Buffer.from([0xff, 0xff]));
@@ -338,9 +340,7 @@ describe('RedisInvalidationChannel', () => {
       });
       await channel.start();
 
-      const messageHandler = mockSubscriber.on.mock.calls.find(
-        (c) => c[0] === 'messageBuffer'
-      )?.[1] as (channel: Buffer, message: Buffer) => void;
+      const messageHandler = messageListener(mockSubscriber.on);
 
       const { serializeEvent } = await import('./event.js');
       const event = {

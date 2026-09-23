@@ -58,7 +58,7 @@ describe('RetryPolicy', () => {
     const fn = vi.fn<() => Promise<string>>().mockRejectedValue(new Error('fail'));
 
     // Catch promise rejection immediately to avoid unhandled rejection warnings
-    const promise = policy.execute(fn).catch((err: unknown) => err as Error);
+    const promise = policy.execute(fn).catch((err: unknown) => err);
 
     // First attempt immediate
     await vi.advanceTimersByTimeAsync(0);
