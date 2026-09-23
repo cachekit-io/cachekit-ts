@@ -67,6 +67,11 @@ describe('generateKey', () => {
     );
     expect(key(sab(1))).not.toBe(key(sab(2)));
     expect(key(runInNewContext('Uint8Array.of(1).buffer'))).toBe(key(Uint8Array.of(1).buffer));
+    // The brand decides, not Symbol.toStringTag: a plain object tagged as a
+    // buffer hashes by its keys, not as one shared empty buffer.
+    const tagged = (a: number) =>
+      Object.defineProperty({ a }, Symbol.toStringTag, { value: 'ArrayBuffer' });
+    expect(key(tagged(1))).not.toBe(key(tagged(2)));
   });
 });
 

@@ -238,6 +238,51 @@ export interface Serializer {
   decode<T>(data: Uint8Array): T;
 }
 
+// Intrinsic getters, captured once: they read internal slots, so they cannot be
+// fooled by Symbol.toStringTag and work on another realm's objects.
+const typedArrayName = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype),
+  Symbol.toStringTag
+)?.get;
+const byteLengthGetter = (proto: object) =>
+  Object.getOwnPropertyDescriptor(proto, 'byteLength')?.get;
+const arrayBufferByteLength = byteLengthGetter(ArrayBuffer.prototype);
+// SharedArrayBuffer is absent in browsers without cross-origin isolation.
+const sharedArrayBufferByteLength =
+  typeof SharedArrayBuffer === 'function'
+    ? byteLengthGetter(SharedArrayBuffer.prototype)
+    : undefined;
+
+/** The getter throws unless `value` holds that buffer's internal slot. */
+function hasBufferBrand(value: object, byteLength: () => number): value is ArrayBufferLike {
+  try {
+    byteLength.call(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A binary value's type and bytes, from its brand; undefined if `value` is not
+ * binary. Not instanceof, which another realm's buffers (vm, jest) fail, nor
+ * Symbol.toStringTag, which any object can set (LAB-4839).
+ */
+function binary(value: object): [type: string, bytes: ArrayBufferView] | undefined {
+  if (ArrayBuffer.isView(value)) return [typedArrayName?.call(value) ?? 'DataView', value];
+  // The tag only picks which brand to check, so a plain object never pays for a
+  // throw. Only a buffer that retags itself is missed: it encodes as a map.
+  const tag = Object.prototype.toString.call(value).slice(8, -1);
+  const byteLength =
+    tag === 'ArrayBuffer'
+      ? arrayBufferByteLength
+      : tag === 'SharedArrayBuffer'
+        ? sharedArrayBufferByteLength
+        : undefined;
+  if (!byteLength || !hasBufferBrand(value, byteLength)) return undefined;
+  return [tag, new Uint8Array(value)];
+}
+
 /**
  * Normalize a value for deterministic serialization.
  * - Sort object keys alphabetically
@@ -318,17 +363,14 @@ export function normalize(
       .sort();
   }
 
-  // Tag, not instanceof: another realm's Uint8Array or ArrayBuffer (vm, jest)
-  // fails instanceof, and a SharedArrayBuffer never matches ArrayBuffer.
-  const type = Object.prototype.toString.call(value).slice(8, -1);
-  if (ArrayBuffer.isView(value) || type === 'ArrayBuffer' || type === 'SharedArrayBuffer') {
+  const bin = binary(value);
+  if (bin) {
+    const [type, bytes] = bin;
     // @msgpack/msgpack emits a Uint8Array as bin, bounded by maxEncodedSize.
-    if (type === 'Uint8Array') return value;
+    if (type === 'Uint8Array') return bytes;
     // A key argument is hashed, never decoded: hash other binary by type and
     // bytes, so Int8Array([-1]) and Uint8Array([255]) stay distinct keys.
-    if (forKey) {
-      return { [type]: ArrayBuffer.isView(value) ? value : new Uint8Array(value as ArrayBuffer) };
-    }
+    if (forKey) return { [type]: bytes };
     // A value would decode as a Uint8Array — a silent type change — so reject
     // it with the fix instead (LAB-4839).
     throw new SerializationError(

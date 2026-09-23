@@ -4,6 +4,9 @@ import { decode as msgpackDecode, encode as msgpackEncode } from '@msgpack/msgpa
 import { MessagePackSerializer, assertDecodeDepth, boundedDecodeOptions } from './serializer.js';
 import { ValueTooLargeError, SerializationError } from '../errors.js';
 
+const retag = <T extends object>(value: T, tag: string): T =>
+  Object.defineProperty(value, Symbol.toStringTag, { value: tag });
+
 describe('MessagePackSerializer', () => {
   const serializer = new MessagePackSerializer();
 
@@ -73,9 +76,16 @@ describe('MessagePackSerializer', () => {
       ['ArrayBuffer', new ArrayBuffer(2)],
       ['ArrayBuffer', runInNewContext('new ArrayBuffer(2)')], // another realm
       ['SharedArrayBuffer', new SharedArrayBuffer(2)],
+      // Retagged: the brand, not Symbol.toStringTag, decides the type.
+      ['Float64Array', retag(new Float64Array([1.5]), 'Uint8Array')],
     ])('rejects %s rather than map-encoding it (LAB-4839)', (name, value) => {
       expect(() => serializer.encode(value)).toThrow(SerializationError);
       expect(() => serializer.encode({ nested: value })).toThrow(`Cannot serialize ${name}`);
+    });
+
+    it('encodes a plain object tagged as a buffer as a map (LAB-4839)', () => {
+      const encoded = serializer.encode(retag({ a: 1 }, 'ArrayBuffer'));
+      expect(serializer.decode(encoded)).toEqual({ a: 1 });
     });
   });
 

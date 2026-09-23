@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, assert, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -1055,9 +1055,11 @@ describe('Cache Integration', () => {
 describe('Binary values (LAB-4839)', () => {
   let dir: string;
   const bytes = (n: number) => Uint8Array.from({ length: n }, (_, i) => (i * 31 + 7) & 0xff);
+  // `got` is unknown on purpose: the bug returned a plain object, so this must
+  // check the runtime type, not assume it.
   const expectSameBytes = (got: unknown, want: Uint8Array) => {
-    expect(got).toBeInstanceOf(Uint8Array);
-    expect(Buffer.compare(got as Uint8Array, want)).toBe(0);
+    assert(got instanceof Uint8Array, 'expected a Uint8Array');
+    expect(Buffer.compare(got, want)).toBe(0);
   };
 
   beforeEach(async () => {
