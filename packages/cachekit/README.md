@@ -468,8 +468,11 @@ Workers (wasm32 has no AES instructions).
 import { EncryptionManager } from '@cachekit-io/cachekit';
 
 const manager = new EncryptionManager(process.env.CACHEKIT_MASTER_KEY!, 'tenant-123');
-console.log('AES hardware acceleration:', await manager.isHardwareAccelerated());
-manager.dispose();
+try {
+  console.log('AES hardware acceleration:', await manager.isHardwareAccelerated());
+} finally {
+  manager.dispose();
+}
 ```
 
 ## Cloudflare Workers
