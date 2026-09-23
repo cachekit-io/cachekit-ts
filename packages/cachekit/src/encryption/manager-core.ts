@@ -99,6 +99,15 @@ export class EncryptionManagerCore {
   private native: EncryptionBindings | null = null;
   private disposed = false;
   private initPromise: Promise<void> | null = null;
+  /**
+   * Single resolution site for the tenant identifier — both HKDF derivation
+   * (doInitialize) and AAD construction (buildAAD) MUST read this same value.
+   * A second `this.tenantId ?? ...` fallback anywhere else re-splits the two
+   * uses and reintroduces the "default" (HKDF) vs "" (AAD) mismatch that
+   * makes ciphertext unauthenticatable (spec/intent-presets.md § Master Key
+   * Input, rule 5; LAB-4668).
+   */
+  private readonly effectiveTenantId: string;
   // Note: Nonce tracking is done in Rust via getNonceCounter().
   // The Rust encryptor throws NonceCounterExhausted when the limit is reached.
 
@@ -135,6 +144,7 @@ export class EncryptionManagerCore {
     private readonly previousMasterKeys: readonly string[] = []
   ) {
     validateKeyHex(masterKey, 'Master key');
+    this.effectiveTenantId = tenantId ?? 'default';
     if (previousMasterKeys.length > MAX_PREVIOUS_MASTER_KEYS) {
       throw new ConfigurationError(
         `previousMasterKeys accepts at most ${MAX_PREVIOUS_MASTER_KEYS} keys, got ${previousMasterKeys.length} — drop retired keys explicitly, the list is never truncated`
@@ -203,12 +213,11 @@ export class EncryptionManagerCore {
       // byte buffers are wiped in the finally below as soon as the binding has
       // consumed them — on error paths too (the hex config strings remain on
       // the manager for init retry, per the documented masterKey pattern).
-      const effectiveTenantId = this.tenantId ?? 'default';
       let tenantKeys: EncryptionTenantKeys;
       try {
         tenantKeys = this.native.deriveTenantKeys(
           masterKeyBytes,
-          effectiveTenantId,
+          this.effectiveTenantId,
           previousKeyBytes.length > 0 ? previousKeyBytes : undefined
         );
       } finally {
@@ -372,7 +381,7 @@ export class EncryptionManagerCore {
 
     // Encode all components as UTF-8 (matches Python exactly)
     const components = [
-      encoder.encode(this.tenantId ?? ''),
+      encoder.encode(this.effectiveTenantId),
       encoder.encode(cacheKey),
       encoder.encode(format),
       encoder.encode(compressed ? 'True' : 'False'), // Python str(bool) format
