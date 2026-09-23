@@ -318,13 +318,17 @@ export function normalize(
       .sort();
   }
 
-  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
-    // Tag, not instanceof, so a Buffer or another realm's Uint8Array (vm, jest)
-    // passes. @msgpack/msgpack emits it as bin, bounded by maxEncodedSize.
-    const type = Object.prototype.toString.call(value).slice(8, -1);
+  // Tag, not instanceof: another realm's Uint8Array or ArrayBuffer (vm, jest)
+  // fails instanceof, and a SharedArrayBuffer never matches ArrayBuffer.
+  const type = Object.prototype.toString.call(value).slice(8, -1);
+  if (ArrayBuffer.isView(value) || type === 'ArrayBuffer' || type === 'SharedArrayBuffer') {
+    // @msgpack/msgpack emits a Uint8Array as bin, bounded by maxEncodedSize.
     if (type === 'Uint8Array') return value;
-    // A key argument is hashed, never decoded, so any binary hashes by its bytes.
-    if (forKey) return ArrayBuffer.isView(value) ? value : new Uint8Array(value);
+    // A key argument is hashed, never decoded: hash other binary by type and
+    // bytes, so Int8Array([-1]) and Uint8Array([255]) stay distinct keys.
+    if (forKey) {
+      return { [type]: ArrayBuffer.isView(value) ? value : new Uint8Array(value as ArrayBuffer) };
+    }
     // A value would decode as a Uint8Array — a silent type change — so reject
     // it with the fix instead (LAB-4839).
     throw new SerializationError(

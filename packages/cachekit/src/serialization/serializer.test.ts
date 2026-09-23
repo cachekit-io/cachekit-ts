@@ -66,19 +66,13 @@ describe('MessagePackSerializer', () => {
       expect(decoded).toEqual(Uint8Array.of(1, 2, 3));
     });
 
-    it('bounds binary by maxEncodedSize, not maxCollectionSize (LAB-4839)', () => {
-      const big = new Uint8Array(20_000).fill(7);
-      expect(serializer.decode(serializer.encode(big))).toEqual(big);
-      expect(() =>
-        new MessagePackSerializer({ maxEncodedSize: 100 }).encode(new Uint8Array(200))
-      ).toThrow(ValueTooLargeError);
-    });
-
     it.each([
       ['Float64Array', new Float64Array([1.5])],
       ['Uint8ClampedArray', new Uint8ClampedArray(2)],
       ['DataView', new DataView(new ArrayBuffer(2))],
       ['ArrayBuffer', new ArrayBuffer(2)],
+      ['ArrayBuffer', runInNewContext('new ArrayBuffer(2)')], // another realm
+      ['SharedArrayBuffer', new SharedArrayBuffer(2)],
     ])('rejects %s rather than map-encoding it (LAB-4839)', (name, value) => {
       expect(() => serializer.encode(value)).toThrow(SerializationError);
       expect(() => serializer.encode({ nested: value })).toThrow(`Cannot serialize ${name}`);

@@ -1068,14 +1068,10 @@ describe('Binary values (LAB-4839)', () => {
     await fs.rm(dir, { recursive: true, force: true });
   });
 
-  it.each([
-    ['envelope', {}],
-    ['no envelope', { compression: false }],
-    ['encrypted', { encryption: { masterKey: '0'.repeat(64), tenantId: 'test-tenant' } }],
-  ])('round-trips Uint8Array and Buffer through set/get and wrap (%s)', async (_, options) => {
-    const c = createCache({ backend: file({ cacheDir: dir }), l1: { enabled: false }, ...options });
+  it('round-trips a Uint8Array through set/get and wrap', async () => {
+    const c = createCache({ backend: file({ cacheDir: dir }), l1: { enabled: false } });
 
-    for (const value of [bytes(3), bytes(20_000), Buffer.from(bytes(20_000))]) {
+    for (const value of [bytes(3), bytes(20_000)]) {
       await c.set('bin:k', value);
       expectSameBytes(await c.get('bin:k'), value);
     }

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { runInNewContext } from 'node:vm';
 import { generateKey, generateParamsHash, extractNamespace } from './key-generator.js';
 
 describe('generateKey', () => {
@@ -46,16 +47,26 @@ describe('generateKey', () => {
     expect(() => generateKey('test', [new Uint8Array(20_000)])).not.toThrow();
   });
 
-  it('hashes any other binary argument by its bytes (LAB-4839)', () => {
-    const f32 = new Float32Array([1.5, -2]);
-    expect(generateKey('test', [f32])).toBe(generateKey('test', [new Uint8Array(f32.buffer)]));
-    expect(generateKey('test', [new DataView(f32.buffer)])).toBe(generateKey('test', [f32]));
-    // Every ArrayBuffer and DataView used to hash as {} — distinct buffers shared one key.
-    const a = Uint8Array.of(1).buffer;
-    const b = Uint8Array.of(2).buffer;
-    expect(generateKey('test', [a])).not.toBe(generateKey('test', [b]));
-    expect(generateKey('test', [new DataView(a)])).not.toBe(generateKey('test', [new DataView(b)]));
-    expect(generateKey('test', [a])).toBe(generateKey('test', [Uint8Array.of(1)]));
+  it('hashes any other binary argument by its type and bytes (LAB-4839)', () => {
+    const key = (arg: unknown) => generateKey('test', [arg]);
+    expect(key(new Float32Array([1.5, -2]))).toBe(key(Float32Array.of(1.5, -2)));
+    expect(key(new Float32Array([1.5]))).not.toBe(key(new Float32Array([2.5])));
+    // Same bytes, different type: distinct keys.
+    expect(key(Int8Array.of(-1))).not.toBe(key(Uint8Array.of(255)));
+    expect(key(Uint8Array.of(1).buffer)).not.toBe(key(Uint8Array.of(1)));
+    // Every ArrayBuffer, SharedArrayBuffer and DataView used to hash as {}, so
+    // distinct buffers shared one key.
+    const sab = (b: number) => {
+      const buf = new SharedArrayBuffer(1);
+      new Uint8Array(buf)[0] = b;
+      return buf;
+    };
+    expect(key(Uint8Array.of(1).buffer)).not.toBe(key(Uint8Array.of(2).buffer));
+    expect(key(new DataView(Uint8Array.of(1).buffer))).not.toBe(
+      key(new DataView(Uint8Array.of(2).buffer))
+    );
+    expect(key(sab(1))).not.toBe(key(sab(2)));
+    expect(key(runInNewContext('Uint8Array.of(1).buffer'))).toBe(key(Uint8Array.of(1).buffer));
   });
 });
 

@@ -205,22 +205,25 @@ CachekitIO per plan.)
 ### Binary values
 
 A `Uint8Array`, including a Node `Buffer`, is stored as MessagePack `bin` and
-read back as a `Uint8Array` with the same bytes (a `Buffer` comes back as a plain
-`Uint8Array`). It counts against `serializer.maxEncodedSize` like any other
+read back as a `Uint8Array` with the same bytes (a `Buffer` may come back as a
+plain `Uint8Array`). It counts against `serializer.maxEncodedSize` like any other
 value, so the 1 MiB default above applies. Other binary types — `Float32Array`
-and the other typed arrays, `DataView`, a bare `ArrayBuffer` — throw
-`SerializationError` on `set()`, because they would read back as a `Uint8Array`
-rather than the type you stored. Store the bytes and rebuild the type on read:
+and the other typed arrays, `DataView`, `ArrayBuffer` — are rejected with
+`SerializationError`, because they would read back as a `Uint8Array` rather than
+the type you stored. As with a size rejection, graceful degradation absorbs that
+error: `set()` resolves and nothing is stored. Store the bytes and rebuild the
+type on read:
 
 ```typescript
 await cache.set('embedding', new Uint8Array(vec.buffer, vec.byteOffset, vec.byteLength));
 const bytes = await cache.get<Uint8Array>('embedding');
 // Copy first: the result can be an unaligned view into a larger buffer.
-const restored = bytes && new Float32Array(bytes.slice().buffer);
+const restored = bytes && new Float32Array(new Uint8Array(bytes).buffer);
 ```
 
-Function arguments are different: keys are hashed, never decoded, so a
-`wrap()`ed function can take any binary type and it hashes by its bytes.
+In auto mode, function arguments are different: keys are hashed, never decoded,
+so a `wrap()`ed function can take any binary type, hashed by its type and bytes.
+Interop mode accepts only `Uint8Array` arguments.
 
 ## Master-Key Rotation
 
