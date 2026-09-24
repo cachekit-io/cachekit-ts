@@ -2,6 +2,9 @@ import { describe, it, expect } from 'vitest';
 import { runInNewContext } from 'node:vm';
 import { generateKey, generateParamsHash, extractNamespace } from './key-generator.js';
 
+/** The key for a single binary or object argument. */
+const key = (arg: object) => generateKey('test', [arg]);
+
 describe('generateKey', () => {
   it('generates consistent keys for same input', () => {
     const key1 = generateKey('test:fn', [1, 2, 3]);
@@ -48,7 +51,6 @@ describe('generateKey', () => {
   });
 
   it('hashes any other binary argument by its type and bytes (LAB-4839)', () => {
-    const key = (arg: unknown) => generateKey('test', [arg]);
     expect(key(new Float32Array([1.5, -2]))).toBe(key(Float32Array.of(1.5, -2)));
     expect(key(new Float32Array([1.5]))).not.toBe(key(new Float32Array([2.5])));
     // Same bytes, different type: distinct keys.
@@ -75,8 +77,7 @@ describe('generateKey', () => {
   });
 
   it('hashes a detached binary argument as empty instead of throwing (LAB-4839)', () => {
-    const key = (arg: unknown) => generateKey('test', [arg]);
-    const detached = <T>(view: (buf: ArrayBuffer) => T): T => {
+    const detached = <T extends object>(view: (buf: ArrayBuffer) => T): T => {
       const buf = new ArrayBuffer(4);
       const result = view(buf);
       structuredClone(buf, { transfer: [buf] });
@@ -85,6 +86,45 @@ describe('generateKey', () => {
     expect(key(detached((buf) => buf))).toBe(key(new ArrayBuffer(0)));
     expect(key(detached((buf) => new Uint8Array(buf)))).toBe(key(new Uint8Array(0)));
     expect(key(detached((buf) => new DataView(buf)))).toBe(key(new DataView(new ArrayBuffer(0))));
+  });
+
+  it('never gives a binary argument the key of an ordinary object (LAB-4839)', () => {
+    expect(key(Int8Array.of(-1))).not.toBe(key({ Int8Array: Uint8Array.of(255) }));
+    expect(key(Int8Array.of(-1))).not.toBe(key({ Int8Array: Int8Array.of(-1) }));
+    expect(key(new ArrayBuffer(1))).not.toBe(key({ ArrayBuffer: new Uint8Array(1) }));
+  });
+
+  it('reads binary bytes from internal slots, not shadowable properties (LAB-4839)', () => {
+    const shadowed = Object.defineProperty(Uint8Array.of(1, 2, 3), 'byteLength', { value: 0 });
+    expect(key(shadowed)).toBe(key(Uint8Array.of(1, 2, 3)));
+    const retagged = (b: number) =>
+      Object.defineProperty(Uint8Array.of(b).buffer, Symbol.toStringTag, { value: 'Object' });
+    expect(key(retagged(1))).not.toBe(key(retagged(2)));
+    class Tagged extends ArrayBuffer {
+      get [Symbol.toStringTag]() {
+        return 'Tagged';
+      }
+    }
+    expect(key(new Tagged(1))).toBe(key(new ArrayBuffer(1)));
+  });
+
+  it('keeps non-binary keys byte-identical to earlier releases', () => {
+    // Pinned from main before binary support: changing it orphans every
+    // existing cache entry.
+    const args = [
+      ...[1, -0, 1.5, -7, 2 ** 53, 'héllo', '', true, false, null, undefined],
+      [1, [2, [3]]],
+      { b: 2, a: { d: [1], c: null }, Int8Array: 'x' },
+      new Date(0),
+      new Map<unknown, unknown>([
+        ['b', 1],
+        ['a', { z: 1 }],
+      ]),
+      new Set([3, 1, 2]),
+    ];
+    expect(generateKey('test', args)).toBe(
+      'test:0c0e00c359985743c94e25e7898c35885ee325a08553315d6f79c1f8ab39fc24'
+    );
   });
 });
 

@@ -1,4 +1,4 @@
-import { encode, decode } from '@msgpack/msgpack';
+import { ExtData, encode, decode } from '@msgpack/msgpack';
 import { SerializationError, ValueTooLargeError } from '../errors.js';
 import {
   DEFAULT_MAX_ENCODED_SIZE,
@@ -239,23 +239,26 @@ export interface Serializer {
 }
 
 // Intrinsic getters, captured once: they read internal slots, so they cannot be
-// fooled by Symbol.toStringTag and work on another realm's objects. The
-// %TypedArray% name getter returns undefined for a DataView.
-const typedArrayName = Object.getOwnPropertyDescriptor(
-  Object.getPrototypeOf(Uint8Array.prototype),
-  Symbol.toStringTag
-)?.get;
-const byteLengthGetter = (proto: object) =>
-  Object.getOwnPropertyDescriptor(proto, 'byteLength')?.get;
-const arrayBufferByteLength = byteLengthGetter(ArrayBuffer.prototype);
+// fooled by Symbol.toStringTag or shadowed properties, and work on another
+// realm's objects. The %TypedArray% name getter returns undefined for a DataView.
+type Getter = (this: unknown) => unknown;
+const getter = (proto: object, name: PropertyKey) =>
+  Object.getOwnPropertyDescriptor(proto, name)?.get as Getter;
+const typedArrayProto = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const typedArrayName = getter(typedArrayProto, Symbol.toStringTag);
+const viewGetters = (proto: object) =>
+  ['buffer', 'byteOffset', 'byteLength'].map((name) => getter(proto, name));
+const typedArrayView = viewGetters(typedArrayProto);
+const dataViewView = viewGetters(DataView.prototype);
+const arrayBufferByteLength = getter(ArrayBuffer.prototype, 'byteLength');
 // SharedArrayBuffer is absent in browsers without cross-origin isolation.
 const sharedArrayBufferByteLength =
   typeof SharedArrayBuffer === 'function'
-    ? byteLengthGetter(SharedArrayBuffer.prototype)
+    ? getter(SharedArrayBuffer.prototype, 'byteLength')
     : undefined;
 
 /** The getter throws unless `value` holds that buffer's internal slot. */
-function hasBufferBrand(value: object, byteLength: () => number): value is ArrayBufferLike {
+function hasBufferBrand(value: object, byteLength: Getter): boolean {
   try {
     byteLength.call(value);
     return true;
@@ -269,11 +272,12 @@ function hasBufferBrand(value: object, byteLength: () => number): value is Array
  * throws on any view but holds no bytes, so it reads as empty, as it would in
  * the caller's own function, rather than throwing from key generation.
  */
-function bytesOf(value: ArrayBufferView | ArrayBufferLike): Uint8Array {
+function bytesOf(value: object): Uint8Array {
   try {
-    return ArrayBuffer.isView(value)
-      ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
-      : new Uint8Array(value);
+    if (!ArrayBuffer.isView(value)) return new Uint8Array(value as ArrayBufferLike);
+    const view = typedArrayName.call(value) === undefined ? dataViewView : typedArrayView;
+    const [buffer, byteOffset, byteLength] = view.map((get) => get.call(value));
+    return new Uint8Array(buffer as ArrayBufferLike, byteOffset as number, byteLength as number);
   } catch {
     return new Uint8Array(0);
   }
@@ -286,20 +290,26 @@ function bytesOf(value: ArrayBufferView | ArrayBufferLike): Uint8Array {
  */
 function binary(value: object): [type: string, bytes: Uint8Array] | undefined {
   if (ArrayBuffer.isView(value)) {
-    return [typedArrayName?.call(value) ?? 'DataView', bytesOf(value)];
+    return [(typedArrayName.call(value) as string | undefined) ?? 'DataView', bytesOf(value)];
   }
-  // The tag only picks which brand to check, so a plain object never pays for a
-  // throw. Only a buffer that retags itself is missed: it encodes as {}, and
-  // every such key argument shares one key.
+  // The tag or instanceof only picks which brand to check, so a plain object
+  // never pays for a throw. instanceof catches a same-realm buffer that retags
+  // itself; only another realm's retagged buffer is missed, and encodes as {}.
   const tag = Object.prototype.toString.call(value).slice(8, -1);
-  const byteLength =
-    tag === 'ArrayBuffer'
-      ? arrayBufferByteLength
-      : tag === 'SharedArrayBuffer'
-        ? sharedArrayBufferByteLength
-        : undefined;
-  if (!byteLength || !hasBufferBrand(value, byteLength)) return undefined;
-  return [tag, bytesOf(value)];
+  if (
+    (tag === 'ArrayBuffer' || value instanceof ArrayBuffer) &&
+    hasBufferBrand(value, arrayBufferByteLength)
+  ) {
+    return ['ArrayBuffer', bytesOf(value)];
+  }
+  if (
+    sharedArrayBufferByteLength &&
+    (tag === 'SharedArrayBuffer' || value instanceof SharedArrayBuffer) &&
+    hasBufferBrand(value, sharedArrayBufferByteLength)
+  ) {
+    return ['SharedArrayBuffer', bytesOf(value)];
+  }
+  return undefined;
 }
 
 /**
@@ -388,8 +398,10 @@ export function normalize(
     // @msgpack/msgpack emits a Uint8Array as bin, bounded by maxEncodedSize.
     if (type === 'Uint8Array') return bytes;
     // A key argument is hashed, never decoded: hash other binary by type and
-    // bytes, so Int8Array([-1]) and Uint8Array([255]) stay distinct keys.
-    if (forKey) return { [type]: bytes };
+    // bytes, so Int8Array([-1]) and Uint8Array([255]) stay distinct keys. As a
+    // msgpack ext, which no ordinary argument normalizes to, it cannot collide
+    // with an object of that shape, e.g. { Int8Array: Uint8Array.of(255) }.
+    if (forKey) return new ExtData(0, encode([type, bytes]));
     // A value would decode as a Uint8Array — a silent type change — so reject
     // it with the fix instead (LAB-4839).
     throw new SerializationError(

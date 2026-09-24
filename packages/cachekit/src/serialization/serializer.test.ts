@@ -83,9 +83,15 @@ describe('MessagePackSerializer', () => {
       ['ArrayBuffer', detach(new ArrayBuffer(2))],
       // Retagged: the brand, not Symbol.toStringTag, decides the type.
       ['Float64Array', retag(new Float64Array([1.5]), 'Uint8Array')],
+      ['ArrayBuffer', retag(new ArrayBuffer(2), 'Object')],
     ])('rejects %s rather than map-encoding it (LAB-4839)', (name, value) => {
       expect(() => serializer.encode(value)).toThrow(SerializationError);
       expect(() => serializer.encode({ nested: value })).toThrow(`Cannot serialize ${name}`);
+    });
+
+    it('encodes a Uint8Array by its internal slots, not shadowable properties (LAB-4839)', () => {
+      const shadowed = Object.defineProperty(Uint8Array.of(1, 2, 3), 'byteLength', { value: 0 });
+      expect(serializer.encode(shadowed)).toEqual(Uint8Array.of(0xc4, 0x03, 1, 2, 3));
     });
 
     it('encodes a detached Uint8Array as empty bin (LAB-4839)', () => {
