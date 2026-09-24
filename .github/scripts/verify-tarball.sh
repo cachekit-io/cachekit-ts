@@ -15,7 +15,27 @@
 #   every other registry setting.
 set -euo pipefail
 
+if [ "$#" -ne 3 ]; then
+  echo "Usage: verify-tarball.sh <tarball> <package.json> <sha256>" >&2
+  exit 2
+fi
+
 tarball=$1 manifest=$2 sha256=$3
+
+if [ ! -f "$tarball" ]; then
+  echo "::error::Tarball '$tarball' does not exist." >&2
+  exit 2
+fi
+
+if [ ! -f "$manifest" ]; then
+  echo "::error::Manifest '$manifest' does not exist." >&2
+  exit 2
+fi
+
+if [[ ! $sha256 =~ ^[0-9a-f]{64}$ ]]; then
+  echo "::error::sha256 '$sha256' is not 64 lowercase hex characters." >&2
+  exit 2
+fi
 
 echo "$sha256  $tarball" | sha256sum -c -
 
