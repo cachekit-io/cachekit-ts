@@ -310,6 +310,15 @@ jobs:
           ref: ${{ needs.release-please.outputs.core-wasm--tag_name || github.event.inputs.wasm_tag }}
           persist-credentials: false
 
+      # The verifier comes from this workflow's own commit, not the tag: a
+      # recovery `wasm_tag` can predate verify-tarball.sh.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          path: .release-scripts
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
       # No `registry-url` — same reason as publish-cachekit.
       - name: Setup Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
@@ -330,7 +339,7 @@ jobs:
         env:
           SHA256: ${{ needs.build-cachekit-core-wasm.outputs.sha256 }}
           MANIFEST: packages/cachekit-core-wasm/package.json
-        run: .github/scripts/verify-tarball.sh "$RUNNER_TEMP/package.tgz" "$MANIFEST" "$SHA256"
+        run: .release-scripts/.github/scripts/verify-tarball.sh "$RUNNER_TEMP/package.tgz" "$MANIFEST" "$SHA256"
 
       # Auth is npm OIDC trusted publishing — the repo has NO NPM_TOKEN secret
       # (the old token-auth steps resolved an empty token and died ENEEDAUTH,
