@@ -241,24 +241,33 @@ export interface Serializer {
 // Intrinsic getters, captured once: they read internal slots, so they cannot be
 // fooled by Symbol.toStringTag or shadowed properties, and work on another
 // realm's objects. The %TypedArray% name getter returns undefined for a DataView.
-type Getter = (this: unknown) => unknown;
-const getter = (proto: object, name: PropertyKey) =>
-  Object.getOwnPropertyDescriptor(proto, name)?.get as Getter;
-const typedArrayProto = Object.getPrototypeOf(Uint8Array.prototype) as object;
-const typedArrayName = getter(typedArrayProto, Symbol.toStringTag);
-const viewGetters = (proto: object) =>
-  ['buffer', 'byteOffset', 'byteLength'].map((name) => getter(proto, name));
+// T is the getter's return type per the spec, which TypeScript cannot check.
+type Getter<T> = (this: unknown) => T;
+function getter<T>(proto: object, name: PropertyKey): Getter<T> {
+  const get: Getter<T> | undefined = Object.getOwnPropertyDescriptor(proto, name)?.get;
+  // Fail at load: bytesOf and hasBufferBrand swallow throws, so a missing getter
+  // would otherwise give every binary argument the same key.
+  if (!get) throw new Error(`cachekit: intrinsic getter ${String(name)} not found`);
+  return get;
+}
+const typedArrayProto: object = Object.getPrototypeOf(Uint8Array.prototype);
+const typedArrayName = getter<string | undefined>(typedArrayProto, Symbol.toStringTag);
+const viewGetters = (proto: object) => ({
+  buffer: getter<ArrayBufferLike>(proto, 'buffer'),
+  byteOffset: getter<number>(proto, 'byteOffset'),
+  byteLength: getter<number>(proto, 'byteLength'),
+});
 const typedArrayView = viewGetters(typedArrayProto);
 const dataViewView = viewGetters(DataView.prototype);
-const arrayBufferByteLength = getter(ArrayBuffer.prototype, 'byteLength');
+const arrayBufferByteLength = getter<number>(ArrayBuffer.prototype, 'byteLength');
 // SharedArrayBuffer is absent in browsers without cross-origin isolation.
 const sharedArrayBufferByteLength =
   typeof SharedArrayBuffer === 'function'
-    ? getter(SharedArrayBuffer.prototype, 'byteLength')
+    ? getter<number>(SharedArrayBuffer.prototype, 'byteLength')
     : undefined;
 
 /** The getter throws unless `value` holds that buffer's internal slot. */
-function hasBufferBrand(value: object, byteLength: Getter): boolean {
+function hasBufferBrand(value: object, byteLength: Getter<number>): value is ArrayBufferLike {
   try {
     byteLength.call(value);
     return true;
@@ -272,12 +281,15 @@ function hasBufferBrand(value: object, byteLength: Getter): boolean {
  * throws on any view but holds no bytes, so it reads as empty, as it would in
  * the caller's own function, rather than throwing from key generation.
  */
-function bytesOf(value: object): Uint8Array {
+function bytesOf(value: ArrayBufferLike | ArrayBufferView): Uint8Array {
   try {
-    if (!ArrayBuffer.isView(value)) return new Uint8Array(value as ArrayBufferLike);
+    if (!ArrayBuffer.isView(value)) return new Uint8Array(value);
     const view = typedArrayName.call(value) === undefined ? dataViewView : typedArrayView;
-    const [buffer, byteOffset, byteLength] = view.map((get) => get.call(value));
-    return new Uint8Array(buffer as ArrayBufferLike, byteOffset as number, byteLength as number);
+    return new Uint8Array(
+      view.buffer.call(value),
+      view.byteOffset.call(value),
+      view.byteLength.call(value)
+    );
   } catch {
     return new Uint8Array(0);
   }
@@ -290,7 +302,7 @@ function bytesOf(value: object): Uint8Array {
  */
 function binary(value: object): [type: string, bytes: Uint8Array] | undefined {
   if (ArrayBuffer.isView(value)) {
-    return [(typedArrayName.call(value) as string | undefined) ?? 'DataView', bytesOf(value)];
+    return [typedArrayName.call(value) ?? 'DataView', bytesOf(value)];
   }
   // The tag or instanceof only picks which brand to check, so a plain object
   // never pays for a throw. instanceof catches a same-realm buffer that retags

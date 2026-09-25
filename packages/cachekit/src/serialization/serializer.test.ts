@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { runInNewContext } from 'node:vm';
 import { decode as msgpackDecode, encode as msgpackEncode } from '@msgpack/msgpack';
 import { MessagePackSerializer, assertDecodeDepth, boundedDecodeOptions } from './serializer.js';
@@ -104,6 +104,20 @@ describe('MessagePackSerializer', () => {
     it('encodes a plain object tagged as a buffer as a map (LAB-4839)', () => {
       const encoded = serializer.encode(retag({ a: 1 }, 'ArrayBuffer'));
       expect(serializer.decode(encoded)).toEqual({ a: 1 });
+    });
+
+    it('fails at load when an intrinsic getter is missing, not by keying all binary alike (LAB-4839)', async () => {
+      const original = Object.getOwnPropertyDescriptor(DataView.prototype, 'byteOffset');
+      Reflect.deleteProperty(DataView.prototype, 'byteOffset');
+      vi.resetModules();
+      try {
+        await expect(import('./serializer.js')).rejects.toThrow(
+          'cachekit: intrinsic getter byteOffset not found'
+        );
+      } finally {
+        if (original) Object.defineProperty(DataView.prototype, 'byteOffset', original);
+        vi.resetModules();
+      }
     });
   });
 
