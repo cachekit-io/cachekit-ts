@@ -786,10 +786,10 @@ export class CacheImpl implements SecureCache {
     // every key on this cache (LAB-5139). Interop rejection always throws
     // (spec: values outside the data model MUST error). Auto-mode rejection
     // keeps the degradation contract it had inside the executor: counted,
-    // then thrown with degradation off, absorbed (value not cached) with it
-    // on. A size rejection emits one greppable, rate-limited warning either
-    // way, since degradation or a consumer's try/catch around set() would
-    // otherwise hide it (LAB-1388).
+    // then thrown with degradation off, absorbed with it on — never written
+    // to L2, though an SWR refresh on a plaintext cache still repopulates L1
+    // from the returned l1Write, as a degraded backend write does. A size
+    // rejection emits one rate-limited warning either way (LAB-1388).
     let serialized: Uint8Array;
     try {
       serialized = interop ? encodeInteropValue(value) : this.serializer.encode(value);

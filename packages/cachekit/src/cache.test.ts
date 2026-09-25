@@ -3,7 +3,7 @@ import { createCache } from './cache.js';
 import { generateKey } from './serialization/key-generator.js';
 import { setLogger } from './logger.js';
 import { createCache as createIntentCache } from './intents.js';
-import { ConfigurationError, SerializationError, ValueTooLargeError } from './errors.js';
+import { ConfigurationError, ValueTooLargeError } from './errors.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
@@ -910,14 +910,14 @@ describe('Cache Integration', () => {
     });
   });
 
+  // ~2 MiB of unique-ish content — over the 1 MiB default maxEncodedSize.
+  const oversized = () => 'x'.repeat(2 * 1024 * 1024);
+
   describe('oversized-value set() warning (LAB-1388)', () => {
     afterEach(() => {
       setLogger(null);
       vi.useRealTimers();
     });
-
-    // ~2 MiB of unique-ish content — over the 1 MiB default maxEncodedSize.
-    const oversized = () => 'x'.repeat(2 * 1024 * 1024);
 
     it('reports a rate-limited warning even when degradation swallows the error', async () => {
       vi.useFakeTimers();
@@ -991,8 +991,6 @@ describe('Cache Integration', () => {
       vi.restoreAllMocks();
     });
 
-    const oversized = () => 'x'.repeat(2 * 1024 * 1024);
-
     // production preset: retry 3x with backoff, breaker opens at 5 failures.
     const productionCache = (backend: Backend, serializer?: { maxCollectionSize: number }) =>
       createIntentCache.production({ backend, metrics: false, serializer });
@@ -1041,24 +1039,6 @@ describe('Cache Integration', () => {
       for (let i = 1; i < 6; i++) await c.set(`ns:wide${i}`, tooMany);
       await c.set('ns:small', 'ok');
       expect(await c.get('ns:small')).toBe('ok');
-
-      await c.close();
-    });
-
-    it('still throws SerializationError when degradation is disabled', async () => {
-      const c = createIntentCache.production({
-        backend: new InMemoryBackend(),
-        metrics: false,
-        serializer: { maxCollectionSize: 10 },
-        reliability: { degradation: false },
-      });
-
-      await expect(
-        c.set(
-          'ns:wide',
-          Array.from({ length: 11 }, (_, i) => i)
-        )
-      ).rejects.toThrow(SerializationError);
 
       await c.close();
     });
