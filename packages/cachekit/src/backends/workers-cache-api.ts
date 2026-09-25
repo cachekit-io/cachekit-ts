@@ -105,13 +105,6 @@ export class CacheAPIBackend implements Backend {
    * See Backend.transformsKeys.
    */
   readonly transformsKeys = true;
-  /**
-   * Cloudflare stores Cache API `Response` bodies compressed at rest, so the
-   * ByteStorage LZ4 envelope would spend isolate CPU compressing twice for
-   * little win — advertise compression off by default (LAB-1388). An
-   * explicit `compression: true` on the cache still enables it.
-   */
-  readonly compressionDefault = false;
   private readonly cacheName?: string;
   private readonly defaultTtl: number;
   private cachePromise: Promise<CacheLike> | null = null;

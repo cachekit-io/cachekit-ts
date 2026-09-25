@@ -1,13 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { createCache } from '../intents.js';
 import { CacheAPIBackend, workersCacheAPI, type CacheLike } from './workers-cache-api.js';
 
 /**
- * Node-lane unit tests for the Cache API backend's header math and
- * advertised defaults (LAB-1388). The real-workerd behavior (actual
- * caches.default storage) is covered by test/workers/edge-backends —
- * these tests pin the freshness arithmetic getWithTtl derives from the
- * stored response's Cache-Control/Age headers, which workerd's local
- * cache emulation cannot exercise (it never reports Age).
+ * Node-lane unit tests for the Cache API backend's header math and its
+ * compression default. The real-workerd behavior (actual caches.default
+ * storage) is covered by test/workers/edge-backends — these tests pin the
+ * freshness arithmetic getWithTtl derives from the stored response's
+ * Cache-Control/Age headers, which workerd's local cache emulation cannot
+ * exercise (it never reports Age), and that the backend leaves compression
+ * at the cache-level default, pinned by a secure cross-read.
  */
 class FakeCache implements CacheLike {
   readonly store = new Map<string, Response>();
@@ -41,8 +43,30 @@ describe('CacheAPIBackend (unit, mocked caches global)', () => {
 
   const value = new Uint8Array([1, 2, 3, 4]);
 
-  it('advertises compression off (Cloudflare compresses response bodies at rest)', () => {
-    expect(new CacheAPIBackend().compressionDefault).toBe(false);
+  it('does not advertise compression off (the cache-level default, on, applies)', () => {
+    expect(new CacheAPIBackend().compressionDefault).not.toBe(false);
+  });
+
+  it('a secure cache with no compression option decrypts entries a compression: true cache wrote', async () => {
+    // compression: true is the 0.1.5 default. The AAD binds the envelope
+    // flag, so a default that differs from it fails to decrypt every entry
+    // written before the upgrade.
+    const secure = (compression?: boolean) =>
+      createCache.secure({
+        backend: workersCacheAPI(),
+        masterKey: 'a'.repeat(64),
+        l1: { enabled: false },
+        metrics: false,
+        ...(compression === undefined ? {} : { compression }),
+      });
+
+    const writer = secure(true);
+    await writer.set('ns:k', { hello: 'world' });
+    const reader = secure();
+    expect(await reader.get('ns:k')).toEqual({ hello: 'world' });
+
+    await writer.close();
+    await reader.close();
   });
 
   it('getWithTtl returns null on miss', async () => {
