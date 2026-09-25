@@ -39,6 +39,10 @@ describe('Error types', () => {
     expect(err.cause).toBe(cause);
   });
 
+  it('BackendError defaults to transient so an unknown cause still trips the breaker', () => {
+    expect(new BackendError('Unknown error').classification).toBe('transient');
+  });
+
   it('all error types have correct names', () => {
     const errors = [
       new CachekitError(''),

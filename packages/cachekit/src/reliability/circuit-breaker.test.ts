@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { CircuitBreaker } from './circuit-breaker.js';
-import { CircuitBreakerOpenError } from '../errors.js';
+import { BackendError, CircuitBreakerOpenError } from '../errors.js';
 
 describe('CircuitBreaker', () => {
   let breaker: CircuitBreaker;
@@ -226,5 +226,72 @@ describe('CircuitBreaker', () => {
     expect(breaker3.tryAcquireHalfOpenSlot()).toBe(true);
     expect(breaker3.tryAcquireHalfOpenSlot()).toBe(false);
     expect(breaker3.tryAcquireHalfOpenSlot()).toBe(false);
+  });
+
+  describe('error classification', () => {
+    const openThenHalfOpen = async () => {
+      vi.useFakeTimers();
+      for (let i = 0; i < 3; i++) {
+        await expect(breaker.execute(() => Promise.reject(new Error()))).rejects.toThrow();
+      }
+      vi.advanceTimersByTime(150);
+      expect(breaker.state).toBe('half-open');
+    };
+
+    it.each(['permanent', 'authentication'] as const)(
+      '%s BackendError never counts toward opening',
+      async (classification) => {
+        const err = new BackendError('rejected', classification);
+        for (let i = 0; i < 10; i++) {
+          await expect(breaker.execute(() => Promise.reject(err))).rejects.toBe(err);
+        }
+        expect(breaker.state).toBe('closed');
+      }
+    );
+
+    it.each(['transient', 'timeout'] as const)(
+      '%s BackendError counts toward opening',
+      async (classification) => {
+        for (let i = 0; i < 3; i++) {
+          await expect(
+            breaker.execute(() => Promise.reject(new BackendError('down', classification)))
+          ).rejects.toThrow('down');
+        }
+        expect(breaker.state).toBe('open');
+      }
+    );
+
+    it('a BackendError built without a classification counts toward opening', async () => {
+      for (let i = 0; i < 3; i++) {
+        await expect(
+          breaker.execute(() => Promise.reject(new BackendError('Unknown error')))
+        ).rejects.toThrow();
+      }
+      expect(breaker.state).toBe('open');
+    });
+
+    it('a permanent error on a half-open probe frees its slot instead of wedging', async () => {
+      await openThenHalfOpen();
+      const err = new BackendError('rejected', 'permanent');
+
+      // More permanent probes than halfOpenMaxCalls (2): each must free its slot.
+      for (let i = 0; i < 4; i++) {
+        await expect(breaker.execute(() => Promise.reject(err))).rejects.toBe(err);
+      }
+      expect(breaker.state).toBe('half-open');
+
+      // successThreshold (2) healthy probes still close the breaker.
+      await breaker.execute(() => Promise.resolve('ok'));
+      await breaker.execute(() => Promise.resolve('ok'));
+      expect(breaker.state).toBe('closed');
+    });
+
+    it('a transient error on a half-open probe still reopens', async () => {
+      await openThenHalfOpen();
+      await expect(
+        breaker.execute(() => Promise.reject(new BackendError('down', 'transient')))
+      ).rejects.toThrow();
+      expect(breaker.state).toBe('open');
+    });
   });
 });

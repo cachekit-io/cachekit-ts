@@ -49,12 +49,19 @@ export class IntegrityError extends CachekitError {
 /**
  * Thrown when backend operations fail.
  * Examples: Redis connection error, network timeout.
+ *
+ * `classification` drives the reliability stack: `permanent` and
+ * `authentication` errors are not retried and do not count toward the
+ * circuit breaker; `transient` and `timeout` errors are. The default is
+ * `transient`, so an error whose cause is unknown — including one thrown by a
+ * custom backend — still trips the breaker during a real outage. Pass
+ * `permanent` only for errors that retrying cannot fix.
  */
 export class BackendError extends CachekitError {
   readonly classification: import('./backends/error-classifier.js').ErrorClassification;
   constructor(
     message: string,
-    classification: import('./backends/error-classifier.js').ErrorClassification = 'permanent',
+    classification: import('./backends/error-classifier.js').ErrorClassification = 'transient',
     options?: ErrorOptions
   ) {
     super(message, options);

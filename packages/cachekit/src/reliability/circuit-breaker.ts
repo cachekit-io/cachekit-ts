@@ -1,4 +1,5 @@
 import { CircuitBreakerOpenError } from '../errors.js';
+import { isRetryable } from '../backends/error-classifier.js';
 import {
   DEFAULT_CB_FAILURE_THRESHOLD,
   DEFAULT_CB_SUCCESS_THRESHOLD,
@@ -53,6 +54,11 @@ const DEFAULT_CONFIG: CircuitBreakerConfig = {
  * - OPEN + timeout elapsed → HALF-OPEN
  * - HALF-OPEN + success >= successThreshold → CLOSED
  * - HALF-OPEN + any failure → OPEN
+ *
+ * Only retryable errors count as failures (see `isRetryable`). A `BackendError`
+ * classified `permanent` or `authentication` is request-specific: it passes
+ * through without touching the failure count, and a half-open probe that
+ * hits one frees its slot for the next probe.
  */
 export class CircuitBreaker {
   private readonly config: CircuitBreakerConfig;
@@ -112,7 +118,8 @@ export class CircuitBreaker {
       throw new CircuitBreakerOpenError();
     }
 
-    if (currentState === 'half-open') {
+    const isProbe = currentState === 'half-open';
+    if (isProbe) {
       // M6 Fix: Use atomic slot acquisition to prevent race condition
       if (!this.tryAcquireHalfOpenSlot()) {
         throw new CircuitBreakerOpenError('Circuit breaker half-open limit reached');
@@ -124,7 +131,11 @@ export class CircuitBreaker {
       this.recordSuccess();
       return result;
     } catch (error) {
-      this.recordFailure();
+      if (isRetryable(error)) {
+        this.recordFailure();
+      } else if (isProbe) {
+        this.releaseHalfOpenSlot();
+      }
       throw error;
     }
   }
@@ -146,6 +157,17 @@ export class CircuitBreaker {
       if (this.successesInHalfOpen >= this.config.successThreshold) {
         this.transitionToClosed();
       }
+    }
+  }
+
+  /**
+   * Free a probe slot without counting a success or a failure. Without this,
+   * `halfOpenMaxCalls` request-specific errors in a row would fill every slot
+   * and wedge the breaker half-open against a healthy backend.
+   */
+  private releaseHalfOpenSlot(): void {
+    if (this.currentState === 'half-open' && this.callsInHalfOpen > 0) {
+      this.callsInHalfOpen--;
     }
   }
 
