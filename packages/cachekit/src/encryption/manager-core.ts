@@ -1,6 +1,7 @@
 import { EncryptionError, ConfigurationError, NonceExhaustedError } from '../errors.js';
 import {
   AAD_VERSION,
+  MAX_AAD_SIZE,
   MAX_PREVIOUS_MASTER_KEYS,
   MASTER_KEY_BYTES,
   MASTER_KEY_HEX_LENGTH,
@@ -374,6 +375,29 @@ export class EncryptionManagerCore {
     this.tenantKeys?.free?.();
     this.tenantKeys = null;
     this.native = null;
+  }
+
+  /**
+   * Reject a cache key whose AAD would exceed MAX_AAD_SIZE, which both native
+   * bindings refuse to encrypt or decrypt under. Synchronous and needs no key
+   * material, so the cache can run it before the reliability executor: an
+   * over-limit key fails the same way on every attempt, so retrying it is
+   * pointless and counting it would let a handful of long keys open the
+   * circuit breaker for every key on the cache.
+   *
+   * Measures the real AAD rather than re-deriving its length, so the check
+   * cannot drift from buildAAD.
+   *
+   * @throws {ConfigurationError} if the AAD for `cacheKey` exceeds MAX_AAD_SIZE
+   */
+  validateKey(cacheKey: string, compressed = false): void {
+    const aadSize = this.buildAAD(cacheKey, 'msgpack', compressed).length;
+    if (aadSize <= MAX_AAD_SIZE) return;
+    throw new ConfigurationError(
+      `Cache key too long for an encrypted cache: its AAD is ${aadSize} bytes, over the ` +
+        `${MAX_AAD_SIZE}-byte limit. The AAD carries the full key (counted in UTF-8 bytes) ` +
+        'plus the tenant id; shorten or hash the key.'
+    );
   }
 
   /**

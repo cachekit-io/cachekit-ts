@@ -9,6 +9,7 @@ import { setLogger } from './logger.js';
 import { createCache as createIntentCache } from './intents.js';
 import { ConfigurationError, ValueTooLargeError } from './errors.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
+import { EncryptionManagerCore } from './encryption/manager-core.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
 import type { ByteStorageLike } from './cache-core.js';
@@ -1043,6 +1044,110 @@ describe('Cache Integration', () => {
       for (let i = 1; i < 6; i++) await c.set(`ns:wide${i}`, tooMany);
       await c.set('ns:small', 'ok');
       expect(await c.get('ns:small')).toBe('ok');
+
+      await c.close();
+    });
+  });
+
+  describe('secure keys over the AAD limit are rejected before the reliability executor (LAB-5142)', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    const TENANT = 'lab-5142';
+    const MAX_AAD = 64 * 1024;
+    // v0x03 AAD = version byte + four 4-byte length prefixes + tenant id + key
+    // + 'msgpack' + 'True'/'False' (the compressed flag). Written out rather
+    // than imported so these tests check the implementation's arithmetic.
+    const keyBudget = (compressed: boolean) =>
+      MAX_AAD - (1 + 16 + TENANT.length + 'msgpack'.length + (compressed ? 4 : 5));
+    /** A key of exactly `bytes` UTF-8 bytes; `multibyte` spends most of it on 2-byte 'é'. */
+    const keyOfBytes = (bytes: number, multibyte = false) => {
+      const body = bytes - 'ns:'.length;
+      const wide = multibyte ? Math.floor(body / 2) : 0;
+      return `ns:${'é'.repeat(wide)}${'k'.repeat(body - 2 * wide)}`;
+    };
+    // production reliability: retry 3x with backoff, breaker opens at 5 failures.
+    const secureCache = (backend: Backend, compression?: boolean) =>
+      createIntentCache.secure({
+        backend,
+        masterKey: '0'.repeat(64),
+        tenantId: TENANT,
+        compression,
+        metrics: false,
+      });
+    // InMemoryBackend advertises no compression default, so the envelope is on.
+    const overLimitKey = keyOfBytes(keyBudget(true) + 1);
+
+    it('six over-limit set() calls reject and leave the breaker closed', async () => {
+      const backend = new InMemoryBackend();
+      const c = secureCache(backend);
+
+      for (let i = 0; i < 6; i++) {
+        await expect(c.set(`${overLimitKey}${i}`, 'v')).rejects.toThrow(ConfigurationError);
+      }
+
+      // An open breaker would degrade this write to a no-op, so the
+      // read-back proves the rejections were never counted.
+      await c.set('ns:small', 'ok');
+      expect(await c.get('ns:small')).toBe('ok');
+      expect(await backend.get('ns:small')).not.toBeNull();
+
+      await c.close();
+    });
+
+    it('never calls encrypt for an over-limit key', async () => {
+      const encrypt = vi.spyOn(EncryptionManagerCore.prototype, 'encrypt');
+      const c = secureCache(new InMemoryBackend());
+
+      await expect(c.set(overLimitKey, 'v')).rejects.toThrow(ConfigurationError);
+      expect(encrypt).not.toHaveBeenCalled();
+
+      await c.close();
+    });
+
+    it('get() rejects before any backend or decrypt call', async () => {
+      const backend = new InMemoryBackend();
+      const backendGet = vi.spyOn(backend, 'get');
+      const decrypt = vi.spyOn(EncryptionManagerCore.prototype, 'decrypt');
+      const c = secureCache(backend);
+
+      await expect(c.get(overLimitKey)).rejects.toThrow(ConfigurationError);
+      expect(backendGet).not.toHaveBeenCalled();
+      expect(decrypt).not.toHaveBeenCalled();
+
+      await c.close();
+    });
+
+    // The at-limit key round-trips through the real native encrypt/decrypt, so
+    // this also proves the TS limit matches the binding's, byte for byte.
+    it.each([
+      { compression: true, multibyte: false },
+      { compression: false, multibyte: false },
+      { compression: true, multibyte: true },
+      { compression: false, multibyte: true },
+    ])(
+      'boundary is 65 536 AAD bytes, counted in UTF-8 (compression=$compression, multibyte=$multibyte)',
+      async ({ compression, multibyte }) => {
+        const c = secureCache(new InMemoryBackend(), compression);
+        const atLimit = keyOfBytes(keyBudget(compression), multibyte);
+
+        await c.set(atLimit, 'fits');
+        expect(await c.get(atLimit)).toBe('fits');
+        await expect(c.set(`${atLimit}k`, 'v')).rejects.toThrow(ConfigurationError);
+        await expect(c.get(`${atLimit}k`)).rejects.toThrow(ConfigurationError);
+
+        await c.close();
+      }
+    );
+
+    it('a cache without encryption stores the same key as before', async () => {
+      const backend = new InMemoryBackend();
+      const c = createIntentCache.production({ backend, metrics: false });
+
+      await c.set(overLimitKey, 'plain');
+      expect(await c.get(overLimitKey)).toBe('plain');
+      expect(await backend.get(overLimitKey)).not.toBeNull();
 
       await c.close();
     });
