@@ -76,25 +76,34 @@ jobs:
             gh pr edit "$pr_number" --repo "$GITHUB_REPOSITORY" --add-assignee 27Bslash6
           done
 
-  publish-cachekit:
-    name: Publish @cachekit-io/cachekit
+  # Each package is built in a job with NO id-token and published by a job that
+  # runs no dependency code. Every step of an `id-token: write` job can mint
+  # the npm OIDC token, and npm trusted publishers bind to this workflow file,
+  # not to a job — so a compromised build dependency (turbo, tsc, a cargo
+  # build.rs or proc-macro) running beside the token could publish EITHER
+  # package at any version. Split, it can only influence the tarball its own
+  # build job hands over: the publish job refuses a tarball whose sha256 is not
+  # the one that build job reported, or whose name/version or registry (as
+  # pnpm itself reads them) is not the package being released on npmjs.org.
+  build-cachekit:
+    name: Build @cachekit-io/cachekit
     needs: release-please
     if: needs.release-please.outputs.cachekit--release_created == 'true' || github.event.inputs.force_release == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      sha256: ${{ steps.pack.outputs.sha256 }}
     permissions:
       contents: read
       checks: read
-      id-token: write
 
     steps:
       # The tag path needs no check: release-please only tags commits on main,
       # where "CI Success" is a required check. A force_release dispatch
       # produces no tag, so the checkout below falls back to github.sha — the
       # tip of whatever ref was selected at dispatch, which may never have
-      # passed CI. Verify that commit before any step can mint the OIDC token.
+      # passed CI. Verify that commit before anything is built for publishing.
       # Keying off the empty tag (not the force_release input) targets exactly
-      # the case where the fallback is taken. This is an API query, so unlike
-      # the test step it replaces, it runs no dependency code beside the token.
+      # the case where the fallback is taken.
       - name: Verify CI passed for forced publish
         if: needs.release-please.outputs.cachekit--tag_name == ''
         env:
@@ -123,7 +132,60 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ needs.release-please.outputs.cachekit--tag_name || github.sha }}
-          # Publish-only job (no git writes); don't leave the token on disk.
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: '22'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
+
+      # --ignore-scripts closes the wormable install-time vector (Shai-Hulud-
+      # class lifecycle scripts, including pnpm-workspace.yaml's allowBuilds
+      # allowlist — nothing here needs them); --frozen-lockfile pins the graph
+      # to what CI verified.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # No test step: ci.yml already ran build+test on this exact commit. That
+      # holds on the tag path via the required "CI Success" check on main, and
+      # on the forced path via the verification step above.
+      - name: Build
+        run: pnpm build
+
+      # pnpm pack is what `pnpm publish <dir>` runs internally: it rewrites the
+      # workspace:* deps to concrete versions, which needs the install above.
+      - name: Pack
+        id: pack
+        working-directory: packages/cachekit
+        run: |
+          pnpm pack --out "$RUNNER_TEMP/package.tgz"
+          echo "sha256=$(sha256sum "$RUNNER_TEMP/package.tgz" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        with:
+          name: cachekit-tarball
+          path: ${{ runner.temp }}/package.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-cachekit:
+    name: Publish @cachekit-io/cachekit
+    needs: [release-please, build-cachekit]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    # Nothing in this job may execute dependency code: no install, no build, no
+    # test. Checkout is for the packageManager pin and the manifest to verify
+    # against; pnpm publishes the prebuilt tarball, running no lifecycle scripts.
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.release-please.outputs.cachekit--tag_name || github.sha }}
           persist-credentials: false
 
       # No `registry-url`: it writes a token-era .npmrc whose
@@ -138,52 +200,41 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
 
-      # This job can mint the npm OIDC publish token. --ignore-scripts closes
-      # the wormable install-time vector (Shai-Hulud-class lifecycle scripts,
-      # including pnpm-workspace.yaml's allowBuilds allowlist — nothing here
-      # needs them); --frozen-lockfile pins the graph to what CI verified.
-      # The build below still executes dependency code beside the token, so
-      # exposure is narrowed, not closed — the structural fix is build/publish
-      # job separation (LAB-2731).
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile --ignore-scripts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: cachekit-tarball
+          path: ${{ runner.temp }}
 
-      # No test step: ci.yml already ran build+test on this exact commit, and
-      # every extra step here runs dependency code beside the OIDC token. That
-      # holds on the tag path via the required "CI Success" check on main, and
-      # on the forced path via the verification step above.
-      - name: Build
-        run: pnpm build
+      # The tarball came from a job that ran dependency code: pin its digest,
+      # identity and target registry before the token is used (see the script).
+      - name: Verify tarball
+        shell: bash
+        env:
+          SHA256: ${{ needs.build-cachekit.outputs.sha256 }}
+          MANIFEST: packages/cachekit/package.json
+        run: .github/scripts/verify-tarball.sh "$RUNNER_TEMP/package.tgz" "$MANIFEST" "$SHA256"
 
       # Auth is npm OIDC trusted publishing via a package-level trusted
       # publisher on npmjs.com — the repo has NO npm token secret (LAB-831).
       - name: Publish to npm
-        working-directory: packages/cachekit
-        run: pnpm publish --access public --provenance --no-git-checks
+        run: pnpm publish "$RUNNER_TEMP/package.tgz" --access public --provenance --no-git-checks
 
-  publish-cachekit-core-wasm:
-    name: Publish @cachekit-io/cachekit-core-wasm
+  build-cachekit-core-wasm:
+    name: Build @cachekit-io/cachekit-core-wasm
     needs: release-please
     if: needs.release-please.outputs.core-wasm--release_created == 'true' || github.event.inputs.wasm_tag != ''
     runs-on: ubuntu-latest
-    # Serialize publishes of the same wasm tag so an in-flight automatic
-    # release-please run and a manual `wasm_tag` recovery dispatch can't race
-    # into duplicate npm publishes. Different tags still publish in parallel.
-    concurrency:
-      group: publish-cachekit-core-wasm-${{ needs.release-please.outputs.core-wasm--tag_name || github.event.inputs.wasm_tag }}
-      cancel-in-progress: false
+    outputs:
+      sha256: ${{ steps.pack.outputs.sha256 }}
     permissions:
       contents: read
-      id-token: write
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ needs.release-please.outputs.core-wasm--tag_name || github.event.inputs.wasm_tag }}
-          # Publish-only job (no git writes); don't leave the token on disk.
           persist-credentials: false
 
-      # No `registry-url` — same reason as publish-cachekit.
       - name: Setup Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
@@ -216,23 +267,87 @@ jobs:
           cp "/tmp/binaryen-version_${BINARYEN_VERSION}/bin/wasm-opt" "$HOME/.local/bin/"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      # --ignore-scripts: same OIDC-exposure rule as publish-cachekit; build.sh
-      # is pure cargo/wasm-bindgen/wasm-opt and needs no dependency scripts.
-      # cargo build.rs/proc-macros still run beside the token — LAB-2731.
+      # --ignore-scripts: build.sh is pure cargo/wasm-bindgen/wasm-opt and
+      # needs no dependency scripts.
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Build wasm artifact
         run: pnpm --filter @cachekit-io/cachekit-core-wasm build:wasm
 
+      - name: Pack
+        id: pack
+        working-directory: packages/cachekit-core-wasm
+        run: |
+          pnpm pack --out "$RUNNER_TEMP/package.tgz"
+          echo "sha256=$(sha256sum "$RUNNER_TEMP/package.tgz" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        with:
+          name: cachekit-core-wasm-tarball
+          path: ${{ runner.temp }}/package.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-cachekit-core-wasm:
+    name: Publish @cachekit-io/cachekit-core-wasm
+    needs: [release-please, build-cachekit-core-wasm]
+    runs-on: ubuntu-latest
+    # Serialize publishes of the same wasm tag so an in-flight automatic
+    # release-please run and a manual `wasm_tag` recovery dispatch can't race
+    # into duplicate npm publishes. Different tags still publish in parallel.
+    concurrency:
+      group: publish-cachekit-core-wasm-${{ needs.release-please.outputs.core-wasm--tag_name || github.event.inputs.wasm_tag }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+
+    # Same shape as publish-cachekit: no dependency code runs beside the token.
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.release-please.outputs.core-wasm--tag_name || github.event.inputs.wasm_tag }}
+          persist-credentials: false
+
+      # The verifier comes from this workflow's own commit, not the tag: a
+      # recovery `wasm_tag` can predate verify-tarball.sh.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          path: .release-scripts
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      # No `registry-url` — same reason as publish-cachekit.
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: '22'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: cachekit-core-wasm-tarball
+          path: ${{ runner.temp }}
+
+      # Same pins as publish-cachekit.
+      - name: Verify tarball
+        shell: bash
+        env:
+          SHA256: ${{ needs.build-cachekit-core-wasm.outputs.sha256 }}
+          MANIFEST: packages/cachekit-core-wasm/package.json
+        run: .release-scripts/.github/scripts/verify-tarball.sh "$RUNNER_TEMP/package.tgz" "$MANIFEST" "$SHA256"
+
       # Auth is npm OIDC trusted publishing — the repo has NO NPM_TOKEN secret
       # (the old token-auth steps resolved an empty token and died ENEEDAUTH,
       # LAB-831). Node 22's bundled npm 10 cannot do OIDC; pnpm 11 can, and
-      # this is the exact invocation the proven publish-cachekit job uses.
+      # this is the exact invocation publish-cachekit uses.
       # Bootstrapping a NEW package: trusted publishers are package-level and
       # can only be configured once the package exists (npm/cli#8544), so the
       # first publish must be a one-off credentialed/manual publish; configure
       # the package-level trusted publisher after that and OIDC takes over.
       - name: Publish to npm
-        working-directory: packages/cachekit-core-wasm
-        run: pnpm publish --access public --provenance --no-git-checks
+        run: pnpm publish "$RUNNER_TEMP/package.tgz" --access public --provenance --no-git-checks
