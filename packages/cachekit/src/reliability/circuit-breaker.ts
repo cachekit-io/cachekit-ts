@@ -1,5 +1,4 @@
-import { CircuitBreakerOpenError } from '../errors.js';
-import { isRetryable } from '../backends/error-classifier.js';
+import { CircuitBreakerOpenError, isRetryable } from '../errors.js';
 import {
   DEFAULT_CB_FAILURE_THRESHOLD,
   DEFAULT_CB_SUCCESS_THRESHOLD,
@@ -55,10 +54,8 @@ const DEFAULT_CONFIG: CircuitBreakerConfig = {
  * - HALF-OPEN + success >= successThreshold → CLOSED
  * - HALF-OPEN + any failure → OPEN
  *
- * Only retryable errors count as failures (see `isRetryable`). A `BackendError`
- * classified `permanent` or `authentication` is request-specific: it passes
- * through without touching the failure count, and a half-open probe that
- * hits one frees its slot for the next probe.
+ * Only errors that `isRetryable` accepts count as failures; any other error
+ * frees its half-open probe slot without counting either way.
  */
 export class CircuitBreaker {
   private readonly config: CircuitBreakerConfig;
@@ -66,6 +63,7 @@ export class CircuitBreaker {
   private failures: number[] = []; // timestamps of failures within rolling window
   private successesInHalfOpen = 0;
   private callsInHalfOpen = 0;
+  private halfOpenRound = 0; // bumped on each entry to half-open; tags probe slots
   private openedAt: number | null = null;
   // m10 Fix: config is already readonly (set in constructor)
 
@@ -118,8 +116,9 @@ export class CircuitBreaker {
       throw new CircuitBreakerOpenError();
     }
 
-    const isProbe = currentState === 'half-open';
-    if (isProbe) {
+    // The round this call's probe slot belongs to, or null when it took none.
+    const probeRound = currentState === 'half-open' ? this.halfOpenRound : null;
+    if (probeRound !== null) {
       // M6 Fix: Use atomic slot acquisition to prevent race condition
       if (!this.tryAcquireHalfOpenSlot()) {
         throw new CircuitBreakerOpenError('Circuit breaker half-open limit reached');
@@ -133,8 +132,8 @@ export class CircuitBreaker {
     } catch (error) {
       if (isRetryable(error)) {
         this.recordFailure();
-      } else if (isProbe) {
-        this.releaseHalfOpenSlot();
+      } else if (probeRound !== null) {
+        this.releaseHalfOpenSlot(probeRound);
       }
       throw error;
     }
@@ -162,11 +161,17 @@ export class CircuitBreaker {
 
   /**
    * Free a probe slot without counting a success or a failure. Without this,
-   * `halfOpenMaxCalls` request-specific errors in a row would fill every slot
-   * and wedge the breaker half-open against a healthy backend.
+   * `halfOpenMaxCalls` non-retryable errors in a row would fill every slot and
+   * wedge the breaker half-open against a healthy backend. A probe that
+   * outlived its round (the breaker reopened and went half-open again while it
+   * was in flight) holds no slot in the current round, so it frees nothing.
    */
-  private releaseHalfOpenSlot(): void {
-    if (this.currentState === 'half-open' && this.callsInHalfOpen > 0) {
+  private releaseHalfOpenSlot(round: number): void {
+    if (
+      this.currentState === 'half-open' &&
+      round === this.halfOpenRound &&
+      this.callsInHalfOpen > 0
+    ) {
       this.callsInHalfOpen--;
     }
   }
@@ -202,6 +207,7 @@ export class CircuitBreaker {
 
   private transitionToHalfOpen(): void {
     this.currentState = 'half-open';
+    this.halfOpenRound++;
     this.successesInHalfOpen = 0;
     this.callsInHalfOpen = 0;
   }

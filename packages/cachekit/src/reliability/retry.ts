@@ -1,5 +1,5 @@
 import { secureRandomFloat } from '../utils/random.js';
-import { isRetryable } from '../backends/error-classifier.js';
+import { isRetryable } from '../errors.js';
 import {
   DEFAULT_RETRY_MAX_ATTEMPTS,
   DEFAULT_RETRY_BASE_DELAY,

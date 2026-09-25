@@ -47,8 +47,13 @@ const ioBackend = () =>
   });
 
 // production preset: retry 3x with backoff, breaker opens at 5 failures in 60 s.
-const productionCache = (backend: Backend, degradation = true) =>
-  createCache.production({ backend, metrics: false, reliability: { degradation } });
+// `fastRetry` keeps those numbers and only shortens the backoff delay.
+const productionCache = (backend: Backend, degradation = true, fastRetry = false) =>
+  createCache.production({
+    backend,
+    metrics: false,
+    reliability: { degradation, ...(fastRetry && { retry: { baseDelay: 1 } }) },
+  });
 
 /** A healthy set/get round-trip reaches the backend — impossible with the breaker open. */
 async function expectHealthyRoundTrip(
@@ -69,19 +74,22 @@ describe('backend error classification on the production preset', () => {
     vi.unstubAllGlobals();
   });
 
-  it('six 400s on distinct keys make one fetch each and leave the breaker closed', async () => {
-    setLogger(() => {});
-    const server = stubServer(400);
-    const cache = productionCache(ioBackend());
+  it.each([400, 401, 403, 409])(
+    'six %i gets on distinct keys make one fetch each and leave the breaker closed',
+    async (status) => {
+      setLogger(() => {});
+      const server = stubServer(status);
+      const cache = productionCache(ioBackend());
 
-    for (let i = 0; i < 6; i++) {
-      await expect(cache.get(`user:u${i}@example.com`)).resolves.toBeNull();
-      expect(server.fetch).toHaveBeenCalledTimes(i + 1);
+      for (let i = 0; i < 6; i++) {
+        await expect(cache.get(`user:u${i}@example.com`)).resolves.toBeNull();
+        expect(server.fetch).toHaveBeenCalledTimes(i + 1);
+      }
+
+      await expectHealthyRoundTrip(cache, server);
+      await cache.close();
     }
-
-    await expectHealthyRoundTrip(cache, server);
-    await cache.close();
-  });
+  );
 
   it('a 413 on set() makes one fetch and adds no breaker count', async () => {
     setLogger(() => {});
@@ -97,24 +105,10 @@ describe('backend error classification on the production preset', () => {
     await cache.close();
   });
 
-  it.each([401, 403])('a %i makes one fetch and adds no breaker count', async (status) => {
-    setLogger(() => {});
-    const server = stubServer(status);
-    const cache = productionCache(ioBackend());
-
-    for (let i = 0; i < 6; i++) {
-      await cache.get(`ns:k${i}`);
-      expect(server.fetch).toHaveBeenCalledTimes(i + 1);
-    }
-
-    await expectHealthyRoundTrip(cache, server);
-    await cache.close();
-  });
-
   it('a 503 is still retried maxAttempts times, and five of them open the breaker', async () => {
     setLogger(() => {});
     const server = stubServer(503);
-    const cache = productionCache(ioBackend());
+    const cache = productionCache(ioBackend(), true, true);
 
     for (let i = 0; i < 5; i++) {
       await expect(cache.get(`ns:k${i}`)).resolves.toBeNull();
@@ -140,7 +134,7 @@ describe('backend error classification on the production preset', () => {
       exists: async () => false,
       close: async () => {},
     };
-    const cache = productionCache(backend);
+    const cache = productionCache(backend, true, true);
 
     for (let i = 0; i < 5; i++) await cache.get(`ns:k${i}`);
     expect(get).toHaveBeenCalledTimes(15);

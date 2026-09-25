@@ -261,15 +261,6 @@ describe('CircuitBreaker', () => {
       }
     );
 
-    it('a BackendError built without a classification counts toward opening', async () => {
-      for (let i = 0; i < 3; i++) {
-        await expect(
-          breaker.execute(() => Promise.reject(new BackendError('Unknown error')))
-        ).rejects.toThrow();
-      }
-      expect(breaker.state).toBe('open');
-    });
-
     it('a permanent error on a half-open probe frees its slot instead of wedging', async () => {
       await openThenHalfOpen();
       const err = new BackendError('rejected', 'permanent');
@@ -284,6 +275,29 @@ describe('CircuitBreaker', () => {
       await breaker.execute(() => Promise.resolve('ok'));
       await breaker.execute(() => Promise.resolve('ok'));
       expect(breaker.state).toBe('closed');
+    });
+
+    it('a probe that outlives its half-open round frees no slot in the next round', async () => {
+      await openThenHalfOpen();
+      let rejectStale!: (e: Error) => void;
+      const stale = breaker.execute(() => new Promise((_, reject) => (rejectStale = reject)));
+
+      // A second probe fails for real: open, then half-open again (a new round).
+      await expect(
+        breaker.execute(() => Promise.reject(new BackendError('down', 'transient')))
+      ).rejects.toThrow();
+      vi.advanceTimersByTime(150);
+      expect(breaker.state).toBe('half-open');
+
+      // Fill this round's two slots, then let the stale probe hit a permanent error.
+      for (let i = 0; i < 2; i++) void breaker.execute(() => new Promise(() => {}));
+      const err = new BackendError('rejected', 'permanent');
+      rejectStale(err);
+      await expect(stale).rejects.toBe(err);
+
+      await expect(breaker.execute(() => Promise.resolve('ok'))).rejects.toThrow(
+        'half-open limit reached'
+      );
     });
 
     it('a transient error on a half-open probe still reopens', async () => {

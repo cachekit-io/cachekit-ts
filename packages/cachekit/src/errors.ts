@@ -71,6 +71,23 @@ export class BackendError extends CachekitError {
 }
 
 /**
+ * Whether an error is retried by `RetryPolicy` and counts as a failure for
+ * `CircuitBreaker`.
+ *
+ * A `BackendError` classified `permanent` or `authentication` is neither:
+ * retrying cannot fix it (protocol saas-api.md, Error Classification: do not
+ * retry), and it is not an outage signal, so a run of rejected keys must not
+ * open the breaker for every other key. Every other error is retried and
+ * counted.
+ */
+export function isRetryable(error: unknown): boolean {
+  return !(
+    error instanceof BackendError &&
+    (error.classification === 'permanent' || error.classification === 'authentication')
+  );
+}
+
+/**
  * Thrown when circuit breaker is open and blocking requests.
  */
 export class CircuitBreakerOpenError extends CachekitError {

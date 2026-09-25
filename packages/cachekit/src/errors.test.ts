@@ -10,6 +10,7 @@ import {
   ValueTooLargeError,
   NonceExhaustedError,
   SerializationError,
+  isRetryable,
 } from './errors';
 
 describe('Error types', () => {
@@ -41,6 +42,18 @@ describe('Error types', () => {
 
   it('BackendError defaults to transient so an unknown cause still trips the breaker', () => {
     expect(new BackendError('Unknown error').classification).toBe('transient');
+  });
+
+  it.each([
+    ['permanent BackendError', new BackendError('x', 'permanent'), false],
+    ['authentication BackendError', new BackendError('x', 'authentication'), false],
+    ['transient BackendError', new BackendError('x', 'transient'), true],
+    ['timeout BackendError', new BackendError('x', 'timeout'), true],
+    ['unclassified BackendError', new BackendError('x'), true],
+    ['TimeoutError', new TimeoutError(), true],
+    ['plain Error', new Error('x'), true],
+  ])('isRetryable(%s) is %s', (_label, error, expected) => {
+    expect(isRetryable(error)).toBe(expected);
   });
 
   it('all error types have correct names', () => {
