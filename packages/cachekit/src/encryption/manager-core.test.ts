@@ -121,6 +121,43 @@ describe('EncryptionManagerCore', () => {
     manager.dispose();
     expect(freed.length).toBe(1);
   });
+
+  /** Reads the tenant_id component (component 1) back out of a built AAD buffer. */
+  function decodeAadTenantId(aad: Uint8Array): string {
+    const view = new DataView(aad.buffer, aad.byteOffset, aad.byteLength);
+    const len = view.getUint32(1, false);
+    return new TextDecoder().decode(aad.slice(5, 5 + len));
+  }
+
+  it('LAB-4668: HKDF derivation and AAD construction resolve the identical tenant_id', async () => {
+    // Regression for the mismatch: manager-core.ts used `tenantId ?? 'default'`
+    // for HKDF but `tenantId ?? ''` for AAD, so an unset tenant derived keys
+    // for "default" while binding AAD to "" — ciphertext could never
+    // authenticate against a conformant reader.
+    const { bindings } = mockBindings();
+    const manager = new TestManager(async () => bindings);
+
+    await manager.encrypt(new Uint8Array([1]), 'ns:k');
+
+    const [, derivedTenantId] = vi.mocked(bindings.deriveTenantKeys).mock.calls[0];
+    const [, aad] = vi.mocked(bindings.encryptWithTenantKeys).mock.calls[0];
+    expect(derivedTenantId).toBe('default');
+    expect(decodeAadTenantId(aad)).toBe('default');
+    manager.dispose();
+  });
+
+  it('LAB-4668: with a configured tenantId, HKDF and AAD both use it', async () => {
+    const { bindings } = mockBindings();
+    const manager = new TestManager(async () => bindings, 'acme-corp');
+
+    await manager.encrypt(new Uint8Array([1]), 'ns:k');
+
+    const [, derivedTenantId] = vi.mocked(bindings.deriveTenantKeys).mock.calls[0];
+    const [, aad] = vi.mocked(bindings.encryptWithTenantKeys).mock.calls[0];
+    expect(derivedTenantId).toBe('acme-corp');
+    expect(decodeAadTenantId(aad)).toBe('acme-corp');
+    manager.dispose();
+  });
 });
 
 describe('EncryptionManagerCore keyring config (previousMasterKeys)', () => {
