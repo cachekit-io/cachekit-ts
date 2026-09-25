@@ -989,6 +989,67 @@ describe('Cache Integration', () => {
     });
   });
 
+  describe('rejected-value set() warning beyond size (LAB-4845)', () => {
+    afterEach(() => {
+      setLogger(null);
+      vi.useRealTimers();
+    });
+
+    const nested = (depth: number): unknown => (depth === 0 ? 'leaf' : [nested(depth - 1)]);
+
+    it.each([
+      ['a non-Uint8Array binary value', () => new Float32Array([1.5])],
+      ['a depth-exceeded value', () => nested(200)],
+      // Not a SerializationError: @msgpack/msgpack throws a plain Error.
+      ['a value msgpack cannot encode', () => ({ fn: () => 1 })],
+    ])('warns when degradation absorbs %s', async (_label, value) => {
+      const logs: string[] = [];
+      setLogger((message) => logs.push(message));
+
+      const backend = new InMemoryBackend();
+      const c = createCache({ backend });
+
+      // Degradation is on by default: set() resolves and nothing is stored…
+      await expect(c.set('ns:bad', value())).resolves.toBeUndefined();
+      expect(await c.get('ns:bad')).toBeNull();
+      // …but the rejection is reported, digested, without the size hint.
+      const rejected = logs.filter((m) => m.includes('set rejected'));
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]).toContain('keyHash=');
+      expect(rejected[0]).not.toContain('ns:bad');
+      expect(rejected[0]).not.toContain('maxEncodedSize');
+
+      await c.close();
+    });
+
+    it('warns through wrap(), rate-limited per cache', async () => {
+      vi.useFakeTimers();
+      const logs: string[] = [];
+      setLogger((message) => logs.push(message));
+
+      const c = createCache({ backend: new InMemoryBackend() });
+      let calls = 0;
+      const embed = c.wrap(
+        async () => {
+          calls++;
+          return new Float32Array([1.5]);
+        },
+        { namespace: 'ns', ttl: 60 }
+      );
+
+      await embed();
+      await embed();
+      expect(calls).toBe(2); // never cached
+      expect(logs.filter((m) => m.includes('set rejected'))).toHaveLength(1);
+
+      vi.advanceTimersByTime(61_000);
+      await embed();
+      expect(logs.filter((m) => m.includes('set rejected'))).toHaveLength(2);
+
+      await c.close();
+    });
+  });
+
   describe('encode rejections bypass retry and the circuit breaker (LAB-5139)', () => {
     afterEach(() => {
       setLogger(null);

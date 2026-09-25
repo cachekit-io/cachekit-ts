@@ -189,13 +189,21 @@ memory limit (and, on a shared/concurrent runtime, against peak concurrent
 reads), not just your largest value: on a 128 MiB Workers isolate a 10 MiB cap
 already permits a multi-hundred-MiB transient.
 
-The SDK also reports every size rejection through its
+The SDK also reports every rejected `set()` through its
 [pluggable logger](#observability) as a rate-limited, greppable
 `[cachekit] set rejected, value NOT cached (keyHash=...)` line — watch for it
-after deploying a new cache. The line carries a non-reversible blake2b digest
-of the cache key rather than the key itself (keys are caller-controlled and
-may embed sensitive data); to match a digest to a suspect key, hash the key
-with blake2b (16-byte output, hex). This is the same digest the File backend
+after deploying a new cache. That covers size rejections and every other value
+the serializer cannot encode: nesting past `maxDepth`, a collection past
+`maxCollectionSize`, an unsupported binary type (see
+[Binary values](#binary-values)), or a function or `BigInt`. Only a size
+rejection's line suggests raising the limits. The rate limit is one line per
+minute per cache, not per key. (An interop-mode rejection always throws to the
+caller instead, and only its size rejections are logged.)
+
+The line carries a non-reversible blake2b digest of the cache key rather than
+the key itself (keys are caller-controlled and may embed sensitive data); to
+match a digest to a suspect key, hash the key with blake2b (16-byte output,
+hex). This is the same digest the File backend
 uses as its on-disk filename, so on that backend a logged `keyHash` names the
 entry's cache file directly. (Backends have their own hard ceilings too:
 Workers KV values cap at 25 MiB, Memcached items at 1 MiB server-side,
@@ -210,8 +218,8 @@ value, so the 1 MiB default above applies. Other binary types — `Float32Array`
 and the other typed arrays, `DataView`, `ArrayBuffer` — are rejected with
 `SerializationError`, because they would read back as a `Uint8Array` rather than
 the type you stored. As with a size rejection, graceful degradation absorbs that
-error: `set()` resolves and nothing is stored. Store the bytes and rebuild the
-type on read:
+error: `set()` resolves and nothing is stored, and the logger gets the same
+`[cachekit] set rejected` line. Store the bytes and rebuild the type on read:
 
 ```typescript
 await cache.set('embedding', new Uint8Array(vec.buffer, vec.byteOffset, vec.byteLength));
