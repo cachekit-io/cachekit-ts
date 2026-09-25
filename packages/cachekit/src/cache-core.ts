@@ -443,8 +443,8 @@ export class CacheImpl implements SecureCache {
     this.lastSetRejectedWarnAt = now;
     // Only a size rejection is fixed by raising a limit, and interop caps are
     // protocol constants serializer config does not govern — the remediation
-    // hint only holds for a size rejection on the serializer path (expert
-    // panel, LAB-1768).
+    // hint only holds for a size rejection on the serializer path
+    // (LAB-1768).
     const hint =
       error instanceof ValueTooLargeError && !interop
         ? ' Raise serializer.maxEncodedSize / maxDecodedSize if values this large are expected.'
