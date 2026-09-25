@@ -1122,6 +1122,18 @@ describe('Cache Integration', () => {
       await c.close();
     });
 
+    it('wrap() whose namespace pushes the key 1 byte over the budget rejects before computing', async () => {
+      const c = secureCache(new InMemoryBackend());
+      const compute = vi.fn(async () => 'v');
+      // generateKey appends ':' + 64 hex digits, pushing this key 1 byte over.
+      const wrapped = c.wrap(compute, { namespace: keyOfBytes(keyBudget(true) - 64) });
+
+      await expect(wrapped()).rejects.toThrow(ConfigurationError);
+      expect(compute).not.toHaveBeenCalled();
+
+      await c.close();
+    });
+
     // The at-limit key round-trips through the real native encrypt/decrypt, so
     // this also proves the TS limit matches the binding's, byte for byte.
     it.each([

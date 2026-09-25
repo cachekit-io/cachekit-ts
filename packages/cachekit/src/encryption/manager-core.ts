@@ -386,17 +386,23 @@ export class EncryptionManagerCore {
    * circuit breaker for every key on the cache.
    *
    * Measures the real AAD rather than re-deriving its length, so the check
-   * cannot drift from buildAAD.
+   * cannot drift from buildAAD. A key longer than MAX_AAD_SIZE UTF-16 units is
+   * rejected without that measurement: UTF-8 never takes fewer bytes than
+   * UTF-16 units, so it is over the limit whatever it holds, and encoding it
+   * would allocate its whole UTF-8 form and AAD only to throw.
    *
    * @throws {ConfigurationError} if the AAD for `cacheKey` exceeds MAX_AAD_SIZE
    */
   validateKey(cacheKey: string, compressed = false): void {
-    const aadSize = this.buildAAD(cacheKey, 'msgpack', compressed).length;
-    if (aadSize <= MAX_AAD_SIZE) return;
+    const aadAtLeast =
+      cacheKey.length > MAX_AAD_SIZE
+        ? cacheKey.length
+        : this.buildAAD(cacheKey, 'msgpack', compressed).length;
+    if (aadAtLeast <= MAX_AAD_SIZE) return;
     throw new ConfigurationError(
-      `Cache key too long for an encrypted cache: its AAD is ${aadSize} bytes, over the ` +
-        `${MAX_AAD_SIZE}-byte limit. The AAD carries the full key (counted in UTF-8 bytes) ` +
-        'plus the tenant id; shorten or hash the key.'
+      `Cache key too long for an encrypted cache: its AAD is at least ${aadAtLeast} bytes, over ` +
+        `the ${MAX_AAD_SIZE}-byte limit. The AAD carries the full key (counted in UTF-8 bytes) ` +
+        'plus the tenant id; shorten or hash the key (for wrap(), shorten the namespace).'
     );
   }
 
