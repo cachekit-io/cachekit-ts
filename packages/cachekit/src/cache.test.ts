@@ -1,5 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, assert, beforeEach, afterEach, vi } from 'vitest';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { createCache } from './cache.js';
+import { file } from './backends/file.js';
 import { generateKey } from './serialization/key-generator.js';
 import { setLogger } from './logger.js';
 import { createCache as createIntentCache } from './intents.js';
@@ -1102,5 +1106,50 @@ describe('Cache Integration', () => {
 
       await c.close();
     });
+  });
+});
+
+// LAB-4839: normalize() used to send Uint8Array down the plain-object branch —
+// under 10,000 bytes it came back as {"0":…}, over that it threw on the
+// collection cap. Real File backend, L1 off, so every get() decodes from L2.
+describe('Binary values (LAB-4839)', () => {
+  let dir: string;
+  const bytes = (n: number) => Uint8Array.from({ length: n }, (_, i) => (i * 31 + 7) & 0xff);
+  // `got` is unknown on purpose: the bug returned a plain object, so this must
+  // check the runtime type, not assume it.
+  const expectSameBytes = (got: unknown, want: Uint8Array) => {
+    assert(got instanceof Uint8Array, 'expected a Uint8Array');
+    expect(Buffer.compare(got, want)).toBe(0);
+  };
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cachekit-binary-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('round-trips a Uint8Array through set/get and wrap', async () => {
+    const c = createCache({ backend: file({ cacheDir: dir }), l1: { enabled: false } });
+
+    for (const value of [bytes(3), bytes(20_000)]) {
+      await c.set('bin:k', value);
+      expectSameBytes(await c.get('bin:k'), value);
+    }
+
+    let calls = 0;
+    const cached = c.wrap(
+      async (n: number) => {
+        calls++;
+        return bytes(n);
+      },
+      { namespace: 'bin:fn' }
+    );
+    expectSameBytes(await cached(20_000), bytes(20_000));
+    expectSameBytes(await cached(20_000), bytes(20_000));
+    expect(calls).toBe(1); // second call served from the backend, not recomputed
+
+    await c.close();
   });
 });

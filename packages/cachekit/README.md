@@ -201,6 +201,35 @@ entry's cache file directly. (Backends have their own hard ceilings too:
 Workers KV values cap at 25 MiB, Memcached items at 1 MiB server-side,
 CachekitIO per plan.)
 
+### Binary values
+
+A `Uint8Array`, including a Node `Buffer`, is stored as MessagePack `bin` and
+read back as a `Uint8Array` with the same bytes (a `Buffer` may come back as a
+plain `Uint8Array`). It counts against `serializer.maxEncodedSize` like any other
+value, so the 1 MiB default above applies. Other binary types — `Float32Array`
+and the other typed arrays, `DataView`, `ArrayBuffer` — are rejected with
+`SerializationError`, because they would read back as a `Uint8Array` rather than
+the type you stored. As with a size rejection, graceful degradation absorbs that
+error: `set()` resolves and nothing is stored. Store the bytes and rebuild the
+type on read:
+
+```typescript
+await cache.set('embedding', new Uint8Array(vec.buffer, vec.byteOffset, vec.byteLength));
+const bytes = await cache.get<Uint8Array>('embedding');
+// Copy first: the result can be an unaligned view into a larger buffer.
+const restored = bytes && new Float32Array(new Uint8Array(bytes).buffer);
+```
+
+In auto mode, function arguments are different: keys are hashed, never decoded,
+so a `wrap()`ed function can take any binary type. A `Uint8Array` or `Buffer` is
+hashed by its bytes; any other binary type by its type and a fixed-size digest of
+its bytes, so a large `ArrayBuffer` counts only 32 bytes toward the limit below.
+The digest reads every byte on the calling thread, so its cost grows with the
+buffer: bound a request body's size before passing it as an argument.
+All of a call's arguments share one 64 KiB encoded limit; past it, the call
+throws `ValueTooLargeError` rather than bypassing the cache. Interop mode accepts
+only `Uint8Array` arguments.
+
 ## Master-Key Rotation
 
 Rotate the encryption master key without invalidating existing entries:
