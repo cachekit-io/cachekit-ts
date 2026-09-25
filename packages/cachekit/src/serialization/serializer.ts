@@ -1,4 +1,5 @@
 import { ExtData, encode, decode } from '@msgpack/msgpack';
+import { blake2b } from '@noble/hashes/blake2.js';
 import { SerializationError, ValueTooLargeError } from '../errors.js';
 import {
   DEFAULT_MAX_ENCODED_SIZE,
@@ -307,7 +308,14 @@ function binary(value: object): [type: string, bytes: Uint8Array] | undefined {
   // The tag or instanceof only picks which brand to check, so a plain object
   // never pays for a throw. instanceof catches a same-realm buffer that retags
   // itself; only another realm's retagged buffer is missed, and encodes as {}.
-  const tag = Object.prototype.toString.call(value).slice(8, -1);
+  // Reading the tag runs a Proxy trap or Symbol.toStringTag getter, which may
+  // throw; such an object is not a buffer, and must not throw from key generation.
+  let tag = '';
+  try {
+    tag = Object.prototype.toString.call(value).slice(8, -1);
+  } catch {
+    // Not a buffer: fall through to the instanceof and brand checks.
+  }
   if (
     (tag === 'ArrayBuffer' || value instanceof ArrayBuffer) &&
     hasBufferBrand(value, arrayBufferByteLength)
@@ -407,13 +415,17 @@ export function normalize(
   const bin = binary(value);
   if (bin) {
     const [type, bytes] = bin;
-    // @msgpack/msgpack emits a Uint8Array as bin, bounded by maxEncodedSize.
+    // @msgpack/msgpack emits a Uint8Array as bin, bounded by the caller's
+    // post-encode size check.
     if (type === 'Uint8Array') return bytes;
-    // A key argument is hashed, never decoded: hash other binary by type and
-    // bytes, so Int8Array([-1]) and Uint8Array([255]) stay distinct keys. As a
-    // msgpack ext, which no ordinary argument normalizes to, it cannot collide
-    // with an object of that shape, e.g. { Int8Array: Uint8Array.of(255) }.
-    if (forKey) return new ExtData(0, encode([type, bytes]));
+    // A key argument is hashed, never decoded: hash other binary by type and a
+    // BLAKE2b-256 digest of its bytes, so Int8Array([-1]) and Uint8Array([255])
+    // stay distinct keys. The digest keeps the argument 32 bytes whatever the
+    // buffer's size, so a large ArrayBuffer (a request body) neither trips the
+    // 64 KiB key limit nor gets copied before it is checked. As a msgpack ext,
+    // which no ordinary argument normalizes to, it cannot collide with an object
+    // of that shape, e.g. { Int8Array: Uint8Array.of(255) }.
+    if (forKey) return new ExtData(0, encode([type, blake2b(bytes, { dkLen: 32 })]));
     // A value would decode as a Uint8Array — a silent type change — so reject
     // it with the fix instead (LAB-4839).
     throw new SerializationError(

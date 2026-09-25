@@ -222,7 +222,9 @@ const restored = bytes && new Float32Array(new Uint8Array(bytes).buffer);
 ```
 
 In auto mode, function arguments are different: keys are hashed, never decoded,
-so a `wrap()`ed function can take any binary type, hashed by its type and bytes.
+so a `wrap()`ed function can take any binary type. A `Uint8Array` or `Buffer` is
+hashed by its bytes; any other binary type by its type and a fixed-size digest of
+its bytes, so a large `ArrayBuffer` counts only 32 bytes toward the limit below.
 All of a call's arguments share one 64 KiB encoded limit; past it, the call
 throws `ValueTooLargeError` rather than bypassing the cache. Interop mode accepts
 only `Uint8Array` arguments.

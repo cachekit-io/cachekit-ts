@@ -88,6 +88,40 @@ describe('generateKey', () => {
     expect(key(detached((buf) => new DataView(buf)))).toBe(key(new DataView(new ArrayBuffer(0))));
   });
 
+  it('keys a large non-Uint8Array binary argument by digest, without throwing (LAB-4839)', () => {
+    // A request body well past the 64 KiB key limit: main hashed it as {}.
+    const big = (b: number) => {
+      const buf = new ArrayBuffer(1 << 20);
+      new Uint8Array(buf)[(1 << 20) - 1] = b;
+      return buf;
+    };
+    expect(() => key(big(1))).not.toThrow();
+    expect(key(big(1))).toBe(key(big(1)));
+    expect(key(big(1))).not.toBe(key(big(2)));
+    expect(key(new DataView(big(1)))).not.toBe(key(new DataView(big(2))));
+    // main gave these distinct keys; hashing raw bytes would exceed 64 KiB.
+    expect(() => key(new Float64Array(10_000).fill(0.5))).not.toThrow();
+  });
+
+  it('hashes an object whose tag read throws by its keys (LAB-4839)', () => {
+    const strict = new Proxy(
+      { a: 1 },
+      {
+        get(target, prop) {
+          if (!(prop in target)) throw new Error(`unknown prop ${String(prop)}`);
+          return Reflect.get(target, prop);
+        },
+      }
+    );
+    expect(key(strict)).toBe(key({ a: 1 }));
+    const throwingTag = Object.defineProperty({ a: 1 }, Symbol.toStringTag, {
+      get() {
+        throw new Error('no tag');
+      },
+    });
+    expect(key(throwingTag)).toBe(key({ a: 1 }));
+  });
+
   it('never gives a binary argument the key of an ordinary object (LAB-4839)', () => {
     expect(key(Int8Array.of(-1))).not.toBe(key({ Int8Array: Uint8Array.of(255) }));
     expect(key(Int8Array.of(-1))).not.toBe(key({ Int8Array: Int8Array.of(-1) }));
