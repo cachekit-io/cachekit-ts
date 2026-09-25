@@ -225,6 +225,8 @@ In auto mode, function arguments are different: keys are hashed, never decoded,
 so a `wrap()`ed function can take any binary type. A `Uint8Array` or `Buffer` is
 hashed by its bytes; any other binary type by its type and a fixed-size digest of
 its bytes, so a large `ArrayBuffer` counts only 32 bytes toward the limit below.
+The digest reads every byte on the calling thread, so its cost grows with the
+buffer: bound a request body's size before passing it as an argument.
 All of a call's arguments share one 64 KiB encoded limit; past it, the call
 throws `ValueTooLargeError` rather than bypassing the cache. Interop mode accepts
 only `Uint8Array` arguments.
