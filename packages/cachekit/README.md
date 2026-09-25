@@ -195,8 +195,11 @@ The SDK also reports every rejected `set()` through its
 after deploying a new cache. That covers size rejections and every other value
 the serializer cannot encode: nesting past `maxDepth`, a collection past
 `maxCollectionSize`, an unsupported binary type (see
-[Binary values](#binary-values)), or a function or `BigInt`. Only a size
-rejection's line suggests raising the limits. The rate limit is one line per
+[Binary values](#binary-values)), or a function or `BigInt`. The line names
+the limit or type that failed; an error thrown by the value itself (a getter or
+a proxy) is reported generically, never by its message, since that text may
+carry the value or key. Only a size rejection's line suggests raising the
+limits. The rate limit is one line per
 minute per cache, not per key. (An interop-mode rejection always throws to the
 caller instead, and only its size rejections are logged.)
 

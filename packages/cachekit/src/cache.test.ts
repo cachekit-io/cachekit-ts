@@ -1022,6 +1022,33 @@ describe('Cache Integration', () => {
       await c.close();
     });
 
+    // A getter or Proxy trap runs caller code inside normalize, so its error
+    // text is caller-controlled and may carry the value or the key verbatim.
+    it.each([
+      ['an Error', (key: string) => new Error(`private=VALUE_SENTINEL key=${key}`)],
+      ['a non-Error', (key: string) => `private=VALUE_SENTINEL key=${key}`],
+    ])('never logs the message when a getter throws %s', async (_label, thrown) => {
+      const logs: string[] = [];
+      setLogger((message) => logs.push(message));
+
+      const key = 'ns:raw-KEY_SENTINEL';
+      const value = {
+        get payload(): never {
+          throw thrown(key);
+        },
+      };
+      const c = createCache({ backend: new InMemoryBackend() });
+
+      await expect(c.set(key, value)).resolves.toBeUndefined();
+      const rejected = logs.filter((m) => m.includes('set rejected'));
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]).toContain('keyHash=');
+      expect(rejected[0]).not.toContain('VALUE_SENTINEL');
+      expect(rejected[0]).not.toContain('KEY_SENTINEL');
+
+      await c.close();
+    });
+
     it('warns through wrap(), rate-limited per cache', async () => {
       vi.useFakeTimers();
       const logs: string[] = [];

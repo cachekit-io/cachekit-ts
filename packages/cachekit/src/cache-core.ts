@@ -33,7 +33,12 @@ import {
   decodeInteropValue,
 } from './serialization/interop.js';
 import { createInvalidationEvent } from './invalidation/event.js';
-import { BackendError, ConfigurationError, ValueTooLargeError } from './errors.js';
+import {
+  BackendError,
+  ConfigurationError,
+  SerializationError,
+  ValueTooLargeError,
+} from './errors.js';
 import {
   DEFAULT_TTL_SECONDS,
   DEFAULT_LOCK_TIMEOUT_MS,
@@ -454,9 +459,15 @@ export class CacheImpl implements SecureCache {
     // repeated rejections still correlate, and holders of a suspect key can
     // recompute the digest to match it.
     const keyHash = blake2b16Hex(key);
-    logError(
-      `[cachekit] set rejected, value NOT cached (keyHash=${keyHash}): ${error instanceof Error ? error.message : String(error)}.${hint}`
-    );
+    // The same goes for the error text. A getter or Proxy trap on the value
+    // runs caller code inside the encoder, so an arbitrary error's message can
+    // carry the value or the key verbatim. Only the serializer's own
+    // rejections — limits, sizes and type names — are safe to log (LAB-4845).
+    const reason =
+      error instanceof SerializationError || error instanceof ValueTooLargeError
+        ? error.message
+        : 'value could not be encoded (an unsupported type, or a getter or proxy threw)';
+    logError(`[cachekit] set rejected, value NOT cached (keyHash=${keyHash}): ${reason}.${hint}`);
   }
 
   private publishL1Stats(): void {
