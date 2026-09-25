@@ -7,7 +7,7 @@ import { file } from './backends/file.js';
 import { generateKey } from './serialization/key-generator.js';
 import { setLogger } from './logger.js';
 import { createCache as createIntentCache } from './intents.js';
-import { ConfigurationError, ValueTooLargeError } from './errors.js';
+import { ConfigurationError, SerializationError, ValueTooLargeError } from './errors.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
@@ -1027,6 +1027,15 @@ describe('Cache Integration', () => {
     it.each([
       ['an Error', (key: string) => new Error(`private=VALUE_SENTINEL key=${key}`)],
       ['a non-Error', (key: string) => `private=VALUE_SENTINEL key=${key}`],
+      // The class is not provenance: callers can throw the SDK's own errors.
+      [
+        'a SerializationError',
+        (key: string) => new SerializationError(`private=VALUE_SENTINEL key=${key}`),
+      ],
+      [
+        'a ValueTooLargeError',
+        (key: string) => new ValueTooLargeError(`private=VALUE_SENTINEL key=${key}`),
+      ],
     ])('never logs the message when a getter throws %s', async (_label, thrown) => {
       const logs: string[] = [];
       setLogger((message) => logs.push(message));

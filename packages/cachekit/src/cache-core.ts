@@ -459,14 +459,17 @@ export class CacheImpl implements SecureCache {
     // repeated rejections still correlate, and holders of a suspect key can
     // recompute the digest to match it.
     const keyHash = blake2b16Hex(key);
-    // The same goes for the error text. A getter or Proxy trap on the value
-    // runs caller code inside the encoder, so an arbitrary error's message can
-    // carry the value or the key verbatim. Only the serializer's own
-    // rejections — limits, sizes and type names — are safe to log (LAB-4845).
+    // The same goes for the error text: never log it. A getter or Proxy trap on
+    // the value runs caller code inside the encoder, and that code can throw
+    // any error — the SDK's own classes included — with the value or the key
+    // in its message. The class only picks a fixed reason, so a spoofed class
+    // can at worst mislabel the rejection, never leak through it (LAB-4845).
     const reason =
-      error instanceof SerializationError || error instanceof ValueTooLargeError
-        ? error.message
-        : 'value could not be encoded (an unsupported type, or a getter or proxy threw)';
+      error instanceof ValueTooLargeError
+        ? 'encoded value exceeds the size limit'
+        : error instanceof SerializationError
+          ? 'value exceeds maxDepth or maxCollectionSize, or is an unsupported binary type'
+          : 'value could not be encoded (an unsupported type, or a getter or proxy threw)';
     logError(`[cachekit] set rejected, value NOT cached (keyHash=${keyHash}): ${reason}.${hint}`);
   }
 
