@@ -296,9 +296,8 @@ export class CacheImpl implements SecureCache {
     this.encryption = options.encryption ? runtime.createEncryption(options.encryption) : null;
 
     // Initialize ByteStorage (LZ4 compression + xxHash3-64 integrity). The
-    // default honors the backend's advertised preference (LAB-1388): stores
-    // that already compress values at rest (the Cache API) advertise false so
-    // the default config doesn't compress twice. An explicit option wins.
+    // default honors the backend's advertised preference (LAB-1388), else
+    // true. An explicit option wins.
     const compressionEnabled = options.compression ?? this.backend.compressionDefault ?? true;
     this.byteStorage = compressionEnabled ? runtime.createByteStorage() : null;
     // Kept for lazy envelope-tolerant reads (see decodeEntry): a

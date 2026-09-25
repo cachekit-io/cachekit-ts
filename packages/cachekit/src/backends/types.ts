@@ -156,11 +156,15 @@ export interface Backend {
 
   /**
    * The backend's preferred default for the ByteStorage compression
-   * envelope (LAB-1388). Left unset, the cache-level default stays `true`.
-   * Backends whose store already compresses values at rest (the Cloudflare
-   * Cache API stores `Response` bodies compressed) advertise `false` here so
-   * the default configuration doesn't spend CPU compressing twice. An
-   * explicit `compression:` option on the cache always wins.
+   * envelope (LAB-1388). Left unset, the cache-level default stays `true`;
+   * no built-in backend sets it. A custom backend whose store already
+   * compresses the bytes it is given can advertise `false` so the default
+   * configuration doesn't compress twice. An explicit `compression:` option
+   * on the cache always wins.
+   *
+   * The envelope flag is part of the stored format, and secure caches bind
+   * it into the AAD: changing this value makes a secure cache fail to
+   * decrypt every entry written under the old default. Pick it once.
    *
    * Like `keyPrefix`, the value MUST be constant from construction onward.
    */

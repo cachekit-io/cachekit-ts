@@ -144,9 +144,8 @@ const cache = createCache({
     maxDecodedSize: 10 * 1024 * 1024, // 10 MiB default
   },
 
-  // ByteStorage envelope (LZ4 + integrity). Defaults to true, unless the
-  // backend advertises compression off because its store already
-  // compresses at rest (the Workers Cache API backend does).
+  // ByteStorage envelope (LZ4 + integrity). Defaults to true on every
+  // built-in backend.
   compression: true,
 });
 ```
@@ -507,17 +506,9 @@ export default {
 
 Beyond CachekitIO, two Cloudflare-native backends keep cache state in the
 edge itself — no round-trip to api.cachekit.io. Both store the same opaque
-payloads as every other backend, so encryption is unchanged (secure caches
-store only ciphertext), and both plug into `createCache` or any intent via
-`backend:`. One default differs: the Cache API backend advertises the
-ByteStorage compression envelope **off** — Cloudflare already stores
-`Response` bodies compressed at rest, so the wasm envelope would spend
-isolate CPU compressing twice. Pass `compression: true` to re-enable it
-(e.g. to shrink bodies below a size limit before storage). Reads are
-envelope-tolerant either way: a compression-off cache detects, verifies,
-and unwraps entries that an earlier version (or a compression-on peer in a
-mixed fleet) stored with the envelope, so upgrades and gradual rollouts
-never serve envelope bytes as values:
+ByteStorage payloads as every other backend, so encryption and the wire
+envelope are unchanged (secure caches store only ciphertext), and both plug
+into `createCache` or any intent via `backend:`:
 
 ```typescript
 import { createCache, workersKV, workersCacheAPI } from '@cachekit-io/cachekit/workers';
@@ -546,9 +537,17 @@ TTL and consistency semantics differ from Redis/CachekitIO — pick by workload:
 | TTL                      | Native `expirationTtl`; **60s minimum** — shorter TTLs are clamped up, never down   | `Cache-Control: max-age`, honored to the second, no floor         |
 | `ttl <= 0` ("no expiry") | Stored without expiration                                                           | Capped at 1-year max-age (the Cache API has no unbounded storage) |
 | Eviction                 | Durable until expiry                                                                | Best-effort — entries may be dropped under cache pressure         |
-| Compression default      | On (ByteStorage envelope)                                                           | **Off** — Cloudflare stores bodies compressed at rest             |
+| Compression default      | On (ByteStorage envelope)                                                           | On (ByteStorage envelope)                                         |
 | L1 freshness on read     | Bounded by `defaultTtl` (KV reads don't surface remaining TTL)                      | Capped at the entry's **remaining TTL** (from `max-age` − `Age`)  |
 | Best for                 | Shared config, sessions, rarely-written hot reads                                   | Request-local acceleration in front of a shared source            |
+
+The Cache API backend writes uncompressed `application/octet-stream` bodies,
+so the envelope is the only compression the SDK applies. `compression: false`
+saves the isolate CPU the wasm envelope spends on each write and backend
+read, at the cost of larger entries and, on plaintext caches, the xxHash3-64
+integrity check. Choose it before the cache holds data: a secure cache binds
+the setting into its AAD, so flipping it later makes every existing entry
+fail to decrypt.
 
 The Cache API is request-keyed under the hood; the backend maps each cache
 key to a synthetic never-fetched URL, so it behaves like a plain KV store
