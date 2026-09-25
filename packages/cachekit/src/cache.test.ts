@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createCache } from './cache.js';
 import { generateKey } from './serialization/key-generator.js';
 import { setLogger } from './logger.js';
-import { ConfigurationError, ValueTooLargeError } from './errors.js';
+import { createCache as createIntentCache } from './intents.js';
+import { ConfigurationError, SerializationError, ValueTooLargeError } from './errors.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
@@ -979,6 +980,85 @@ describe('Cache Integration', () => {
       // greppable warning for consumers whose own try/catch absorbs it.
       await expect(big()).rejects.toThrow(ValueTooLargeError);
       expect(logs.filter((m) => m.includes('set rejected'))).toHaveLength(1);
+
+      await c.close();
+    });
+  });
+
+  describe('encode rejections bypass retry and the circuit breaker (LAB-5139)', () => {
+    afterEach(() => {
+      setLogger(null);
+      vi.restoreAllMocks();
+    });
+
+    const oversized = () => 'x'.repeat(2 * 1024 * 1024);
+
+    // production preset: retry 3x with backoff, breaker opens at 5 failures.
+    const productionCache = (backend: Backend, serializer?: { maxCollectionSize: number }) =>
+      createIntentCache.production({ backend, metrics: false, serializer });
+
+    it('six oversized set() calls leave the breaker closed for other keys', async () => {
+      setLogger(() => {});
+      const backend = new InMemoryBackend();
+      const c = productionCache(backend);
+
+      for (let i = 0; i < 6; i++) {
+        await expect(c.set(`ns:big${i}`, oversized())).resolves.toBeUndefined();
+      }
+
+      // An open breaker would degrade this write to a no-op (L1 included),
+      // so the read-back proves the breaker never counted the rejections.
+      await c.set('ns:small', 'ok');
+      expect(await c.get('ns:small')).toBe('ok');
+      expect(await backend.get('ns:small')).not.toBeNull();
+
+      await c.close();
+    });
+
+    it('an oversized set() encodes once and never reaches backend.set', async () => {
+      setLogger(() => {});
+      const backend = new InMemoryBackend();
+      const backendSet = vi.spyOn(backend, 'set');
+      const encode = vi.spyOn(MessagePackSerializer.prototype, 'encode');
+      const c = productionCache(backend);
+
+      await expect(c.set('ns:big', oversized())).resolves.toBeUndefined();
+      expect(encode).toHaveBeenCalledTimes(1);
+      expect(backendSet).not.toHaveBeenCalled();
+
+      await c.close();
+    });
+
+    it('a SerializationError encodes once and never counts toward the breaker', async () => {
+      const backend = new InMemoryBackend();
+      const encode = vi.spyOn(MessagePackSerializer.prototype, 'encode');
+      const c = productionCache(backend, { maxCollectionSize: 10 });
+      const tooMany = Array.from({ length: 11 }, (_, i) => i);
+
+      await expect(c.set('ns:wide0', tooMany)).resolves.toBeUndefined();
+      expect(encode).toHaveBeenCalledTimes(1);
+
+      for (let i = 1; i < 6; i++) await c.set(`ns:wide${i}`, tooMany);
+      await c.set('ns:small', 'ok');
+      expect(await c.get('ns:small')).toBe('ok');
+
+      await c.close();
+    });
+
+    it('still throws SerializationError when degradation is disabled', async () => {
+      const c = createIntentCache.production({
+        backend: new InMemoryBackend(),
+        metrics: false,
+        serializer: { maxCollectionSize: 10 },
+        reliability: { degradation: false },
+      });
+
+      await expect(
+        c.set(
+          'ns:wide',
+          Array.from({ length: 11 }, (_, i) => i)
+        )
+      ).rejects.toThrow(SerializationError);
 
       await c.close();
     });

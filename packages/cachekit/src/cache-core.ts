@@ -779,41 +779,29 @@ export class CacheImpl implements SecureCache {
     // degraded write exactly as it did before this change.
     let l1Write: L1Write | null = this.encryption ? null : { l1: value };
 
-    // Interop model rejection is a deterministic caller error (spec: values
-    // outside the data model MUST error) — it surfaces synchronously and
-    // never reaches the reliability executor, where degradation would
-    // silently swallow it and retry/circuit-breaker would count it as a
-    // backend failure. Auto-mode encoding stays inside the executor
-    // (existing degrade semantics unchanged). A size rejection still routes
-    // through the LAB-1388 warning: degradation never hides this path, but
-    // a consumer's own try/catch around set() does.
-    let interopSerialized: Uint8Array | null = null;
-    if (interop) {
-      try {
-        interopSerialized = encodeInteropValue(value);
-      } catch (error) {
-        if (error instanceof ValueTooLargeError) this.warnValueTooLarge(key, error, true);
-        throw error;
-      }
+    // Serialize before the reliability executor. An encode rejection is a
+    // deterministic caller error: retrying it re-encodes the same value for
+    // nothing, and the circuit breaker would count it as a backend failure —
+    // five oversized values in a window would open the breaker and degrade
+    // every key on this cache (LAB-5139). Interop rejection always throws
+    // (spec: values outside the data model MUST error). Auto-mode rejection
+    // keeps the degradation contract it had inside the executor: counted,
+    // then thrown with degradation off, absorbed (value not cached) with it
+    // on. A size rejection emits one greppable, rate-limited warning either
+    // way, since degradation or a consumer's try/catch around set() would
+    // otherwise hide it (LAB-1388).
+    let serialized: Uint8Array;
+    try {
+      serialized = interop ? encodeInteropValue(value) : this.serializer.encode(value);
+    } catch (error) {
+      if (error instanceof ValueTooLargeError) this.warnValueTooLarge(key, error, interop);
+      if (interop) throw error;
+      this.recordFailure('set', error);
+      if (!this.degradationEnabled) throw error;
+      return l1Write;
     }
 
     await this.run('set', undefined, async (): Promise<void> => {
-      // Serialize. A size rejection here is invisible in production configs
-      // — degradation (on by default) swallows set() failures, and careful
-      // consumers try/catch set() anyway — so a cache whose hottest values
-      // exceed maxEncodedSize silently never stores them (LAB-1388). Emit
-      // one greppable, rate-limited warning before the error continues into
-      // the reliability stack.
-      let serialized: Uint8Array;
-      try {
-        serialized = interopSerialized ?? this.serializer.encode(value);
-      } catch (error) {
-        // Only serializer.encode throws here — a non-null interopSerialized
-        // already survived encodeInteropValue above.
-        if (error instanceof ValueTooLargeError) this.warnValueTooLarge(key, error, false);
-        throw error;
-      }
-
       // Compress with ByteStorage (before encryption)
       let data: Uint8Array = useEnvelope
         ? this.withEnvelopeCodec((codec) => codec.pack(serialized))
