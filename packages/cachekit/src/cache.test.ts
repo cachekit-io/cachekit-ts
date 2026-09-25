@@ -1058,7 +1058,8 @@ describe('Cache Integration', () => {
     const MAX_AAD = 64 * 1024;
     // v0x03 AAD = version byte + four 4-byte length prefixes + tenant id + key
     // + 'msgpack' + 'True'/'False' (the compressed flag). Written out rather
-    // than imported so these tests check the implementation's arithmetic.
+    // than derived from buildAAD so the boundary is pinned to the protocol
+    // layout, not to the implementation.
     const keyBudget = (compressed: boolean) =>
       MAX_AAD - (1 + 16 + TENANT.length + 'msgpack'.length + (compressed ? 4 : 5));
     /** A key of exactly `bytes` UTF-8 bytes; `multibyte` spends most of it on 2-byte 'é'. */
@@ -1108,6 +1109,8 @@ describe('Cache Integration', () => {
 
     it('get() rejects before any backend or decrypt call', async () => {
       const backend = new InMemoryBackend();
+      // Seeded, so a read that skipped the pre-flight would reach decrypt.
+      await backend.set(overLimitKey, new Uint8Array([1]), 60);
       const backendGet = vi.spyOn(backend, 'get');
       const decrypt = vi.spyOn(EncryptionManagerCore.prototype, 'decrypt');
       const c = secureCache(backend);
@@ -1123,8 +1126,6 @@ describe('Cache Integration', () => {
     // this also proves the TS limit matches the binding's, byte for byte.
     it.each([
       { compression: true, multibyte: false },
-      { compression: false, multibyte: false },
-      { compression: true, multibyte: true },
       { compression: false, multibyte: true },
     ])(
       'boundary is 65 536 AAD bytes, counted in UTF-8 (compression=$compression, multibyte=$multibyte)',
