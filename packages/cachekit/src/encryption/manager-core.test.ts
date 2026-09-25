@@ -27,6 +27,7 @@ function mockBindings(overrides?: Partial<EncryptionBindings>) {
           encryptionFingerprint: () => new Uint8Array(16),
           getNonceCounter: () => 0,
           keyringEntryCount: () => 1 + (previousMasterKeys?.length ?? 0),
+          hardwareAccelerationEnabled: () => true,
           free() {
             freed.push(keys);
           },
@@ -283,5 +284,45 @@ describe('EncryptionManagerCore keyring config (previousMasterKeys)', () => {
     // The orphaned handle must be zeroized, not parked
     expect(freed.length).toBe(1);
     manager.dispose();
+  });
+
+  it('reports hardware acceleration from the binding, initialising on demand', async () => {
+    const { bindings, derived } = mockBindings();
+    const manager = new TestManager(async () => bindings);
+
+    // Answers at startup, before any encrypt — and derives exactly once.
+    expect(await manager.isHardwareAccelerated()).toBe(true);
+    expect(derived.length).toBe(1);
+    manager.dispose();
+  });
+
+  it('reports null (unknown), not false, when the binding predates the accessor', async () => {
+    const { bindings } = mockBindings();
+    vi.mocked(bindings.deriveTenantKeys).mockImplementation(
+      (_masterKey: Uint8Array, tenantId: string) => ({
+        tenantId,
+        encryptionFingerprint: () => new Uint8Array(16),
+        getNonceCounter: () => 0,
+        // no hardwareAccelerationEnabled — older binding
+      })
+    );
+    const manager = new TestManager(async () => bindings);
+
+    expect(await manager.isHardwareAccelerated()).toBeNull();
+    manager.dispose();
+  });
+
+  it('rejects with EncryptionError, not TypeError, when dispose races an initialised read', async () => {
+    const { bindings } = mockBindings();
+    const manager = new TestManager(async () => bindings);
+
+    // Initialise first, so ensureInitialized() takes its early-return path and
+    // the read below resumes only after dispose() has nulled tenantKeys.
+    expect(await manager.isHardwareAccelerated()).toBe(true);
+
+    const inFlight = manager.isHardwareAccelerated();
+    manager.dispose();
+
+    await expect(inFlight).rejects.toThrow(EncryptionError);
   });
 });

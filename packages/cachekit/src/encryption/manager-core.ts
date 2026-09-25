@@ -25,6 +25,11 @@ export interface EncryptionTenantKeys {
    */
   keyringEntryCount?(): number;
   /**
+   * cachekit-core's AES hardware detection (informational). Optional: older
+   * binding binaries predate it, and the manager reports `null` for those.
+   */
+  hardwareAccelerationEnabled?(): boolean;
+  /**
    * Deterministic zeroize-and-release (wasm bindings). NAPI handles zeroize
    * via GC finalizer instead and don't expose this.
    */
@@ -336,6 +341,26 @@ export class EncryptionManagerCore {
   async getKeyFingerprint(): Promise<Uint8Array | null> {
     if (!this.tenantKeys) return null;
     return this.tenantKeys.encryptionFingerprint();
+  }
+
+  /**
+   * Whether AES-256-GCM is hardware-accelerated on this host, per
+   * cachekit-core's detection (informational — see the README). Initialises
+   * the bindings if needed, so it answers at startup. `null` = unknown: the
+   * installed binding predates the accessor.
+   *
+   * @throws {EncryptionError} if the manager is disposed or bindings fail to load
+   */
+  async isHardwareAccelerated(): Promise<boolean | null> {
+    await this.ensureInitialized();
+    // ensureInitialized() returns early on an already-initialised manager, so
+    // dispose() can land while this call is suspended at the await. encrypt()
+    // and decrypt() convert the resulting null read inside their catch; this
+    // path has none, so it checks explicitly rather than trusting a `!`.
+    if (this.disposed || !this.tenantKeys) {
+      throw new EncryptionError('EncryptionManager has been disposed');
+    }
+    return this.tenantKeys.hardwareAccelerationEnabled?.() ?? null;
   }
 
   /**

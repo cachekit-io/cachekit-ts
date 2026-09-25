@@ -185,6 +185,13 @@ impl TenantKeys {
     pub fn keyring_entry_count(&self) -> u32 {
         self.keyring_entries
     }
+
+    /// Forwards cachekit-core's AES hardware detection — `false` on wasm32
+    /// (no AES instructions); present so the handle matches the NAPI binding.
+    #[wasm_bindgen(js_name = hardwareAccelerationEnabled)]
+    pub fn hardware_acceleration_enabled(&self) -> bool {
+        self.encryptor.hardware_acceleration_enabled()
+    }
 }
 
 /// Derive per-tenant keys using HKDF-SHA256.
