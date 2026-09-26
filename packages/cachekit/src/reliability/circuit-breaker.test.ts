@@ -300,6 +300,48 @@ describe('CircuitBreaker', () => {
       );
     });
 
+    // Opens, goes half-open, starts a probe that stays in flight, then reopens and
+    // goes half-open again: the pending probe now belongs to a finished round.
+    const strandProbeAcrossRounds = async () => {
+      await openThenHalfOpen();
+      let settle!: { resolve: (v: string) => void; reject: (e: Error) => void };
+      const stale = breaker.execute(
+        () => new Promise<string>((resolve, reject) => (settle = { resolve, reject }))
+      );
+      await expect(
+        breaker.execute(() => Promise.reject(new BackendError('down', 'transient')))
+      ).rejects.toThrow();
+      vi.advanceTimersByTime(150);
+      expect(breaker.state).toBe('half-open');
+      return { stale, settle };
+    };
+
+    it('a probe that outlives its round does not count toward closing the next', async () => {
+      const { stale, settle } = await strandProbeAcrossRounds();
+      await breaker.execute(() => Promise.resolve('ok'));
+      settle.resolve('ok');
+      await stale;
+      // successThreshold is 2, but only one success came from this round.
+      expect(breaker.state).toBe('half-open');
+    });
+
+    it('a probe that outlives its round does not reopen the next', async () => {
+      const { stale, settle } = await strandProbeAcrossRounds();
+      settle.reject(new BackendError('down', 'transient'));
+      await expect(stale).rejects.toThrow('down');
+      expect(breaker.state).toBe('half-open');
+    });
+
+    it('a call started before the breaker opened does not count toward half-open', async () => {
+      let resolveEarly!: (v: string) => void;
+      const early = breaker.execute(() => new Promise<string>((r) => (resolveEarly = r)));
+      await openThenHalfOpen();
+      await breaker.execute(() => Promise.resolve('ok'));
+      resolveEarly('ok');
+      await early;
+      expect(breaker.state).toBe('half-open');
+    });
+
     it('a transient error on a half-open probe still reopens', async () => {
       await openThenHalfOpen();
       await expect(

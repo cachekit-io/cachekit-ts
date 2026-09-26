@@ -55,7 +55,8 @@ const DEFAULT_CONFIG: CircuitBreakerConfig = {
  * - HALF-OPEN + any failure → OPEN
  *
  * Only errors that `isRetryable` accepts count as failures; any other error
- * frees its half-open probe slot without counting either way.
+ * frees its half-open probe slot without counting either way. While half-open,
+ * only a probe that took a slot in the current round counts at all.
  */
 export class CircuitBreaker {
   private readonly config: CircuitBreakerConfig;
@@ -127,13 +128,18 @@ export class CircuitBreaker {
 
     try {
       const result = await fn();
-      this.recordSuccess();
+      if (!this.isStale(probeRound)) {
+        this.recordSuccess();
+      }
       return result;
     } catch (error) {
+      if (this.isStale(probeRound)) {
+        throw error;
+      }
       if (isRetryable(error)) {
         this.recordFailure();
       } else if (probeRound !== null) {
-        this.releaseHalfOpenSlot(probeRound);
+        this.releaseHalfOpenSlot();
       }
       throw error;
     }
@@ -160,18 +166,24 @@ export class CircuitBreaker {
   }
 
   /**
+   * True when the breaker is half-open but this call holds no slot in the
+   * current round: it started in an earlier round (the breaker reopened and
+   * went half-open again while it was in flight) or before the breaker opened.
+   * Its outcome describes the backend as it was then, so it neither counts
+   * toward this round nor frees one of its slots.
+   */
+  private isStale(probeRound: number | null): boolean {
+    return this.currentState === 'half-open' && probeRound !== this.halfOpenRound;
+  }
+
+  /**
    * Free a probe slot without counting a success or a failure. Without this,
    * `halfOpenMaxCalls` non-retryable errors in a row would fill every slot and
-   * wedge the breaker half-open against a healthy backend. A probe that
-   * outlived its round (the breaker reopened and went half-open again while it
-   * was in flight) holds no slot in the current round, so it frees nothing.
+   * wedge the breaker half-open against a healthy backend. Callers must have
+   * ruled out a stale probe first (see `isStale`).
    */
-  private releaseHalfOpenSlot(round: number): void {
-    if (
-      this.currentState === 'half-open' &&
-      round === this.halfOpenRound &&
-      this.callsInHalfOpen > 0
-    ) {
+  private releaseHalfOpenSlot(): void {
+    if (this.currentState === 'half-open' && this.callsInHalfOpen > 0) {
       this.callsInHalfOpen--;
     }
   }
