@@ -7,7 +7,7 @@ import { file } from './backends/file.js';
 import { generateKey } from './serialization/key-generator.js';
 import { setLogger } from './logger.js';
 import { createCache as createIntentCache } from './intents.js';
-import { ConfigurationError, ValueTooLargeError } from './errors.js';
+import { ConfigurationError, SerializationError, ValueTooLargeError } from './errors.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
@@ -984,6 +984,103 @@ describe('Cache Integration', () => {
       // greppable warning for consumers whose own try/catch absorbs it.
       await expect(big()).rejects.toThrow(ValueTooLargeError);
       expect(logs.filter((m) => m.includes('set rejected'))).toHaveLength(1);
+
+      await c.close();
+    });
+  });
+
+  describe('rejected-value set() warning beyond size (LAB-4845)', () => {
+    afterEach(() => {
+      setLogger(null);
+      vi.useRealTimers();
+    });
+
+    const nested = (depth: number): unknown => (depth === 0 ? 'leaf' : [nested(depth - 1)]);
+
+    it.each([
+      ['a non-Uint8Array binary value', () => new Float32Array([1.5])],
+      ['a depth-exceeded value', () => nested(200)],
+      // Not a SerializationError: @msgpack/msgpack throws a plain Error.
+      ['a value msgpack cannot encode', () => ({ fn: () => 1 })],
+    ])('warns when degradation absorbs %s', async (_label, value) => {
+      const logs: string[] = [];
+      setLogger((message) => logs.push(message));
+
+      const backend = new InMemoryBackend();
+      const c = createCache({ backend });
+
+      // Degradation is on by default: set() resolves and nothing is stored…
+      await expect(c.set('ns:bad', value())).resolves.toBeUndefined();
+      expect(await c.get('ns:bad')).toBeNull();
+      // …but the rejection is reported, digested, without the size hint.
+      const rejected = logs.filter((m) => m.includes('set rejected'));
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]).toContain('keyHash=');
+      expect(rejected[0]).not.toContain('ns:bad');
+      expect(rejected[0]).not.toContain('maxEncodedSize');
+
+      await c.close();
+    });
+
+    // A getter or Proxy trap runs caller code inside normalize, so its error
+    // text is caller-controlled and may carry the value or the key verbatim.
+    it.each([
+      ['an Error', (key: string) => new Error(`private=VALUE_SENTINEL key=${key}`)],
+      ['a non-Error', (key: string) => `private=VALUE_SENTINEL key=${key}`],
+      // The class is not provenance: callers can throw the SDK's own errors.
+      [
+        'a SerializationError',
+        (key: string) => new SerializationError(`private=VALUE_SENTINEL key=${key}`),
+      ],
+      [
+        'a ValueTooLargeError',
+        (key: string) => new ValueTooLargeError(`private=VALUE_SENTINEL key=${key}`),
+      ],
+    ])('never logs the message when a getter throws %s', async (_label, thrown) => {
+      const logs: string[] = [];
+      setLogger((message) => logs.push(message));
+
+      const key = 'ns:raw-KEY_SENTINEL';
+      const value = {
+        get payload(): never {
+          throw thrown(key);
+        },
+      };
+      const c = createCache({ backend: new InMemoryBackend() });
+
+      await expect(c.set(key, value)).resolves.toBeUndefined();
+      const rejected = logs.filter((m) => m.includes('set rejected'));
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]).toContain('keyHash=');
+      expect(rejected[0]).not.toContain('VALUE_SENTINEL');
+      expect(rejected[0]).not.toContain('KEY_SENTINEL');
+
+      await c.close();
+    });
+
+    it('warns through wrap(), rate-limited per cache', async () => {
+      vi.useFakeTimers();
+      const logs: string[] = [];
+      setLogger((message) => logs.push(message));
+
+      const c = createCache({ backend: new InMemoryBackend() });
+      let calls = 0;
+      const embed = c.wrap(
+        async () => {
+          calls++;
+          return new Float32Array([1.5]);
+        },
+        { namespace: 'ns', ttl: 60 }
+      );
+
+      await embed();
+      await embed();
+      expect(calls).toBe(2); // never cached
+      expect(logs.filter((m) => m.includes('set rejected'))).toHaveLength(1);
+
+      vi.advanceTimersByTime(61_000);
+      await embed();
+      expect(logs.filter((m) => m.includes('set rejected'))).toHaveLength(2);
 
       await c.close();
     });

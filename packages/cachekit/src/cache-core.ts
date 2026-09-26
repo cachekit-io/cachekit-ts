@@ -33,7 +33,12 @@ import {
   decodeInteropValue,
 } from './serialization/interop.js';
 import { createInvalidationEvent } from './invalidation/event.js';
-import { BackendError, ConfigurationError, ValueTooLargeError } from './errors.js';
+import {
+  BackendError,
+  ConfigurationError,
+  SerializationError,
+  ValueTooLargeError,
+} from './errors.js';
 import {
   DEFAULT_TTL_SECONDS,
   DEFAULT_LOCK_TIMEOUT_MS,
@@ -42,13 +47,13 @@ import {
 } from './constants.js';
 
 /**
- * Minimum interval between "set rejected: value too large" warnings
- * (LAB-1388). The rejection itself is often invisible (degradation swallows
- * set failures; consumers try/catch set), so the SDK reports it through the
- * logger — rate-limited so a hot oversized key can't flood the sink.
+ * Minimum interval between "set rejected" warnings (LAB-1388, LAB-4845).
+ * The rejection itself is often invisible (degradation swallows set failures;
+ * consumers try/catch set), so the SDK reports it through the logger —
+ * rate-limited so a hot rejected key can't flood the sink.
  * Module-private on purpose: one consumer, not a tuning knob.
  */
-const VALUE_TOO_LARGE_WARN_INTERVAL_MS = 60_000;
+const SET_REJECTED_WARN_INTERVAL_MS = 60_000;
 
 /**
  * Sentinel for "the lock path did not resolve the miss — compute without
@@ -370,8 +375,8 @@ export class CacheImpl implements SecureCache {
     void this.metrics.recordError(error instanceof Error ? error.constructor.name : 'Unknown');
   }
 
-  /** Timestamp of the last oversized-value warning (rate limiting). */
-  private lastSizeWarnAt = 0;
+  /** Timestamp of the last set-rejected warning (rate limiting). */
+  private lastSetRejectedWarnAt = 0;
 
   /**
    * Verified unpack of a suspected legacy/foreign ByteStorage envelope on a
@@ -430,28 +435,42 @@ export class CacheImpl implements SecureCache {
   }
 
   /**
-   * One-line, greppable, rate-limited report of a set() rejected for size
-   * (LAB-1388) — the only reliable signal of the rejection when degradation
-   * or a consumer catch-block absorbs the ValueTooLargeError itself.
+   * One-line, greppable, rate-limited report of a set() whose value failed to
+   * encode — the only reliable signal of the rejection when degradation or a
+   * consumer catch-block absorbs the error itself. Covers every encode error,
+   * not just size (LAB-1388): depth, collection-size and binary-type
+   * rejections, and the plain Error @msgpack/msgpack throws for a function or
+   * BigInt, were all dropped silently before (LAB-4845).
    */
-  private warnValueTooLarge(key: string, error: ValueTooLargeError, interop: boolean): void {
+  private warnSetRejected(key: string, error: unknown, interop: boolean): void {
     const now = Date.now();
-    if (now - this.lastSizeWarnAt < VALUE_TOO_LARGE_WARN_INTERVAL_MS) return;
-    this.lastSizeWarnAt = now;
-    // Interop caps are protocol constants serializer config does not govern
-    // — the remediation hint only holds for the serializer path (expert
-    // panel, LAB-1768).
-    const hint = interop
-      ? ''
-      : ' Raise serializer.maxEncodedSize / maxDecodedSize if values this large are expected.';
+    if (now - this.lastSetRejectedWarnAt < SET_REJECTED_WARN_INTERVAL_MS) return;
+    this.lastSetRejectedWarnAt = now;
+    // Only a size rejection is fixed by raising a limit, and interop caps are
+    // protocol constants serializer config does not govern — the remediation
+    // hint only holds for a size rejection on the serializer path
+    // (LAB-1768).
+    const hint =
+      error instanceof ValueTooLargeError && !interop
+        ? ' Raise serializer.maxEncodedSize / maxDecodedSize if values this large are expected.'
+        : '';
     // Keys are caller-controlled and may embed PII/credentials — log a
     // non-reversible digest, not the key itself. Same key → same digest, so
     // repeated rejections still correlate, and holders of a suspect key can
     // recompute the digest to match it.
     const keyHash = blake2b16Hex(key);
-    logError(
-      `[cachekit] set rejected, value NOT cached (keyHash=${keyHash}): ${error.message}.${hint}`
-    );
+    // The same goes for the error text: never log it. A getter or Proxy trap on
+    // the value runs caller code inside the encoder, and that code can throw
+    // any error — the SDK's own classes included — with the value or the key
+    // in its message. The class only picks a fixed reason, so a spoofed class
+    // can at worst mislabel the rejection, never leak through it (LAB-4845).
+    const reason =
+      error instanceof ValueTooLargeError
+        ? 'encoded value exceeds the size limit'
+        : error instanceof SerializationError
+          ? 'value exceeds maxDepth or maxCollectionSize, or is an unsupported binary type'
+          : 'value could not be encoded (an unsupported type, or a getter or proxy threw)';
+    logError(`[cachekit] set rejected, value NOT cached (keyHash=${keyHash}): ${reason}.${hint}`);
   }
 
   private publishL1Stats(): void {
@@ -787,13 +806,18 @@ export class CacheImpl implements SecureCache {
     // keeps the degradation contract it had inside the executor: counted,
     // then thrown with degradation off, absorbed with it on — never written
     // to L2, though an SWR refresh on a plaintext cache still repopulates L1
-    // from the returned l1Write, as a degraded backend write does. A size
-    // rejection emits one rate-limited warning either way (LAB-1388).
+    // from the returned l1Write, as a degraded backend write does. An auto-mode
+    // rejection, or an interop size rejection, emits one rate-limited warning
+    // either way (LAB-1388, LAB-4845).
     let serialized: Uint8Array;
     try {
       serialized = interop ? encodeInteropValue(value) : this.serializer.encode(value);
     } catch (error) {
-      if (error instanceof ValueTooLargeError) this.warnValueTooLarge(key, error, interop);
+      // Interop stays size-only: its rejection always throws to the caller, and
+      // its messages can carry value content (an out-of-range integer) that a
+      // log line must not.
+      if (!interop || error instanceof ValueTooLargeError)
+        this.warnSetRejected(key, error, interop);
       if (interop) throw error;
       this.recordFailure('set', error);
       if (!this.degradationEnabled) throw error;
