@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createCache } from '../intents.js';
+import type { Backend } from './types.js';
 import { CacheAPIBackend, workersCacheAPI, type CacheLike } from './workers-cache-api.js';
 
 /**
@@ -44,7 +45,9 @@ describe('CacheAPIBackend (unit, mocked caches global)', () => {
   const value = new Uint8Array([1, 2, 3, 4]);
 
   it('does not advertise compression off (the cache-level default, on, applies)', () => {
-    expect(new CacheAPIBackend().compressionDefault).not.toBe(false);
+    // Read through Backend, as CacheImpl does: the class no longer declares it.
+    const backend: Backend = new CacheAPIBackend();
+    expect(backend.compressionDefault).not.toBe(false);
   });
 
   it('a secure cache with no compression option decrypts entries a compression: true cache wrote', async () => {

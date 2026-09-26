@@ -1144,7 +1144,7 @@ describe('Binary values (LAB-4839)', () => {
         calls++;
         return bytes(n);
       },
-      { namespace: 'bin:fn' }
+      { namespace: 'bin:fn', ttl: 60 }
     );
     expectSameBytes(await cached(20_000), bytes(20_000));
     expectSameBytes(await cached(20_000), bytes(20_000));
