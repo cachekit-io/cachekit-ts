@@ -21,6 +21,11 @@ import {
 } from './cache/background-refresh.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
 import {
+  envelopeVerdict,
+  looksLikeEnvelope,
+  maxEnvelopeInputSize,
+} from './serialization/envelope.js';
+import {
   generateKey,
   generateParamsHash,
   extractNamespace,
@@ -33,22 +38,27 @@ import {
   decodeInteropValue,
 } from './serialization/interop.js';
 import { createInvalidationEvent } from './invalidation/event.js';
-import { BackendError, ConfigurationError, ValueTooLargeError } from './errors.js';
+import {
+  BackendError,
+  ConfigurationError,
+  SerializationError,
+  ValueTooLargeError,
+} from './errors.js';
 import {
   DEFAULT_TTL_SECONDS,
   DEFAULT_LOCK_TIMEOUT_MS,
   DEFAULT_LOCK_WAIT_MS,
   DEFAULT_LOCK_POLL_MS,
+  DEFAULT_MAX_DECODED_SIZE,
 } from './constants.js';
 
 /**
- * Minimum interval between "set rejected: value too large" warnings
- * (LAB-1388). The rejection itself is often invisible (degradation swallows
- * set failures; consumers try/catch set), so the SDK reports it through the
- * logger — rate-limited so a hot oversized key can't flood the sink.
- * Module-private on purpose: one consumer, not a tuning knob.
+ * Minimum interval between repeats of each rate-limited warning. Each reports
+ * an outcome the caller often never sees as an error, so the SDK reports it
+ * through the logger — rate-limited so a hot key can't flood the sink.
+ * Module-private on purpose: not a tuning knob.
  */
-const VALUE_TOO_LARGE_WARN_INTERVAL_MS = 60_000;
+const WARN_INTERVAL_MS = 60_000;
 
 /**
  * Sentinel for "the lock path did not resolve the miss — compute without
@@ -57,17 +67,32 @@ const VALUE_TOO_LARGE_WARN_INTERVAL_MS = 60_000;
  */
 const LOCK_FALLTHROUGH = Symbol('cachekit.lock-fallthrough');
 
+/**
+ * AES-256-GCM ciphertext overhead: 12-byte nonce + 16-byte tag around the
+ * plaintext (cachekit-core's layout; pinned by a test against the real
+ * encryptor). Bounds ciphertext length before decrypt.
+ */
+const AEAD_OVERHEAD_BYTES = 12 + 16;
+
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Read off globalThis: the build's lib set carries no WebAssembly types, and a
+// runtime without WebAssembly has no traps to catch.
+const WASM_RUNTIME_ERROR = (globalThis as { WebAssembly?: { RuntimeError?: ErrorConstructor } })
+  .WebAssembly?.RuntimeError;
+
 /**
- * Cheap structural sniff for the ByteStorage envelope: a positional msgpack
- * 4-tuple whose first element is binary — fixarray(4) marker followed by a
- * bin8/bin16/bin32 marker. User values matching this shape are possible but
- * the verified unpack (xxHash3-64 over the payload) disambiguates; the sniff
- * only exists so ordinary reads never pay an unpack attempt.
+ * A failure inside unpack that is not a verdict on the bytes: a wasm trap
+ * (an allocation abort on a Workers isolate surfaces as
+ * WebAssembly.RuntimeError, and leaves that instance unusable) or a JS
+ * allocation failure copying the output out. Core's own rejections are plain
+ * Errors from both bindings.
  */
-function looksLikeEnvelope(bytes: Uint8Array): boolean {
-  return bytes.length > 2 && bytes[0] === 0x94 && bytes[1] >= 0xc4 && bytes[1] <= 0xc6;
+function isResourceFailure(error: unknown): boolean {
+  return (
+    error instanceof RangeError ||
+    (WASM_RUNTIME_ERROR !== undefined && error instanceof WASM_RUNTIME_ERROR)
+  );
 }
 
 /**
@@ -373,14 +398,30 @@ export class CacheImpl implements SecureCache {
   /** Timestamp of the last oversized-value warning (rate limiting). */
   private lastSizeWarnAt = 0;
 
+  /** Timestamp of the last envelope-unpack-rejected warning (rate limiting). */
+  private lastEnvelopeRejectWarnAt = 0;
+
   /**
    * Verified unpack of a suspected legacy/foreign ByteStorage envelope on a
-   * compression-off cache. Returns null when the bytes aren't actually an
-   * envelope (checksum/shape mismatch) — the caller then treats them as
-   * plain serialized data. The codec is created lazily and cached — except
-   * after close(), when a throwaway codec is used and freed immediately.
+   * compression-off cache. Returns null when the bytes aren't treated as an
+   * envelope — the caller then decodes them as plain serialized data. A
+   * header or core-cap miss rules an envelope out; a checksum/shape rejection
+   * from core is ambiguous (look-alike value or damaged envelope), so it is
+   * also reported via warnEnvelopeRejected, the only use of `key`. The codec
+   * is created lazily and cached — except after close(), when a throwaway
+   * codec is used and freed immediately.
+   *
+   * @throws {ValueTooLargeError} for an envelope over maxDecodedSize (see
+   *   envelopeVerdict) — never unpacked.
+   * @throws the codec's RangeError / WebAssembly.RuntimeError when unpack
+   *   fails for lack of memory rather than on the bytes (isResourceFailure).
    */
-  private tryUnwrapEnvelope(bytes: Uint8Array): Uint8Array | null {
+  private tryUnwrapEnvelope(bytes: Uint8Array, key: string): Uint8Array | null {
+    // Only an envelope within the ceiling gets as far as unpack. One over it
+    // throws rather than falling back: a real envelope served as plain data is
+    // the corruption this path exists to prevent.
+    if (envelopeVerdict(bytes, this.serializer.maxDecodedSize) === 'not-envelope') return null;
+
     // Codec construction stays OUTSIDE the try: a broken binding must fail
     // loudly (through the reliability executor), not be conflated with "not
     // an envelope" — that would silently serve raw envelope tuples, the
@@ -394,7 +435,11 @@ export class CacheImpl implements SecureCache {
       : (this.envelopeReader ??= this.createByteStorage());
     try {
       return reader.unpack(bytes);
-    } catch {
+    } catch (error) {
+      // Not a verdict on the bytes (see isResourceFailure). A native NAPI
+      // allocation failure aborts the process instead; nothing here catches it.
+      if (isResourceFailure(error)) throw error;
+      this.warnEnvelopeRejected(key, bytes.length);
       return null;
     } finally {
       if (reader !== this.envelopeReader) this.freeThrowawayCodec(reader);
@@ -436,7 +481,7 @@ export class CacheImpl implements SecureCache {
    */
   private warnValueTooLarge(key: string, error: ValueTooLargeError, interop: boolean): void {
     const now = Date.now();
-    if (now - this.lastSizeWarnAt < VALUE_TOO_LARGE_WARN_INTERVAL_MS) return;
+    if (now - this.lastSizeWarnAt < WARN_INTERVAL_MS) return;
     this.lastSizeWarnAt = now;
     // Interop caps are protocol constants serializer config does not govern
     // — the remediation hint only holds for the serializer path (expert
@@ -451,6 +496,25 @@ export class CacheImpl implements SecureCache {
     const keyHash = blake2b16Hex(key);
     logError(
       `[cachekit] set rejected, value NOT cached (keyHash=${keyHash}): ${error.message}.${hint}`
+    );
+  }
+
+  /**
+   * Rate-limited report of an envelope-shaped read that core refused to unpack
+   * (checksum or shape mismatch). The bytes are then decoded as plain data:
+   * right for a user value that only looks like an envelope, silent corruption
+   * for a damaged real one. The two can't be told apart here, so this report
+   * is the only trace either leaves. Core's error text is left out on purpose:
+   * on a secure cache these bytes are decrypted plaintext, and its
+   * deserialization errors can echo scalars from them. The key is digested
+   * for the same reason warnValueTooLarge gives.
+   */
+  private warnEnvelopeRejected(key: string, size: number): void {
+    const now = Date.now();
+    if (now - this.lastEnvelopeRejectWarnAt < WARN_INTERVAL_MS) return;
+    this.lastEnvelopeRejectWarnAt = now;
+    logError(
+      `[cachekit] envelope-shaped value failed verified unpack, read as plain data (keyHash=${blake2b16Hex(key)}, bytes=${size}). Unless the cached value is itself meant to look like an envelope, the entry is corrupt — delete it.`
     );
   }
 
@@ -555,9 +619,25 @@ export class CacheImpl implements SecureCache {
 
     let plaintext = bytes;
     if (this.encryption) {
+      // Refuse ciphertext longer than any plaintext this cache would decode
+      // before the codec copies it in: junk of any length otherwise reaches
+      // decrypt, which allocates for all of it before the tag check fails.
+      const maxPlaintext = interop
+        ? DEFAULT_MAX_DECODED_SIZE // decodeInteropValue's fixed input cap
+        : maxEnvelopeInputSize(this.serializer.maxDecodedSize);
+      if (plaintext.length > maxPlaintext + AEAD_OVERHEAD_BYTES) {
+        throw new ValueTooLargeError(
+          `Ciphertext size ${plaintext.length} exceeds max ${maxPlaintext + AEAD_OVERHEAD_BYTES}`
+        );
+      }
       plaintext = await this.encryption.decrypt(plaintext, key, useEnvelope);
     }
     if (useEnvelope) {
+      if (envelopeVerdict(plaintext, this.serializer.maxDecodedSize) === 'not-envelope') {
+        throw new SerializationError(
+          `Stored bytes (${plaintext.length} B) are not an envelope core would accept; refused before unpack`
+        );
+      }
       plaintext = this.withEnvelopeCodec((codec) => codec.unpack(plaintext));
     } else if (!interop && looksLikeEnvelope(plaintext)) {
       // Envelope tolerance (LAB-1388): a compression-off cache can read
@@ -569,10 +649,12 @@ export class CacheImpl implements SecureCache {
       // degradation. The unpack's xxHash3 check rejects ACCIDENTAL
       // look-alikes; it is keyless, so it is not a defense against an
       // adversarial writer deliberately crafting a valid envelope as its
-      // cached value (accepted eyes-open in LAB-1388/LAB-1768 — blast
-      // radius bounded by maxDecodedSize/maxDepth on the unpacked bytes).
-      // Any unpack failure falls back to treating the bytes as
-      // plain-serialized.
+      // cached value (accepted eyes-open in LAB-1388/LAB-1768). Its blast
+      // radius is maxDecodedSize: envelopeVerdict bounds what unpack may
+      // allocate before it runs, and maxDepth bounds the decode after it.
+      // Bytes that are not an envelope core would accept, or that core
+      // rejects, fall back to plain-serialized; an envelope over the ceiling
+      // or an allocation failure throws.
       //
       // Encrypted caches never reach this branch for a genuinely mismatched
       // entry: the AAD binds useEnvelope (frozen v0x03 set, protocol#12), so
@@ -585,7 +667,7 @@ export class CacheImpl implements SecureCache {
       // by the verified unpack. We deliberately do NOT retry decrypt() with
       // the flipped AAD flag: that would reintroduce exactly the envelope-
       // mode ambiguity the AAD binding exists to rule out.
-      plaintext = this.tryUnwrapEnvelope(plaintext) ?? plaintext;
+      plaintext = this.tryUnwrapEnvelope(plaintext, key) ?? plaintext;
     }
     return interop ? decodeInteropValue<T>(plaintext) : this.serializer.decode<T>(plaintext);
   }

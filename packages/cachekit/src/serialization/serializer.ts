@@ -476,6 +476,11 @@ export class MessagePackSerializer implements Serializer {
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
 
+  /** The decoded-size ceiling, for callers that must enforce it upstream of decode(). */
+  get maxDecodedSize(): number {
+    return this.config.maxDecodedSize;
+  }
+
   /**
    * Encode a value to MessagePack bytes.
    *

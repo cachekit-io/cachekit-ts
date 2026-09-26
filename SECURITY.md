@@ -32,17 +32,48 @@ _before_ decompressing. The envelope's self-declared `original_size` is not
 trusted, and the xxHash3-64 checksum is unkeyed so it does not gate a forging
 attacker — see [cachekit-core: Decompression limits](https://github.com/cachekit-io/cachekit-core/blob/main/SECURITY.md#decompression-limits).
 
-`serializer.maxDecodedSize` (10 MiB by default) is checked inside
-`serializer.decode`, i.e. on the already-decompressed bytes. It sits downstream
-of core's bound rather than replacing it, so the two ceilings differ by ~51x:
-core will materialize up to 512 MiB before `maxDecodedSize` is ever consulted.
-Raising or lowering `maxDecodedSize` does not change what `unpack` may allocate.
-Tracked in LAB-2732.
+The SDK holds envelopes to its own, lower ceiling as well:
+`serializer.maxDecodedSize` (10 MiB by default). Before calling `unpack`, it
+reads the envelope's MessagePack header. An envelope that
+declares an `original_size` over `maxDecodedSize` is rejected with
+`ValueTooLargeError`. So is input too long to be an envelope within that
+ceiling. Bytes are never unpacked when their header is not in a shape a
+conforming writer emits, when core's own caps would refuse them, or when
+`compressed_data` is longer than LZ4's worst case for the declared size. That
+last check stops a small declared size from carrying a large payload into core's
+copy. A compression-on read treats such bytes as corrupt. The envelope-tolerant
+read on a compression-off cache decodes them as plain MessagePack. What `unpack`
+may allocate is then a small multiple of `maxDecodedSize`: the input, the
+compressed payload, and an output of at most `maxDecodedSize`, which is the same
+bound `serializer.decode` applies to its input. On an encrypted cache the
+ciphertext is bounded first: bytes longer than any plaintext the cache would
+decode, plus the 28-byte AES-GCM nonce and tag, are rejected with
+`ValueTooLargeError` before `decrypt` copies them. The envelope-tolerant read
+also decodes as plain MessagePack an envelope that passed the header read but
+that core rejects (checksum or shape mismatch), and reports it through the SDK
+logger as a rate-limited `[cachekit] envelope-shaped value failed verified
+unpack` line carrying the key's digest. The line never includes core's error
+text: on an encrypted cache those bytes are decrypted plaintext.
+
+One consequence on compression-off caches: a plain value whose MessagePack
+exactly mimics an envelope core would decompress, and which declares more than
+`maxDecodedSize`, is refused rather than decoded. Only decompressing could tell
+it from a real oversized envelope, and serving a real one as its raw 4-tuple
+would be silent corruption. That key reads as a miss, or throws with degradation
+off. The shape required is `[bytes, [8 integers ≤ 255], an integer over
+maxDecodedSize, anything]`, with at least one byte per 1000 of that integer.
+
+If an allocation fails or the wasm instance traps inside `unpack` during the
+envelope-tolerant read, the SDK propagates the error instead of treating it as
+"not an envelope": on Workers a trap leaves that wasm instance unusable. On
+Node, a native allocation failure inside the NAPI binding aborts the process
+before any JavaScript can observe it; `maxDecodedSize` is what keeps a forged
+envelope from getting that far.
 
 > [!IMPORTANT]
-> The 512 MiB ceiling is server-class. A Cloudflare Workers isolate has roughly
-> 128 MiB, so on the Workers build a payload well inside cachekit-core's limits
-> can still exhaust the isolate. This SDK has no read-side pre-decompression
-> bound, so the only lever is to check the fetched value's byte length yourself
-> before handing it to the cache, or to cap value size at the backend. Making
-> core's ceiling environment-aware is tracked in LAB-2505.
+> The 512 MiB core ceiling is server-class. A Cloudflare Workers isolate has
+> roughly 128 MiB. On Workers, `maxDecodedSize` is now the setting that bounds
+> what a forged envelope can make the reader allocate during `unpack`. It does
+> not bound the decoded value's heap, which can be many times larger; size it
+> as the [README's value size limits](packages/cachekit/README.md#value-size-limits--the-1-mib-default-is-a-cache-off-switch-not-a-suggestion)
+> describe. Making core's ceiling environment-aware is tracked in LAB-2505.

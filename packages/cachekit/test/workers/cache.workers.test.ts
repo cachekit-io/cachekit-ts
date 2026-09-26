@@ -15,8 +15,10 @@ import {
   createCache,
   CachekitIOCore,
   ConfigurationError,
+  ValueTooLargeError,
   type Backend,
 } from '../../src/workers/index.js';
+import { forgedEnvelope } from '../fixtures/forged-envelope.js';
 
 const MASTER_KEY_HEX = '61'.repeat(32); // 32 bytes of 0x61, same as the vector fixture
 
@@ -129,6 +131,23 @@ describe('createCache full stack inside workerd', () => {
     expect(await cache.delete('ns:plain')).toBe(true);
     expect(await cache.get('ns:plain')).toBeNull();
 
+    await cache.close();
+  });
+
+  it('refuses an envelope declaring more than maxDecodedSize before the wasm codec sees it', async () => {
+    // Inside core's own caps (<= 1000:1, <= 512 MiB), so core would allocate
+    // the declared 16 MiB before finding the LZ4 bytes are garbage.
+    const forged = forgedEnvelope(16 * 1024 * 1024);
+
+    const backend = memoryBackend();
+    backend.store.set('ns:forged', forged);
+    const cache = createCache({
+      backend,
+      l1: { enabled: false },
+      reliability: { degradation: false, retry: { maxAttempts: 1 } },
+    });
+
+    await expect(cache.get('ns:forged')).rejects.toThrow(ValueTooLargeError);
     await cache.close();
   });
 
