@@ -185,9 +185,9 @@ in heap (a legal payload can inflate ~40×). Nested forged collection headers
 can no longer amplify unbounded — reads are structurally depth-bounded before
 the decoder allocates (LAB-2487) — but `maxDecodedSize` still sets the ceiling
 on a single untrusted decode's transient memory. It also bounds decompression:
-an envelope that declares more than `maxDecodedSize` is rejected before it is
-unpacked, so the core codec never allocates for it. Size it against your runtime's
-memory limit (and, on a shared/concurrent runtime, against peak concurrent
+an envelope that declares more than `maxDecodedSize`, or carries a payload too
+large for what it declares, is never unpacked, so the core codec never
+allocates for it. Size it against your runtime's memory limit (and, on a shared/concurrent runtime, against peak concurrent
 reads), not just your largest value: on a 128 MiB Workers isolate a 10 MiB cap
 already permits a multi-hundred-MiB transient.
 

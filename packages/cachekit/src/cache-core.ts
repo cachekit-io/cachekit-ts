@@ -20,6 +20,7 @@ import {
   type L1Write,
 } from './cache/background-refresh.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
+import { envelopeVerdict, looksLikeEnvelope } from './serialization/envelope.js';
 import {
   generateKey,
   generateParamsHash,
@@ -63,92 +64,6 @@ const VALUE_TOO_LARGE_WARN_INTERVAL_MS = 60_000;
 const LOCK_FALLTHROUGH = Symbol('cachekit.lock-fallthrough');
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
-/**
- * Cheap structural sniff for the ByteStorage envelope: a positional msgpack
- * 4-tuple whose first element is binary — fixarray(4) marker followed by a
- * bin8/bin16/bin32 marker. User values matching this shape are possible but
- * the verified unpack (xxHash3-64 over the payload) disambiguates; the sniff
- * only exists so ordinary reads never pay an unpack attempt.
- */
-function looksLikeEnvelope(bytes: Uint8Array): boolean {
-  return bytes.length > 2 && bytes[0] === 0x94 && bytes[1] >= 0xc4 && bytes[1] <= 0xc6;
-}
-
-/**
- * The `original_size` a ByteStorage envelope declares, read without unpacking
- * it — or null when the bytes are not an envelope in a shape a conforming
- * writer emits: `[bin | legacy array of uint8, [8 x uint8], uint, …]`, uints
- * in rmp_serde's shortest unsigned forms.
- *
- * It exists so the SDK can refuse an oversized envelope before calling
- * unpack. cachekit-core allocates `original_size` before it validates the LZ4
- * stream, capped only by its own min(512 MiB, 1000 x compressed length), and
- * the unkeyed checksum does not stop a forged size. Stricter than core's
- * lenient rmp_serde decode on purpose: a shape this rejects is never unpacked,
- * so it cannot allocate. Walks a legacy array-of-ints payload byte by byte, so
- * the cost is linear in input size — never in the declared size.
- */
-export function declaredEnvelopeSize(bytes: Uint8Array): number | null {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let pos = 0;
-  const take = (width: 1 | 2 | 4): number | null => {
-    if (pos + width > view.byteLength) return null;
-    const value =
-      width === 1 ? view.getUint8(pos) : width === 2 ? view.getUint16(pos) : view.getUint32(pos);
-    pos += width;
-    return value;
-  };
-  const uint = (): number | null => {
-    const marker = take(1);
-    if (marker === null) return null;
-    if (marker <= 0x7f) return marker;
-    if (marker === 0xcc) return take(1);
-    if (marker === 0xcd) return take(2);
-    if (marker === 0xce) return take(4);
-    return null;
-  };
-  const arrayLength = (marker: number): number | null => {
-    if (marker >= 0x90 && marker <= 0x9f) return marker & 0x0f;
-    if (marker === 0xdc) return take(2);
-    if (marker === 0xdd) return take(4);
-    return null;
-  };
-  // A run of uint8 as rmp_serde writes them: fixint, or 0xcc + one byte.
-  // Indexes the bytes directly — this is the per-byte loop on legacy reads.
-  const byteArray = (length: number): boolean => {
-    for (let i = 0; i < length; i++) {
-      const marker = bytes[pos];
-      if (marker <= 0x7f) pos += 1;
-      else if (marker === 0xcc) pos += 2;
-      else return false; // also past the end: bytes[pos] is undefined
-    }
-    return pos <= view.byteLength;
-  };
-
-  const outer = take(1);
-  if (outer === null || arrayLength(outer) !== 4) return null;
-
-  // [0] compressed_data: bin since protocol 1.1, an array of uint8 before it.
-  const data = take(1);
-  if (data === null) return null;
-  const binWidth = ({ 0xc4: 1, 0xc5: 2, 0xc6: 4 } as const)[data];
-  if (binWidth !== undefined) {
-    const length = take(binWidth);
-    if (length === null || pos + length > view.byteLength) return null;
-    pos += length;
-  } else {
-    const length = arrayLength(data);
-    if (length === null || !byteArray(length)) return null;
-  }
-
-  // [1] checksum: always an array of 8 uint8.
-  const checksum = take(1);
-  if (checksum === null || arrayLength(checksum) !== 8 || !byteArray(8)) return null;
-
-  // [2] original_size.
-  return uint();
-}
 
 // Read off globalThis: the build's lib set carries no WebAssembly types, and a
 // runtime without WebAssembly has no traps to catch.
@@ -475,15 +390,21 @@ export class CacheImpl implements SecureCache {
   /**
    * Verified unpack of a suspected legacy/foreign ByteStorage envelope on a
    * compression-off cache. Returns null when the bytes aren't actually an
-   * envelope (checksum/shape mismatch) — the caller then treats them as
-   * plain serialized data. The codec is created lazily and cached — except
-   * after close(), when a throwaway codec is used and freed immediately.
+   * envelope (header, core-cap or checksum/shape mismatch) — the caller then
+   * treats them as plain serialized data. The codec is created lazily and
+   * cached — except after close(), when a throwaway codec is used and freed
+   * immediately.
+   *
+   * @throws {ValueTooLargeError} for an envelope over maxDecodedSize (see
+   *   envelopeVerdict) — never unpacked.
+   * @throws the codec's RangeError / WebAssembly.RuntimeError when unpack
+   *   fails for lack of memory rather than on the bytes (isResourceFailure).
    */
   private tryUnwrapEnvelope(bytes: Uint8Array): Uint8Array | null {
-    // Only a readable header gets as far as unpack; a declared size over
-    // maxDecodedSize throws rather than falling back, because a real envelope
-    // served as plain data is the corruption this path exists to prevent.
-    if (!this.envelopeWithinCeiling(bytes)) return null;
+    // Only an envelope within the ceiling gets as far as unpack. One over it
+    // throws rather than falling back: a real envelope served as plain data is
+    // the corruption this path exists to prevent.
+    if (envelopeVerdict(bytes, this.serializer.maxDecodedSize) === 'not-envelope') return null;
 
     // Codec construction stays OUTSIDE the try: a broken binding must fail
     // loudly (through the reliability executor), not be conflated with "not
@@ -499,33 +420,13 @@ export class CacheImpl implements SecureCache {
     try {
       return reader.unpack(bytes);
     } catch (error) {
-      // An allocation failure or trap says nothing about whether these bytes
-      // are an envelope, and reading it as "not one" would hide a wasm
-      // instance that is now unusable. On NAPI a native allocation failure
-      // aborts the process instead; nothing here can catch that.
+      // Not a verdict on the bytes (see isResourceFailure). A native NAPI
+      // allocation failure aborts the process instead; nothing here catches it.
       if (isResourceFailure(error)) throw error;
       return null;
     } finally {
       if (reader !== this.envelopeReader) this.freeThrowawayCodec(reader);
     }
-  }
-
-  /**
-   * True when `bytes` parse as an envelope header whose declared size is
-   * within maxDecodedSize; false when they are not an envelope. Throws
-   * ValueTooLargeError over the ceiling — so the one number that bounds
-   * decode() also bounds what unpack may allocate ahead of it.
-   */
-  private envelopeWithinCeiling(bytes: Uint8Array): boolean {
-    const declared = declaredEnvelopeSize(bytes);
-    if (declared === null) return false;
-    const max = this.serializer.maxDecodedSize;
-    if (declared > max) {
-      throw new ValueTooLargeError(
-        `Envelope declares ${declared} bytes, exceeds maxDecodedSize ${max}`
-      );
-    }
-    return true;
   }
 
   /**
@@ -685,8 +586,10 @@ export class CacheImpl implements SecureCache {
       plaintext = await this.encryption.decrypt(plaintext, key, useEnvelope);
     }
     if (useEnvelope) {
-      if (!this.envelopeWithinCeiling(plaintext)) {
-        throw new SerializationError('Stored bytes are not a ByteStorage envelope');
+      if (envelopeVerdict(plaintext, this.serializer.maxDecodedSize) === 'not-envelope') {
+        throw new SerializationError(
+          `Stored bytes (${plaintext.length} B) are not an envelope core would accept; refused before unpack`
+        );
       }
       plaintext = this.withEnvelopeCodec((codec) => codec.unpack(plaintext));
     } else if (!interop && looksLikeEnvelope(plaintext)) {
@@ -700,11 +603,11 @@ export class CacheImpl implements SecureCache {
       // look-alikes; it is keyless, so it is not a defense against an
       // adversarial writer deliberately crafting a valid envelope as its
       // cached value (accepted eyes-open in LAB-1388/LAB-1768). Its blast
-      // radius is maxDecodedSize: the declared size is checked before unpack
-      // (tryUnwrapEnvelope), and maxDepth bounds the decode after it. A
-      // header that doesn't parse, or a core rejection, falls back to
-      // treating the bytes as plain-serialized; an over-ceiling size or an
-      // allocation failure throws.
+      // radius is maxDecodedSize: envelopeVerdict bounds what unpack may
+      // allocate before it runs, and maxDepth bounds the decode after it.
+      // Bytes that are not an envelope core would accept, or that core
+      // rejects, fall back to plain-serialized; an envelope over the ceiling
+      // or an allocation failure throws.
       //
       // Encrypted caches never reach this branch for a genuinely mismatched
       // entry: the AAD binds useEnvelope (frozen v0x03 set, protocol#12), so

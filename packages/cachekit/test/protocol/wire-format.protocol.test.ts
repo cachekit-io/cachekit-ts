@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
-import { declaredEnvelopeSize } from '../../src/cache-core.js';
+import { readEnvelopeHeader } from '../../src/serialization/envelope.js';
 // Single vendored copy of protocol/test-vectors/wire-format.json (see the
 // workers lane header for the re-copy rule); this lane runs the same vectors
 // through the NAPI binding so both bindings are held to identical bytes.
@@ -227,33 +227,37 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
   // The SDK reads original_size itself so it can refuse an oversized envelope
   // before unpack allocates it. It must agree with core on every conforming
   // envelope — both encodings — or a legitimate entry would stop reading.
-  describe('declaredEnvelopeSize (pre-unpack header read)', () => {
+  describe('readEnvelopeHeader (pre-unpack header read)', () => {
+    const declared = (bytes: Uint8Array) => readEnvelopeHeader(bytes)?.declaredSize ?? null;
+
     it.each(vectors.map((v) => [v.name, v] as const))(
       'reads original_size from ground-truth envelope %s',
       (_name, vector) => {
-        expect(declaredEnvelopeSize(hexToBytes(vector.envelope_hex))).toBe(
-          vector.input_hex.length / 2
-        );
+        expect(declared(hexToBytes(vector.envelope_hex))).toBe(vector.input_hex.length / 2);
       }
     );
 
-    it('reads original_size from fresh packs across every uint width', () => {
+    it('reads original_size and compressed length from fresh packs across every uint width', () => {
       for (const size of [0, 1, 127, 128, 255, 256, 65535, 65536, 200_000]) {
         const payload = new Uint8Array(size);
         for (let i = 0; i < size; i++) payload[i] = (i * 131 + 17) & 0xff;
-        expect(declaredEnvelopeSize(bs.pack(payload))).toBe(size);
+        const packed = bs.pack(payload);
+        const header = readEnvelopeHeader(packed);
+        expect(header?.declaredSize).toBe(size);
+        // envelopeVerdict refuses anything past lz4_flex's worst case; the
+        // real writer must stay inside it, even on incompressible input.
+        expect(header!.compressedLength).toBeGreaterThan(0);
+        expect(header!.compressedLength).toBeLessThanOrEqual(20 + Math.floor((size * 110) / 100));
       }
     });
 
-    it('returns null for every truncation of a valid envelope', () => {
+    it('returns null for every truncation short of original_size', () => {
       const packed = bs.pack(new TextEncoder().encode('truncation walk'));
+      // Only the trailing fixstr "msgpack" (8 bytes) is past original_size.
+      const headerEnd = packed.length - 8;
       for (let len = 0; len < packed.length; len++) {
-        // Once original_size is complete only the format string is missing,
-        // which the header read does not need.
-        const size = declaredEnvelopeSize(packed.subarray(0, len));
-        if (size !== null) expect(size).toBe(15);
+        expect(declared(packed.subarray(0, len))).toBe(len < headerEnd ? null : 15);
       }
-      expect(declaredEnvelopeSize(packed.subarray(0, 3))).toBeNull();
     });
 
     it('returns null for shapes no conforming writer emits', () => {
@@ -269,7 +273,7 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
         [0x94, 0x91, 0xcd, 0x01, 0x00, 0x98, 0, 0, 0, 0, 0, 0, 0, 0, 0x00], // legacy byte > 0xff
       ];
       for (const bytes of cases) {
-        expect(declaredEnvelopeSize(new Uint8Array(bytes))).toBeNull();
+        expect(readEnvelopeHeader(new Uint8Array(bytes))).toBeNull();
       }
     });
 
@@ -277,7 +281,7 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
       const packed = bs.pack(new TextEncoder().encode('offset'));
       const padded = new Uint8Array(packed.length + 7);
       padded.set(packed, 7);
-      expect(declaredEnvelopeSize(padded.subarray(7))).toBe(6);
+      expect(declared(padded.subarray(7))).toBe(6);
     });
   });
 });

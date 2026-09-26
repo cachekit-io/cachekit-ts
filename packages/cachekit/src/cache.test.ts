@@ -7,7 +7,8 @@ import { file } from './backends/file.js';
 import { generateKey } from './serialization/key-generator.js';
 import { setLogger } from './logger.js';
 import { createCache as createIntentCache } from './intents.js';
-import { ConfigurationError, ValueTooLargeError } from './errors.js';
+import { ConfigurationError, SerializationError, ValueTooLargeError } from './errors.js';
+import { forgedEnvelope } from '../test/fixtures/forged-envelope.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
@@ -624,31 +625,6 @@ describe('Cache Integration', () => {
     });
 
     describe('read ceiling: maxDecodedSize bounds unpack, not just decode', () => {
-      /**
-       * An envelope cachekit-core would accept and allocate for: `declaredSize`
-       * sits inside core's own caps (<= 512 MiB, <= 1000x compressed length)
-       * but above the reader's maxDecodedSize. The LZ4 bytes are garbage —
-       * core allocates the declared size before it finds that out.
-       */
-      function forgedEnvelope(declaredSize: number): Uint8Array {
-        const compressedLen = Math.ceil(declaredSize / 1000);
-        const bytes = new Uint8Array(1 + 3 + compressedLen + 9 + 5 + 8);
-        const view = new DataView(bytes.buffer);
-        let pos = 0;
-        bytes[pos++] = 0x94; // fixarray(4)
-        bytes[pos++] = 0xc5; // bin16 compressed_data
-        view.setUint16(pos, compressedLen);
-        pos += 2 + compressedLen;
-        bytes[pos++] = 0x98; // checksum: fixarray(8) of zero bytes
-        pos += 8;
-        bytes[pos++] = 0xce; // original_size: uint32
-        view.setUint32(pos, declaredSize);
-        pos += 4;
-        bytes[pos++] = 0xa7; // format: fixstr(7)
-        bytes.set(new TextEncoder().encode('msgpack'), pos);
-        return bytes;
-      }
-
       /** Codec spy: counts unpack calls; `unpackError` makes unpack throw it. */
       function spyCodec(unpackError?: unknown) {
         const calls = { unpack: 0 };
@@ -663,12 +639,18 @@ describe('Cache Integration', () => {
         return { codec, calls };
       }
 
-      function readerOver(stored: Uint8Array, compression: boolean, codec: ByteStorageLike) {
+      async function readerOver(
+        stored: Uint8Array,
+        compression: boolean,
+        codec: ByteStorageLike,
+        serializer?: { maxDecodedSize: number }
+      ) {
         const backend = new InMemoryBackend();
-        void backend.set('test:ceiling', stored, 3600);
+        await backend.set('test:ceiling', stored, 3600);
         const reader = createCache({
           backend,
           compression,
+          serializer,
           l1: { enabled: false },
           reliability: { degradation: false, retry: { maxAttempts: 1 } },
         });
@@ -682,30 +664,43 @@ describe('Cache Integration', () => {
       }
 
       const declared = 16 * 1024 * 1024; // > 10 MiB default maxDecodedSize
-
-      it.each([
+      const bothPaths = [
         ['compression on', true],
         ['compression off (envelope tolerance)', false],
-      ])('rejects an oversized envelope before unpack (%s)', async (_label, compression) => {
-        const { codec, calls } = spyCodec();
-        const reader = readerOver(forgedEnvelope(declared), compression, codec);
+      ] as const;
 
-        await expect(reader.get('test:ceiling')).rejects.toThrow(ValueTooLargeError);
-        expect(calls.unpack).toBe(0);
-        await reader.close();
-      });
+      it.each(bothPaths)(
+        'rejects an oversized envelope before unpack (%s)',
+        async (_label, compression) => {
+          const { codec, calls } = spyCodec();
+          const reader = await readerOver(forgedEnvelope(declared), compression, codec);
+
+          await expect(reader.get('test:ceiling')).rejects.toThrow(ValueTooLargeError);
+          expect(calls.unpack).toBe(0);
+          await reader.close();
+        }
+      );
+
+      it.each(bothPaths)(
+        'never unpacks a small declared size carrying an oversized payload (%s)',
+        async (_label, compression) => {
+          // Core would copy the whole payload before rejecting it.
+          const { codec, calls } = spyCodec();
+          const reader = await readerOver(forgedEnvelope(1, 64 * 1024), compression, codec);
+
+          const read = reader.get<unknown[]>('test:ceiling');
+          if (compression) await expect(read).rejects.toThrow(SerializationError);
+          else expect((await read)?.length).toBe(4); // plain 4-tuple
+          expect(calls.unpack).toBe(0);
+          await reader.close();
+        }
+      );
 
       it('lets maxDecodedSize raise the ceiling for envelopes that legitimately need it', async () => {
         const { codec, calls } = spyCodec();
-        const backend = new InMemoryBackend();
-        await backend.set('test:ceiling', forgedEnvelope(declared), 3600);
-        const reader = createCache({
-          backend,
-          l1: { enabled: false },
-          serializer: { maxDecodedSize: declared },
-          reliability: { degradation: false, retry: { maxAttempts: 1 } },
+        const reader = await readerOver(forgedEnvelope(declared), true, codec, {
+          maxDecodedSize: declared,
         });
-        (reader as unknown as { byteStorage: ByteStorageLike }).byteStorage = codec;
 
         // Passes the ceiling and reaches unpack; the spy's empty output then
         // fails to decode, which is not what this test is about.
@@ -714,10 +709,33 @@ describe('Cache Integration', () => {
         await reader.close();
       });
 
+      it('still reads a plain value shaped like an envelope core would reject', async () => {
+        // bytes, 8 small ints, a size over the ceiling, a string: an ordinary
+        // value on a compression-off cache. Core refuses it on the 1000:1 cap
+        // before allocating, so refusing it here would protect nothing.
+        const value = [
+          new Uint8Array([1, 2, 3]),
+          [1, 2, 3, 4, 5, 6, 7, 8],
+          12_000_000,
+          'image/png',
+        ];
+        const backend = new InMemoryBackend();
+        const cache = createCache({
+          backend,
+          compression: false,
+          l1: { enabled: false },
+          reliability: { degradation: false },
+        });
+        await cache.set('test:lookalike', value);
+
+        expect(await cache.get('test:lookalike')).toEqual(value);
+        await cache.close();
+      });
+
       it('propagates a wasm trap from the tolerance sniff instead of reading it as "not an envelope"', async () => {
         const trap = new WebAssembly.RuntimeError('unreachable');
         const { codec, calls } = spyCodec(trap);
-        const reader = readerOver(forgedEnvelope(1000), false, codec);
+        const reader = await readerOver(forgedEnvelope(1000), false, codec);
 
         await expect(reader.get('test:ceiling')).rejects.toBe(trap);
         expect(calls.unpack).toBe(1);
@@ -727,7 +745,7 @@ describe('Cache Integration', () => {
       it('propagates a JS allocation failure from the tolerance sniff', async () => {
         const oom = new RangeError('Array buffer allocation failed');
         const { codec } = spyCodec(oom);
-        const reader = readerOver(forgedEnvelope(1000), false, codec);
+        const reader = await readerOver(forgedEnvelope(1000), false, codec);
 
         await expect(reader.get('test:ceiling')).rejects.toBe(oom);
         await reader.close();
@@ -737,10 +755,10 @@ describe('Cache Integration', () => {
         // A core integrity/format rejection means "not an envelope": the bytes
         // are decoded as plain MessagePack (here, the 4-tuple itself).
         const { codec, calls } = spyCodec(new Error('Checksum mismatch'));
-        const reader = readerOver(forgedEnvelope(1000), false, codec);
+        const reader = await readerOver(forgedEnvelope(1000), false, codec);
 
         const value = await reader.get<unknown[]>('test:ceiling');
-        expect(Array.isArray(value) && value.length).toBe(4);
+        expect(value?.length).toBe(4);
         expect(calls.unpack).toBe(1);
         await reader.close();
       });
@@ -750,7 +768,7 @@ describe('Cache Integration', () => {
         // sniff, but whose [1] is not a checksum: the header read rules it out.
         const plain = new MessagePackSerializer().encode([new Uint8Array([1]), 'x', 3, 'y']);
         const { codec, calls } = spyCodec();
-        const reader = readerOver(plain, false, codec);
+        const reader = await readerOver(plain, false, codec);
 
         expect(await reader.get('test:ceiling')).toEqual([new Uint8Array([1]), 'x', 3, 'y']);
         expect(calls.unpack).toBe(0);
