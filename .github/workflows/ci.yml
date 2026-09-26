@@ -106,6 +106,9 @@ jobs:
 
   coverage:
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
+    permissions:
+      contents: read
+      id-token: write # Required for Codecov OIDC
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -134,12 +137,16 @@ jobs:
       # aborts before exec; continue-on-error keeps the upload from reddening CI.
       # When this step is orange, read the log: "Could not verify signature" is
       # the guard working (never silence it); an upload error (token, network)
-      # only loses that upload.
+      # only loses that upload. Codecov requires a token on any same-repo branch
+      # (its error says "protected"). use_oidc mints one per run via the job's
+      # id-token: write, so no stored secret. Forks never attempt OIDC and upload
+      # tokenless; "Token required" on a same-repo run means OIDC did not mint.
       - name: Upload coverage
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         continue-on-error: true
         with:
           files: ./packages/cachekit/coverage/lcov.info
+          use_oidc: true
           fail_ci_if_error: true
 
   security:
@@ -154,6 +161,46 @@ jobs:
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: '22'
+
+      # Holds where renovate.json's approval gate cannot: vulnerability-
+      # remediation updates bypass that gate (why: CONTRIBUTING.md). Runs before
+      # `pnpm install` so no install script can rewrite the file first.
+      - name: Verify bounded floor-pins stay in-major
+        run: |
+          set -euo pipefail
+          # Declared bounds, "<package> <upper-bound major>". Adding or removing
+          # a bounded pin means editing this list — that edit IS the human
+          # decision the bound represents.
+          expected='brace-expansion@2 3
+          js-yaml 5
+          protobufjs 8
+          uuid 12'
+          expected=$(printf '%s\n' "${expected}" | sort)
+
+          # Read the overrides through pnpm's own parser — exactly what install
+          # applies, however the YAML is spelled; a file pnpm cannot read fails
+          # the step. Keep ONLY a plain `>=floor <N` value, floor and bound at
+          # most three parts, the bound written <N, <N.0 or <N.0.0. Anything
+          # else — `<12.1` (admits 12.0.x), `<12.0.0.0` (invalid, so semver drops
+          # it), a `||` union, a missing bound — drops out of `found` and fails
+          # the comparison. A key with whitespace could forge extra lines, so fail.
+          overrides=$(pnpm config get overrides --json)
+          found=$(printf '%s' "${overrides}" | node -e '
+            const o = JSON.parse(require("fs").readFileSync(0, "utf8") || "{}") ?? {};
+            for (const [k, v] of Object.entries(o)) {
+              if (/\s/.test(k)) throw new Error("override key contains whitespace: " + JSON.stringify(k));
+              const m = /^>=\d+(?:\.\d+){0,2}\s+<(\d+)(?:\.0){0,2}$/.exec(String(v));
+              if (m) console.log(k + " " + m[1]);
+            }' | sort)
+
+          if [ "${found}" != "${expected}" ]; then
+            echo "::error::Bounded floor-pins in pnpm-workspace.yaml no longer match the set this check declares. A bound is a deliberate constraint, not drift (see the notes beside each pin, and CONTRIBUTING.md). If crossing a major is genuinely required, remove the bound in a hand-written commit that says why and update the expected list in this step."
+            echo "--- expected ---"; printf '%s\n' "${expected}"
+            echo "--- found ---";    printf '%s\n' "${found:-(none — pnpm reports no bounded overrides)}" | sed 's/^/  /'
+            exit 1
+          fi
+          echo "Bounded floor-pins verified (package upper-bound-major):"
+          printf '%s\n' "${found}" | sed 's/^/  /'
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

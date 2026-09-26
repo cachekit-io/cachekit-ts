@@ -32,13 +32,6 @@ describe('L1Cache', () => {
       expect(cache.get('key')).toBeNull();
     });
 
-    it('updates lastAccess on get', () => {
-      vi.useFakeTimers();
-      cache.set('key', 'value', 10000, 'test');
-      vi.advanceTimersByTime(1000);
-      cache.get('key'); // Should update lastAccess
-    });
-
     it('ttl <= 0 never expires (LAB-1388: matches the ts-wide "no expiry" contract)', () => {
       vi.useFakeTimers();
       cache.set('zero', 'value', 0, 'test');

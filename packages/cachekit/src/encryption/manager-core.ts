@@ -25,6 +25,11 @@ export interface EncryptionTenantKeys {
    */
   keyringEntryCount?(): number;
   /**
+   * cachekit-core's AES hardware detection (informational). Optional: older
+   * binding binaries predate it, and the manager reports `null` for those.
+   */
+  hardwareAccelerationEnabled?(): boolean;
+  /**
    * Deterministic zeroize-and-release (wasm bindings). NAPI handles zeroize
    * via GC finalizer instead and don't expose this.
    */
@@ -99,6 +104,8 @@ export class EncryptionManagerCore {
   private native: EncryptionBindings | null = null;
   private disposed = false;
   private initPromise: Promise<void> | null = null;
+  /** Single source of truth for tenant_id — read by both HKDF derivation and AAD construction. */
+  private readonly effectiveTenantId: string;
   // Note: Nonce tracking is done in Rust via getNonceCounter().
   // The Rust encryptor throws NonceCounterExhausted when the limit is reached.
 
@@ -130,11 +137,12 @@ export class EncryptionManagerCore {
    */
   constructor(
     private readonly masterKey: string,
-    private readonly tenantId: string | undefined,
+    tenantId: string | undefined,
     private readonly loadBindings: () => Promise<EncryptionBindings>,
     private readonly previousMasterKeys: readonly string[] = []
   ) {
     validateKeyHex(masterKey, 'Master key');
+    this.effectiveTenantId = tenantId ?? 'default';
     if (previousMasterKeys.length > MAX_PREVIOUS_MASTER_KEYS) {
       throw new ConfigurationError(
         `previousMasterKeys accepts at most ${MAX_PREVIOUS_MASTER_KEYS} keys, got ${previousMasterKeys.length} — drop retired keys explicitly, the list is never truncated`
@@ -203,12 +211,11 @@ export class EncryptionManagerCore {
       // byte buffers are wiped in the finally below as soon as the binding has
       // consumed them — on error paths too (the hex config strings remain on
       // the manager for init retry, per the documented masterKey pattern).
-      const effectiveTenantId = this.tenantId ?? 'default';
       let tenantKeys: EncryptionTenantKeys;
       try {
         tenantKeys = this.native.deriveTenantKeys(
           masterKeyBytes,
-          effectiveTenantId,
+          this.effectiveTenantId,
           previousKeyBytes.length > 0 ? previousKeyBytes : undefined
         );
       } finally {
@@ -337,6 +344,26 @@ export class EncryptionManagerCore {
   }
 
   /**
+   * Whether AES-256-GCM is hardware-accelerated on this host, per
+   * cachekit-core's detection (informational — see the README). Initialises
+   * the bindings if needed, so it answers at startup. `null` = unknown: the
+   * installed binding predates the accessor.
+   *
+   * @throws {EncryptionError} if the manager is disposed or bindings fail to load
+   */
+  async isHardwareAccelerated(): Promise<boolean | null> {
+    await this.ensureInitialized();
+    // ensureInitialized() returns early on an already-initialised manager, so
+    // dispose() can land while this call is suspended at the await. encrypt()
+    // and decrypt() convert the resulting null read inside their catch; this
+    // path has none, so it checks explicitly rather than trusting a `!`.
+    if (this.disposed || !this.tenantKeys) {
+      throw new EncryptionError('EncryptionManager has been disposed');
+    }
+    return this.tenantKeys.hardwareAccelerationEnabled?.() ?? null;
+  }
+
+  /**
    * Dispose of the encryption manager and zeroize keys.
    *
    * NAPI: releasing the reference triggers ZeroizeOnDrop via the GC finalizer.
@@ -372,7 +399,7 @@ export class EncryptionManagerCore {
 
     // Encode all components as UTF-8 (matches Python exactly)
     const components = [
-      encoder.encode(this.tenantId ?? ''),
+      encoder.encode(this.effectiveTenantId),
       encoder.encode(cacheKey),
       encoder.encode(format),
       encoder.encode(compressed ? 'True' : 'False'), // Python str(bool) format

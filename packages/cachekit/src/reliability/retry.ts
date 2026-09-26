@@ -1,4 +1,5 @@
 import { secureRandomFloat } from '../utils/random.js';
+import { isRetryable } from '../errors.js';
 import {
   DEFAULT_RETRY_MAX_ATTEMPTS,
   DEFAULT_RETRY_BASE_DELAY,
@@ -18,7 +19,11 @@ export interface RetryConfig {
   maxDelay: number;
   /** Add random jitter to delays (default: true) */
   jitter: boolean;
-  /** Error types to retry (default: all errors) */
+  /**
+   * Error types to retry (default: all retryable errors). Narrows, never
+   * widens: a `BackendError` classified `permanent` or `authentication` is
+   * never retried, whatever this returns.
+   */
   retryOn?: (error: Error) => boolean;
 }
 
@@ -74,7 +79,7 @@ export class RetryPolicy {
         lastError = error instanceof Error ? error : new Error(String(error));
 
         // Check if we should retry this error
-        if (this.config.retryOn && !this.config.retryOn(lastError)) {
+        if (!isRetryable(lastError) || (this.config.retryOn && !this.config.retryOn(lastError))) {
           throw lastError;
         }
 

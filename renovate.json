@@ -1,4 +1,12 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["local>cachekit-io/renovate-config"]
+  "extends": ["local>cachekit-io/renovate-config"],
+  "packageRules": [
+    {
+      "description": "Upper bounds on pnpm-workspace.yaml overrides are decisions, not drift: cross-major proposals wait under Pending Approval instead of opening a branch. Routine majors only; CONTRIBUTING.md explains the CI step that covers the rest.",
+      "matchDepTypes": ["pnpm-workspace.overrides"],
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    }
+  ]
 }

@@ -278,6 +278,15 @@ impl TenantKeys {
     pub fn keyring_entry_count(&self) -> u32 {
         self.keyring_entries
     }
+
+    /// Whether cachekit-core detected AES hardware support on this host.
+    ///
+    /// Forwards `ZeroKnowledgeEncryptor::hardware_acceleration_enabled()`.
+    /// Informational only — `ring` dispatches independently of it.
+    #[napi]
+    pub fn hardware_acceleration_enabled(&self) -> bool {
+        self.encryptor.hardware_acceleration_enabled()
+    }
 }
 
 /// Derive per-tenant keys using HKDF-SHA256.

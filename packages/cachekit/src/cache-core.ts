@@ -296,9 +296,8 @@ export class CacheImpl implements SecureCache {
     this.encryption = options.encryption ? runtime.createEncryption(options.encryption) : null;
 
     // Initialize ByteStorage (LZ4 compression + xxHash3-64 integrity). The
-    // default honors the backend's advertised preference (LAB-1388): stores
-    // that already compress values at rest (the Cache API) advertise false so
-    // the default config doesn't compress twice. An explicit option wins.
+    // default honors the backend's advertised preference (LAB-1388), else
+    // true. An explicit option wins.
     const compressionEnabled = options.compression ?? this.backend.compressionDefault ?? true;
     this.byteStorage = compressionEnabled ? runtime.createByteStorage() : null;
     // Kept for lazy envelope-tolerant reads (see decodeEntry): a
@@ -385,7 +384,7 @@ export class CacheImpl implements SecureCache {
     // Codec construction stays OUTSIDE the try: a broken binding must fail
     // loudly (through the reliability executor), not be conflated with "not
     // an envelope" — that would silently serve raw envelope tuples, the
-    // exact corruption this path exists to prevent (expert panel, LAB-1768).
+    // exact corruption this path exists to prevent (LAB-1768).
     //
     // After close() the cached reader has already been freed — an in-flight
     // read resuming post-shutdown must not resurrect the cache (close() will
@@ -714,7 +713,7 @@ export class CacheImpl implements SecureCache {
           // Infinity ms: an Infinity originalTtl turns getWithSwr's
           // freshness check into `Infinity > Infinity` — permanently stale,
           // arming a spurious background refresh per marker window, forever
-          // (expert panel, LAB-1768).
+          // (LAB-1768).
           const l1TtlMs = Number.isFinite(l1TtlSeconds) ? l1TtlSeconds * 1000 : 0;
           this.l1.set(key, this.l1Payload(value, data), l1TtlMs, namespace);
           this.publishL1Stats();
@@ -779,41 +778,29 @@ export class CacheImpl implements SecureCache {
     // degraded write exactly as it did before this change.
     let l1Write: L1Write | null = this.encryption ? null : { l1: value };
 
-    // Interop model rejection is a deterministic caller error (spec: values
-    // outside the data model MUST error) — it surfaces synchronously and
-    // never reaches the reliability executor, where degradation would
-    // silently swallow it and retry/circuit-breaker would count it as a
-    // backend failure. Auto-mode encoding stays inside the executor
-    // (existing degrade semantics unchanged). A size rejection still routes
-    // through the LAB-1388 warning: degradation never hides this path, but
-    // a consumer's own try/catch around set() does.
-    let interopSerialized: Uint8Array | null = null;
-    if (interop) {
-      try {
-        interopSerialized = encodeInteropValue(value);
-      } catch (error) {
-        if (error instanceof ValueTooLargeError) this.warnValueTooLarge(key, error, true);
-        throw error;
-      }
+    // Serialize before the reliability executor. An encode rejection is a
+    // deterministic caller error: retrying it re-encodes the same value for
+    // nothing, and the circuit breaker would count it as a backend failure —
+    // five oversized values in a window would open the breaker and degrade
+    // every key on this cache (LAB-5139). Interop rejection always throws
+    // (spec: values outside the data model MUST error). Auto-mode rejection
+    // keeps the degradation contract it had inside the executor: counted,
+    // then thrown with degradation off, absorbed with it on — never written
+    // to L2, though an SWR refresh on a plaintext cache still repopulates L1
+    // from the returned l1Write, as a degraded backend write does. A size
+    // rejection emits one rate-limited warning either way (LAB-1388).
+    let serialized: Uint8Array;
+    try {
+      serialized = interop ? encodeInteropValue(value) : this.serializer.encode(value);
+    } catch (error) {
+      if (error instanceof ValueTooLargeError) this.warnValueTooLarge(key, error, interop);
+      if (interop) throw error;
+      this.recordFailure('set', error);
+      if (!this.degradationEnabled) throw error;
+      return l1Write;
     }
 
     await this.run('set', undefined, async (): Promise<void> => {
-      // Serialize. A size rejection here is invisible in production configs
-      // — degradation (on by default) swallows set() failures, and careful
-      // consumers try/catch set() anyway — so a cache whose hottest values
-      // exceed maxEncodedSize silently never stores them (LAB-1388). Emit
-      // one greppable, rate-limited warning before the error continues into
-      // the reliability stack.
-      let serialized: Uint8Array;
-      try {
-        serialized = interopSerialized ?? this.serializer.encode(value);
-      } catch (error) {
-        // Only serializer.encode throws here — a non-null interopSerialized
-        // already survived encodeInteropValue above.
-        if (error instanceof ValueTooLargeError) this.warnValueTooLarge(key, error, false);
-        throw error;
-      }
-
       // Compress with ByteStorage (before encryption)
       let data: Uint8Array = useEnvelope
         ? this.withEnvelopeCodec((codec) => codec.pack(serialized))
@@ -1369,7 +1356,7 @@ export class CacheImpl implements SecureCache {
 
   private ensureNotClosed(): void {
     if (this.closed) {
-      throw new BackendError('Cache has been closed');
+      throw new BackendError('Cache has been closed', 'permanent');
     }
   }
 }

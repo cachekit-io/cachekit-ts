@@ -49,18 +49,42 @@ export class IntegrityError extends CachekitError {
 /**
  * Thrown when backend operations fail.
  * Examples: Redis connection error, network timeout.
+ *
+ * `classification` drives the reliability stack: `permanent` and
+ * `authentication` errors are not retried and do not count toward the
+ * circuit breaker; `transient` and `timeout` errors are. The default is
+ * `transient`, so an error whose cause is unknown — including one thrown by a
+ * custom backend — still trips the breaker during a real outage. Pass
+ * `permanent` only for errors that retrying cannot fix.
  */
 export class BackendError extends CachekitError {
   readonly classification: import('./backends/error-classifier.js').ErrorClassification;
   constructor(
     message: string,
-    classification: import('./backends/error-classifier.js').ErrorClassification = 'permanent',
+    classification: import('./backends/error-classifier.js').ErrorClassification = 'transient',
     options?: ErrorOptions
   ) {
     super(message, options);
     this.name = 'BackendError';
     this.classification = classification;
   }
+}
+
+/**
+ * Whether an error is retried by `RetryPolicy` and counts as a failure for
+ * `CircuitBreaker`.
+ *
+ * A `BackendError` classified `permanent` or `authentication` is neither:
+ * retrying cannot fix it (protocol saas-api.md, Error Classification: do not
+ * retry), and it is not an outage signal, so a run of rejected keys must not
+ * open the breaker for every other key. Every other error is retried and
+ * counted.
+ */
+export function isRetryable(error: unknown): boolean {
+  return !(
+    error instanceof BackendError &&
+    (error.classification === 'permanent' || error.classification === 'authentication')
+  );
 }
 
 /**

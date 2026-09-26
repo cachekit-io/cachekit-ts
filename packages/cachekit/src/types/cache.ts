@@ -228,9 +228,9 @@ export interface CacheOptions {
   /**
    * Enable ByteStorage wire format (LZ4 compression + xxHash3-64 integrity).
    * Default: true, unless the backend advertises `compressionDefault: false`
-   * because its store already compresses at rest (the Workers Cache API
-   * backend does — see Backend.compressionDefault). An explicit value here
-   * always wins.
+   * (no built-in backend does — see Backend.compressionDefault). An explicit
+   * value here always wins. Changing it on an existing secure cache makes
+   * every existing entry fail to decrypt: the AAD binds the envelope flag.
    */
   compression?: boolean;
 

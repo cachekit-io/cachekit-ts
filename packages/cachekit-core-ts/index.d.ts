@@ -99,6 +99,13 @@ export declare class TenantKeys {
    * current key only, turning every pre-rotation entry into a miss.
    */
   keyringEntryCount(): number
+  /**
+   * Whether cachekit-core detected AES hardware support on this host.
+   *
+   * Forwards `ZeroKnowledgeEncryptor::hardware_acceleration_enabled()`.
+   * Informational only — `ring` dispatches independently of it.
+   */
+  hardwareAccelerationEnabled(): boolean
 }
 
 /**
