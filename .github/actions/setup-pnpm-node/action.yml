@@ -7,6 +7,10 @@ inputs:
     description: Node.js version to install
     required: false
     default: '22'
+  cache:
+    description: actions/setup-node package-manager cache; '' disables it
+    required: false
+    default: pnpm
 runs:
   using: composite
   steps:
@@ -17,4 +21,4 @@ runs:
       uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
       with:
         node-version: ${{ inputs.node-version }}
-        cache: pnpm
+        cache: ${{ inputs.cache }}

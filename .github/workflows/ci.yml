@@ -295,26 +295,17 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      # Drift protection for maintainers only: a fork PR runs its own copy of
-      # this workflow (a fork can't remove its own guard), so this catches an
-      # accidental self-hosted `runs-on` creeping back onto main/push, not a
-      # malicious fork PR. The server-side control for fork PRs lives in
-      # repository and org runner settings, outside this file.
-      #
-      # This is a line-oriented heuristic (case-insensitive grep over
-      # runs-on:/os:/runner: keys and JSON "os": values), not a schema-aware
-      # YAML parse — a determined bypass via a renamed matrix key or a YAML
-      # anchor/multi-line block scalar would slip past it. That tradeoff is
-      # deliberate: closing it properly means defeating a determined bypass,
-      # which is what the settings-level runner controls are for, not this
-      # maintainer sanity check.
+      # Drift check for maintainers, not a fork-PR control: a fork PR runs its
+      # own copy of this workflow.
       - name: Fail if any workflow still targets a self-hosted runner
         run: |
           set -euo pipefail
-          hits=$(grep -rnE '^[[:space:]]*runs-on:|^[[:space:]]*(os|runner):|"os":' .github/workflows/ \
-            | grep -iE 'cachekit|self-hosted' || true)
+          key="^[[:space:]]*(-[[:space:]]+)?(runs-on|os|runner):[^#]*(cachekit|self-hosted)"
+          json="\"os\":[[:space:]]*\"[^\"]*(cachekit|self-hosted)"
+          item="^[[:space:]]*-[[:space:]]+[\"']?(cachekit|cachekit-lean|self-hosted)[\"']?[[:space:]]*(#.*)?\$"
+          hits=$(grep -rniE -e "$key" -e "$json" -e "$item" .github/workflows/ || true)
           if [ -n "$hits" ]; then
-            echo "::error::self-hosted runner reference(s) found in .github/workflows/ (LAB-3503 drift guard):"
+            echo "::error::Workflows in this public repo must use GitHub-hosted runners (e.g. ubuntu-latest):"
             echo "$hits"
             exit 1
           fi

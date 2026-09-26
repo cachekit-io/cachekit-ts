@@ -30,6 +30,7 @@ on:
     paths:
       - 'packages/cachekit-core-ts/**'
       - '.github/workflows/build-native.yml'
+      - '.github/actions/setup-pnpm-node/**'
       - 'pnpm-lock.yaml'
 
 permissions:
@@ -78,7 +79,11 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
+      # Tag runs build the binaries that get published (see header), so they
+      # restore no cache: a cache entry is written by whatever ran before it.
       - uses: ./.github/actions/setup-pnpm-node
+        with:
+          cache: ${{ github.ref_type != 'tag' && 'pnpm' || '' }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # stable
@@ -87,6 +92,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache Rust build artifacts
+        if: github.ref_type != 'tag'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: packages/cachekit-core-ts
