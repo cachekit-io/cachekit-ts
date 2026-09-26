@@ -110,6 +110,8 @@ export interface ByteStorageLike {
 export interface EncryptionLike {
   encrypt(data: Uint8Array, cacheKey: string, compressed?: boolean): Promise<Uint8Array>;
   decrypt(ciphertext: Uint8Array, cacheKey: string, compressed?: boolean): Promise<Uint8Array>;
+  /** Throws ConfigurationError for a key encrypt/decrypt would reject for size. */
+  validateKey(cacheKey: string, compressed?: boolean): void;
   dispose(): void;
 }
 
@@ -664,8 +666,10 @@ export class CacheImpl implements SecureCache {
       }
     }
 
-    // Reserved-key pre-flight — see Backend.validateKey.
+    // Reserved-key and key-size pre-flight — see Backend.validateKey and
+    // EncryptionManagerCore.validateKey.
     this.backend.validateKey?.(key);
+    this.encryption?.validateKey(key, this.useEnvelope(interop));
 
     // Fetch from L2 (backend)
     return this.run('get', null, async (): Promise<T | null> => {
@@ -766,6 +770,9 @@ export class CacheImpl implements SecureCache {
 
     const namespace = options?.namespace ?? extractNamespace(key);
     const useEnvelope = this.useEnvelope(interop);
+    // A key too long for the encryption AAD fails the same way, for the same
+    // reason (see EncryptionManagerCore.validateKey).
+    this.encryption?.validateKey(key, useEnvelope);
 
     // What L1 should hold, captured as soon as it exists rather than returned
     // from the closure — a degraded backend write (which `run` swallows) must

@@ -230,6 +230,24 @@ All of a call's arguments share one 64 KiB encoded limit; past it, the call
 throws `ValueTooLargeError` rather than bypassing the cache. Interop mode accepts
 only `Uint8Array` arguments.
 
+### Key size limit on secure caches
+
+A secure cache binds the full cache key into the AES-GCM additional
+authenticated data (AAD), and the encryption core rejects an AAD over
+**64 KiB** (`MAX_AAD_SIZE`, 65 536 bytes). The AAD adds 28 bytes (29 with
+compression off) plus your tenant id (`default`, 7 bytes, when none is set) to
+the key, so the key limit is just under 64 KiB, counted in UTF-8 bytes rather
+than string length. `get()`, `set()` and `wrap()` on a secure cache throw
+`ConfigurationError` for a longer key, before any backend call. Graceful
+degradation does not absorb it, and it never counts toward the circuit breaker.
+A `wrap()` key is your `namespace`, a `:` and a 64-character hash (65 bytes), so
+`wrap()` hits this only through a namespace that fills the rest of the budget:
+keep namespaces short, and never build one from raw input. (Interop namespaces
+and operations are capped at 64 characters, so interop keys cannot reach it.) If
+you key a secure cache by raw input such as a URL or query string, hash it
+first. Caches without encryption have no such limit, though a backend may impose
+its own.
+
 ## Master-Key Rotation
 
 Rotate the encryption master key without invalidating existing entries:

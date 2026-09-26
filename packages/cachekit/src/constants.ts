@@ -134,6 +134,14 @@ export const REDIS_RETRY_MAX_DELAY = 30000;
 /** AAD version byte (v0x03 includes cache_key binding) */
 export const AAD_VERSION = 0x03;
 
+/**
+ * Maximum AAD size in bytes. Mirrors MAX_AAD_SIZE in both native bindings
+ * (packages/cachekit-core-ts/src/lib.rs, packages/cachekit-core-wasm/src/lib.rs),
+ * which reject a larger AAD. The AAD carries the full cache key, so this caps
+ * the key length a secure cache can store.
+ */
+export const MAX_AAD_SIZE = 64 * 1024;
+
 /** Required master key length in bytes (exact — validation rejects any other length) */
 export const MASTER_KEY_BYTES = 32;
 
