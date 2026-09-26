@@ -3,6 +3,7 @@ import { GenericContainer, type StartedTestContainer } from 'testcontainers';
 import { execSync } from 'node:child_process';
 import { memcached } from '../../src/backends/memcached.js';
 import type { MemcachedBackend } from '../../src/backends/memcached.js';
+import { createCache } from '../../src/intents.js';
 
 // Skip if Docker is not available or on Windows (Testcontainers volume mount issues)
 let dockerAvailable = false;
@@ -90,5 +91,24 @@ describe.skipIf(!dockerAvailable)('MemcachedBackend Integration (Testcontainers)
     // memcached default -I is 1 MiB; cachekit guards before sending
     const big = new Uint8Array(1024 * 1024 + 1);
     await expect(backend.set('too-big', big)).rejects.toThrow(/max\s+item size/);
+  });
+
+  it('over-length keys on the production preset fail once and leave the breaker closed', async () => {
+    // Unguarded, memcached answers a 251-byte key with "Invalid arguments" and
+    // closes the connection: each call was retried 3 times, five of them opened
+    // the breaker, and a request queued behind one on that socket never settled.
+    const cache = createCache.production({ backend, metrics: false, l1: { enabled: false } });
+    const longKey = (i: number) => `${i}:`.padEnd(251, 'x');
+
+    for (let i = 0; i < 6; i++) {
+      await expect(cache.get(longKey(i))).rejects.toMatchObject({
+        name: 'BackendError',
+        classification: 'permanent',
+      });
+    }
+
+    await cache.set('healthy-after-long-keys', 'ok');
+    expect(await backend.get('healthy-after-long-keys')).not.toBeNull(); // reached memcached
+    expect(await cache.get('healthy-after-long-keys')).toBe('ok');
   });
 });
