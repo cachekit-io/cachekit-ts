@@ -157,17 +157,30 @@ jobs:
           uuid 12'
           expected=$(printf '%s\n' "${expected}" | sort)
 
-          # Slice the overrides block, drop comments, and match ONLY a plain
-          # `>=floor <N` value, the bound written <N, <N.0 or <N.0.0. Anything
-          # else — `<12.1` (admits 12.0.x), a `||` union, a missing bound,
-          # reindented YAML — drops out of `found` and fails the comparison:
-          # unrecognised shape fails closed. `|| true` as in the sibling step:
-          # grep exits 1 on an empty block, and pipefail would abort before the
-          # explicit branch can say why.
-          found=$(awk '/^overrides:[[:space:]]*$/{inblk=1;next} inblk && /^[^[:space:]#]/{inblk=0} inblk' pnpm-workspace.yaml \
-                  | grep -v '^[[:space:]]*#' \
-                  | sed -nE "s/^  ['\"]?([^'\":]+)['\"]?:[[:space:]]*['\"]>=[0-9][0-9.]*[[:space:]]+<([0-9]+)(\.0)*['\"].*/\1 \2/p" \
-                  | sort || true)
+          # Slice the overrides block, dropping blank and comment lines. `|| true`
+          # as in the sibling step: grep exits 1 on an empty block, and pipefail
+          # would abort before the explicit branch can say why.
+          block=$(awk '/^overrides:[[:space:]]*$/{inblk=1;next} inblk && /^[^[:space:]#]/{inblk=0} inblk' pnpm-workspace.yaml \
+                  | tr -d '\r' | grep -Ev '^[[:space:]]*(#.*)?$' || true)
+
+          # A line-based check cannot follow YAML quoting across lines, so every
+          # entry must be one self-contained line: `  key: 'value'`, value
+          # quoted, no quote or backslash inside it, optional trailing comment.
+          entry="^  (['\"]?)[^'\":[:space:]]+\1:[[:space:]]+(['\"])([^'\"\\\\]*)\2([[:space:]]+#.*)?$"
+          bad=$(printf '%s\n' "${block}" | grep -Ev "${entry}" || true)
+          if [ -n "${bad}" ]; then
+            echo "::error::pnpm-workspace.yaml overrides has entries this check cannot read. Write each as one line, key: 'value', with the value quoted and no quotes or backslashes inside it."
+            printf '%s\n' "${bad}"
+            exit 1
+          fi
+
+          # Match ONLY a plain `>=floor <N` value, the bound written <N, <N.0 or
+          # <N.0.0, to the end of the line. Anything else — `<12.1` (admits
+          # 12.0.x), a `||` union, a missing bound — drops out of `found` and
+          # fails the comparison: unrecognised shape fails closed.
+          found=$(printf '%s\n' "${block}" \
+                  | sed -nE "s/^  ['\"]?([^'\":]+)['\"]?:[[:space:]]+['\"]>=[0-9][0-9.]*[[:space:]]+<([0-9]+)(\.0)*['\"]([[:space:]]+#.*)?$/\1 \2/p" \
+                  | sort)
 
           if [ "${found}" != "${expected}" ]; then
             echo "::error::Bounded floor-pins in pnpm-workspace.yaml no longer match the set this check declares. A bound is a deliberate constraint, not drift (see the notes beside each pin, and CONTRIBUTING.md). If crossing a major is genuinely required, remove the bound in a hand-written commit that says why and update the expected list in this step."
