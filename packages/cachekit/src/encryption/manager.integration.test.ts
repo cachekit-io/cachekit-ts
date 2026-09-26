@@ -299,17 +299,22 @@ describe('Nonce Exhaustion Error Path (Gap 2 - lines 125-137)', () => {
 });
 
 describe('EncryptionManager with empty tenant ID (Edge Case)', () => {
-  it('uses default tenant ID when none provided', async () => {
-    // No tenant ID provided - should use 'default' internally
-    const manager = new EncryptionManager(VALID_HEX_KEY);
+  it('an unset tenant ID is interchangeable with an explicit "default"', async () => {
+    // LAB-4668: a same-instance round-trip cannot catch an HKDF/AAD tenant
+    // mismatch — both sides share it. Crossing to an explicit 'default'
+    // manager (what py/rs write) exercises the real AAD in both directions.
+    const unset = new EncryptionManager(VALID_HEX_KEY);
+    const explicit = new EncryptionManager(VALID_HEX_KEY, 'default');
     const data = new Uint8Array([1, 2, 3]);
 
     try {
-      const encrypted = await manager.encrypt(data, 'test-key');
-      const decrypted = await manager.decrypt(encrypted, 'test-key');
-      expect(Array.from(decrypted)).toEqual(Array.from(data));
+      const fromUnset = await unset.encrypt(data, 'test-key');
+      expect(Array.from(await explicit.decrypt(fromUnset, 'test-key'))).toEqual([1, 2, 3]);
+      const fromExplicit = await explicit.encrypt(data, 'test-key');
+      expect(Array.from(await unset.decrypt(fromExplicit, 'test-key'))).toEqual([1, 2, 3]);
     } finally {
-      manager.dispose();
+      unset.dispose();
+      explicit.dispose();
     }
   });
 });

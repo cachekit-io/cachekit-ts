@@ -228,9 +228,9 @@ export interface CacheOptions {
   /**
    * Enable ByteStorage wire format (LZ4 compression + xxHash3-64 integrity).
    * Default: true, unless the backend advertises `compressionDefault: false`
-   * because its store already compresses at rest (the Workers Cache API
-   * backend does — see Backend.compressionDefault). An explicit value here
-   * always wins.
+   * (no built-in backend does — see Backend.compressionDefault). An explicit
+   * value here always wins. Changing it on an existing secure cache makes
+   * every existing entry fail to decrypt: the AAD binds the envelope flag.
    */
   compression?: boolean;
 
@@ -338,12 +338,17 @@ export interface Cache {
 }
 
 /**
- * Secure cache interface with encryption.
- * Extends Cache with secure-only wrap method.
+ * `Cache` plus `secure.wrap`. Every `createCache()` call and intent returns
+ * this type whether or not `encryption` is configured; encryption is enforced
+ * by `secure.wrap` at wrap time, not by the type.
  */
 export interface SecureCache extends Cache {
   /**
-   * Secure version of wrap that always encrypts.
+   * Encrypting version of `wrap`. Fails closed: throws `ConfigurationError`
+   * at wrap time — not on first call — when the cache has no `encryption`
+   * configured, so a function registered as secure can never cache
+   * plaintext. With encryption configured it behaves exactly like `wrap`.
+   * There is no option to run it unencrypted; use `wrap` for that.
    */
   secure: {
     wrap<TArgs extends unknown[], TResult>(

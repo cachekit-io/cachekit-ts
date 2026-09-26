@@ -137,6 +137,8 @@ describe('encryption vectors — raw wasm bindings', () => {
       const plaintext = hexToBytes(vectors[0].plaintext_hex);
 
       expect(tk.getNonceCounter()).toBe(0);
+      // wasm32 has no AES instructions: detection is honestly false, never undefined.
+      expect(tk.hardwareAccelerationEnabled()).toBe(false);
       const ct1 = encryptWithTenantKeys(plaintext, aad, tk);
       expect(tk.getNonceCounter()).toBe(1);
       const ct2 = encryptWithTenantKeys(plaintext, aad, tk);

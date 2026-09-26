@@ -144,9 +144,8 @@ const cache = createCache({
     maxDecodedSize: 10 * 1024 * 1024, // 10 MiB default
   },
 
-  // ByteStorage envelope (LZ4 + integrity). Defaults to true, unless the
-  // backend advertises compression off because its store already
-  // compresses at rest (the Workers Cache API backend does).
+  // ByteStorage envelope (LZ4 + integrity). Defaults to true on every
+  // built-in backend.
   compression: true,
 });
 ```
@@ -201,6 +200,35 @@ uses as its on-disk filename, so on that backend a logged `keyHash` names the
 entry's cache file directly. (Backends have their own hard ceilings too:
 Workers KV values cap at 25 MiB, Memcached items at 1 MiB server-side,
 CachekitIO per plan.)
+
+### Binary values
+
+A `Uint8Array`, including a Node `Buffer`, is stored as MessagePack `bin` and
+read back as a `Uint8Array` with the same bytes (a `Buffer` may come back as a
+plain `Uint8Array`). It counts against `serializer.maxEncodedSize` like any other
+value, so the 1 MiB default above applies. Other binary types — `Float32Array`
+and the other typed arrays, `DataView`, `ArrayBuffer` — are rejected with
+`SerializationError`, because they would read back as a `Uint8Array` rather than
+the type you stored. As with a size rejection, graceful degradation absorbs that
+error: `set()` resolves and nothing is stored. Store the bytes and rebuild the
+type on read:
+
+```typescript
+await cache.set('embedding', new Uint8Array(vec.buffer, vec.byteOffset, vec.byteLength));
+const bytes = await cache.get<Uint8Array>('embedding');
+// Copy first: the result can be an unaligned view into a larger buffer.
+const restored = bytes && new Float32Array(new Uint8Array(bytes).buffer);
+```
+
+In auto mode, function arguments are different: keys are hashed, never decoded,
+so a `wrap()`ed function can take any binary type. A `Uint8Array` or `Buffer` is
+hashed by its bytes; any other binary type by its type and a fixed-size digest of
+its bytes, so a large `ArrayBuffer` counts only 32 bytes toward the limit below.
+The digest reads every byte on the calling thread, so its cost grows with the
+buffer: bound a request body's size before passing it as an argument.
+All of a call's arguments share one 64 KiB encoded limit; past it, the call
+throws `ValueTooLargeError` rather than bypassing the cache. Interop mode accepts
+only `Uint8Array` arguments.
 
 ## Master-Key Rotation
 
@@ -454,6 +482,27 @@ With the CachekitIO backend, the `X-CacheKit-L1-*` telemetry headers are wired
 automatically from the cache's live L1/L2 hit and miss counters; pass your own
 `metricsProvider` in the backend config to override.
 
+**Is AES hardware-accelerated on this host?** `isHardwareAccelerated()` on the
+encryption manager forwards cachekit-core's detection. Informational only: the
+crypto backend picks its implementation independently, so use it to explain
+`.secure` latency, not to change behaviour. It initialises the bindings if
+needed, and returns `null` (unknown) only when the installed binding
+predates the accessor. The per-architecture semantics are core's — as of
+cachekit-core 0.6 a runtime AES-NI probe on x86/x86_64, `true` on every aarch64
+build (a NEON check, not the Crypto Extension), and `false` on Cloudflare
+Workers (wasm32 has no AES instructions).
+
+```typescript
+import { EncryptionManager } from '@cachekit-io/cachekit';
+
+const manager = new EncryptionManager(process.env.CACHEKIT_MASTER_KEY!, 'tenant-123');
+try {
+  console.log('AES hardware acceleration:', await manager.isHardwareAccelerated());
+} finally {
+  manager.dispose();
+}
+```
+
 ## Cloudflare Workers
 
 The SDK ships a Workers-native entrypoint: `@cachekit-io/cachekit/workers`
@@ -507,17 +556,9 @@ export default {
 
 Beyond CachekitIO, two Cloudflare-native backends keep cache state in the
 edge itself — no round-trip to api.cachekit.io. Both store the same opaque
-payloads as every other backend, so encryption is unchanged (secure caches
-store only ciphertext), and both plug into `createCache` or any intent via
-`backend:`. One default differs: the Cache API backend advertises the
-ByteStorage compression envelope **off** — Cloudflare already stores
-`Response` bodies compressed at rest, so the wasm envelope would spend
-isolate CPU compressing twice. Pass `compression: true` to re-enable it
-(e.g. to shrink bodies below a size limit before storage). Reads are
-envelope-tolerant either way: a compression-off cache detects, verifies,
-and unwraps entries that an earlier version (or a compression-on peer in a
-mixed fleet) stored with the envelope, so upgrades and gradual rollouts
-never serve envelope bytes as values:
+ByteStorage payloads as every other backend, so encryption and the wire
+envelope are unchanged (secure caches store only ciphertext), and both plug
+into `createCache` or any intent via `backend:`:
 
 ```typescript
 import { createCache, workersKV, workersCacheAPI } from '@cachekit-io/cachekit/workers';
@@ -546,9 +587,17 @@ TTL and consistency semantics differ from Redis/CachekitIO — pick by workload:
 | TTL                      | Native `expirationTtl`; **60s minimum** — shorter TTLs are clamped up, never down   | `Cache-Control: max-age`, honored to the second, no floor         |
 | `ttl <= 0` ("no expiry") | Stored without expiration                                                           | Capped at 1-year max-age (the Cache API has no unbounded storage) |
 | Eviction                 | Durable until expiry                                                                | Best-effort — entries may be dropped under cache pressure         |
-| Compression default      | On (ByteStorage envelope)                                                           | **Off** — Cloudflare stores bodies compressed at rest             |
+| Compression default      | On (ByteStorage envelope)                                                           | On (ByteStorage envelope)                                         |
 | L1 freshness on read     | Bounded by `defaultTtl` (KV reads don't surface remaining TTL)                      | Capped at the entry's **remaining TTL** (from `max-age` − `Age`)  |
 | Best for                 | Shared config, sessions, rarely-written hot reads                                   | Request-local acceleration in front of a shared source            |
+
+The Cache API backend writes uncompressed `application/octet-stream` bodies,
+so the envelope is the only compression the SDK applies. `compression: false`
+saves the isolate CPU the wasm envelope spends on each write and backend
+read, at the cost of larger entries and, on plaintext caches, the xxHash3-64
+integrity check. Choose it before the cache holds data: a secure cache binds
+the setting into its AAD, so flipping it later makes every existing entry
+fail to decrypt.
 
 The Cache API is request-keyed under the hood; the backend maps each cache
 key to a synthetic never-fetched URL, so it behaves like a plain KV store

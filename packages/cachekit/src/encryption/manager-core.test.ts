@@ -27,6 +27,7 @@ function mockBindings(overrides?: Partial<EncryptionBindings>) {
           encryptionFingerprint: () => new Uint8Array(16),
           getNonceCounter: () => 0,
           keyringEntryCount: () => 1 + (previousMasterKeys?.length ?? 0),
+          hardwareAccelerationEnabled: () => true,
           free() {
             freed.push(keys);
           },
@@ -120,6 +121,43 @@ describe('EncryptionManagerCore', () => {
     manager.dispose();
     manager.dispose();
     expect(freed.length).toBe(1);
+  });
+
+  /** Reads the tenant_id component (component 1) back out of a built AAD buffer. */
+  function decodeAadTenantId(aad: Uint8Array): string {
+    const view = new DataView(aad.buffer, aad.byteOffset, aad.byteLength);
+    const len = view.getUint32(1, false);
+    return new TextDecoder().decode(aad.slice(5, 5 + len));
+  }
+
+  it('LAB-4668: HKDF derivation and AAD construction resolve the identical tenant_id', async () => {
+    // Regression for the mismatch: manager-core.ts used `tenantId ?? 'default'`
+    // for HKDF but `tenantId ?? ''` for AAD, so an unset tenant derived keys
+    // for "default" while binding AAD to "" — ciphertext could never
+    // authenticate against a conformant reader.
+    const { bindings } = mockBindings();
+    const manager = new TestManager(async () => bindings);
+
+    await manager.encrypt(new Uint8Array([1]), 'ns:k');
+
+    const [, derivedTenantId] = vi.mocked(bindings.deriveTenantKeys).mock.calls[0];
+    const [, aad] = vi.mocked(bindings.encryptWithTenantKeys).mock.calls[0];
+    expect(derivedTenantId).toBe('default');
+    expect(decodeAadTenantId(aad)).toBe('default');
+    manager.dispose();
+  });
+
+  it('LAB-4668: with a configured tenantId, HKDF and AAD both use it', async () => {
+    const { bindings } = mockBindings();
+    const manager = new TestManager(async () => bindings, 'acme-corp');
+
+    await manager.encrypt(new Uint8Array([1]), 'ns:k');
+
+    const [, derivedTenantId] = vi.mocked(bindings.deriveTenantKeys).mock.calls[0];
+    const [, aad] = vi.mocked(bindings.encryptWithTenantKeys).mock.calls[0];
+    expect(derivedTenantId).toBe('acme-corp');
+    expect(decodeAadTenantId(aad)).toBe('acme-corp');
+    manager.dispose();
   });
 });
 
@@ -246,5 +284,45 @@ describe('EncryptionManagerCore keyring config (previousMasterKeys)', () => {
     // The orphaned handle must be zeroized, not parked
     expect(freed.length).toBe(1);
     manager.dispose();
+  });
+
+  it('reports hardware acceleration from the binding, initialising on demand', async () => {
+    const { bindings, derived } = mockBindings();
+    const manager = new TestManager(async () => bindings);
+
+    // Answers at startup, before any encrypt — and derives exactly once.
+    expect(await manager.isHardwareAccelerated()).toBe(true);
+    expect(derived.length).toBe(1);
+    manager.dispose();
+  });
+
+  it('reports null (unknown), not false, when the binding predates the accessor', async () => {
+    const { bindings } = mockBindings();
+    vi.mocked(bindings.deriveTenantKeys).mockImplementation(
+      (_masterKey: Uint8Array, tenantId: string) => ({
+        tenantId,
+        encryptionFingerprint: () => new Uint8Array(16),
+        getNonceCounter: () => 0,
+        // no hardwareAccelerationEnabled — older binding
+      })
+    );
+    const manager = new TestManager(async () => bindings);
+
+    expect(await manager.isHardwareAccelerated()).toBeNull();
+    manager.dispose();
+  });
+
+  it('rejects with EncryptionError, not TypeError, when dispose races an initialised read', async () => {
+    const { bindings } = mockBindings();
+    const manager = new TestManager(async () => bindings);
+
+    // Initialise first, so ensureInitialized() takes its early-return path and
+    // the read below resumes only after dispose() has nulled tenantKeys.
+    expect(await manager.isHardwareAccelerated()).toBe(true);
+
+    const inFlight = manager.isHardwareAccelerated();
+    manager.dispose();
+
+    await expect(inFlight).rejects.toThrow(EncryptionError);
   });
 });

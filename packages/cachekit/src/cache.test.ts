@@ -1,7 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, assert, beforeEach, afterEach, vi } from 'vitest';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { createCache } from './cache.js';
+import { file } from './backends/file.js';
 import { generateKey } from './serialization/key-generator.js';
 import { setLogger } from './logger.js';
+import { createCache as createIntentCache } from './intents.js';
 import { ConfigurationError, ValueTooLargeError } from './errors.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
 import type { SecureCache } from './types/cache.js';
@@ -271,6 +276,53 @@ describe('Cache Integration', () => {
       await boundedCache.set('test:ttl-ok', 'value', { ttl: 60 });
       expect(setCalls).toBe(1);
       await boundedCache.close();
+    });
+
+    // LAB-2877 regression: a backend's key rejection (Backend.validateKey —
+    // CachekitIO's reserved path segments) is the same kind of deterministic
+    // caller error: inside the executor it would be retried, counted by the
+    // circuit breaker, and swallowed by degradation into a silent miss or a
+    // set() that never stores.
+    it('surfaces a backend key rejection despite default-on degradation', async () => {
+      const inner = new InMemoryBackend();
+      const calls: string[] = [];
+      const guardedBackend: Backend = {
+        async get(key) {
+          calls.push('get');
+          return inner.get(key);
+        },
+        async set(key, value, ttl) {
+          calls.push('set');
+          return inner.set(key, value, ttl!);
+        },
+        async delete(key) {
+          calls.push('delete');
+          return inner.delete(key);
+        },
+        async exists(key) {
+          calls.push('exists');
+          return inner.exists(key);
+        },
+        close: () => inner.close(),
+        validateKey(key) {
+          if (key === '..') throw new ConfigurationError('reserved path segment');
+        },
+      };
+
+      const guardedCache = createCache({
+        backend: guardedBackend,
+        compression: false,
+        l1: { enabled: false },
+      });
+      await expect(guardedCache.get('..')).rejects.toThrow(ConfigurationError);
+      await expect(guardedCache.set('..', 'value')).rejects.toThrow(ConfigurationError);
+      await expect(guardedCache.delete('..')).rejects.toThrow(ConfigurationError);
+      await expect(guardedCache.exists('..')).rejects.toThrow(ConfigurationError);
+      expect(calls).toEqual([]); // rejected before the reliability executor ran
+
+      await guardedCache.set('test:key-ok', 'value');
+      expect(calls).toEqual(['set']);
+      await guardedCache.close();
     });
   });
 
@@ -557,8 +609,7 @@ describe('Cache Integration', () => {
       // Same in-flight-across-close() interleaving as above, but on the
       // DEFAULT compression-on path: close() frees this.byteStorage, so the
       // resumed read must not unpack with the freed codec (a use-after-free
-      // on the wasm binding) — it gets a throwaway instead (expert panel,
-      // LAB-1768).
+      // on the wasm binding) — it gets a throwaway instead (LAB-1768).
       const { pending, counts, writer } = await startPostCloseRead({
         key: 'test:postclose-on',
         value: { data: 'enveloped' },
@@ -863,14 +914,14 @@ describe('Cache Integration', () => {
     });
   });
 
+  // ~2 MiB of unique-ish content — over the 1 MiB default maxEncodedSize.
+  const oversized = () => 'x'.repeat(2 * 1024 * 1024);
+
   describe('oversized-value set() warning (LAB-1388)', () => {
     afterEach(() => {
       setLogger(null);
       vi.useRealTimers();
     });
-
-    // ~2 MiB of unique-ish content — over the 1 MiB default maxEncodedSize.
-    const oversized = () => 'x'.repeat(2 * 1024 * 1024);
 
     it('reports a rate-limited warning even when degradation swallows the error', async () => {
       vi.useFakeTimers();
@@ -938,6 +989,65 @@ describe('Cache Integration', () => {
     });
   });
 
+  describe('encode rejections bypass retry and the circuit breaker (LAB-5139)', () => {
+    afterEach(() => {
+      setLogger(null);
+      vi.restoreAllMocks();
+    });
+
+    // production preset: retry 3x with backoff, breaker opens at 5 failures.
+    const productionCache = (backend: Backend, serializer?: { maxCollectionSize: number }) =>
+      createIntentCache.production({ backend, metrics: false, serializer });
+
+    it('six oversized set() calls leave the breaker closed for other keys', async () => {
+      setLogger(() => {});
+      const backend = new InMemoryBackend();
+      const c = productionCache(backend);
+
+      for (let i = 0; i < 6; i++) {
+        await expect(c.set(`ns:big${i}`, oversized())).resolves.toBeUndefined();
+      }
+
+      // An open breaker would degrade this write to a no-op (L1 included),
+      // so the read-back proves the breaker never counted the rejections.
+      await c.set('ns:small', 'ok');
+      expect(await c.get('ns:small')).toBe('ok');
+      expect(await backend.get('ns:small')).not.toBeNull();
+
+      await c.close();
+    });
+
+    it('an oversized set() encodes once and never reaches backend.set', async () => {
+      setLogger(() => {});
+      const backend = new InMemoryBackend();
+      const backendSet = vi.spyOn(backend, 'set');
+      const encode = vi.spyOn(MessagePackSerializer.prototype, 'encode');
+      const c = productionCache(backend);
+
+      await expect(c.set('ns:big', oversized())).resolves.toBeUndefined();
+      expect(encode).toHaveBeenCalledTimes(1);
+      expect(backendSet).not.toHaveBeenCalled();
+
+      await c.close();
+    });
+
+    it('a SerializationError encodes once and never counts toward the breaker', async () => {
+      const backend = new InMemoryBackend();
+      const encode = vi.spyOn(MessagePackSerializer.prototype, 'encode');
+      const c = productionCache(backend, { maxCollectionSize: 10 });
+      const tooMany = Array.from({ length: 11 }, (_, i) => i);
+
+      await expect(c.set('ns:wide0', tooMany)).resolves.toBeUndefined();
+      expect(encode).toHaveBeenCalledTimes(1);
+
+      for (let i = 1; i < 6; i++) await c.set(`ns:wide${i}`, tooMany);
+      await c.set('ns:small', 'ok');
+      expect(await c.get('ns:small')).toBe('ok');
+
+      await c.close();
+    });
+  });
+
   describe('backend-advertised compression default (LAB-1388)', () => {
     /** Plain MessagePack view of raw backend bytes ('decode failed' when the
      * envelope bytes aren't even valid MessagePack). */
@@ -996,5 +1106,50 @@ describe('Cache Integration', () => {
 
       await c.close();
     });
+  });
+});
+
+// LAB-4839: normalize() used to send Uint8Array down the plain-object branch —
+// under 10,000 bytes it came back as {"0":…}, over that it threw on the
+// collection cap. Real File backend, L1 off, so every get() decodes from L2.
+describe('Binary values (LAB-4839)', () => {
+  let dir: string;
+  const bytes = (n: number) => Uint8Array.from({ length: n }, (_, i) => (i * 31 + 7) & 0xff);
+  // `got` is unknown on purpose: the bug returned a plain object, so this must
+  // check the runtime type, not assume it.
+  const expectSameBytes = (got: unknown, want: Uint8Array) => {
+    assert(got instanceof Uint8Array, 'expected a Uint8Array');
+    expect(Buffer.compare(got, want)).toBe(0);
+  };
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cachekit-binary-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('round-trips a Uint8Array through set/get and wrap', async () => {
+    const c = createCache({ backend: file({ cacheDir: dir }), l1: { enabled: false } });
+
+    for (const value of [bytes(3), bytes(20_000)]) {
+      await c.set('bin:k', value);
+      expectSameBytes(await c.get('bin:k'), value);
+    }
+
+    let calls = 0;
+    const cached = c.wrap(
+      async (n: number) => {
+        calls++;
+        return bytes(n);
+      },
+      { namespace: 'bin:fn' }
+    );
+    expectSameBytes(await cached(20_000), bytes(20_000));
+    expectSameBytes(await cached(20_000), bytes(20_000));
+    expect(calls).toBe(1); // second call served from the backend, not recomputed
+
+    await c.close();
   });
 });

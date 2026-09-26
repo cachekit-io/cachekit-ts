@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { CircuitBreakerOpenError } from '../errors.js';
 
@@ -12,6 +12,12 @@ describe('CircuitBreaker', () => {
       timeout: 100,
       halfOpenMaxCalls: 2,
     });
+  });
+
+  afterEach(() => {
+    // Fake timers are process-global; a failing assertion before a trailing
+    // vi.useRealTimers() would otherwise freeze the clock for every later test.
+    vi.useRealTimers();
   });
 
   it('starts in closed state', () => {
@@ -54,8 +60,6 @@ describe('CircuitBreaker', () => {
     // Advance time past timeout
     vi.advanceTimersByTime(150);
     expect(breaker.state).toBe('half-open');
-
-    vi.useRealTimers();
   });
 
   it('closes after successes in half-open', async () => {
@@ -73,8 +77,6 @@ describe('CircuitBreaker', () => {
     await breaker.execute(() => Promise.resolve('ok'));
 
     expect(breaker.state).toBe('closed');
-
-    vi.useRealTimers();
   });
 
   it('reopens on failure in half-open', async () => {
@@ -90,8 +92,6 @@ describe('CircuitBreaker', () => {
     // Fail once
     await expect(breaker.execute(() => Promise.reject(new Error()))).rejects.toThrow();
     expect(breaker.state).toBe('open');
-
-    vi.useRealTimers();
   });
 
   it('enforces half-open max calls', async () => {
@@ -110,8 +110,6 @@ describe('CircuitBreaker', () => {
 
     // Circuit should be closed now
     expect(breaker.state).toBe('closed');
-
-    vi.useRealTimers();
   });
 
   it('reset returns to closed', async () => {
@@ -145,8 +143,6 @@ describe('CircuitBreaker', () => {
     // Old failures should be pruned, so 1 more failure shouldn't open it
     await expect(breaker2.execute(() => Promise.reject(new Error()))).rejects.toThrow();
     expect(breaker2.state).toBe('closed');
-
-    vi.useRealTimers();
   });
 
   it('M6: concurrent requests in half-open must not exceed halfOpenMaxCalls limit', async () => {
@@ -204,8 +200,6 @@ describe('CircuitBreaker', () => {
     // The rest (8) should have been rejected with CircuitBreakerOpenError
     expect(executedCount).toBeLessThanOrEqual(2);
     expect(rejectedCount).toBeGreaterThanOrEqual(8);
-
-    vi.useRealTimers();
   });
 
   it('M6: tryAcquireHalfOpenSlot returns false when limit reached', async () => {
@@ -232,7 +226,5 @@ describe('CircuitBreaker', () => {
     expect(breaker3.tryAcquireHalfOpenSlot()).toBe(true);
     expect(breaker3.tryAcquireHalfOpenSlot()).toBe(false);
     expect(breaker3.tryAcquireHalfOpenSlot()).toBe(false);
-
-    vi.useRealTimers();
   });
 });

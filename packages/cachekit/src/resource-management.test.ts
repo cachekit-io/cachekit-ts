@@ -9,6 +9,7 @@ import { createCache } from './cache.js';
 import { RetryPolicy } from './reliability/retry.js';
 import { CacheMetrics } from './metrics/prometheus.js';
 import type { Backend } from './backends/types.js';
+import type { L1Cache } from './l1/lru-cache.js';
 import type { Redis } from 'ioredis';
 
 // ========== Test Helpers ==========
@@ -200,59 +201,50 @@ describe('m3: RetryPolicy Cancellable Sleep', () => {
 // ========== m4: Missing Cleanup of refreshingKeys on Close ==========
 
 describe('m4: refreshingKeys Cleanup on Close', () => {
+  afterEach(() => {
+    // A failure between useFakeTimers/useRealTimers below must not leak a
+    // frozen clock into the m5 suite.
+    vi.useRealTimers();
+  });
+
   it('should clear refreshingKeys when cache is closed', async () => {
-    const backend = new InMemoryBackend();
+    vi.useFakeTimers();
     const cache = createCache({
-      backend,
-      defaultTtl: 3600,
+      backend: new InMemoryBackend(),
       l1: {
         enabled: true,
         maxEntries: 100,
         swrEnabled: true,
-        swrThresholdRatio: 0.9, // Very high ratio to trigger SWR quickly
+        swrThresholdRatio: 0.9,
       },
     });
+    // refreshingKeys is held by the internal L1 alone (close() reaches it via
+    // l1.clear()) and has no public surface — same reach-in as
+    // cache.encryption-l1.test.ts.
+    const l1 = (cache as unknown as { l1: L1Cache }).l1;
 
-    // Set a value
-    await cache.set('test:key', { data: 'value' });
+    // First call computes the value (cold path); the refresh's recompute
+    // never settles, so the refresh is still in flight when close() runs —
+    // the only state in which close() has a marker to clear.
+    const compute = vi
+      .fn<() => Promise<{ computed: boolean }>>()
+      .mockResolvedValueOnce({ computed: true })
+      .mockReturnValue(new Promise<never>(() => {}));
+    const wrapped = cache.wrap(compute, { namespace: 'test:slow', ttl: 3600 });
 
-    // Access it to populate L1
-    await cache.get('test:key');
-
-    // Access via wrap to potentially trigger SWR
-    const slowFn = async () => {
-      // Simulate slow computation - don't actually await
-      return { computed: true };
-    };
-
-    const wrapped = cache.wrap(slowFn, {
-      namespace: 'test:slow',
-      ttl: 3600,
-    });
-
-    // First call
     await wrapped();
+    expect(l1.stats.refreshing).toBe(0);
 
-    // Advance time to make it stale (past SWR threshold)
-    vi.useFakeTimers();
-    vi.advanceTimersByTime(3300 * 1000); // 91.7% of TTL
+    // 300s of a 3600s TTL remain — under the SWR threshold at every jitter
+    // draw (0.9 × 3600s × [0.9, 1.1] = 2916–3564s), so this read is stale,
+    // takes the refresh marker and starts the background refresh.
+    vi.advanceTimersByTime(3300 * 1000);
+    await wrapped();
+    expect(compute).toHaveBeenCalledTimes(2);
+    expect(l1.stats.refreshing).toBe(1);
 
-    // This should trigger background refresh, adding to refreshingKeys
-    // (Background refresh starts but doesn't complete immediately)
-
-    vi.useRealTimers();
-
-    // Close cache - refreshingKeys should be cleared
     await cache.close();
-
-    // Try to access internal state to verify cleanup
-    // Since we can't directly access refreshingKeys, we verify
-    // by ensuring close() completes without resource leaks
-    // The fix adds clearing refreshingKeys in close()
-
-    // If refreshingKeys wasn't cleared, it would leave stale state
-    // This test documents the expected behavior
-    expect(true).toBe(true);
+    expect(l1.stats.refreshing).toBe(0);
   });
 
   it('should clear L1 cache refreshingKeys on close', async () => {

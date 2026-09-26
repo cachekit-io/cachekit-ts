@@ -1,7 +1,11 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { RetryPolicy } from './retry';
 
 describe('RetryPolicy', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('succeeds on first attempt', async () => {
     const policy = new RetryPolicy();
     const fn = vi.fn().mockResolvedValue('success');
@@ -73,6 +77,5 @@ describe('RetryPolicy', () => {
     const result = await promise;
     expect(result).toBeInstanceOf(Error);
     expect(result.message).toBe('fail');
-    vi.useRealTimers();
   });
 });

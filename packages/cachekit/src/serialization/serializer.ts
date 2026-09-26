@@ -1,4 +1,5 @@
-import { encode, decode } from '@msgpack/msgpack';
+import { ExtData, encode, decode } from '@msgpack/msgpack';
+import { blake2b } from '@noble/hashes/blake2.js';
 import { SerializationError, ValueTooLargeError } from '../errors.js';
 import {
   DEFAULT_MAX_ENCODED_SIZE,
@@ -238,6 +239,99 @@ export interface Serializer {
   decode<T>(data: Uint8Array): T;
 }
 
+// Intrinsic getters, captured once: they read internal slots, so they cannot be
+// fooled by Symbol.toStringTag or shadowed properties, and work on another
+// realm's objects. The %TypedArray% name getter returns undefined for a DataView.
+// T is the getter's return type per the spec, which TypeScript cannot check.
+type Getter<T> = (this: unknown) => T;
+function getter<T>(proto: object, name: PropertyKey): Getter<T> {
+  const get: Getter<T> | undefined = Object.getOwnPropertyDescriptor(proto, name)?.get;
+  // Fail at load: bytesOf and hasBufferBrand swallow throws, so a missing getter
+  // would otherwise give every binary argument the same key.
+  if (!get) throw new Error(`cachekit: intrinsic getter ${String(name)} not found`);
+  return get;
+}
+const typedArrayProto: object = Object.getPrototypeOf(Uint8Array.prototype);
+const typedArrayName = getter<string | undefined>(typedArrayProto, Symbol.toStringTag);
+const viewGetters = (proto: object) => ({
+  buffer: getter<ArrayBufferLike>(proto, 'buffer'),
+  byteOffset: getter<number>(proto, 'byteOffset'),
+  byteLength: getter<number>(proto, 'byteLength'),
+});
+const typedArrayView = viewGetters(typedArrayProto);
+const dataViewView = viewGetters(DataView.prototype);
+const arrayBufferByteLength = getter<number>(ArrayBuffer.prototype, 'byteLength');
+// SharedArrayBuffer is absent in browsers without cross-origin isolation.
+const sharedArrayBufferByteLength =
+  typeof SharedArrayBuffer === 'function'
+    ? getter<number>(SharedArrayBuffer.prototype, 'byteLength')
+    : undefined;
+
+/** The getter throws unless `value` holds that buffer's internal slot. */
+function hasBufferBrand(value: object, byteLength: Getter<number>): value is ArrayBufferLike {
+  try {
+    byteLength.call(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The bytes as a Uint8Array view, not a copy. A detached (transferred) buffer
+ * throws on any view but holds no bytes, so it reads as empty, as it would in
+ * the caller's own function, rather than throwing from key generation.
+ */
+function bytesOf(value: ArrayBufferLike | ArrayBufferView): Uint8Array {
+  try {
+    if (!ArrayBuffer.isView(value)) return new Uint8Array(value);
+    const view = typedArrayName.call(value) === undefined ? dataViewView : typedArrayView;
+    return new Uint8Array(
+      view.buffer.call(value),
+      view.byteOffset.call(value),
+      view.byteLength.call(value)
+    );
+  } catch {
+    return new Uint8Array(0);
+  }
+}
+
+/**
+ * A binary value's type and bytes, from its brand; undefined if `value` is not
+ * binary. Not instanceof, which another realm's buffers (vm, jest) fail, nor
+ * Symbol.toStringTag, which any object can set (LAB-4839).
+ */
+function binary(value: object): [type: string, bytes: Uint8Array] | undefined {
+  if (ArrayBuffer.isView(value)) {
+    return [typedArrayName.call(value) ?? 'DataView', bytesOf(value)];
+  }
+  // The tag or instanceof only picks which brand to check, so a plain object
+  // never pays for a throw. instanceof catches a same-realm buffer that retags
+  // itself; only another realm's retagged buffer is missed, and encodes as {}.
+  // Reading the tag runs a Proxy trap or Symbol.toStringTag getter, which may
+  // throw; such an object is not a buffer, and must not throw from key generation.
+  let tag = '';
+  try {
+    tag = Object.prototype.toString.call(value).slice(8, -1);
+  } catch {
+    // Not a buffer: fall through to the instanceof and brand checks.
+  }
+  if (
+    (tag === 'ArrayBuffer' || value instanceof ArrayBuffer) &&
+    hasBufferBrand(value, arrayBufferByteLength)
+  ) {
+    return ['ArrayBuffer', bytesOf(value)];
+  }
+  if (
+    sharedArrayBufferByteLength &&
+    (tag === 'SharedArrayBuffer' || value instanceof SharedArrayBuffer) &&
+    hasBufferBrand(value, sharedArrayBufferByteLength)
+  ) {
+    return ['SharedArrayBuffer', bytesOf(value)];
+  }
+  return undefined;
+}
+
 /**
  * Normalize a value for deterministic serialization.
  * - Sort object keys alphabetically
@@ -245,12 +339,17 @@ export interface Serializer {
  * - Convert undefined to null
  * - Track depth to prevent stack overflow
  * - M9 Fix: Check collection size to prevent DoS via large collections
+ * - Pass Uint8Array (incl. Buffer) through as msgpack bin; reject other binary
+ *   values, but hash any binary key argument (`forKey`) by its bytes
+ *
+ * Package-internal: key generation calls it with `forKey` set.
  */
-function normalize(
+export function normalize(
   value: unknown,
   depth: number,
   maxDepth: number,
-  maxCollectionSize: number
+  maxCollectionSize: number,
+  forKey: boolean
 ): unknown {
   if (depth > maxDepth) {
     throw new SerializationError(`Max depth of ${maxDepth} exceeded`);
@@ -279,7 +378,7 @@ function normalize(
         `Array size ${value.length} exceeds max collection size ${maxCollectionSize}`
       );
     }
-    return value.map((item) => normalize(item, depth + 1, maxDepth, maxCollectionSize));
+    return value.map((item) => normalize(item, depth + 1, maxDepth, maxCollectionSize, forKey));
   }
 
   if (value instanceof Date) {
@@ -296,7 +395,7 @@ function normalize(
     const obj: Record<string, unknown> = {};
     const sortedKeys = Array.from(value.keys()).sort();
     for (const key of sortedKeys) {
-      obj[String(key)] = normalize(value.get(key), depth + 1, maxDepth, maxCollectionSize);
+      obj[String(key)] = normalize(value.get(key), depth + 1, maxDepth, maxCollectionSize, forKey);
     }
     return obj;
   }
@@ -309,8 +408,30 @@ function normalize(
       );
     }
     return Array.from(value)
-      .map((item) => normalize(item, depth + 1, maxDepth, maxCollectionSize))
+      .map((item) => normalize(item, depth + 1, maxDepth, maxCollectionSize, forKey))
       .sort();
+  }
+
+  const bin = binary(value);
+  if (bin) {
+    const [type, bytes] = bin;
+    // @msgpack/msgpack emits a Uint8Array as bin, bounded by the caller's
+    // post-encode size check.
+    if (type === 'Uint8Array') return bytes;
+    // A key argument is hashed, never decoded: hash other binary by type and a
+    // BLAKE2b-256 digest of its bytes, so Int8Array([-1]) and Uint8Array([255])
+    // stay distinct keys. The digest keeps the argument 32 bytes whatever the
+    // buffer's size, so a large ArrayBuffer (a request body) neither trips the
+    // 64 KiB key limit nor gets copied before it is checked. As a msgpack ext,
+    // which no ordinary argument normalizes to, it cannot collide with an object
+    // of that shape, e.g. { Int8Array: Uint8Array.of(255) }.
+    if (forKey) return new ExtData(0, encode([type, blake2b(bytes, { dkLen: 32 })]));
+    // A value would decode as a Uint8Array — a silent type change — so reject
+    // it with the fix instead (LAB-4839).
+    throw new SerializationError(
+      `Cannot serialize ${type}: binary values must be a Uint8Array or Buffer ` +
+        '(view the bytes with new Uint8Array(buffer, byteOffset, byteLength))'
+    );
   }
 
   // Plain object - sort keys
@@ -327,7 +448,7 @@ function normalize(
   const sortedKeys = keys.sort();
   const result: Record<string, unknown> = {};
   for (const key of sortedKeys) {
-    result[key] = normalize(obj[key], depth + 1, maxDepth, maxCollectionSize);
+    result[key] = normalize(obj[key], depth + 1, maxDepth, maxCollectionSize, forKey);
   }
   return result;
 }
@@ -363,7 +484,13 @@ export class MessagePackSerializer implements Serializer {
    */
   encode<T>(value: T): Uint8Array {
     // Normalize for deterministic output (also checks depth and collection size)
-    const normalized = normalize(value, 0, this.config.maxDepth, this.config.maxCollectionSize);
+    const normalized = normalize(
+      value,
+      0,
+      this.config.maxDepth,
+      this.config.maxCollectionSize,
+      false
+    );
 
     // Encode to MessagePack
     const encoded = encode(normalized);
@@ -398,7 +525,8 @@ export class MessagePackSerializer implements Serializer {
       for (const item of value) {
         this.validateDepth(item, depth + 1);
       }
-    } else if (value !== null && typeof value === 'object') {
+    } else if (value !== null && typeof value === 'object' && !ArrayBuffer.isView(value)) {
+      // bin decodes to a Uint8Array: its elements are bytes, not children.
       for (const v of Object.values(value)) {
         this.validateDepth(v, depth + 1);
       }
