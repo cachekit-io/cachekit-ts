@@ -15,6 +15,7 @@ import {
   createCache,
   CachekitIOCore,
   ConfigurationError,
+  ValueTooLargeError,
   type Backend,
 } from '../../src/workers/index.js';
 
@@ -129,6 +130,34 @@ describe('createCache full stack inside workerd', () => {
     expect(await cache.delete('ns:plain')).toBe(true);
     expect(await cache.get('ns:plain')).toBeNull();
 
+    await cache.close();
+  });
+
+  it('refuses an envelope declaring more than maxDecodedSize before the wasm codec sees it', async () => {
+    // Inside core's own caps (<= 1000:1, <= 512 MiB), so core would allocate
+    // the declared 16 MiB before finding the LZ4 bytes are garbage.
+    const declared = 16 * 1024 * 1024;
+    const compressedLen = Math.ceil(declared / 1000);
+    const forged = new Uint8Array(4 + compressedLen + 9 + 5 + 8);
+    const view = new DataView(forged.buffer);
+    forged.set([0x94, 0xc5]); // fixarray(4), bin16 compressed_data
+    view.setUint16(2, compressedLen);
+    let pos = 4 + compressedLen;
+    forged[pos] = 0x98; // checksum: fixarray(8) of zeros
+    pos += 9;
+    forged[pos] = 0xce; // original_size: uint32
+    view.setUint32(pos + 1, declared);
+    forged.set([0xa7, ...new TextEncoder().encode('msgpack')], pos + 5);
+
+    const backend = memoryBackend();
+    backend.store.set('ns:forged', forged);
+    const cache = createCache({
+      backend,
+      l1: { enabled: false },
+      reliability: { degradation: false, retry: { maxAttempts: 1 } },
+    });
+
+    await expect(cache.get('ns:forged')).rejects.toThrow(ValueTooLargeError);
     await cache.close();
   });
 

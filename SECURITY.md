@@ -32,17 +32,28 @@ _before_ decompressing. The envelope's self-declared `original_size` is not
 trusted, and the xxHash3-64 checksum is unkeyed so it does not gate a forging
 attacker — see [cachekit-core: Decompression limits](https://github.com/cachekit-io/cachekit-core/blob/main/SECURITY.md#decompression-limits).
 
-`serializer.maxDecodedSize` (10 MiB by default) is checked inside
-`serializer.decode`, i.e. on the already-decompressed bytes. It sits downstream
-of core's bound rather than replacing it, so the two ceilings differ by ~51x:
-core will materialize up to 512 MiB before `maxDecodedSize` is ever consulted.
-Raising or lowering `maxDecodedSize` does not change what `unpack` may allocate.
-Tracked in LAB-2732.
+The SDK holds envelopes to its own, lower ceiling as well:
+`serializer.maxDecodedSize` (10 MiB by default). Before calling `unpack`, it
+reads the envelope's declared `original_size` from the MessagePack header and
+rejects any envelope that declares more than `maxDecodedSize` with
+`ValueTooLargeError`. The codec never sees it, so nothing is allocated for it.
+This covers both read paths: compression-on reads, and the envelope-tolerant
+read on a compression-off cache. Bytes whose header is not in a shape a
+conforming writer emits are never unpacked. A compression-on read treats them as
+corrupt, and the tolerant read decodes them as plain MessagePack. Whatever
+`unpack` returns is therefore at most `maxDecodedSize`, the same bound
+`serializer.decode` applies, so one setting governs both stages.
+
+If an allocation fails or the wasm instance traps inside `unpack` during the
+envelope-tolerant read, the SDK propagates the error instead of treating it as
+"not an envelope": on Workers a trap leaves that wasm instance unusable. On
+Node, a native allocation failure inside the NAPI binding aborts the process
+before any JavaScript can observe it; `maxDecodedSize` is what keeps a forged
+envelope from getting that far.
 
 > [!IMPORTANT]
-> The 512 MiB ceiling is server-class. A Cloudflare Workers isolate has roughly
-> 128 MiB, so on the Workers build a payload well inside cachekit-core's limits
-> can still exhaust the isolate. This SDK has no read-side pre-decompression
-> bound, so the only lever is to check the fetched value's byte length yourself
-> before handing it to the cache, or to cap value size at the backend. Making
+> The 512 MiB core ceiling is server-class. A Cloudflare Workers isolate has
+> roughly 128 MiB, so keep `maxDecodedSize` within what the isolate can afford
+> on a single read: it bounds what a forged envelope can make the reader
+> allocate, not just what the decoder accepts. Making
 > core's ceiling environment-aware is tracked in LAB-2505.
