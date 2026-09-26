@@ -142,41 +142,31 @@ jobs:
         with:
           node-version: '22'
 
-      # renovate.json's approval gate covers routine majors only; a
-      # vulnerability-alert update overrides repo config and gets through
-      # (PR #94 did), so this step is the layer that actually holds — for bots
-      # and humans alike. Rationale for both layers: CONTRIBUTING.md.
-      # Deliberately ahead of `pnpm install`: it needs no node_modules, and an
-      # install script must not get to rewrite the file before the check reads
-      # it. (The brace-expansion step below reads pnpm-lock.yaml after install
-      # and has the same exposure — pre-existing, untouched here.)
+      # Holds where renovate.json's approval gate cannot: vulnerability-
+      # remediation updates bypass that gate (why: CONTRIBUTING.md). Runs before
+      # `pnpm install` so no install script can rewrite the file first.
       - name: Verify bounded floor-pins stay in-major
         run: |
           set -euo pipefail
-          # Declared bounds, "<package> <upper-bound major>", sorted. Adding or
-          # removing a bounded pin means editing this list — that edit IS the
-          # human decision the bound represents.
+          # Declared bounds, "<package> <upper-bound major>". Adding or removing
+          # a bounded pin means editing this list — that edit IS the human
+          # decision the bound represents.
           expected='brace-expansion@2 3
           js-yaml 5
           protobufjs 8
           uuid 12'
-          expected=$(printf '%s\n' "${expected}" | sed 's/^ *//')
+          expected=$(printf '%s\n' "${expected}" | sort)
 
-          # Slice the overrides block (top-level key to next top-level key or
-          # EOF), drop comments, then match ONLY a plain `>=floor <bound` value.
-          # Anything else — a `||` union, a missing bound, reindented YAML — is
-          # deliberately NOT matched, so it drops out of `found` and fails the
-          # set comparison below. Unrecognised shape must fail closed: a parser
-          # that quietly skips what it cannot read is not a guard.
-          # `|| true`, as in the sibling step below: the `grep -v` exits 1 when
-          # it selects nothing — exactly the shape-moved case this guard exists
-          # to catch — and under pipefail that would abort here with no message.
-          # Let the empty result reach the explicit branch so the failure
-          # explains itself. It cannot mask a real drift: a broken pipeline
-          # yields empty or partial output, which never equals `expected`.
+          # Slice the overrides block, drop comments, and match ONLY a plain
+          # `>=floor <N` value, the bound written <N, <N.0 or <N.0.0. Anything
+          # else — `<12.1` (admits 12.0.x), a `||` union, a missing bound,
+          # reindented YAML — drops out of `found` and fails the comparison:
+          # unrecognised shape fails closed. `|| true` as in the sibling step:
+          # grep exits 1 on an empty block, and pipefail would abort before the
+          # explicit branch can say why.
           found=$(awk '/^overrides:[[:space:]]*$/{inblk=1;next} inblk && /^[^[:space:]#]/{inblk=0} inblk' pnpm-workspace.yaml \
                   | grep -v '^[[:space:]]*#' \
-                  | sed -nE "s/^  ['\"]?([^'\":]+)['\"]?:[[:space:]]*['\"]>=[0-9][0-9.]*[[:space:]]+<([0-9]+)(\.[0-9.]*)?['\"].*/\1 \2/p" \
+                  | sed -nE "s/^  ['\"]?([^'\":]+)['\"]?:[[:space:]]*['\"]>=[0-9][0-9.]*[[:space:]]+<([0-9]+)(\.0)*['\"].*/\1 \2/p" \
                   | sort || true)
 
           if [ "${found}" != "${expected}" ]; then
