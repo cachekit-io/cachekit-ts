@@ -53,13 +53,13 @@ import {
 } from './constants.js';
 
 /**
- * Minimum interval between "set rejected: value too large" warnings
- * (LAB-1388). The rejection itself is often invisible (degradation swallows
- * set failures; consumers try/catch set), so the SDK reports it through the
- * logger — rate-limited so a hot oversized key can't flood the sink.
- * Module-private on purpose: one consumer, not a tuning knob.
+ * Minimum interval between repeats of each rate-limited warning ("set
+ * rejected: value too large", LAB-1388; envelope unpack rejected). Both report
+ * an outcome the caller never sees as an error, so the SDK reports it through
+ * the logger — rate-limited so a hot key can't flood the sink.
+ * Module-private on purpose: not a tuning knob.
  */
-const VALUE_TOO_LARGE_WARN_INTERVAL_MS = 60_000;
+const WARN_INTERVAL_MS = 60_000;
 
 /**
  * Sentinel for "the lock path did not resolve the miss — compute without
@@ -399,6 +399,9 @@ export class CacheImpl implements SecureCache {
   /** Timestamp of the last oversized-value warning (rate limiting). */
   private lastSizeWarnAt = 0;
 
+  /** Timestamp of the last envelope-unpack-rejected warning (rate limiting). */
+  private lastEnvelopeRejectWarnAt = 0;
+
   /**
    * Verified unpack of a suspected legacy/foreign ByteStorage envelope on a
    * compression-off cache. Returns null when the bytes aren't actually an
@@ -412,7 +415,7 @@ export class CacheImpl implements SecureCache {
    * @throws the codec's RangeError / WebAssembly.RuntimeError when unpack
    *   fails for lack of memory rather than on the bytes (isResourceFailure).
    */
-  private tryUnwrapEnvelope(bytes: Uint8Array): Uint8Array | null {
+  private tryUnwrapEnvelope(bytes: Uint8Array, key: string): Uint8Array | null {
     // Only an envelope within the ceiling gets as far as unpack. One over it
     // throws rather than falling back: a real envelope served as plain data is
     // the corruption this path exists to prevent.
@@ -435,6 +438,7 @@ export class CacheImpl implements SecureCache {
       // Not a verdict on the bytes (see isResourceFailure). A native NAPI
       // allocation failure aborts the process instead; nothing here catches it.
       if (isResourceFailure(error)) throw error;
+      this.warnEnvelopeRejected(key, bytes.length);
       return null;
     } finally {
       if (reader !== this.envelopeReader) this.freeThrowawayCodec(reader);
@@ -476,7 +480,7 @@ export class CacheImpl implements SecureCache {
    */
   private warnValueTooLarge(key: string, error: ValueTooLargeError, interop: boolean): void {
     const now = Date.now();
-    if (now - this.lastSizeWarnAt < VALUE_TOO_LARGE_WARN_INTERVAL_MS) return;
+    if (now - this.lastSizeWarnAt < WARN_INTERVAL_MS) return;
     this.lastSizeWarnAt = now;
     // Interop caps are protocol constants serializer config does not govern
     // — the remediation hint only holds for the serializer path (expert
@@ -491,6 +495,25 @@ export class CacheImpl implements SecureCache {
     const keyHash = blake2b16Hex(key);
     logError(
       `[cachekit] set rejected, value NOT cached (keyHash=${keyHash}): ${error.message}.${hint}`
+    );
+  }
+
+  /**
+   * Rate-limited report of an envelope-shaped read that core refused to unpack
+   * (checksum or shape mismatch). The bytes are then decoded as plain data:
+   * right for a user value that only looks like an envelope, silent corruption
+   * for a damaged real one. The two can't be told apart here, so this report
+   * is the only trace either leaves. Core's error text is left out on purpose:
+   * on a secure cache these bytes are decrypted plaintext, and its
+   * deserialization errors can echo scalars from them. The key is digested
+   * for the same reason warnValueTooLarge gives.
+   */
+  private warnEnvelopeRejected(key: string, size: number): void {
+    const now = Date.now();
+    if (now - this.lastEnvelopeRejectWarnAt < WARN_INTERVAL_MS) return;
+    this.lastEnvelopeRejectWarnAt = now;
+    logError(
+      `[cachekit] envelope-shaped value failed verified unpack, read as plain data (keyHash=${blake2b16Hex(key)}, bytes=${size}). If this key was written with compression on, the entry is corrupt — delete it.`
     );
   }
 
@@ -643,7 +666,7 @@ export class CacheImpl implements SecureCache {
       // by the verified unpack. We deliberately do NOT retry decrypt() with
       // the flipped AAD flag: that would reintroduce exactly the envelope-
       // mode ambiguity the AAD binding exists to rule out.
-      plaintext = this.tryUnwrapEnvelope(plaintext) ?? plaintext;
+      plaintext = this.tryUnwrapEnvelope(plaintext, key) ?? plaintext;
     }
     return interop ? decodeInteropValue<T>(plaintext) : this.serializer.decode<T>(plaintext);
   }

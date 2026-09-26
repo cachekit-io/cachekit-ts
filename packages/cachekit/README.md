@@ -470,8 +470,9 @@ silently. (On Cloudflare Workers, where prom-client cannot run, the `metrics`
 option degrades to a no-op the same way.)
 
 Internal error reporting (background refresh, invalidation channel, Redis
-connection events) defaults to `console.error`; route it into your own logging
-pipeline with `setLogger`:
+connection events, and read anomalies such as an envelope-shaped value that
+fails its integrity check on a compression-off cache) defaults to
+`console.error`; route it into your own logging pipeline with `setLogger`:
 
 ```typescript
 import { setLogger } from '@cachekit-io/cachekit';

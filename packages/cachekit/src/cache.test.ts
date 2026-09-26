@@ -828,16 +828,43 @@ describe('Cache Integration', () => {
         await reader.close();
       });
 
-      it('still treats an ordinary unpack rejection as a sniff miss', async () => {
+      it('still treats an ordinary unpack rejection as a sniff miss, and reports it', async () => {
         // A core integrity/format rejection means "not an envelope": the bytes
-        // are decoded as plain MessagePack (here, the 4-tuple itself).
-        const { codec, calls } = spyCodec(new Error('Checksum mismatch'));
-        const reader = await readerOver(forgedEnvelope(1000), false, codec);
+        // are decoded as plain MessagePack (here, the 4-tuple itself). A
+        // damaged real envelope reads the same way, so the rejection is
+        // reported — rate-limited, key digested, core's error withheld.
+        vi.useFakeTimers();
+        const logs: { message: string; error: unknown }[] = [];
+        setLogger((message, error) => logs.push({ message, error }));
+        try {
+          const stored = forgedEnvelope(1000);
+          const { codec, calls } = spyCodec(new Error('Checksum mismatch'));
+          const reader = await readerOver(stored, false, codec);
+          const reports = () => logs.filter((l) => l.message.includes('failed verified unpack'));
 
-        const value = await reader.get<unknown[]>('test:ceiling');
-        expect(value?.length).toBe(4);
-        expect(calls.unpack).toBe(1);
-        await reader.close();
+          const value = await reader.get<unknown[]>('test:ceiling');
+          expect(value?.length).toBe(4);
+          expect(calls.unpack).toBe(1);
+          expect(reports()).toHaveLength(1);
+          const [report] = reports();
+          expect(report.message).toMatch(
+            new RegExp(`keyHash=[0-9a-f]{32}, bytes=${stored.length}\\)`)
+          );
+          expect(report.message).not.toContain('test:ceiling');
+          // Post-decrypt, core's error text can echo plaintext: never logged.
+          expect(report.message).not.toContain('Checksum mismatch');
+          expect(report.error).toBeUndefined();
+
+          await reader.get('test:ceiling');
+          expect(reports()).toHaveLength(1);
+          vi.advanceTimersByTime(61_000);
+          await reader.get('test:ceiling');
+          expect(reports()).toHaveLength(2);
+          await reader.close();
+        } finally {
+          setLogger(null);
+          vi.useRealTimers();
+        }
       });
 
       it('never unpacks bytes that only pass the one-byte sniff', async () => {
