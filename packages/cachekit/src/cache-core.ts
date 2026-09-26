@@ -53,10 +53,9 @@ import {
 } from './constants.js';
 
 /**
- * Minimum interval between repeats of each rate-limited warning ("set
- * rejected: value too large", LAB-1388; envelope unpack rejected). Both report
- * an outcome the caller never sees as an error, so the SDK reports it through
- * the logger — rate-limited so a hot key can't flood the sink.
+ * Minimum interval between repeats of each rate-limited warning. Each reports
+ * an outcome the caller often never sees as an error, so the SDK reports it
+ * through the logger — rate-limited so a hot key can't flood the sink.
  * Module-private on purpose: not a tuning knob.
  */
 const WARN_INTERVAL_MS = 60_000;
@@ -404,11 +403,13 @@ export class CacheImpl implements SecureCache {
 
   /**
    * Verified unpack of a suspected legacy/foreign ByteStorage envelope on a
-   * compression-off cache. Returns null when the bytes aren't actually an
-   * envelope (header, core-cap or checksum/shape mismatch) — the caller then
-   * treats them as plain serialized data. The codec is created lazily and
-   * cached — except after close(), when a throwaway codec is used and freed
-   * immediately.
+   * compression-off cache. Returns null when the bytes aren't treated as an
+   * envelope — the caller then decodes them as plain serialized data. A
+   * header or core-cap miss rules an envelope out; a checksum/shape rejection
+   * from core is ambiguous (look-alike value or damaged envelope), so it is
+   * also reported via warnEnvelopeRejected, the only use of `key`. The codec
+   * is created lazily and cached — except after close(), when a throwaway
+   * codec is used and freed immediately.
    *
    * @throws {ValueTooLargeError} for an envelope over maxDecodedSize (see
    *   envelopeVerdict) — never unpacked.
@@ -513,7 +514,7 @@ export class CacheImpl implements SecureCache {
     if (now - this.lastEnvelopeRejectWarnAt < WARN_INTERVAL_MS) return;
     this.lastEnvelopeRejectWarnAt = now;
     logError(
-      `[cachekit] envelope-shaped value failed verified unpack, read as plain data (keyHash=${blake2b16Hex(key)}, bytes=${size}). If this key was written with compression on, the entry is corrupt — delete it.`
+      `[cachekit] envelope-shaped value failed verified unpack, read as plain data (keyHash=${blake2b16Hex(key)}, bytes=${size}). Unless the cached value is itself meant to look like an envelope, the entry is corrupt — delete it.`
     );
   }
 

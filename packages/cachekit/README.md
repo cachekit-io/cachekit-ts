@@ -194,8 +194,9 @@ already permits a multi-hundred-MiB transient.
 The SDK also reports every size rejection through its
 [pluggable logger](#observability) as a rate-limited, greppable
 `[cachekit] set rejected, value NOT cached (keyHash=...)` line — watch for it
-after deploying a new cache. The line carries a non-reversible blake2b digest
-of the cache key rather than the key itself (keys are caller-controlled and
+after deploying a new cache. This line, like every `keyHash=` line the SDK
+logs, carries a non-reversible blake2b digest of the cache key rather than the
+key itself (keys are caller-controlled and
 may embed sensitive data); to match a digest to a suspect key, hash the key
 with blake2b (16-byte output, hex). This is the same digest the File backend
 uses as its on-disk filename, so on that backend a logged `keyHash` names the

@@ -42,18 +42,18 @@ conforming writer emits, when core's own caps would refuse them, or when
 `compressed_data` is longer than LZ4's worst case for the declared size. That
 last check stops a small declared size from carrying a large payload into core's
 copy. A compression-on read treats such bytes as corrupt. The envelope-tolerant
-read on a compression-off cache decodes them as plain MessagePack. It does the
-same when core rejects an envelope the header read let through (checksum or
-shape mismatch), and reports that through the SDK logger as a rate-limited
-`[cachekit] envelope-shaped value failed verified unpack` line carrying the
-key's digest. The line never includes core's error text: on an encrypted cache
-those bytes are decrypted plaintext. What `unpack`
+read on a compression-off cache decodes them as plain MessagePack. What `unpack`
 may allocate is then a small multiple of `maxDecodedSize`: the input, the
 compressed payload, and an output of at most `maxDecodedSize`, which is the same
 bound `serializer.decode` applies to its input. On an encrypted cache the
 ciphertext is bounded first: bytes longer than any plaintext the cache would
 decode, plus the 28-byte AES-GCM nonce and tag, are rejected with
-`ValueTooLargeError` before `decrypt` copies them.
+`ValueTooLargeError` before `decrypt` copies them. The envelope-tolerant read
+also decodes as plain MessagePack an envelope that passed the header read but
+that core rejects (checksum or shape mismatch), and reports it through the SDK
+logger as a rate-limited `[cachekit] envelope-shaped value failed verified
+unpack` line carrying the key's digest. The line never includes core's error
+text: on an encrypted cache those bytes are decrypted plaintext.
 
 One consequence on compression-off caches: a plain value whose MessagePack
 exactly mimics an envelope core would decompress, and which declares more than

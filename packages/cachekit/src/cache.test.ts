@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createCache } from './cache.js';
 import { file } from './backends/file.js';
-import { generateKey } from './serialization/key-generator.js';
+import { blake2b16Hex, generateKey } from './serialization/key-generator.js';
 import { setLogger } from './logger.js';
 import { createCache as createIntentCache } from './intents.js';
 import { ConfigurationError, SerializationError, ValueTooLargeError } from './errors.js';
@@ -847,8 +847,8 @@ describe('Cache Integration', () => {
           expect(calls.unpack).toBe(1);
           expect(reports()).toHaveLength(1);
           const [report] = reports();
-          expect(report.message).toMatch(
-            new RegExp(`keyHash=[0-9a-f]{32}, bytes=${stored.length}\\)`)
+          expect(report.message).toContain(
+            `keyHash=${blake2b16Hex('test:ceiling')}, bytes=${stored.length})`
           );
           expect(report.message).not.toContain('test:ceiling');
           // Post-decrypt, core's error text can echo plaintext: never logged.
