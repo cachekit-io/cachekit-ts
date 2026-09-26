@@ -790,6 +790,25 @@ describe('Cache Integration', () => {
         );
       });
 
+      it('refuses (known loss) a plain value indistinguishable from an oversized envelope', async () => {
+        // Within core's caps and over the ceiling: only decompressing could tell
+        // this value from a real oversized envelope, and serving a real one as
+        // its raw 4-tuple is silent corruption. So it is refused, and the key
+        // misses; see SECURITY.md "Bounded decompression".
+        const value = [new Uint8Array(12_000), [1, 2, 3, 4, 5, 6, 7, 8], 12_000_000, 'image/png'];
+        const backend = new InMemoryBackend();
+        const cache = createCache({
+          backend,
+          compression: false,
+          l1: { enabled: false },
+          reliability: { degradation: false },
+        });
+        await cache.set('test:lookalike', value);
+
+        await expect(cache.get('test:lookalike')).rejects.toThrow(ValueTooLargeError);
+        await cache.close();
+      });
+
       it('propagates a wasm trap from the tolerance sniff instead of reading it as "not an envelope"', async () => {
         const trap = new WebAssembly.RuntimeError('unreachable');
         const { codec, calls } = spyCodec(trap);

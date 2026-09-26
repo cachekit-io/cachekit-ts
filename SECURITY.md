@@ -50,6 +50,14 @@ ciphertext is bounded first: bytes longer than any plaintext the cache would
 decode, plus the 28-byte AES-GCM nonce and tag, are rejected with
 `ValueTooLargeError` before `decrypt` copies them.
 
+One consequence on compression-off caches: a plain value whose MessagePack
+exactly mimics an envelope core would decompress, and which declares more than
+`maxDecodedSize`, is refused rather than decoded. Only decompressing could tell
+it from a real oversized envelope, and serving a real one as its raw 4-tuple
+would be silent corruption. That key reads as a miss, or throws with degradation
+off. The shape required is `[bytes, [8 integers ≤ 255], an integer over
+maxDecodedSize, anything]`, with at least one byte per 1000 of that integer.
+
 If an allocation fails or the wasm instance traps inside `unpack` during the
 envelope-tolerant read, the SDK propagates the error instead of treating it as
 "not an envelope": on Workers a trap leaves that wasm instance unusable. On
