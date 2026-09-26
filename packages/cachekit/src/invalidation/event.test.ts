@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { encode, DecodeError } from '@msgpack/msgpack';
 import { serializeEvent, deserializeEvent, createInvalidationEvent } from './event';
+import { SerializationError } from '../errors';
 
 describe('InvalidationEvent serialization', () => {
   it('round-trips global event', () => {
@@ -68,5 +70,86 @@ describe('InvalidationEvent serialization', () => {
       paramsHash: 'f'.repeat(64),
     });
     expect(deserializeEvent(serializeEvent(atSanityEdge)).namespace).toBe('n'.repeat(1000));
+  });
+
+  it('wraps a decoder failure in SerializationError with cause (LAB-3477)', () => {
+    // fixext1 with an unrecognised timestamp payload: passes the size and depth
+    // checks (3 bytes, no collections) and fails INSIDE @msgpack's decoder.
+    const run = (): unknown => deserializeEvent(Uint8Array.of(0xd4, 0xff, 0x00));
+    expect(run).toThrow(SerializationError);
+    expect(run).toThrow(/Failed to decode invalidation event/);
+    let cause: unknown;
+    try {
+      run();
+    } catch (err) {
+      cause = (err as SerializationError).cause;
+    }
+    expect(cause).toBeInstanceOf(DecodeError);
+  });
+
+  it('rejects a well-formed payload that is not a map (LAB-3477)', () => {
+    for (const notAMap of [[], 'global', null]) {
+      const run = (): unknown => deserializeEvent(encode(notAMap));
+      expect(run).toThrow(SerializationError);
+      expect(run).toThrow(/^Invalidation event payload is not a map/);
+    }
+  });
+
+  it('rejects a map missing or mistyping a required key (LAB-3477)', () => {
+    const valid = { l: 'global', ts: 1, src: 'i' };
+    const bad: unknown[] = [
+      { ts: 1, src: 'i' },
+      { l: 'global', src: 'i' },
+      { l: 'global', ts: 1 },
+      { ...valid, l: 7 },
+      { ...valid, l: 'bogus' },
+      { ...valid, ts: 'now' },
+      { ...valid, src: null },
+      { ...valid, ns: 1 },
+      { ...valid, ph: [] },
+    ];
+    for (const payload of bad) {
+      const run = (): unknown => deserializeEvent(encode(payload));
+      expect(run).toThrow(SerializationError);
+      expect(run).toThrow(/^Invalidation event payload is not a map/);
+    }
+    expect(deserializeEvent(encode(valid))).toStrictEqual({
+      level: 'global',
+      namespace: undefined,
+      paramsHash: undefined,
+      timestamp: 1,
+      sourceInstance: 'i',
+    });
+  });
+
+  it('reads an empty-string optional as absent, keeping the pair inverse (LAB-4336)', () => {
+    expect(
+      deserializeEvent(encode({ l: 'namespace', ts: 1, src: 'i', ns: '', ph: '' }))
+    ).toStrictEqual({
+      level: 'namespace',
+      namespace: undefined,
+      paramsHash: undefined,
+      timestamp: 1,
+      sourceInstance: 'i',
+    });
+  });
+
+  it('accepts nil-encoded optionals and normalizes them to undefined (LAB-4336)', () => {
+    // A struct/dict encoder emits nil for an unset field instead of omitting
+    // the key — msgpack.packb({'ns': None}) in Python does. Rejecting this
+    // payload would drop a whole-cache invalidation and leave L1 stale until
+    // TTL — RedisInvalidationChannel only logs the deserialize failure, so the
+    // publisher never learns its invalidation went nowhere.
+    // Level 'global' on purpose — invalidateAll() reads neither optional, so
+    // this is the payload where acceptance actually prevents staleness.
+    expect(
+      deserializeEvent(encode({ l: 'global', ts: 1, src: 'i', ns: null, ph: null }))
+    ).toStrictEqual({
+      level: 'global',
+      namespace: undefined,
+      paramsHash: undefined,
+      timestamp: 1,
+      sourceInstance: 'i',
+    });
   });
 });

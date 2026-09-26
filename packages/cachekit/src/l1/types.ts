@@ -108,10 +108,22 @@ export interface InvalidationEvent {
   /** Level of invalidation */
   level: InvalidationLevel;
 
-  /** Namespace to invalidate (required if level is 'namespace' or 'params') */
+  /**
+   * Namespace to invalidate. Optional on the wire and not enforced by the
+   * shape guard, despite what a 'namespace' level implies.
+   *
+   * This SDK never publishes one without it: `CacheImpl.invalidate()` reports
+   * a namespace-level call with no namespace to its own caller and returns
+   * without publishing. So a namespace-level event that arrives without one
+   * came from some other publisher, and it invalidates nothing —
+   * `handleInvalidationEvent` logs it and moves on.
+   */
   namespace?: string;
 
-  /** Specific params hash to invalidate (required if level is 'params') */
+  /**
+   * Params hash to invalidate. Published but never consumed — no read path
+   * acts on it and params-level events are a no-op in L1.
+   */
   paramsHash?: string;
 
   /** When this event was created (Unix timestamp in ms) */

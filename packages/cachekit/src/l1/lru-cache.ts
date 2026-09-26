@@ -1,5 +1,6 @@
 import { L1Config, DEFAULT_L1_CONFIG, CacheEntry, SwrResult, InvalidationEvent } from './types.js';
 import { secureRandomFloat } from '../utils/random.js';
+import { logError } from '../logger.js';
 import { extractNamespace } from '../serialization/key-generator.js';
 import {
   SWR_JITTER_MIN,
@@ -334,11 +335,29 @@ export class L1Cache<T = unknown> {
       case 'namespace':
         if (event.namespace) {
           this.invalidateByNamespace(event.namespace);
+        } else {
+          // A foreign publisher sent an instruction nothing can carry out.
+          // This class used to fail the shape guard and get logged by the
+          // channel; accepting nil must not cost that signal.
+          logError('[cachekit] Ignored namespace-level invalidation: no namespace on the event', {
+            // Object-wrapped deliberately: sourceInstance is untrusted text and only
+            // object string VALUES get control chars escaped — a bare string arg would
+            // let a forged newline open a log line. Do not flatten. typeof, not `?.`:
+            // L1Cache is exported, so a JS caller reaches this method with any value at
+            // all, and the report on an error path must not be what throws. Sliced
+            // because the only bound on it is the 4KB event cap.
+            sourceInstance:
+              typeof event.sourceInstance === 'string'
+                ? event.sourceInstance.slice(0, 64)
+                : 'unknown',
+          });
         }
         break;
       case 'params':
-        // For params-level, we'd need the full key
-        // This is handled at a higher layer that knows the key format
+        // Nothing consumes this. No higher layer picks it up, and the `ph` on
+        // the wire is a digest of the key string rather than the canonical
+        // params hash, so it cannot be matched here: a remote instance keeps
+        // serving the invalidated key until TTL. Tracked in LAB-4359.
         break;
     }
   }
