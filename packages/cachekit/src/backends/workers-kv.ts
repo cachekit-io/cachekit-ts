@@ -157,7 +157,7 @@ export class WorkersKVBackend implements Backend {
 
   private ensureNotClosed(): void {
     if (this.closed) {
-      throw new BackendError('Workers KV backend is closed');
+      throw new BackendError('Workers KV backend is closed', 'permanent');
     }
   }
 }

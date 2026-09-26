@@ -442,6 +442,33 @@ try {
 }
 ```
 
+### Which errors are retried and trip the circuit breaker
+
+Every `BackendError` carries a `classification`. `transient` and `timeout`
+errors (a dropped connection, a 5xx, a 408 or 429) are retried with backoff and
+count toward opening the circuit breaker, and so is a `TimeoutError`, which is
+how a cachekit.io request timeout surfaces. `permanent` and `authentication`
+errors are attempted once and never count toward the breaker, because retrying
+cannot fix them and they are not an outage signal. From cachekit.io these are
+401 and 403 (a bad or revoked API key) and every other 4xx, for example 400
+(a key the service rejects), 409 and 413. The built-in backends also raise them
+for client-side validation failures (a value over the File or Memcached size
+limit, an out-of-range TTL) and for calls on a closed backend. So a run of keys
+the service rejects cannot open the breaker and cut off every other key.
+
+Graceful degradation still applies: under `production`, `secure` and `io` these
+errors resolve as a miss or a no-op, and with `reliability: { degradation: false }`
+they reject with the `BackendError`. With degradation on, a revoked API key
+therefore turns the cache into silent misses at one request per operation
+rather than opening the breaker; watch `cachekit_errors_total` (see
+[Observability](#observability)) to catch it.
+
+A custom backend should pass `'permanent'` only for errors that retrying cannot
+fix: `new BackendError(message, 'permanent')`. The classification defaults to
+`'transient'`, so an error with an unknown cause still trips the breaker during
+a real outage. `retry.retryOn` can narrow which errors are retried, but it
+cannot make a `permanent` or `authentication` error retry.
+
 ## Observability
 
 Optional Prometheus metrics via peer dependency:

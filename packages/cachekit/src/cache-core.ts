@@ -1356,7 +1356,7 @@ export class CacheImpl implements SecureCache {
 
   private ensureNotClosed(): void {
     if (this.closed) {
-      throw new BackendError('Cache has been closed');
+      throw new BackendError('Cache has been closed', 'permanent');
     }
   }
 }

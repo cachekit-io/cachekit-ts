@@ -231,7 +231,7 @@ export class CacheAPIBackend implements Backend {
 
   private ensureNotClosed(): void {
     if (this.closed) {
-      throw new BackendError('Cache API backend is closed');
+      throw new BackendError('Cache API backend is closed', 'permanent');
     }
   }
 }

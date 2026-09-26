@@ -1,4 +1,4 @@
-import { CircuitBreakerOpenError } from '../errors.js';
+import { CircuitBreakerOpenError, isRetryable } from '../errors.js';
 import {
   DEFAULT_CB_FAILURE_THRESHOLD,
   DEFAULT_CB_SUCCESS_THRESHOLD,
@@ -53,6 +53,10 @@ const DEFAULT_CONFIG: CircuitBreakerConfig = {
  * - OPEN + timeout elapsed → HALF-OPEN
  * - HALF-OPEN + success >= successThreshold → CLOSED
  * - HALF-OPEN + any failure → OPEN
+ *
+ * Only errors that `isRetryable` accepts count as failures; any other error
+ * frees its half-open probe slot without counting either way. While half-open,
+ * only a probe that took a slot in the current round counts at all.
  */
 export class CircuitBreaker {
   private readonly config: CircuitBreakerConfig;
@@ -60,6 +64,7 @@ export class CircuitBreaker {
   private failures: number[] = []; // timestamps of failures within rolling window
   private successesInHalfOpen = 0;
   private callsInHalfOpen = 0;
+  private halfOpenRound = 0; // bumped on each entry to half-open; tags probe slots
   private openedAt: number | null = null;
   // m10 Fix: config is already readonly (set in constructor)
 
@@ -112,7 +117,9 @@ export class CircuitBreaker {
       throw new CircuitBreakerOpenError();
     }
 
-    if (currentState === 'half-open') {
+    // The round this call's probe slot belongs to, or null when it took none.
+    const probeRound = currentState === 'half-open' ? this.halfOpenRound : null;
+    if (probeRound !== null) {
       // M6 Fix: Use atomic slot acquisition to prevent race condition
       if (!this.tryAcquireHalfOpenSlot()) {
         throw new CircuitBreakerOpenError('Circuit breaker half-open limit reached');
@@ -121,10 +128,19 @@ export class CircuitBreaker {
 
     try {
       const result = await fn();
-      this.recordSuccess();
+      if (!this.isStale(probeRound)) {
+        this.recordSuccess();
+      }
       return result;
     } catch (error) {
-      this.recordFailure();
+      if (this.isStale(probeRound)) {
+        throw error;
+      }
+      if (isRetryable(error)) {
+        this.recordFailure();
+      } else if (probeRound !== null) {
+        this.releaseHalfOpenSlot();
+      }
       throw error;
     }
   }
@@ -146,6 +162,30 @@ export class CircuitBreaker {
       if (this.successesInHalfOpen >= this.config.successThreshold) {
         this.transitionToClosed();
       }
+    }
+  }
+
+  /**
+   * True when the breaker is half-open but this call holds no slot in the
+   * current round: it started in an earlier round (the breaker reopened and
+   * went half-open again while it was in flight) or before the breaker opened.
+   * Its outcome describes the backend as it was then, so it neither counts
+   * toward this round nor frees one of its slots. Reads `state`, not
+   * `currentState`, so a pending open -> half-open transition is applied first.
+   */
+  private isStale(probeRound: number | null): boolean {
+    return this.state === 'half-open' && probeRound !== this.halfOpenRound;
+  }
+
+  /**
+   * Free a probe slot without counting a success or a failure. Without this,
+   * `halfOpenMaxCalls` non-retryable errors in a row would fill every slot and
+   * wedge the breaker half-open against a healthy backend. Callers must have
+   * ruled out a stale probe first (see `isStale`).
+   */
+  private releaseHalfOpenSlot(): void {
+    if (this.currentState === 'half-open' && this.callsInHalfOpen > 0) {
+      this.callsInHalfOpen--;
     }
   }
 
@@ -180,6 +220,7 @@ export class CircuitBreaker {
 
   private transitionToHalfOpen(): void {
     this.currentState = 'half-open';
+    this.halfOpenRound++;
     this.successesInHalfOpen = 0;
     this.callsInHalfOpen = 0;
   }

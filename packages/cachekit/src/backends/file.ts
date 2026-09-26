@@ -66,7 +66,8 @@ export class FileBackend implements Backend, TTLBackend {
     const defaultTtl = config.defaultTtl ?? 0;
     if (defaultTtl < 0 || defaultTtl > MAX_TTL_SECONDS) {
       throw new BackendError(
-        `defaultTtl ${defaultTtl} out of range [0, ${MAX_TTL_SECONDS}] (max 10 years)`
+        `defaultTtl ${defaultTtl} out of range [0, ${MAX_TTL_SECONDS}] (max 10 years)`,
+        'permanent'
       );
     }
     this.config = {
@@ -113,7 +114,8 @@ export class FileBackend implements Backend, TTLBackend {
 
     if (this.config.maxValueBytes > 0 && value.length > this.config.maxValueBytes) {
       throw new BackendError(
-        `Value size ${value.length} exceeds maxValueBytes (${this.config.maxValueBytes})`
+        `Value size ${value.length} exceeds maxValueBytes (${this.config.maxValueBytes})`,
+        'permanent'
       );
     }
 
@@ -122,7 +124,8 @@ export class FileBackend implements Backend, TTLBackend {
     if (effectiveTtl !== 0) {
       if (effectiveTtl < 0 || effectiveTtl > MAX_TTL_SECONDS) {
         throw new BackendError(
-          `TTL ${effectiveTtl} out of range [0, ${MAX_TTL_SECONDS}] (max 10 years)`
+          `TTL ${effectiveTtl} out of range [0, ${MAX_TTL_SECONDS}] (max 10 years)`,
+          'permanent'
         );
       }
       expiry = nowSeconds() + BigInt(Math.floor(effectiveTtl));
@@ -208,10 +211,13 @@ export class FileBackend implements Backend, TTLBackend {
 
     const seconds = Math.floor(ttl);
     if (seconds <= 0) {
-      throw new BackendError(`File refreshTTL requires ttl >= 1 second, got ${ttl}`);
+      throw new BackendError(`File refreshTTL requires ttl >= 1 second, got ${ttl}`, 'permanent');
     }
     if (seconds > MAX_TTL_SECONDS) {
-      throw new BackendError(`TTL ${ttl} out of range [1, ${MAX_TTL_SECONDS}] (max 10 years)`);
+      throw new BackendError(
+        `TTL ${ttl} out of range [1, ${MAX_TTL_SECONDS}] (max 10 years)`,
+        'permanent'
+      );
     }
 
     await this.ensureDir();
@@ -357,7 +363,7 @@ export class FileBackend implements Backend, TTLBackend {
 
   private ensureNotClosed(): void {
     if (this.closed) {
-      throw new BackendError('File backend is closed');
+      throw new BackendError('File backend is closed', 'permanent');
     }
   }
 

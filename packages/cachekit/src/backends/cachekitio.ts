@@ -323,7 +323,7 @@ export class CachekitIOCore implements Backend {
 
   private ensureNotClosed(): void {
     if (this.closed) {
-      throw new BackendError('CachekitIO backend is closed');
+      throw new BackendError('CachekitIO backend is closed', 'permanent');
     }
   }
 }
