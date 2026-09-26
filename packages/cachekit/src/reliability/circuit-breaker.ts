@@ -170,10 +170,11 @@ export class CircuitBreaker {
    * current round: it started in an earlier round (the breaker reopened and
    * went half-open again while it was in flight) or before the breaker opened.
    * Its outcome describes the backend as it was then, so it neither counts
-   * toward this round nor frees one of its slots.
+   * toward this round nor frees one of its slots. Reads `state`, not
+   * `currentState`, so a pending open -> half-open transition is applied first.
    */
   private isStale(probeRound: number | null): boolean {
-    return this.currentState === 'half-open' && probeRound !== this.halfOpenRound;
+    return this.state === 'half-open' && probeRound !== this.halfOpenRound;
   }
 
   /**
