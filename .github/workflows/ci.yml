@@ -170,14 +170,10 @@ jobs:
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
-        env:
-          CARGO_HOME: /tmp/cargo
 
       - name: Audit Cargo dependencies
         working-directory: packages/cachekit-core-ts
         run: cargo audit
-        env:
-          CARGO_HOME: /tmp/cargo
 
   workers:
     name: Workers lane (wasm + workerd)
