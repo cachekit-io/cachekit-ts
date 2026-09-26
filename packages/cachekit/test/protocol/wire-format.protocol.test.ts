@@ -3,7 +3,7 @@ import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 // Single vendored copy of protocol/test-vectors/wire-format.json (see the
 // workers lane header for the re-copy rule); this lane runs the same vectors
 // through the NAPI binding so both bindings are held to identical bytes.
-import fixture from '../workers/fixtures/wire-format.json';
+import fixture from '../workers/fixtures/wire-format.json' with { type: 'json' };
 
 interface WireVector {
   name: string;

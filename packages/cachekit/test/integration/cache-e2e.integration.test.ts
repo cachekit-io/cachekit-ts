@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { createCache } from '../../src/cache';
-import type { SecureCache } from '../../src/types/cache';
+import { createCache } from '../../src/cache.js';
+import type { SecureCache } from '../../src/types/cache.js';
 
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379';
 

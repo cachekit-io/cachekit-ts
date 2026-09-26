@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { CacheMetrics, NoopMetrics, createMetrics } from './prometheus';
+import { CacheMetrics, NoopMetrics, createMetrics, type MetricsCollector } from './prometheus.js';
 
 // Mock prom-client (not available in test environment)
 vi.mock('prom-client', () => ({
@@ -74,7 +74,7 @@ describe('CacheMetrics', () => {
 
 describe('NoopMetrics', () => {
   it('all methods are no-ops', async () => {
-    const metrics = new NoopMetrics();
+    const metrics: MetricsCollector = new NoopMetrics();
     await metrics.recordOperation('get', 'success');
     await metrics.recordHit('l1');
     await metrics.recordMiss();

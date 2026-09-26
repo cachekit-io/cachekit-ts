@@ -167,19 +167,16 @@ describe('EncryptionManager', () => {
       // We need to override the mock to throw nonce exhaustion
       const mod = await import('@cachekit-io/cachekit-core-ts');
       const origFn = mod.encryptWithTenantKeys;
-      // @ts-expect-error - overriding mock for test
       mod.encryptWithTenantKeys = () => {
         throw new Error('Nonce counter exhausted');
       };
 
       const manager = new EncryptionManager(validKey, 'test-tenant');
       // Initialize first with a successful encrypt
-      // @ts-expect-error - restore for init
       mod.encryptWithTenantKeys = origFn;
       await manager.encrypt(new Uint8Array([1]), 'key');
 
       // Now make it throw nonce exhaustion
-      // @ts-expect-error - overriding mock for test
       mod.encryptWithTenantKeys = () => {
         throw new Error('NonceCounterExhausted');
       };
@@ -189,7 +186,6 @@ describe('EncryptionManager', () => {
       );
 
       // Restore
-      // @ts-expect-error - restoring mock
       mod.encryptWithTenantKeys = origFn;
       manager.dispose();
     });
@@ -204,7 +200,6 @@ describe('EncryptionManager', () => {
       // Initialize
       await manager.encrypt(new Uint8Array([1]), 'key');
 
-      // @ts-expect-error - overriding mock for test
       mod.encryptWithTenantKeys = () => {
         throw new Error('some crypto failure');
       };
@@ -214,7 +209,6 @@ describe('EncryptionManager', () => {
         /Encryption failed/
       );
 
-      // @ts-expect-error - restoring mock
       mod.encryptWithTenantKeys = origFn;
       manager.dispose();
     });
@@ -226,7 +220,6 @@ describe('EncryptionManager', () => {
       const manager = new EncryptionManager(validKey, 'test-tenant');
       await manager.encrypt(new Uint8Array([1]), 'key');
 
-      // @ts-expect-error - overriding mock for test
       mod.encryptWithTenantKeys = () => {
         throw 'string error';
       };
@@ -234,7 +227,6 @@ describe('EncryptionManager', () => {
       await expect(manager.encrypt(new Uint8Array([1]), 'key')).rejects.toThrow(EncryptionError);
       await expect(manager.encrypt(new Uint8Array([1]), 'key')).rejects.toThrow(/Unknown error/);
 
-      // @ts-expect-error - restoring mock
       mod.encryptWithTenantKeys = origFn;
       manager.dispose();
     });
@@ -248,7 +240,6 @@ describe('EncryptionManager', () => {
       const manager = new EncryptionManager(validKey, 'test-tenant');
       await manager.encrypt(new Uint8Array([1]), 'key');
 
-      // @ts-expect-error - overriding mock for test
       mod.decryptWithTenantKeys = () => {
         throw 'string error';
       };
@@ -256,7 +247,6 @@ describe('EncryptionManager', () => {
       await expect(manager.decrypt(new Uint8Array([1]), 'key')).rejects.toThrow(EncryptionError);
       await expect(manager.decrypt(new Uint8Array([1]), 'key')).rejects.toThrow(/Unknown error/);
 
-      // @ts-expect-error - restoring mock
       mod.decryptWithTenantKeys = origFn;
       manager.dispose();
     });
@@ -267,7 +257,6 @@ describe('EncryptionManager', () => {
       const mod = await import('@cachekit-io/cachekit-core-ts');
       const origFn = mod.deriveTenantKeys;
 
-      // @ts-expect-error - overriding mock for test
       mod.deriveTenantKeys = () => {
         throw new TypeError('unexpected init error');
       };
@@ -278,7 +267,6 @@ describe('EncryptionManager', () => {
         /Failed to initialize/
       );
 
-      // @ts-expect-error - restoring mock
       mod.deriveTenantKeys = origFn;
       manager.dispose();
     });
@@ -287,7 +275,6 @@ describe('EncryptionManager', () => {
       const mod = await import('@cachekit-io/cachekit-core-ts');
       const origFn = mod.deriveTenantKeys;
 
-      // @ts-expect-error - overriding mock for test
       mod.deriveTenantKeys = () => {
         throw 'string init error';
       };
@@ -295,7 +282,6 @@ describe('EncryptionManager', () => {
       const manager = new EncryptionManager(validKey, 'test-tenant');
       await expect(manager.encrypt(new Uint8Array([1]), 'key')).rejects.toThrow(EncryptionError);
 
-      // @ts-expect-error - restoring mock
       mod.deriveTenantKeys = origFn;
       manager.dispose();
     });

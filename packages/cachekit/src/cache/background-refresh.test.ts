@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { BackgroundRefreshManager } from './background-refresh.js';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
+import { BackgroundRefreshManager, type PersistCallback } from './background-refresh.js';
 import { L1Cache } from '../l1/lru-cache.js';
 
 // Pin the SWR jitter draw so tests are deterministic. 0.5 lands the
@@ -12,7 +12,7 @@ vi.mock('../utils/random.js', () => ({
 describe('BackgroundRefreshManager', () => {
   let manager: BackgroundRefreshManager;
   let l1Cache: L1Cache;
-  let persistToL2: ReturnType<typeof vi.fn>;
+  let persistToL2: Mock<PersistCallback<unknown>>;
   let consoleSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
@@ -20,7 +20,7 @@ describe('BackgroundRefreshManager', () => {
     l1Cache = new L1Cache({ maxEntries: 100 });
     // The L2 write hands back what L1 should hold. For a plaintext cache that
     // is the value itself; a secure cache would return its ciphertext here.
-    persistToL2 = vi.fn(async (_key: string, value: unknown) => ({ l1: value }));
+    persistToL2 = vi.fn<PersistCallback<unknown>>(async (_key, value) => ({ l1: value }));
     consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 

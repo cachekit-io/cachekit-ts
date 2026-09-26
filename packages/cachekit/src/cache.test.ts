@@ -231,7 +231,7 @@ describe('Cache Integration', () => {
       const retryCache = createCache({
         backend: flakeyBackend,
         reliability: {
-          retry: { maxAttempts: 3, baseDelayMs: 10 },
+          retry: { maxAttempts: 3, baseDelay: 10 },
         },
         l1: { enabled: false }, // Disable L1 to force backend access
       });

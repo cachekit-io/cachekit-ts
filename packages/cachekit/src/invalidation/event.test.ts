@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { serializeEvent, deserializeEvent, createInvalidationEvent } from './event';
+import { serializeEvent, deserializeEvent, createInvalidationEvent } from './event.js';
 
 describe('InvalidationEvent serialization', () => {
   it('round-trips global event', () => {

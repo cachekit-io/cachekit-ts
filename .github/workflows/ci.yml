@@ -32,6 +32,9 @@ jobs:
       - name: Type check
         run: pnpm type-check
 
+      - name: Type check tests
+        run: pnpm type-check:tests
+
   test:
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
     strategy:

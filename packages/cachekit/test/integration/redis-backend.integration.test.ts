@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import { redis } from '../../src/backends/redis.js';
 import { RedisContainer, type StartedRedisContainer } from '@testcontainers/redis';
 import { execSync } from 'node:child_process';
@@ -124,7 +124,7 @@ describe.skipIf(!dockerAvailable)('RedisBackend Integration (Testcontainers)', (
   describe('getWithTtl (LAB-1388)', () => {
     it('returns the value and remaining TTL in one round trip', async () => {
       await backend.set('gwt-key', new Uint8Array([7, 8]), 60);
-      const result = await backend.getWithTtl('gwt-key');
+      const result = await backend.getWithTtl?.('gwt-key');
       expect(result).not.toBeNull();
       expect(result!.value).toEqual(new Uint8Array([7, 8]));
       expect(result!.ttlSeconds).toBeGreaterThan(0);
@@ -132,12 +132,12 @@ describe.skipIf(!dockerAvailable)('RedisBackend Integration (Testcontainers)', (
     });
 
     it('returns null for a missing key', async () => {
-      expect(await backend.getWithTtl('gwt-missing')).toBeNull();
+      expect(await backend.getWithTtl?.('gwt-missing')).toBeNull();
     });
 
     it('returns null TTL for a key without expiry', async () => {
       await client.set(`${testPrefix}gwt-persistent`, 'v');
-      const result = await backend.getWithTtl('gwt-persistent');
+      const result = await backend.getWithTtl?.('gwt-persistent');
       expect(result).not.toBeNull();
       expect(result!.ttlSeconds).toBeNull();
     });
@@ -147,7 +147,7 @@ describe.skipIf(!dockerAvailable)('RedisBackend Integration (Testcontainers)', (
       // The raw client sees the prefixed key; getWithTtl reads it back
       // through the same prefixing.
       expect(await client.exists(`${testPrefix}gwt-prefixed`)).toBe(1);
-      const result = await backend.getWithTtl('gwt-prefixed');
+      const result = await backend.getWithTtl?.('gwt-prefixed');
       expect(result!.value).toEqual(new Uint8Array([9]));
     });
   });
