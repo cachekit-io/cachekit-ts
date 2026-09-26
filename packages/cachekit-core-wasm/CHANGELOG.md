@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-core-wasm-v0.1.2...cachekit-core-wasm-v0.1.3) (2026-09-26)
+
+
+### Features
+
+* **encryption:** previousMasterKeys keyring rotation surface (LAB-685) ([#103](https://github.com/cachekit-io/cachekit-ts/issues/103)) ([e7d1a8f](https://github.com/cachekit-io/cachekit-ts/commit/e7d1a8fffe7833078d363bed23b30199653327dd))
+* **encryption:** surface hardware-acceleration detection (LAB-523) ([#132](https://github.com/cachekit-io/cachekit-ts/issues/132)) ([0ae83ba](https://github.com/cachekit-io/cachekit-ts/commit/0ae83ba54e804360b236e91385dfe47303538fba))
+
 ## [0.1.2](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-core-wasm-v0.1.1...cachekit-core-wasm-v0.1.2) (2026-08-03)
 
 
