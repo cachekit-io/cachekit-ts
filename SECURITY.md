@@ -45,7 +45,10 @@ copy. A compression-on read treats such bytes as corrupt. The envelope-tolerant
 read on a compression-off cache decodes them as plain MessagePack. What `unpack`
 may allocate is then a small multiple of `maxDecodedSize`: the input, the
 compressed payload, and an output of at most `maxDecodedSize`, which is the same
-bound `serializer.decode` applies to its input.
+bound `serializer.decode` applies to its input. On an encrypted cache the
+ciphertext is bounded first: bytes longer than any plaintext the cache would
+decode, plus the 28-byte AES-GCM nonce and tag, are rejected with
+`ValueTooLargeError` before `decrypt` copies them.
 
 If an allocation fails or the wasm instance traps inside `unpack` during the
 envelope-tolerant read, the SDK propagates the error instead of treating it as

@@ -20,7 +20,11 @@ import {
   type L1Write,
 } from './cache/background-refresh.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
-import { envelopeVerdict, looksLikeEnvelope } from './serialization/envelope.js';
+import {
+  envelopeVerdict,
+  looksLikeEnvelope,
+  maxEnvelopeInputSize,
+} from './serialization/envelope.js';
 import {
   generateKey,
   generateParamsHash,
@@ -45,6 +49,7 @@ import {
   DEFAULT_LOCK_TIMEOUT_MS,
   DEFAULT_LOCK_WAIT_MS,
   DEFAULT_LOCK_POLL_MS,
+  DEFAULT_MAX_DECODED_SIZE,
 } from './constants.js';
 
 /**
@@ -62,6 +67,13 @@ const VALUE_TOO_LARGE_WARN_INTERVAL_MS = 60_000;
  * null, and conflating the two would compute twice under a held lock.
  */
 const LOCK_FALLTHROUGH = Symbol('cachekit.lock-fallthrough');
+
+/**
+ * AES-256-GCM ciphertext overhead: 12-byte nonce + 16-byte tag around the
+ * plaintext (cachekit-core's layout; pinned by a test against the real
+ * encryptor). Bounds ciphertext length before decrypt.
+ */
+const AEAD_OVERHEAD_BYTES = 12 + 16;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -583,6 +595,17 @@ export class CacheImpl implements SecureCache {
 
     let plaintext = bytes;
     if (this.encryption) {
+      // Refuse ciphertext longer than any plaintext this cache would decode
+      // before the codec copies it in: junk of any length otherwise reaches
+      // decrypt, which allocates for all of it before the tag check fails.
+      const maxPlaintext = interop
+        ? DEFAULT_MAX_DECODED_SIZE // decodeInteropValue's fixed input cap
+        : maxEnvelopeInputSize(this.serializer.maxDecodedSize);
+      if (plaintext.length > maxPlaintext + AEAD_OVERHEAD_BYTES) {
+        throw new ValueTooLargeError(
+          `Ciphertext size ${plaintext.length} exceeds max ${maxPlaintext + AEAD_OVERHEAD_BYTES}`
+        );
+      }
       plaintext = await this.encryption.decrypt(plaintext, key, useEnvelope);
     }
     if (useEnvelope) {

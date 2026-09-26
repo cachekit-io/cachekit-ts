@@ -732,6 +732,64 @@ describe('Cache Integration', () => {
         await cache.close();
       });
 
+      describe('encrypted caches: ciphertext length is bounded before decrypt', () => {
+        const encryption = { masterKey: '0'.repeat(64), tenantId: 'ceiling' };
+
+        it('stores exactly plaintext + 28 bytes (the pinned AEAD overhead)', async () => {
+          // decodeEntry's pre-decrypt cap assumes nonce(12) + tag(16); if core
+          // ever adds a header this fails here instead of refusing real reads.
+          const backend = new InMemoryBackend();
+          const cache = createCache({
+            backend,
+            encryption,
+            compression: false,
+            l1: { enabled: false },
+          });
+          const value = { data: 'x'.repeat(1000) };
+          await cache.set('test:aead', value);
+          const stored = await backend.get('test:aead');
+          expect(stored!.length).toBe(new MessagePackSerializer().encode(value).length + 28);
+          await cache.close();
+        });
+
+        it.each(bothPaths)(
+          'refuses oversized junk ciphertext without decrypting it (%s)',
+          async (_label, compression) => {
+            const maxDecodedSize = 1000;
+            const backend = new InMemoryBackend();
+            // Longest input any plaintext could need (envelope cap) + AEAD, + 1.
+            const limit = 2 * (20 + Math.floor((maxDecodedSize * 110) / 100)) + 256 + 28;
+            await backend.set('test:junk', new Uint8Array(limit + 1), 3600);
+            const cache = createCache({
+              backend,
+              encryption,
+              compression,
+              serializer: { maxDecodedSize },
+              l1: { enabled: false },
+              reliability: { degradation: false, retry: { maxAttempts: 1 } },
+            });
+            const impl = cache as unknown as {
+              encryption: { decrypt: (...args: unknown[]) => Promise<Uint8Array> };
+            };
+            let decrypts = 0;
+            const realDecrypt = impl.encryption.decrypt.bind(impl.encryption);
+            impl.encryption.decrypt = (...args) => {
+              decrypts++;
+              return realDecrypt(...args);
+            };
+
+            await expect(cache.get('test:junk')).rejects.toThrow(ValueTooLargeError);
+            expect(decrypts).toBe(0);
+
+            // At the limit it reaches decrypt (and fails authentication).
+            await backend.set('test:junk', new Uint8Array(limit), 3600);
+            await expect(cache.get('test:junk')).rejects.toThrow();
+            expect(decrypts).toBe(1);
+            await cache.close();
+          }
+        );
+      });
+
       it('propagates a wasm trap from the tolerance sniff instead of reading it as "not an envelope"', async () => {
         const trap = new WebAssembly.RuntimeError('unreachable');
         const { codec, calls } = spyCodec(trap);

@@ -26,6 +26,16 @@ function lz4MaxCompressedSize(n: number): number {
 }
 
 /**
+ * The longest bytes that can be an envelope within `maxDecodedSize`: twice
+ * lz4's worst case (legacy encoding spends up to 2 bytes per compressed
+ * byte) plus the fixed fields. Never less than maxDecodedSize, so it also
+ * covers plain serialized values.
+ */
+export function maxEnvelopeInputSize(maxDecodedSize: number): number {
+  return 2 * lz4MaxCompressedSize(maxDecodedSize) + ENVELOPE_OVERHEAD_BYTES;
+}
+
+/**
  * Cheap structural sniff for the ByteStorage envelope: a positional msgpack
  * 4-tuple whose first element is binary — fixarray(4) marker followed by a
  * bin8/bin16/bin32 marker. Gates envelope tolerance on compression-off
@@ -125,16 +135,15 @@ export function readEnvelopeHeader(
  *   what any LZ4 writer emits for the declared size. Never unpack these.
  *
  * @throws {ValueTooLargeError} for an envelope core would accept that
- *   declares more than `maxDecodedSize`, or bytes too long to be an envelope
- *   within it (at least twice lz4's worst case, since legacy encoding spends
- *   up to 2 bytes per compressed byte). Such bytes are over maxDecodedSize
- *   either way, so a plain decode would reject them too.
+ *   declares more than `maxDecodedSize`, or bytes longer than
+ *   maxEnvelopeInputSize. Such bytes are over maxDecodedSize either way, so a
+ *   plain decode would reject them too.
  */
 export function envelopeVerdict(
   bytes: Uint8Array,
   maxDecodedSize: number
 ): 'unpack' | 'not-envelope' {
-  const maxInput = 2 * lz4MaxCompressedSize(maxDecodedSize) + ENVELOPE_OVERHEAD_BYTES;
+  const maxInput = maxEnvelopeInputSize(maxDecodedSize);
   if (bytes.length > maxInput) {
     throw new ValueTooLargeError(
       `Envelope input size ${bytes.length} exceeds max ${maxInput} for maxDecodedSize ${maxDecodedSize}`
