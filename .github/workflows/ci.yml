@@ -11,17 +11,11 @@ permissions:
 
 jobs:
   lint:
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Setup Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
-        with:
-          node-version: '22'
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
+      - uses: ./.github/actions/setup-pnpm-node
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -33,7 +27,7 @@ jobs:
         run: pnpm type-check
 
   test:
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -42,13 +36,9 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Setup Node.js ${{ matrix.node }}
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+      - uses: ./.github/actions/setup-pnpm-node
         with:
           node-version: ${{ matrix.node }}
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -60,13 +50,7 @@ jobs:
         run: pnpm test
 
   test-integration:
-    # Fork PRs fall back to ubuntu-latest (GHA disables self-hosted runners
-    # for fork PRs by security policy). Internal/push runs use 'cachekit'
-    # (NOT 'cachekit-lean') because the redis service container below
-    # requires Docker on the host: cachekit-lean is a locked-down rootless
-    # pod with no DOCKER_HOST and no docker socket, so services would fail
-    # to start. ubuntu-latest has Docker preinstalled.
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit' }}
+    runs-on: ubuntu-latest
     services:
       redis:
         image: redis:7-alpine
@@ -81,13 +65,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Setup Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
-        with:
-          node-version: '22'
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
+      - uses: ./.github/actions/setup-pnpm-node
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -102,20 +80,14 @@ jobs:
           CI: true
 
   coverage:
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write # Required for Codecov OIDC
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Setup Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
-        with:
-          node-version: '22'
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
+      - uses: ./.github/actions/setup-pnpm-node
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -147,17 +119,11 @@ jobs:
           fail_ci_if_error: true
 
   security:
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
-
-      - name: Setup Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
-        with:
-          node-version: '22'
+      - uses: ./.github/actions/setup-pnpm-node
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -204,18 +170,14 @@ jobs:
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
-        env:
-          CARGO_HOME: /tmp/cargo
 
       - name: Audit Cargo dependencies
         working-directory: packages/cachekit-core-ts
         run: cargo audit
-        env:
-          CARGO_HOME: /tmp/cargo
 
   workers:
     name: Workers lane (wasm + workerd)
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
+    runs-on: ubuntu-latest
     env:
       # Must match the wasm-bindgen version pinned in the crate's Cargo.lock;
       # scripts/build.sh fails loudly on drift.
@@ -228,19 +190,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Configure Rust paths (self-hosted)
-        if: ${{ !github.event.pull_request.head.repo.fork }}
-        run: |
-          echo "RUSTUP_HOME=/tmp/rustup" >> "$GITHUB_ENV"
-          echo "CARGO_HOME=/tmp/cargo" >> "$GITHUB_ENV"
-
-      - name: Setup Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
-        with:
-          node-version: '22'
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
+      - uses: ./.github/actions/setup-pnpm-node
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # stable
@@ -250,6 +200,11 @@ jobs:
           # size-budget check in scripts/build.sh.
           toolchain: 1.97.1
           targets: wasm32-unknown-unknown
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: packages/cachekit-core-wasm
 
       - name: Install wasm-bindgen + wasm-opt (pinned prebuilts, checksummed)
         run: |
@@ -281,18 +236,12 @@ jobs:
 
   smoke-test:
     name: Package smoke test (ESM + CJS)
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
+    runs-on: ubuntu-latest
     needs: [test]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Setup Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
-        with:
-          node-version: '22'
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
+      - uses: ./.github/actions/setup-pnpm-node
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -340,10 +289,42 @@ jobs:
             console.log('CJS: all exports verified');
           "
 
+  self-hosted-drift-guard:
+    name: Self-hosted runner drift guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      # Drift check for maintainers, not a fork-PR control: a fork PR runs its
+      # own copy of this workflow.
+      - name: Fail if any workflow still targets a self-hosted runner
+        run: |
+          set -euo pipefail
+          key="^[[:space:]]*(-[[:space:]]+)?(runs-on|os|runner):[^#]*(cachekit|self-hosted)"
+          json="\"os\":[[:space:]]*\"[^\"]*(cachekit|self-hosted)"
+          item="^[[:space:]]*-[[:space:]]+[\"']?(cachekit|cachekit-lean|self-hosted)[\"']?[[:space:]]*(#.*)?\$"
+          hits=$(grep -rniE -e "$key" -e "$json" -e "$item" .github/workflows/ || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Workflows in this public repo must use GitHub-hosted runners (e.g. ubuntu-latest):"
+            echo "$hits"
+            exit 1
+          fi
+          echo "no self-hosted runner references found in .github/workflows/"
+
   ci-success:
     name: CI Success
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
-    needs: [lint, test, test-integration, coverage, security, smoke-test, workers]
+    runs-on: ubuntu-latest
+    needs:
+      [
+        lint,
+        test,
+        test-integration,
+        coverage,
+        security,
+        smoke-test,
+        workers,
+        self-hosted-drift-guard,
+      ]
     if: always()
     steps:
       - name: Check all jobs succeeded
@@ -354,7 +335,8 @@ jobs:
              [[ "${{ needs.coverage.result }}" != "success" ]] || \
              [[ "${{ needs.security.result }}" != "success" ]] || \
              [[ "${{ needs.smoke-test.result }}" != "success" ]] || \
-             [[ "${{ needs.workers.result }}" != "success" ]]; then
+             [[ "${{ needs.workers.result }}" != "success" ]] || \
+             [[ "${{ needs.self-hosted-drift-guard.result }}" != "success" ]]; then
             echo "One or more jobs failed"
             exit 1
           fi
