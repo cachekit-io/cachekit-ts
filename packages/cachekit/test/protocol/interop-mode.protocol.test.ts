@@ -9,6 +9,10 @@
  * stdlib Python reference implementation and independently cross-checked by
  * tools/interop-crosscheck.mjs; this suite is the cachekit-ts SDK's own
  * mandatory verification (spec "SDK Implementation Requirements" #7).
+ *
+ * Provenance: cachekit-io/protocol test-vectors/interop-mode.json 1.1.0
+ * (https://github.com/cachekit-io/protocol/pull/78), copied byte-for-byte —
+ * sha256 9b1855851d888c479e37a8fff9e9bbe5738737a9a408e749d9126c7678b9e7bc
  */
 
 import { readFileSync } from 'node:fs';
