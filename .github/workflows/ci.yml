@@ -304,6 +304,19 @@ jobs:
           json="\"os\":[[:space:]]*\"[^\"]*(cachekit|self-hosted)"
           item="^[[:space:]]*-[[:space:]]+[\"']?(cachekit|cachekit-lean|self-hosted)[\"']?[[:space:]]*(#.*)?\$"
           hits=$(grep -rniE -e "$key" -e "$json" -e "$item" .github/workflows/ || true)
+          # A runs-on/os/runner key with no inline value holds its runner on the
+          # lines below (a group/labels mapping, a sequence, a wrapped [ ] list):
+          # scan those lines only, so unrelated keys such as concurrency.group
+          # are never read.
+          block=$(awk '
+            { line = tolower($0); sub(/#.*/, "", line) }
+            line ~ /^[ \t]*$/ { next }
+            { ind = match(line, /[^ \t]/) }
+            open && (ind < base || (ind == base && line !~ /^[ \t]*-/)) { open = 0 }
+            line ~ /^[ \t]*(-[ \t]+)?(runs-on|os|runner):[ \t]*$/ { open = 1; base = match(line, /[^ \t-]/); next }
+            open && line ~ /cachekit|self-hosted/ { print FILENAME ":" FNR ":" $0 }
+          ' .github/workflows/*)
+          hits=$(printf '%s\n%s\n' "$hits" "$block" | sed '/^$/d' | sort -u -t: -k1,1 -k2,2n)
           if [ -n "$hits" ]; then
             echo "::error::Workflows in this public repo must use GitHub-hosted runners (e.g. ubuntu-latest):"
             echo "$hits"
