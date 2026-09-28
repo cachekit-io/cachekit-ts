@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { L1Cache } from './lru-cache';
+import { setLogger } from '../logger';
 import type { InvalidationEvent } from './types';
 
 describe('L1Cache', () => {
@@ -433,6 +434,62 @@ describe('L1Cache', () => {
       expect(cache.get('ns1:a')).toBeNull();
       expect(cache.get('ns1:b')).toBeNull();
       expect(cache.get('ns2:c')).toBe('value3');
+    });
+
+    it('handleInvalidationEvent - reports a namespace event with no namespace (LAB-4336)', () => {
+      // It invalidates nothing, so the publisher's intent is lost. That must
+      // not vanish: before nil was accepted, such an event failed to
+      // deserialize and the channel logged it. Accepting it must not cost
+      // the signal. Empty string is the same case — it is falsy here.
+      const reported: { message: string; data?: unknown }[] = [];
+      setLogger((message, data) => reported.push({ message, data }));
+      const forged = 'other-instance\n[cachekit] FORGED LINE';
+      try {
+        cache.set('ns1:a', 'value1', 10000, 'ns1');
+        cache.handleInvalidationEvent({
+          level: 'namespace',
+          namespace: undefined,
+          timestamp: Date.now(),
+          sourceInstance: forged,
+        });
+        expect(cache.get('ns1:a')).toBe('value1');
+      } finally {
+        setLogger(null);
+      }
+
+      expect(reported).toHaveLength(1);
+      expect(reported[0].message).toMatch(/Ignored namespace-level invalidation.*no namespace/);
+      // Fails the moment someone tidies the object wrapper into a template
+      // literal: only object string VALUES get control chars escaped.
+      expect(reported[0].message).not.toContain('FORGED LINE');
+      expect(reported[0].data).toEqual({ sourceInstance: forged });
+    });
+
+    it('handleInvalidationEvent - the report is total and bounded (LAB-4336)', () => {
+      // Why this exists next to the test above: that fixture is a short
+      // string, so it passes with both the typeof guard and the bound deleted.
+      const reported: unknown[] = [];
+      const report = (sourceInstance: unknown) => {
+        cache.handleInvalidationEvent({
+          level: 'namespace',
+          timestamp: 0,
+          sourceInstance,
+        } as InvalidationEvent);
+      };
+      setLogger((_message, data) => reported.push(data));
+      try {
+        for (const bad of [undefined, null, 123, { a: 1 }, Symbol('s')]) {
+          expect(() => report(bad)).not.toThrow();
+        }
+        report('x'.repeat(80));
+      } finally {
+        setLogger(null);
+      }
+
+      expect(reported).toEqual([
+        ...Array(5).fill({ sourceInstance: 'unknown' }),
+        { sourceInstance: 'x'.repeat(64) },
+      ]);
     });
 
     it('handleInvalidationEvent - ignores events from self', () => {
