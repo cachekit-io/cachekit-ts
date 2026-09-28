@@ -1259,6 +1259,11 @@ export class CacheImpl implements SecureCache {
       return;
     }
 
+    if (level === 'params' && !options?.key) {
+      logError('[cachekit] invalidate("params") called with no key; nothing invalidated');
+      return;
+    }
+
     // Invalidate L1
     if (this.l1) {
       switch (level) {
@@ -1283,8 +1288,11 @@ export class CacheImpl implements SecureCache {
     if (level === 'params' && options?.key) {
       try {
         await this.backend.delete(options.key);
-      } catch {
-        // Best-effort L2 invalidation - don't fail the operation
+      } catch (err) {
+        // Best-effort L2 invalidation - don't fail the operation, but don't
+        // hide it either. The key is caller-supplied, so it stays out of the
+        // message string.
+        logError('[cachekit] invalidate("params") L2 delete failed:', err);
       }
     }
     // Note: namespace/global L2 invalidation requires Redis SCAN - not implemented

@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createCache } from './cache.js';
 import { RetryPolicy } from './reliability/retry.js';
 import { CacheMetrics } from './metrics/prometheus.js';
+import { setLogger } from './logger.js';
 import type { Backend } from './backends/types.js';
 import type { L1Cache } from './l1/lru-cache.js';
 import type { Redis } from 'ioredis';
@@ -136,6 +137,73 @@ describe('m1: InvalidationChannel Initialization', () => {
   });
 });
 
+// ========== invalidate() must not report success for work it did not do ==========
+
+describe('invalidate("params") failure reporting', () => {
+  let reported: string[];
+
+  beforeEach(() => {
+    reported = [];
+    setLogger((message) => reported.push(message));
+  });
+
+  afterEach(() => {
+    setLogger(null);
+  });
+
+  it.each([
+    ['no options', undefined],
+    ['empty options', {}],
+    ['empty key', { key: '' }],
+  ])(
+    'reports a call with %s at the caller, and deletes and publishes nothing',
+    async (_, options) => {
+      const backend = new InMemoryBackend();
+      const deleteSpy = vi.spyOn(backend, 'delete');
+      const mockRedis = createMockRedis();
+      const cache = createCache({
+        backend,
+        defaultTtl: 3600,
+        invalidation: { redis: mockRedis },
+      });
+
+      await expect(cache.invalidate('params', options)).resolves.toBeUndefined();
+      expect(reported).toEqual([
+        '[cachekit] invalidate("params") called with no key; nothing invalidated',
+      ]);
+      expect(deleteSpy).not.toHaveBeenCalled();
+      expect(mockRedis.publish).not.toHaveBeenCalled();
+
+      // A well-formed call stays quiet and still publishes — the guard must not be broader.
+      reported.length = 0;
+      await cache.invalidate('params', { key: 'k' });
+      expect(reported).toEqual([]);
+      expect(deleteSpy).toHaveBeenCalledOnce();
+      expect(mockRedis.publish).toHaveBeenCalledOnce();
+
+      await cache.close();
+    }
+  );
+
+  it('reports a failed L2 delete but still resolves', async () => {
+    const failure = new Error('backend down');
+    const errors: unknown[] = [];
+    setLogger((message, error) => {
+      reported.push(message);
+      errors.push(error);
+    });
+    const backend = new InMemoryBackend();
+    vi.spyOn(backend, 'delete').mockRejectedValue(failure);
+    const cache = createCache({ backend, defaultTtl: 3600 });
+
+    await expect(cache.invalidate('params', { key: 'secret-key' })).resolves.toBeUndefined();
+    expect(reported).toEqual(['[cachekit] invalidate("params") L2 delete failed:']);
+    expect(errors).toEqual([failure]);
+
+    await cache.close();
+  });
+});
+
 // ========== m3: RetryPolicy Sleep Not Cancellable ==========
 
 describe('m3: RetryPolicy Cancellable Sleep', () => {
@@ -257,7 +325,6 @@ describe('m4: refreshingKeys Cleanup on Close', () => {
       swrEnabled: true,
       swrThresholdRatio: 0.01, // Very low to trigger refresh
       maxConcurrentRefreshes: 10,
-      invalidationEnabled: true,
       namespaceIndex: true,
     });
 

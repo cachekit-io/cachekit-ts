@@ -30,9 +30,6 @@ export interface L1Config {
    */
   maxConcurrentRefreshes: number;
 
-  /** Enable cross-instance invalidation (default: true) */
-  invalidationEnabled: boolean;
-
   /**
    * Enable namespace index for namespace-level invalidation (default: true)
    * Uses extra memory but enables O(n) namespace invalidation
@@ -49,7 +46,6 @@ export const DEFAULT_L1_CONFIG: L1Config = {
   swrEnabled: true,
   swrThresholdRatio: DEFAULT_L1_SWR_THRESHOLD_RATIO,
   maxConcurrentRefreshes: DEFAULT_L1_MAX_CONCURRENT_REFRESHES,
-  invalidationEnabled: true,
   namespaceIndex: true,
 };
 

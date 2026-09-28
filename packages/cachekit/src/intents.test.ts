@@ -54,11 +54,10 @@ describe('Intent-based Cache API', () => {
       expect(capturedOptions!.reliability?.circuitBreaker?.failureThreshold).toBe(Infinity);
     });
 
-    it('disables SWR and invalidation on L1', () => {
+    it('disables SWR and the namespace index on L1', () => {
       createCache.minimal({ url: 'redis://localhost:6379' });
 
       expect(capturedOptions!.l1?.swrEnabled).toBe(false);
-      expect(capturedOptions!.l1?.invalidationEnabled).toBe(false);
       expect(capturedOptions!.l1?.namespaceIndex).toBe(false);
     });
 
@@ -104,7 +103,6 @@ describe('Intent-based Cache API', () => {
       createCache.production({ url: 'redis://localhost:6379' });
 
       expect(capturedOptions!.l1?.swrEnabled).toBe(true);
-      expect(capturedOptions!.l1?.invalidationEnabled).toBe(true);
       expect(capturedOptions!.l1?.namespaceIndex).toBe(true);
     });
 
@@ -140,7 +138,7 @@ describe('Intent-based Cache API', () => {
       expect(capturedOptions!.l1?.maxEntries).toBe(500);
       expect(capturedOptions!.l1?.swrEnabled).toBe(false);
       // Defaults still applied for unset fields
-      expect(capturedOptions!.l1?.invalidationEnabled).toBe(true);
+      expect(capturedOptions!.l1?.namespaceIndex).toBe(true);
     });
   });
 
