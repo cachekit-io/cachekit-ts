@@ -329,57 +329,159 @@ jobs:
             console.log('CJS: all exports verified');
           "
 
-  self-hosted-drift-guard:
-    name: Self-hosted runner drift guard
+  # This repo is public and forkable, so every job runs on GitHub-hosted
+  # runners, never on self-hosted ones. Allow-list, not deny-list: a deny-list
+  # cannot see a label it has no name for. The program is the heredoc below;
+  # its regression fixtures are .github/scripts/runner-drift-guard-selftest.sh,
+  # run first so a broken guard cannot pass anything. This is drift protection
+  # for maintainers, not a fork-PR control: a fork PR runs its own copy of this
+  # workflow.
+  runner-drift-guard:
+    name: Runner drift guard
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      # Drift check for maintainers, not a fork-PR control: a fork PR runs its
-      # own copy of this workflow.
-      - name: Fail if any workflow still targets a self-hosted runner
+      # The program stays in this workflow file on purpose: GITHUB_TOKEN cannot
+      # write .github/workflows/, so a `contents: write` job (release-please) or
+      # a compromised action could rewrite a script under .github/scripts/ but
+      # not this heredoc. It is written to a temp file so the self-test and the
+      # scan run the same bytes.
+      - name: Write the guard program
         run: |
-          set -euo pipefail
-          key="^[[:space:]]*(-[[:space:]]+)?(runs-on|os|runner):[^#]*(cachekit|self-hosted)"
-          json="\"os\":[[:space:]]*\"[^\"]*(cachekit|self-hosted)"
-          item="^[[:space:]]*-[[:space:]]+[\"']?(cachekit|cachekit-lean|self-hosted)[\"']?[[:space:]]*(#.*)?\$"
-          hits=$(grep -rniE -e "$key" -e "$json" -e "$item" .github/workflows/ || true)
-          # A runs-on/os/runner key with no inline value holds its runner on the
-          # lines below (a group/labels mapping, a sequence, a wrapped [ ] list):
-          # scan those lines only, so unrelated keys such as concurrency.group
-          # are never read. For a sequence item ("- os:") the block is the rest of
-          # that item, so sibling keys like labels: are scanned and the next
-          # "- ..." item closes it.
-          block=$(awk '
-            { line = tolower($0); sub(/#.*/, "", line) }
-            line ~ /^[ \t]*$/ { next }
-            { ind = match(line, /[^ \t]/) }
-            open && (ind < base || (ind == base && (seq || line !~ /^[ \t]*-/))) { open = 0 }
-            line ~ /^[ \t]*(-[ \t]+)?(runs-on|os|runner):[ \t]*$/ { open = 1; base = ind; seq = (line ~ /^[ \t]*-/); next }
-            open && line ~ /cachekit|self-hosted/ { print FILENAME ":" FNR ":" $0 }
-          ' .github/workflows/*)
-          hits=$(printf '%s\n%s\n' "$hits" "$block" | sed '/^$/d' | sort -u -t: -k1,1 -k2,2n)
-          if [ -n "$hits" ]; then
-            echo "::error::Workflows in this public repo must use GitHub-hosted runners (e.g. ubuntu-latest):"
-            echo "$hits"
-            exit 1
-          fi
-          echo "no self-hosted runner references found in .github/workflows/"
+          cat > "$RUNNER_TEMP/runner-drift-guard.awk" <<'AWK'
+            # Allow-list, fail closed: every runs-on value, and every os or
+            # runner value inside a matrix block, must be one of the exact
+            # hosted labels in HOSTED or the matrix.os expression. This is a
+            # line scanner, not a YAML parser: a line that could hide a runner
+            # label from it is an error, never a skip. Exact labels, not a
+            # hosted-prefix pattern (a prefix admits any self-hosted label named
+            # ubuntu-<anything>) and not a copy of GitHub's image table (it
+            # rots): adopting another hosted image is a deliberate edit to HOSTED.
+            function fail(file, line, msg) {
+              printf "::error file=%s,line=%d::%s\n", file, line, msg
+              bad = 1
+            }
+            function label(v) {
+              fail(FILENAME, FNR, "runner value \"" v "\" is not an allow-listed GitHub-hosted label — this public repo runs only on GitHub-hosted runners; adopting a new hosted image means extending HOSTED in the runner-drift-guard job of ci.yml")
+            }
+            # Verdict on the one dynamic matrix the guard accepts (see the
+            # build-native.yml rules below), given at the end of each file so the
+            # job order does not matter.
+            function dynamic_matrix_verdict() {
+              if (dyn_line && !dyn_os) fail(dyn_file, dyn_line, "the build matrix comes from the resolve job, which writes no \"os\" literal the drift guard can check — write each entry as \"os\":\"<label>\"")
+              dyn_line = 0
+            }
+            BEGIN {
+              HOSTED = "^(ubuntu|macos|windows)-latest$"
+              # The only expansions build-native.yml's resolve job may use; any
+              # other one reads a value the guard cannot check. The expression
+              # opener is split so GitHub does not expand it in this run: block.
+              OPENER = "$" "{{ "
+              RESOLVE_EXP[1] = OPENER "github.event_name }}"
+              RESOLVE_EXP[2] = OPENER "steps.set.outputs.builds }}"
+              RESOLVE_EXP[3] = "$(echo \"$builds\" | tr -d '\\n ')"
+              RESOLVE_EXP[4] = "$github_output"
+            }
+            FNR == 1 {
+              dynamic_matrix_verdict()
+              matrix_indent = value_indent = -1; in_jobs = dyn_os = 0; job = ""
+              bn = (FILENAME ~ /(^|\/)build-native\.yml$/)
+            }
+            { sub(/\r$/, ""); sub(/#.*/, ""); $0 = tolower($0) }
+            /^[[:space:]]*$/ { next }
+            {
+              match($0, /^[[:space:]]*(-[[:space:]]*)?/)
+              indent = RLENGTH
+              if (matrix_indent >= 0 && indent <= matrix_indent) matrix_indent = -1
+            }
+            # A line deeper than the runner key before it continues that value
+            # (a wrapped plain scalar), so the key line held only part of it.
+            value_indent >= 0 {
+              if (indent > value_indent) fail(FILENAME, FNR, "runner value continues on this line — write it on one line after the key")
+              value_indent = -1
+            }
+            # Track the matrix block by indentation: a bare os: or runner: is
+            # validated only there, because the same key names a workflow_dispatch
+            # input or an action with: parameter, which select no runner. The
+            # tracker arms only on a bare `matrix:` line — anything else on that
+            # line (an expression, anchor, alias, tag or flow map) leaves the block
+            # unread, so the refusal rule below rejects the line instead.
+            /^[[:space:]]*(-[[:space:]]*)?["']?matrix["']?[[:space:]]*:[[:space:]]*$/ { matrix_indent = indent }
+            # build-native.yml builds its matrix as JSON in its `matrix` job and
+            # reads it in its `build` job. Only that file tracks job ids.
+            bn && /^jobs[[:space:]]*:[[:space:]]*$/ { in_jobs = 1; job_indent = -1; next }
+            in_jobs && indent == 0 { in_jobs = 0; job = "" }
+            in_jobs && job_indent < 0 { job_indent = indent }
+            in_jobs && indent == job_indent { job = $0; sub(/^[[:space:]]*/, "", job); sub(/[[:space:]]*:.*/, "", job) }
+            # In the resolve job every "os" must be a quoted literal hosted
+            # label, and the JSON must be literal: any other os there (a shell
+            # variable, a jq --arg) or any expansion outside RESOLVE_EXP (a
+            # vars.* expression, a file read, an env variable) is a value the
+            # guard cannot check. Checked pairs are cut from the line so the
+            # flow-mapping rule below does not refuse them.
+            bn && job == "matrix" {
+              while (match($0, /"os"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
+                v = substr($0, RSTART, RLENGTH); sub(/^[^:]*:[[:space:]]*"/, "", v); sub(/"$/, "", v)
+                if (v ~ HOSTED) dyn_os = 1; else label(v)
+                $0 = substr($0, 1, RSTART - 1) substr($0, RSTART + RLENGTH)
+              }
+              if (/(^|[^a-z0-9_-])os([^a-z0-9_-]|$)/) fail(FILENAME, FNR, "\"os\" in the build-matrix resolve job is not a literal the drift guard can check — write each entry as \"os\":\"<label>\"")
+              line = $0
+              for (i = 1; i in RESOLVE_EXP; i++)
+                while ((k = index(line, RESOLVE_EXP[i]))) line = substr(line, 1, k - 1) substr(line, k + length(RESOLVE_EXP[i]))
+              if (line ~ /[$`]/) fail(FILENAME, FNR, "the build-matrix resolve job reads a value the drift guard cannot check — keep its JSON literal; a new expansion there is a deliberate edit to RESOLVE_EXP in the runner-drift-guard job of ci.yml")
+            }
+            # The build job's include of that JSON is the one dynamic matrix the
+            # guard accepts; dynamic_matrix_verdict() fails it unless the resolve
+            # job wrote at least one checked "os" literal. The same line anywhere
+            # else falls through to the refusal rule.
+            bn && job == "build" && matrix_indent >= 0 && /^[[:space:]]*include[[:space:]]*:[[:space:]]*\$\{\{[[:space:]]*fromjson\(needs\.matrix\.outputs\.builds\)[[:space:]]*\}\}[[:space:]]*$/ {
+              dyn_line = FNR; dyn_file = FILENAME; next
+            }
+            # Lines that may hide a runner label: a flow mapping carrying a
+            # runner/strategy/matrix key; strategy: or matrix: with any inline
+            # value, include: with one inside a matrix; a YAML merge key or a bare
+            # alias item; a job calling a reusable workflow in another repo (its
+            # runs-on is outside this scan; ./.github/workflows/ callees are
+            # scanned). Accepted false positives, all fail-closed: an env/with key
+            # named matrix or strategy with an inline value; a flow map with an
+            # os or runner key.
+            /[{,][[:space:]]*["']?(runs-on|os|runner|strategy|matrix|include)["']?[[:space:]]*:/ ||
+            /^[[:space:]]*(-[[:space:]]*)?["']?(strategy|matrix)["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ ||
+            (/^[[:space:]]*(-[[:space:]]*)?["']?include["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ && matrix_indent >= 0) ||
+            /^[[:space:]]*(-[[:space:]]*)?(<<[[:space:]]*:|\*[^*[:space:]])/ ||
+            (/^[[:space:]]*uses[[:space:]]*:/ && /\/\.github\/workflows\// && !/uses[[:space:]]*:[[:space:]]*["']?\.\//) {
+              fail(FILENAME, FNR, "line may hide a runner label from the drift guard — write `runs-on: <label>` / `os: [<labels>]` inline; keep `strategy:`, `matrix:`, `include:` as bare keys over a static block (no expressions, anchors, aliases or flow maps); call reusable workflows only from ./.github/workflows/")
+            }
+            /^[[:space:]]*(-[[:space:]]*)?["']?runs-on["']?[[:space:]]*:/ ||
+            (/^[[:space:]]*(-[[:space:]]*)?["']?(os|runner)["']?[[:space:]]*:/ && matrix_indent >= 0) {
+              v = $0; sub(/^[^:]*:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
+              if (v != "") value_indent = indent
+              if (v ~ /^["']?\$\{\{[[:space:]]*matrix\.os[[:space:]]*\}\}["']?$/) next
+              if (v ~ /^\[/ && v !~ /\]$/) v = ""
+              gsub(/[][ "']/, "", v)
+              n = split(v, items, ",")
+              ok = (v != "")
+              for (i = 1; i <= n; i++) if (items[i] !~ HOSTED) ok = 0
+              if (!ok) label(v == "" ? "<value not inline on this line>" : v)
+            }
+            END { dynamic_matrix_verdict(); exit bad }
+          AWK
+
+      - name: Guard self-test (regression fixtures)
+        run: bash .github/scripts/runner-drift-guard-selftest.sh "$RUNNER_TEMP/runner-drift-guard.awk"
+
+      # One awk pass, no shell pipeline: a program error exits non-zero and
+      # fails the step instead of reading as "no match".
+      - name: Every runner value is an allow-listed GitHub-hosted label
+        run: awk -f "$RUNNER_TEMP/runner-drift-guard.awk" .github/workflows/*.y*ml
 
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
     needs:
-      [
-        lint,
-        test,
-        test-integration,
-        coverage,
-        security,
-        smoke-test,
-        workers,
-        self-hosted-drift-guard,
-      ]
+      [lint, test, test-integration, coverage, security, smoke-test, workers, runner-drift-guard]
     if: always()
     steps:
       - name: Check all jobs succeeded
@@ -391,7 +493,7 @@ jobs:
              [[ "${{ needs.security.result }}" != "success" ]] || \
              [[ "${{ needs.smoke-test.result }}" != "success" ]] || \
              [[ "${{ needs.workers.result }}" != "success" ]] || \
-             [[ "${{ needs.self-hosted-drift-guard.result }}" != "success" ]]; then
+             [[ "${{ needs.runner-drift-guard.result }}" != "success" ]]; then
             echo "One or more jobs failed"
             exit 1
           fi
