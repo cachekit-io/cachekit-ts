@@ -339,18 +339,26 @@ export class L1Cache<T = unknown> {
           // A foreign publisher sent an instruction nothing can carry out.
           // This class used to fail the shape guard and get logged by the
           // channel; accepting nil must not cost that signal.
-          logError('[cachekit] Ignored namespace-level invalidation: no namespace on the event', {
-            // Object-wrapped deliberately: sourceInstance is untrusted text and only
-            // object string VALUES get control chars escaped — a bare string arg would
-            // let a forged newline open a log line. Do not flatten. typeof, not `?.`:
-            // L1Cache is exported, so a JS caller reaches this method with any value at
-            // all, and the report on an error path must not be what throws. Sliced
-            // because the only bound on it is the 4KB event cap.
-            sourceInstance:
-              typeof event.sourceInstance === 'string'
-                ? event.sourceInstance.slice(0, 64)
-                : 'unknown',
-          });
+          //
+          // sourceInstance is untrusted text, so it is escaped here rather than
+          // left to the sink: setLogger lets an application install any sink, and
+          // the message reaches every one verbatim, console.error included.
+          // JSON.stringify covers C0 controls and lone surrogates; the replace adds
+          // the DEL/C1 range and U+2028/U+2029, which it leaves raw and which some
+          // terminals and log viewers treat as a line break. typeof, not String():
+          // L1Cache is exported, so a JS caller reaches this method with any value
+          // at all, and the report on an error path must not be what throws. Sliced
+          // because the only bound on it is the 4KB event cap.
+          const source =
+            typeof event.sourceInstance === 'string'
+              ? JSON.stringify(event.sourceInstance.slice(0, 64)).replace(
+                  /[\u007f-\u009f\u2028\u2029]/g,
+                  (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`
+                )
+              : 'unknown';
+          logError(
+            `[cachekit] Ignored namespace-level invalidation: no namespace on the event (sourceInstance=${source})`
+          );
         }
         break;
       case 'params':
