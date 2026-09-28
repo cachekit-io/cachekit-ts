@@ -9,6 +9,7 @@ import { createCache } from './cache.js';
 import { RetryPolicy } from './reliability/retry.js';
 import { CacheMetrics } from './metrics/prometheus.js';
 import { setLogger } from './logger.js';
+import { blake2b16Hex } from './serialization/key-generator.js';
 import type { Backend } from './backends/types.js';
 import type { L1Cache } from './l1/lru-cache.js';
 import type { Redis } from 'ioredis';
@@ -197,7 +198,11 @@ describe('invalidate("params") failure reporting', () => {
     const cache = createCache({ backend, defaultTtl: 3600 });
 
     await expect(cache.invalidate('params', { key: 'secret-key' })).resolves.toBeUndefined();
-    expect(reported).toEqual(['[cachekit] invalidate("params") L2 delete failed:']);
+    // The digest a holder of the key can recompute, never the key itself.
+    expect(reported).toEqual([
+      `[cachekit] invalidate("params") L2 delete failed (keyHash=${blake2b16Hex('secret-key')}):`,
+    ]);
+    expect(reported[0]).not.toContain('secret-key');
     expect(errors).toEqual([failure]);
 
     await cache.close();

@@ -1290,9 +1290,13 @@ export class CacheImpl implements SecureCache {
         await this.backend.delete(options.key);
       } catch (err) {
         // Best-effort L2 invalidation - don't fail the operation, but don't
-        // hide it either. The key is caller-supplied, so it stays out of the
-        // message string.
-        logError('[cachekit] invalidate("params") L2 delete failed:', err);
+        // hide it either. The entry stays stale in L2 until its TTL, so name
+        // it — by the same digest warnValueTooLarge logs, never the
+        // caller-supplied key itself.
+        logError(
+          `[cachekit] invalidate("params") L2 delete failed (keyHash=${blake2b16Hex(options.key)}):`,
+          err
+        );
       }
     }
     // Note: namespace/global L2 invalidation requires Redis SCAN - not implemented
