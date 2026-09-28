@@ -469,10 +469,10 @@ describe('L1Cache', () => {
       );
     });
 
-    it('handleInvalidationEvent - escapes line breaks JSON.stringify leaves raw (LAB-4522)', () => {
-      // NEL (U+0085), the other C1 controls and U+2028/U+2029 pass through
-      // JSON.stringify untouched, and some terminals and log viewers break a
-      // line on them.
+    it('handleInvalidationEvent - escapes the DEL/C1 and U+2028/U+2029 characters JSON.stringify leaves raw (LAB-4522)', () => {
+      // JSON.stringify passes these through untouched. NEL (U+0085) and
+      // U+2028/U+2029 can break a log line; CSI (U+009B) opens a terminal
+      // control sequence; DEL is a control character like the rest.
       const reported: string[] = [];
       setLogger((message) => reported.push(message));
       try {

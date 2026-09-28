@@ -343,12 +343,14 @@ export class L1Cache<T = unknown> {
           // sourceInstance is untrusted text, so it is escaped here rather than
           // left to the sink: setLogger lets an application install any sink, and
           // the message reaches every one verbatim, console.error included.
-          // JSON.stringify covers C0 controls and lone surrogates; the replace adds
-          // the DEL/C1 range and U+2028/U+2029, which it leaves raw and which some
-          // terminals and log viewers treat as a line break. typeof, not String():
-          // L1Cache is exported, so a JS caller reaches this method with any value
-          // at all, and the report on an error path must not be what throws. Sliced
-          // because the only bound on it is the 4KB event cap.
+          // JSON.stringify covers C0 controls and lone surrogates. The replace adds
+          // what it leaves raw: DEL and the C1 range (NEL U+0085 is a line break,
+          // CSI U+009B opens a terminal control sequence) and U+2028/U+2029, which
+          // some log viewers break a line on. typeof, not String(): L1Cache is
+          // exported, so a JS caller reaches this method with any value at all, and
+          // the report on an error path must not be what throws. Sliced because
+          // nothing else bounds it here: channel events are capped at 4KB, direct
+          // callers not at all.
           const source =
             typeof event.sourceInstance === 'string'
               ? JSON.stringify(event.sourceInstance.slice(0, 64)).replace(
