@@ -98,13 +98,20 @@ describe('wire-format vectors (wasm ByteStorage)', () => {
   );
 
   it('pack marks compressed_data as msgpack bin for arbitrary payloads', () => {
-    // Not in the vector set: one bin8-sized and one bin16-sized payload.
+    // Not in the vector set: one bin8-sized and one bin16-sized payload. The
+    // large one repeats every 256 bytes, so LZ4 shrinks it to ~270 B — just
+    // over the bin8 limit; the explicit marker keeps that claim tested.
     const small = new TextEncoder().encode('fresh bin-emit check');
     const large = new Uint8Array(1000);
-    for (let i = 0; i < large.length; i++) large[i] = (i * 131 + 17) & 0xff; // incompressible
-    for (const payload of [small, large]) {
+    for (let i = 0; i < large.length; i++) large[i] = (i * 131 + 17) & 0xff;
+    const cases = [
+      [small, 0xc4],
+      [large, 0xc5],
+    ] as const;
+    for (const [payload, marker] of cases) {
       const packed = storage.pack(payload);
       expect(packed[0]).toBe(0x94); // fixarray(4) envelope
+      expect(packed[1]).toBe(marker);
       expect(packed[1]).toBe(expectedBinMarker(compressedData(packed).length));
       expect(storage.unpack(packed)).toEqual(payload);
     }
