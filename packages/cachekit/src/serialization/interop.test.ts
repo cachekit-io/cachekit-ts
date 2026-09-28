@@ -48,6 +48,15 @@ describe('interop segment validation', () => {
       expect(() => validateInteropSegment('namespace', seg)).not.toThrow();
     }
   });
+
+  it('rejects a non-string segment before the reservation check', () => {
+    // RegExp.test string-coerces, Set.has does not: ['ns'] would pass the
+    // grammar, skip the reservation, and mint an `ns:` key.
+    for (const seg of [['ns'], new String('nsapi')] as unknown as string[]) {
+      expect(() => validateInteropSegment('namespace', seg)).toThrow(ConfigurationError);
+      expect(() => generateInteropKey(seg, 'get_user', [1])).toThrow(ConfigurationError);
+    }
+  });
 });
 
 describe('interop argument encoding (args profile)', () => {

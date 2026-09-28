@@ -96,10 +96,17 @@ export class InteropFloat {
  * vectors). Exact-match and namespace-only: `nsx` is a valid namespace, and
  * `ns` / `nsapi` are valid operations.
  *
- * @throws {ConfigurationError} if the segment does not match the grammar, or
- *   is a reserved namespace
+ * A non-string is rejected first: RegExp.test string-coerces its argument but
+ * Set.has does not, so an untyped `['ns']` would otherwise pass the grammar
+ * and skip the reservation.
+ *
+ * @throws {ConfigurationError} if the segment is not a string, does not match
+ *   the grammar, or is a reserved namespace
  */
 export function validateInteropSegment(kind: 'namespace' | 'operation', value: string): void {
+  if (typeof value !== 'string') {
+    throw new ConfigurationError(`Invalid interop ${kind}: must be a string, got ${typeof value}`);
+  }
   if (!INTEROP_SEGMENT_PATTERN.test(value)) {
     throw new ConfigurationError(
       `Invalid interop ${kind} ${JSON.stringify(value)}: must full-string match ` +
