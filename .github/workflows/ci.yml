@@ -372,24 +372,51 @@ jobs:
               if (dyn_line && !dyn_os) fail(dyn_file, dyn_line, "the build matrix comes from the resolve job, which writes no \"os\" literal the drift guard can check — write each entry as \"os\":\"<label>\"")
               dyn_line = 0
             }
-            BEGIN {
-              HOSTED = "^(ubuntu|macos|windows)-latest$"
-              # The only expansions build-native.yml's resolve job may use; any
-              # other one reads a value the guard cannot check. The expression
-              # opener is split so GitHub does not expand it in this run: block.
-              OPENER = "$" "{{ "
-              RESOLVE_EXP[1] = OPENER "github.event_name }}"
-              RESOLVE_EXP[2] = OPENER "steps.set.outputs.builds }}"
-              RESOLVE_EXP[3] = "$(echo \"$builds\" | tr -d '\\n ')"
-              RESOLVE_EXP[4] = "$github_output"
+            # The only lines build-native.yml's resolve job may hold, besides
+            # comment lines and the content of an open builds='...' literal.
+            # Any other line (a file read, a generated matrix, a step env,
+            # shell or container) could set the matrix to a value the guard
+            # cannot check, so a new line there is a deliberate edit here.
+            function resolve_shape(s) {
+              return s ~ /^[[:space:]]*(matrix|outputs|steps):[[:space:]]*$/ ||
+                s ~ /^[[:space:]]*(-[[:space:]]+)?(name|runs-on):/ ||
+                s ~ /^[[:space:]]*builds: \$\{\{ steps\.set\.outputs\.builds \}\}[[:space:]]*$/ ||
+                s ~ /^[[:space:]]*(-[[:space:]]+)?(id: set|run: \|)[[:space:]]*$/ ||
+                s ~ /^[[:space:]]*if \[ "\$\{\{ github\.event_name \}\}" = "pull_request" \]; then[[:space:]]*$/ ||
+                s ~ /^[[:space:]]*(else|fi)[[:space:]]*$/ ||
+                s ~ /^[[:space:]]*builds='[^$'\\]*'?[[:space:]]*$/ ||
+                s ~ /^[[:space:]]*echo "builds=\$\(echo "\$builds" \| tr -d '\\n '\)" >> "\$GITHUB_OUTPUT"[[:space:]]*$/
             }
+            # Checks one raw line of the resolve job; in a run: block a # is
+            # not a comment. Its JSON is single-quoted literal text (no $, so no
+            # expression; no \, so no JSON escape), and every "os" in it must be
+            # a quoted hosted label. Checked pairs are cut from the line so the
+            # flow-mapping rule below does not refuse them.
+            function resolve_line(   r, v, n, json) {
+              r = tolower(raw)
+              n = gsub(/'/, "'", r)
+              json = lit || raw ~ /^[[:space:]]*builds='/
+              if (lit ? raw !~ /^[^$'\\]*'?[[:space:]]*$/ : !resolve_shape(raw))
+                fail(FILENAME, FNR, "the build-matrix resolve job may hold only lines the drift guard can check — write its JSON as builds='<literal>'; a new line there is a deliberate edit to resolve_shape() in the runner-drift-guard job of ci.yml")
+              if (json) lit = lit ? !n : n == 1
+              while (json && match(r, /"os"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
+                v = substr(r, RSTART, RLENGTH); sub(/^[^:]*:[[:space:]]*"/, "", v); sub(/"$/, "", v)
+                if (v ~ HOSTED) dyn_os = 1; else label(v)
+                r = substr(r, 1, RSTART - 1) substr(r, RSTART + RLENGTH)
+              }
+              if (json && r ~ /(^|[^a-z0-9_-])os([^a-z0-9_-]|$)/) fail(FILENAME, FNR, "\"os\" in the build-matrix resolve job is not a literal the drift guard can check — write each entry as \"os\":\"<label>\"")
+              $0 = r
+            }
+            BEGIN { HOSTED = "^(ubuntu|macos|windows)-latest$" }
             FNR == 1 {
               dynamic_matrix_verdict()
-              matrix_indent = value_indent = -1; in_jobs = dyn_os = 0; job = ""
+              matrix_indent = value_indent = -1; in_jobs = dyn_os = lit = 0; job = ""
               bn = (FILENAME ~ /(^|\/)build-native\.yml$/)
             }
-            { sub(/\r$/, ""); sub(/#.*/, ""); $0 = tolower($0) }
-            /^[[:space:]]*$/ { next }
+            # A # starts a YAML comment only at the start of a line or after
+            # whitespace; ubuntu-latest#x is one plain scalar.
+            { sub(/\r$/, ""); raw = $0; sub(/(^|[[:space:]])#.*/, ""); $0 = tolower($0) }
+            /^[[:space:]]*$/ { if (lit) resolve_line(); next }
             {
               match($0, /^[[:space:]]*(-[[:space:]]*)?/)
               indent = RLENGTH
@@ -413,25 +440,8 @@ jobs:
             bn && /^jobs[[:space:]]*:[[:space:]]*$/ { in_jobs = 1; job_indent = -1; next }
             in_jobs && indent == 0 { in_jobs = 0; job = "" }
             in_jobs && job_indent < 0 { job_indent = indent }
-            in_jobs && indent == job_indent { job = $0; sub(/^[[:space:]]*/, "", job); sub(/[[:space:]]*:.*/, "", job) }
-            # In the resolve job every "os" must be a quoted literal hosted
-            # label, and the JSON must be literal: any other os there (a shell
-            # variable, a jq --arg) or any expansion outside RESOLVE_EXP (a
-            # vars.* expression, a file read, an env variable) is a value the
-            # guard cannot check. Checked pairs are cut from the line so the
-            # flow-mapping rule below does not refuse them.
-            bn && job == "matrix" {
-              while (match($0, /"os"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
-                v = substr($0, RSTART, RLENGTH); sub(/^[^:]*:[[:space:]]*"/, "", v); sub(/"$/, "", v)
-                if (v ~ HOSTED) dyn_os = 1; else label(v)
-                $0 = substr($0, 1, RSTART - 1) substr($0, RSTART + RLENGTH)
-              }
-              if (/(^|[^a-z0-9_-])os([^a-z0-9_-]|$)/) fail(FILENAME, FNR, "\"os\" in the build-matrix resolve job is not a literal the drift guard can check — write each entry as \"os\":\"<label>\"")
-              line = $0
-              for (i = 1; i in RESOLVE_EXP; i++)
-                while ((k = index(line, RESOLVE_EXP[i]))) line = substr(line, 1, k - 1) substr(line, k + length(RESOLVE_EXP[i]))
-              if (line ~ /[$`]/) fail(FILENAME, FNR, "the build-matrix resolve job reads a value the drift guard cannot check — keep its JSON literal; a new expansion there is a deliberate edit to RESOLVE_EXP in the runner-drift-guard job of ci.yml")
-            }
+            in_jobs && indent == job_indent { job = $0; sub(/^[[:space:]]*/, "", job); sub(/[[:space:]]*:.*/, "", job); lit = 0 }
+            bn && job == "matrix" { resolve_line() }
             # The build job's include of that JSON is the one dynamic matrix the
             # guard accepts; dynamic_matrix_verdict() fails it unless the resolve
             # job wrote at least one checked "os" literal. The same line anywhere
@@ -459,7 +469,8 @@ jobs:
               v = $0; sub(/^[^:]*:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
               if (v != "") value_indent = indent
               if (v ~ /^["']?\$\{\{[[:space:]]*matrix\.os[[:space:]]*\}\}["']?$/) next
-              if (v ~ /^\[/ && v !~ /\]$/) v = ""
+              # An unclosed list or quote was wrapped, or cut by a # inside it.
+              if (v ~ /^\[/ && v !~ /\]$/ || gsub(/"/, "&", v) % 2 || gsub(/'/, "&", v) % 2) v = ""
               gsub(/[][ "']/, "", v)
               n = split(v, items, ",")
               ok = (v != "")

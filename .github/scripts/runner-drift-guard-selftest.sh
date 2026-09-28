@@ -56,6 +56,7 @@ bad same-indent-include   $'jobs:\n  j:\n    strategy:\n      matrix:\n        i
 bad quoted-key            $'jobs:\n  j:\n    "runs-on": build-pool'
 bad quoted-key-os         $'jobs:\n  j:\n    strategy:\n      matrix:\n        \'os\': [build-pool]'
 bad upper-key             $'jobs:\n  j:\n    strategy:\n      matrix:\n        OS: [build-pool]\n    runs-on: ${{ matrix.os }}'
+bad hash-in-plain-scalar  $'jobs:\n  j:\n    runs-on: ubuntu-latest#pool'
 # --- values not written inline (hosted labels: only the shape fails) --------
 bad block-form            $'jobs:\n  j:\n    runs-on:\n      group: some-group\n      labels: [ubuntu-latest]'
 bad block-sequence        $'jobs:\n  j:\n    runs-on:\n      - ubuntu-latest'
@@ -68,6 +69,7 @@ bad literal-scalar        $'jobs:\n  j:\n    runs-on: |\n      ubuntu-latest'
 bad wrapped-expression    $'jobs:\n  j:\n    runs-on: ${{ github.event.pull_request.head.repo.fork &&\n      \'ubuntu-latest\' || \'macos-latest\' }}'
 bad wrapped-plain-scalar  $'jobs:\n  j:\n    runs-on: ubuntu-latest\n      macos-latest' 4
 bad wrapped-include-item  $'jobs:\n  j:\n    strategy:\n      matrix:\n        include:\n          - os: ubuntu-latest\n              macos-latest\n            node: 24' 7
+bad hash-in-quoted-scalar $'jobs:\n  j:\n    runs-on: "ubuntu-latest #pool"'
 # --- lines that may hide a runner label (hosted labels: only the shape fails)
 bad flow-style-job        'jobs: {j: {runs-on: ubuntu-latest}}'
 bad flow-strategy         $'jobs:\n  j:\n    strategy: {fail-fast: false, matrix: {os: [ubuntu-latest]}}'
@@ -135,14 +137,24 @@ bad json-split-pair/build-native    "$(native $'builds=\'[{"target":"x","os":\n 
 bad json-vars-expression/build-native "$(native $'builds=\'${{ vars.BUILD_MATRIX }}\'')" 12
 bad json-file-read/build-native     "$(native $'builds=$(cat build-matrix.json)')" 12
 bad json-env-variable/build-native  "$(native $'builds="$BUILD_MATRIX"')" 12
-bad json-no-literal/build-native    "jobs:"$'\n  matrix:\n    runs-on: ubuntu-latest\n    outputs:\n      builds: ${{ steps.set.outputs.builds }}\n    steps:\n      - id: set\n        run: echo \'builds=[{"target":"x"}]\' >> "$GITHUB_OUTPUT"\n'"$build_job" 14
+bad json-no-literal/build-native    "jobs:"$'\n  matrix:\n    runs-on: ubuntu-latest\n    outputs:\n      builds: ${{ steps.set.outputs.builds }}\n    steps:\n      - id: set\n        run: echo \'builds=[{"target":"x"}]\' >> "$GITHUB_OUTPUT"\n'"$build_job" "8 14"
 bad dynamic-other-job/build-native  "$(native "$one")"$'\n'"${build_job/build:/build2:}" 27
 bad dynamic-other-output/build-native "$(s=$(native "$one"); printf '%s' "${s/needs.matrix.outputs.builds/needs.matrix.outputs.extra}")" 20
 bad dynamic-other-workflow          "$(native "$one")" "10 12 20"
+env_step=$'        env:\n          BASH_ENV: .github/m.sh\n        run: |'
+bad json-read-file/build-native     "$(native 'read -r builds < build-matrix.json')" 12
+bad json-extra-output/build-native  "$(native "$one"$'\n            node scripts/gen-matrix.js >> "$GITHUB_OUTPUT"')" 13
+bad json-step-env/build-native      "$(s=$(native "$one"); printf '%s' "${s/        run: |/"$env_step"}")" "8 9"
+bad json-hash-in-literal/build-native "$(native $'builds=\'[{"target":"#","os":"build-pool"}]\'')" 12
+bad json-hash-escaped-var/build-native "$(native $'builds="[{\\"target\\":\\"#\\",\\"os\\":\\"$RUNNER\\"}]"')" 12
+bad json-hash-line-in-literal/build-native "$(native $'builds=\'[\n              # {"target":"x","os":"build-pool"}\n              {"target":"x","os":"macos-latest"}]\'')" 13
+bad json-escaped-key/build-native   "$(native $'builds=\'[{"target":"x","\\u006fs":"build-pool"}]\'')" 12
+good resolve-job-comments/build-native "$(native $'# don\'t read this list from a file\n            '"$one")"
 # --- must pass --------------------------------------------------------------
 good ubuntu-latest        $'jobs:\n  j:\n    runs-on: ubuntu-latest'
 good upper-hosted-label   $'jobs:\n  j:\n    runs-on: Ubuntu-Latest'
 good comment-stripped     $'jobs:\n  j:\n    runs-on: ubuntu-latest  # was: build-pool'
+good comment-after-quoted $'jobs:\n  j:\n    runs-on: \'ubuntu-latest\'  # it\'s pinned'
 good quoted-matrix-os     $'jobs:\n  j:\n    runs-on: "${{ matrix.os }}"'
 good inline-matrix        $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [ubuntu-latest, macos-latest, \'windows-latest\']\n        node: [22, 24]'
 good include-item         $'jobs:\n  j:\n    strategy:\n      matrix:\n        include:\n          - os: windows-latest\n            node: 24'
