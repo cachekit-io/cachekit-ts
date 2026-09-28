@@ -5,7 +5,7 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", "build/**", "*.tsbuildinfo"]
+      "outputs": ["dist/**", "build/**", "*.tsbuildinfo", "*.node"]
     },
     "test": {
       "dependsOn": ["build"],

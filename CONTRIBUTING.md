@@ -10,7 +10,7 @@ pnpm build
 pnpm test
 ```
 
-Requirements: Node.js 22+, pnpm 8+, Rust stable (only needed if you touch `packages/cachekit-core-ts/`).
+Requirements: Node.js 22+, pnpm 11.11+, Rust stable (`pnpm build` compiles the native binding in `packages/cachekit-core-ts/` whenever the build cache misses).
 
 ## Pre-commit hooks
 
