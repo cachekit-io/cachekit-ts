@@ -96,7 +96,8 @@ export class MemcachedBackend implements Backend {
       throw new BackendError(
         `Value for key '${key}' is ${value.length} bytes, which exceeds the Memcached max ` +
           `item size of ${maxSize} bytes. Enable compression, use a larger-payload backend ` +
-          `(Redis/SaaS/File), or raise both the server's -I limit and maxItemSizeBytes.`
+          `(Redis/SaaS/File), or raise both the server's -I limit and maxItemSizeBytes.`,
+        'permanent'
       );
     }
 
@@ -152,7 +153,10 @@ export class MemcachedBackend implements Backend {
 
     const seconds = Math.floor(ttl);
     if (seconds <= 0) {
-      throw new BackendError(`Memcached refreshTTL requires ttl >= 1 second, got ${ttl}`);
+      throw new BackendError(
+        `Memcached refreshTTL requires ttl >= 1 second, got ${ttl}`,
+        'permanent'
+      );
     }
 
     const client = await this.getClient();
@@ -206,7 +210,7 @@ export class MemcachedBackend implements Backend {
 
   private ensureNotClosed(): void {
     if (this.closed) {
-      throw new BackendError('Memcached backend is closed');
+      throw new BackendError('Memcached backend is closed', 'permanent');
     }
   }
 

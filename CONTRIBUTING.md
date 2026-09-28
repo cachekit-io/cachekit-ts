@@ -69,10 +69,6 @@ pnpm --filter @cachekit-io/cachekit test:integration
 pnpm test:coverage
 ```
 
-## CI on external (fork) PRs
-
-GitHub disables self-hosted runners for fork PRs by security policy. Our CI workflows detect this and fall back to `ubuntu-latest` automatically — no action needed on your side. The full job matrix runs identically; only the runner host differs.
-
 ## What `main` looks like
 
 `main` is the integration branch and is **not guaranteed stable between releases**. Per-PR CI only builds the native crate on linux-x64 to keep PR turnaround fast; the full 5-platform matrix (linux x64/arm64, macOS x86/arm64, Windows) runs on `push: main` and on release tags. Cross-platform regressions can land on `main` and stay there until the post-merge run catches them — they're always caught before a release tag is cut, so published artifacts on npm are always validated against every platform.

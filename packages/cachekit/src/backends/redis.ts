@@ -238,7 +238,7 @@ export class RedisBackend implements LockableBackend, TTLBackend {
     // instead (the SaaS backend's PATCH /ttl rejects ttl <= 0 the same way).
     const seconds = Math.floor(ttl);
     if (seconds <= 0) {
-      throw new BackendError(`Redis refreshTTL requires ttl >= 1 second, got ${ttl}`);
+      throw new BackendError(`Redis refreshTTL requires ttl >= 1 second, got ${ttl}`, 'permanent');
     }
 
     try {
@@ -261,7 +261,10 @@ export class RedisBackend implements LockableBackend, TTLBackend {
     // PX requires a positive integer — floats/zero make Redis reject the SET.
     const px = Math.floor(timeoutMs);
     if (px <= 0) {
-      throw new BackendError(`Redis acquireLock requires timeoutMs >= 1, got ${timeoutMs}`);
+      throw new BackendError(
+        `Redis acquireLock requires timeoutMs >= 1, got ${timeoutMs}`,
+        'permanent'
+      );
     }
 
     const lockId = randomUUID();
@@ -307,7 +310,7 @@ export class RedisBackend implements LockableBackend, TTLBackend {
 
   private ensureNotClosed(): void {
     if (this.closed) {
-      throw new BackendError('Redis backend is closed');
+      throw new BackendError('Redis backend is closed', 'permanent');
     }
   }
 
