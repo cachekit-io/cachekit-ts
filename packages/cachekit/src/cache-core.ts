@@ -44,6 +44,7 @@ import {
   SerializationError,
   ValueTooLargeError,
 } from './errors.js';
+import { isErrorClassification } from './backends/error-classifier.js';
 import {
   DEFAULT_TTL_SECONDS,
   DEFAULT_LOCK_TIMEOUT_MS,
@@ -135,6 +136,8 @@ export interface ByteStorageLike {
 export interface EncryptionLike {
   encrypt(data: Uint8Array, cacheKey: string, compressed?: boolean): Promise<Uint8Array>;
   decrypt(ciphertext: Uint8Array, cacheKey: string, compressed?: boolean): Promise<Uint8Array>;
+  /** Throws ConfigurationError for a key encrypt/decrypt would reject for size. */
+  validateKey(cacheKey: string, compressed?: boolean): void;
   dispose(): void;
 }
 
@@ -207,6 +210,25 @@ export interface CacheRuntime {
    * wedging. Unset on Node, where fire-and-forget is safe.
    */
   swrRequiresWaitUntil?: boolean;
+}
+
+/**
+ * A key-free label for a failed L2 delete. Every field of a thrown error —
+ * `cause`, `message`, `name`, even `classification` — is written by whoever
+ * threw it and can embed the caller's key, so only literals are emitted and
+ * `classification` is checked against its known values first. It is read
+ * exactly once: a getter could pass the check and then return the key, or
+ * throw and turn best-effort invalidation into a rejection.
+ */
+function describeDeleteFailure(err: unknown): string {
+  if (!(err instanceof BackendError)) return err instanceof Error ? 'Error' : 'Unknown error';
+  let classification: unknown;
+  try {
+    classification = err.classification;
+  } catch {
+    return 'BackendError';
+  }
+  return isErrorClassification(classification) ? `BackendError(${classification})` : 'BackendError';
 }
 
 /**
@@ -764,8 +786,10 @@ export class CacheImpl implements SecureCache {
       }
     }
 
-    // Reserved-key pre-flight — see Backend.validateKey.
+    // Reserved-key and key-size pre-flight — see Backend.validateKey and
+    // EncryptionManagerCore.validateKey.
     this.backend.validateKey?.(key);
+    this.encryption?.validateKey(key, this.useEnvelope(interop));
 
     // Fetch from L2 (backend)
     return this.run('get', null, async (): Promise<T | null> => {
@@ -866,6 +890,9 @@ export class CacheImpl implements SecureCache {
 
     const namespace = options?.namespace ?? extractNamespace(key);
     const useEnvelope = this.useEnvelope(interop);
+    // A key too long for the encryption AAD fails the same way, for the same
+    // reason (see EncryptionManagerCore.validateKey).
+    this.encryption?.validateKey(key, useEnvelope);
 
     // What L1 should hold, captured as soon as it exists rather than returned
     // from the closure — a degraded backend write (which `run` swallows) must
@@ -1364,6 +1391,11 @@ export class CacheImpl implements SecureCache {
       return;
     }
 
+    if (level === 'params' && !options?.key) {
+      logError('[cachekit] invalidate("params") called with no key; nothing invalidated');
+      return;
+    }
+
     // Invalidate L1
     if (this.l1) {
       switch (level) {
@@ -1388,8 +1420,15 @@ export class CacheImpl implements SecureCache {
     if (level === 'params' && options?.key) {
       try {
         await this.backend.delete(options.key);
-      } catch {
-        // Best-effort L2 invalidation - don't fail the operation
+      } catch (err) {
+        // Best-effort L2 invalidation - don't fail the operation, but don't
+        // hide it either. The entry stays stale in L2 until its TTL, so name
+        // it — by the same digest warnValueTooLarge logs, never the
+        // caller-supplied key itself.
+        logError(
+          `[cachekit] invalidate("params") L2 delete failed (keyHash=${blake2b16Hex(options.key)}):`,
+          describeDeleteFailure(err)
+        );
       }
     }
     // Note: namespace/global L2 invalidation requires Redis SCAN - not implemented

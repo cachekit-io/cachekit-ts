@@ -29,7 +29,7 @@ import {
 import { EncryptionManager, ByteStorage } from '../../src/workers/runtime.js';
 import { EncryptionError } from '../../src/errors.js';
 import { AAD_VERSION } from '../../src/constants.js';
-import fixture from './fixtures/encryption.json';
+import fixture from './fixtures/encryption.json' with { type: 'json' };
 
 interface EncryptionVector {
   name: string;

@@ -221,7 +221,6 @@ export function buildIntents<TCache extends SecureCache>(
       l1: {
         ...options.l1,
         swrEnabled: false,
-        invalidationEnabled: false,
         namespaceIndex: false,
       },
       reliability: {
@@ -346,14 +345,13 @@ function resolveIntentBackend(
 
 /**
  * Full-featured L1 defaults shared by the production / secure / io intents
- * (SWR + invalidation + namespace index on unless overridden). `minimal`
- * deliberately does NOT use this — it hard-disables all three.
+ * (SWR + namespace index on unless overridden). `minimal` deliberately does
+ * NOT use this — it hard-disables both.
  */
 function withFullL1Defaults(l1: BaseIntentOptions['l1']): CacheOptions['l1'] {
   return {
     ...l1,
     swrEnabled: l1?.swrEnabled ?? true,
-    invalidationEnabled: l1?.invalidationEnabled ?? true,
     namespaceIndex: l1?.namespaceIndex ?? true,
   };
 }

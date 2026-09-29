@@ -242,6 +242,24 @@ All of a call's arguments share one 64 KiB encoded limit; past it, the call
 throws `ValueTooLargeError` rather than bypassing the cache. Interop mode accepts
 only `Uint8Array` arguments.
 
+### Key size limit on secure caches
+
+A secure cache binds the full cache key into the AES-GCM additional
+authenticated data (AAD), and the encryption core rejects an AAD over
+**64 KiB** (`MAX_AAD_SIZE`, 65 536 bytes). The AAD adds 28 bytes (29 with
+compression off) plus your tenant id (`default`, 7 bytes, when none is set) to
+the key, so the key limit is just under 64 KiB, counted in UTF-8 bytes rather
+than string length. `get()`, `set()` and `wrap()` on a secure cache throw
+`ConfigurationError` for a longer key, before any backend call. Graceful
+degradation does not absorb it, and it never counts toward the circuit breaker.
+A `wrap()` key is your `namespace`, a `:` and a 64-character hash (65 bytes), so
+`wrap()` hits this only through a namespace that fills the rest of the budget:
+keep namespaces short, and never build one from raw input. (Interop namespaces
+and operations are capped at 64 characters, so interop keys cannot reach it.) If
+you key a secure cache by raw input such as a URL or query string, hash it
+first. Caches without encryption have no such limit, though a backend may impose
+its own.
+
 ## Master-Key Rotation
 
 Rotate the encryption master key without invalidating existing entries:
@@ -364,6 +382,8 @@ const cache = createCache({ backend });
 ```
 
 Semantics match cachekit-py's Memcached backend: TTLs are clamped to the 30-day protocol maximum (larger values would be read as unix timestamps), values over `maxItemSizeBytes` (default 1 MiB, the server's default item-size limit) are rejected client-side with a loud error, `exists()` is GET-based (memcached has no EXISTS command), and omitting `ttl` with no `defaultTtl` means never expire. `refreshTTL(key, ttl)` is available via the `touch` command, but there is no `getTTL` — the memcached protocol cannot read a key's remaining TTL, so this backend deliberately does not implement `TTLBackend`.
+
+Keys are limited to 250 bytes of UTF-8, key prefix included, which is the memcached protocol limit. A longer key throws `BackendError` (classification `permanent`) before anything is sent and before the reliability stack runs, so it is never retried and never counts toward the circuit breaker. It is thrown to the caller even with graceful degradation on (`production`, `secure`, `io`), because it is a fault in the key rather than an outage: shorten or hash long keys.
 
 ### File
 
@@ -491,7 +511,9 @@ errors resolve as a miss or a no-op, and with `reliability: { degradation: false
 they reject with the `BackendError`. With degradation on, a revoked API key
 therefore turns the cache into silent misses at one request per operation
 rather than opening the breaker; watch `cachekit_errors_total` (see
-[Observability](#observability)) to catch it.
+[Observability](#observability)) to catch it. The exception is a key the
+backend rejects before anything is sent, such as a [Memcached](#memcached) key
+over 250 bytes: that error is thrown to the caller even with degradation on.
 
 A custom backend should pass `'permanent'` only for errors that retrying cannot
 fix: `new BackendError(message, 'permanent')`. The classification defaults to

@@ -21,7 +21,7 @@ const mockClient = {
   quit: vi.fn(),
 };
 
-const clientCreate = vi.fn(() => mockClient);
+const clientCreate = vi.fn((..._args: unknown[]) => mockClient);
 
 vi.mock('memjs', () => ({
   Client: {
@@ -198,6 +198,44 @@ describe('MemcachedBackend', () => {
 
     it('defaults to empty (keys stored verbatim, interop-safe)', () => {
       expect(backend.keyPrefix).toBe('');
+    });
+  });
+
+  describe('key length', () => {
+    // The server answers an over-length key with "Invalid arguments" and closes
+    // the connection, so the limit is enforced before anything is sent.
+    const expectPermanent = (fn: () => unknown) => {
+      expect(fn).toThrow(BackendError);
+      expect(fn).toThrow(expect.objectContaining({ classification: 'permanent' }));
+    };
+
+    it('validateKey accepts 250 bytes and rejects 251 as permanent', () => {
+      expect(() => backend.validateKey('k'.repeat(250))).not.toThrow();
+      expectPermanent(() => backend.validateKey('k'.repeat(251)));
+    });
+
+    it('counts the key prefix', () => {
+      const b = memcached({ keyPrefix: 'app:' });
+      expect(() => b.validateKey('k'.repeat(246))).not.toThrow();
+      expectPermanent(() => b.validateKey('k'.repeat(247)));
+    });
+
+    it('counts UTF-8 bytes, not characters', () => {
+      expectPermanent(() => backend.validateKey('é'.repeat(126))); // 126 chars, 252 bytes
+    });
+
+    it.each([
+      ['get', (b: MemcachedBackend, k: string) => b.get(k)],
+      ['set', (b: MemcachedBackend, k: string) => b.set(k, new Uint8Array([1]), 60)],
+      ['delete', (b: MemcachedBackend, k: string) => b.delete(k)],
+      ['exists', (b: MemcachedBackend, k: string) => b.exists(k)],
+      ['refreshTTL', (b: MemcachedBackend, k: string) => b.refreshTTL(k, 60)],
+    ])('%s rejects an over-length key without reaching the server', async (_op, call) => {
+      await expect(call(backend, 'k'.repeat(251))).rejects.toMatchObject({
+        name: 'BackendError',
+        classification: 'permanent',
+      });
+      expect(clientCreate).not.toHaveBeenCalled();
     });
   });
 

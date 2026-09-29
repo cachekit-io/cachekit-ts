@@ -81,13 +81,16 @@ export interface Backend {
    * Reject a key this backend cannot address, synchronously and before the
    * reliability executor runs — CachekitIO refuses the reserved path
    * segments `.` `..` `health` `ttl` `lock` (protocol spec/saas-api.md
-   * § Cache-Key Path Encoding). Same contract as validateTtl: inside `run`,
-   * degradation would swallow the deterministic caller error and
-   * retry/circuit-breaker would count it as backend failures.
+   * § Cache-Key Path Encoding); Memcached refuses keys over 250 bytes.
+   * Same contract as validateTtl: inside `run`, degradation would swallow
+   * the deterministic caller error and retry/circuit-breaker would count it
+   * as backend failures.
    *
    * Delegating wrappers MUST forward the inner backend's implementation.
    *
    * @throws {ConfigurationError} when the key is rejected by this backend
+   * @throws {BackendError} classified `permanent` (never retried or counted
+   *   by the breaker) when the key is rejected by this backend
    */
   validateKey?(key: string): void;
 

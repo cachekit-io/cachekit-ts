@@ -134,11 +134,9 @@ describe('generateKey', () => {
     const retagged = (b: number) =>
       Object.defineProperty(Uint8Array.of(b).buffer, Symbol.toStringTag, { value: 'Object' });
     expect(key(retagged(1))).not.toBe(key(retagged(2)));
-    class Tagged extends ArrayBuffer {
-      get [Symbol.toStringTag]() {
-        return 'Tagged';
-      }
-    }
+    // lib types ArrayBuffer's toStringTag as the literal 'ArrayBuffer'.
+    class Tagged extends ArrayBuffer {}
+    Object.defineProperty(Tagged.prototype, Symbol.toStringTag, { value: 'Tagged' });
     expect(key(new Tagged(1))).toBe(key(new ArrayBuffer(1)));
   });
 

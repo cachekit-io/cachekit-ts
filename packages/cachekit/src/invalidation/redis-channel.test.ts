@@ -1,12 +1,22 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, type Mock } from 'vitest';
 import { RedisInvalidationChannel } from './redis-channel.js';
 import type { Redis } from 'ioredis';
+
+// Mirrors the only listener RedisInvalidationChannel registers on its subscriber.
+type MessageListener = (channel: Buffer, message: Buffer) => void;
+type OnFn = (event: 'messageBuffer', listener: MessageListener) => void;
+
+function messageListener(on: Mock<OnFn>): MessageListener {
+  const listener = on.mock.calls.find((c) => c[0] === 'messageBuffer')?.[1];
+  if (!listener) throw new Error('start() did not register a messageBuffer listener');
+  return listener;
+}
 
 describe('RedisInvalidationChannel', () => {
   // Mock Redis client
   const createMockRedis = (): Redis => {
     const mockSubscriber = {
-      on: vi.fn(),
+      on: vi.fn<OnFn>(),
       subscribe: vi.fn().mockResolvedValue(undefined),
       unsubscribe: vi.fn().mockResolvedValue(undefined),
       quit: vi.fn().mockResolvedValue(undefined),
@@ -40,14 +50,14 @@ describe('RedisInvalidationChannel', () => {
 
     it('should cleanup old subscriber when start() called without stop()', async () => {
       const mockSubscriber1 = {
-        on: vi.fn(),
+        on: vi.fn<OnFn>(),
         subscribe: vi.fn().mockResolvedValue(undefined),
         unsubscribe: vi.fn().mockResolvedValue(undefined),
         quit: vi.fn().mockResolvedValue(undefined),
       };
 
       const mockSubscriber2 = {
-        on: vi.fn(),
+        on: vi.fn<OnFn>(),
         subscribe: vi.fn().mockResolvedValue(undefined),
         unsubscribe: vi.fn().mockResolvedValue(undefined),
         quit: vi.fn().mockResolvedValue(undefined),
@@ -89,7 +99,7 @@ describe('RedisInvalidationChannel', () => {
       const mockRedis = {
         duplicate: vi.fn(() => {
           const sub = {
-            on: vi.fn(),
+            on: vi.fn<OnFn>(),
             subscribe: vi.fn().mockResolvedValue(undefined),
             unsubscribe: vi.fn().mockResolvedValue(undefined),
             quit: vi.fn().mockResolvedValue(undefined),
@@ -217,7 +227,7 @@ describe('RedisInvalidationChannel', () => {
   describe('message handling', () => {
     it('dispatches deserialized events to callbacks', async () => {
       const mockSubscriber = {
-        on: vi.fn(),
+        on: vi.fn<OnFn>(),
         subscribe: vi.fn().mockResolvedValue(undefined),
         unsubscribe: vi.fn().mockResolvedValue(undefined),
         quit: vi.fn().mockResolvedValue(undefined),
@@ -234,9 +244,7 @@ describe('RedisInvalidationChannel', () => {
       await channel.start();
 
       // Simulate incoming message by calling the messageBuffer handler
-      const messageHandler = mockSubscriber.on.mock.calls.find(
-        (c: [string, unknown]) => c[0] === 'messageBuffer'
-      )?.[1] as (channel: Buffer, message: Buffer) => void;
+      const messageHandler = messageListener(mockSubscriber.on);
 
       // Serialize a test event
       const { serializeEvent } = await import('./event.js');
@@ -258,7 +266,7 @@ describe('RedisInvalidationChannel', () => {
 
     it('ignores messages from wrong channel', async () => {
       const mockSubscriber = {
-        on: vi.fn(),
+        on: vi.fn<OnFn>(),
         subscribe: vi.fn().mockResolvedValue(undefined),
         unsubscribe: vi.fn().mockResolvedValue(undefined),
         quit: vi.fn().mockResolvedValue(undefined),
@@ -274,9 +282,7 @@ describe('RedisInvalidationChannel', () => {
       channel.subscribe((event) => received.push(event));
       await channel.start();
 
-      const messageHandler = mockSubscriber.on.mock.calls.find(
-        (c: [string, unknown]) => c[0] === 'messageBuffer'
-      )?.[1] as (channel: Buffer, message: Buffer) => void;
+      const messageHandler = messageListener(mockSubscriber.on);
 
       messageHandler(Buffer.from('wrong:channel'), Buffer.from([0x90]));
       expect(received).toHaveLength(0);
@@ -287,7 +293,7 @@ describe('RedisInvalidationChannel', () => {
     it('logs deserialization errors without throwing', async () => {
       const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
       const mockSubscriber = {
-        on: vi.fn(),
+        on: vi.fn<OnFn>(),
         subscribe: vi.fn().mockResolvedValue(undefined),
         unsubscribe: vi.fn().mockResolvedValue(undefined),
         quit: vi.fn().mockResolvedValue(undefined),
@@ -301,9 +307,7 @@ describe('RedisInvalidationChannel', () => {
       const channel = new RedisInvalidationChannel(mockRedis);
       await channel.start();
 
-      const messageHandler = mockSubscriber.on.mock.calls.find(
-        (c: [string, unknown]) => c[0] === 'messageBuffer'
-      )?.[1] as (channel: Buffer, message: Buffer) => void;
+      const messageHandler = messageListener(mockSubscriber.on);
 
       // Send invalid msgpack data
       messageHandler(Buffer.from('cachekit:invalidate'), Buffer.from([0xff, 0xff]));
@@ -319,7 +323,7 @@ describe('RedisInvalidationChannel', () => {
     it('logs callback errors without throwing', async () => {
       const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
       const mockSubscriber = {
-        on: vi.fn(),
+        on: vi.fn<OnFn>(),
         subscribe: vi.fn().mockResolvedValue(undefined),
         unsubscribe: vi.fn().mockResolvedValue(undefined),
         quit: vi.fn().mockResolvedValue(undefined),
@@ -336,9 +340,7 @@ describe('RedisInvalidationChannel', () => {
       });
       await channel.start();
 
-      const messageHandler = mockSubscriber.on.mock.calls.find(
-        (c: [string, unknown]) => c[0] === 'messageBuffer'
-      )?.[1] as (channel: Buffer, message: Buffer) => void;
+      const messageHandler = messageListener(mockSubscriber.on);
 
       const { serializeEvent } = await import('./event.js');
       const event = {
@@ -362,7 +364,7 @@ describe('RedisInvalidationChannel', () => {
   describe('cleanup edge cases', () => {
     it('handles errors during cleanup gracefully', async () => {
       const mockSubscriber = {
-        on: vi.fn(),
+        on: vi.fn<OnFn>(),
         subscribe: vi.fn().mockResolvedValue(undefined),
         unsubscribe: vi.fn().mockRejectedValue(new Error('unsub failed')),
         quit: vi.fn().mockRejectedValue(new Error('quit failed')),

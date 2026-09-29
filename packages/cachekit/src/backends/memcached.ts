@@ -12,6 +12,9 @@ export const MAX_MEMCACHED_TTL = 30 * 24 * 60 * 60;
 /** Server default item-size limit (-I flag): 1 MiB. */
 const DEFAULT_MAX_ITEM_SIZE_BYTES = 1024 * 1024;
 
+/** Memcached protocol key limit, in bytes (key prefix included). */
+const MAX_KEY_BYTES = 250;
+
 /**
  * Memcached backend using memjs (binary protocol, multi-server support).
  *
@@ -75,6 +78,7 @@ export class MemcachedBackend implements Backend {
 
   async get(key: string): Promise<Uint8Array | null> {
     this.ensureNotClosed();
+    this.validateKey(key);
     const client = await this.getClient();
 
     try {
@@ -87,6 +91,7 @@ export class MemcachedBackend implements Backend {
 
   async set(key: string, value: Uint8Array, ttl?: number): Promise<void> {
     this.ensureNotClosed();
+    this.validateKey(key);
 
     // Fail loudly BEFORE sending: the server rejects items over its -I limit
     // (default 1 MiB), and that rejection is easy to lose — guard client-side
@@ -115,6 +120,7 @@ export class MemcachedBackend implements Backend {
 
   async delete(key: string): Promise<boolean> {
     this.ensureNotClosed();
+    this.validateKey(key);
     const client = await this.getClient();
 
     try {
@@ -127,6 +133,7 @@ export class MemcachedBackend implements Backend {
   /** Memcached has no native EXISTS command; GET and check for null (matches py). */
   async exists(key: string): Promise<boolean> {
     this.ensureNotClosed();
+    this.validateKey(key);
     const client = await this.getClient();
 
     try {
@@ -150,6 +157,7 @@ export class MemcachedBackend implements Backend {
    */
   async refreshTTL(key: string, ttl: number): Promise<boolean> {
     this.ensureNotClosed();
+    this.validateKey(key);
 
     const seconds = Math.floor(ttl);
     if (seconds <= 0) {
@@ -164,6 +172,24 @@ export class MemcachedBackend implements Backend {
       return await client.touch(this.prefixedKey(key), Math.min(seconds, MAX_MEMCACHED_TTL));
     } catch (error) {
       throw this.wrapError('refreshTTL', error);
+    }
+  }
+
+  /**
+   * Backend.validateKey capability — rejects a key over the protocol's
+   * 250-byte limit (key prefix included), before anything is sent. The
+   * server answers such a key with "Invalid arguments" and then closes the
+   * connection, stranding any request queued behind it on that socket.
+   * Every operation also checks, for callers that use the backend directly.
+   */
+  validateKey(key: string): void {
+    const bytes = Buffer.byteLength(this.prefixedKey(key));
+    if (bytes > MAX_KEY_BYTES) {
+      throw new BackendError(
+        `Memcached key is ${bytes} bytes (key prefix included), over the protocol limit of ` +
+          `${MAX_KEY_BYTES} bytes. Shorten or hash the key, or use a backend without this limit.`,
+        'permanent'
+      );
     }
   }
 

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { RetryPolicy } from './retry';
-import { BackendError } from '../errors';
+import { RetryPolicy } from './retry.js';
+import { BackendError } from '../errors.js';
 
 describe('RetryPolicy', () => {
   afterEach(() => {
@@ -56,10 +56,10 @@ describe('RetryPolicy', () => {
     vi.useFakeTimers();
 
     const policy = new RetryPolicy({ maxAttempts: 3, baseDelay: 100, jitter: false });
-    const fn = vi.fn().mockRejectedValue(new Error('fail'));
+    const fn = vi.fn<() => Promise<string>>().mockRejectedValue(new Error('fail'));
 
-    // Catch promise rejection immediately to avoid unhandled rejection warnings
-    const promise = policy.execute(fn).catch((err) => err);
+    // Attach the assertion before advancing timers so the rejection is never unhandled
+    const assertion = expect(policy.execute(fn)).rejects.toThrow('fail');
 
     // First attempt immediate
     await vi.advanceTimersByTimeAsync(0);
@@ -75,9 +75,7 @@ describe('RetryPolicy', () => {
 
     // Wait for all timers and verify error
     await vi.runAllTimersAsync();
-    const result = await promise;
-    expect(result).toBeInstanceOf(Error);
-    expect(result.message).toBe('fail');
+    await assertion;
   });
 
   describe('error classification', () => {
