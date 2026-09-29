@@ -27,7 +27,10 @@ check() { # kind name body [lines]
   mkdir -p "${f%/*}"
   printf '%s\n' "$3" > "$f"
   for eol in LF CRLF; do
-    [ "$eol" = CRLF ] && sed -i 's/$/\r/' "$f"
+    # awk, not sed -i: BSD sed reads -i's next word as a backup suffix.
+    if [ "$eol" = CRLF ] && ! { awk '{ printf "%s\r\n", $0 }' "$f" > "$f.crlf" && mv "$f.crlf" "$f"; }; then
+      echo "::error::selftest $1 $2: cannot write the CRLF fixture"; exit 1
+    fi
     out=$(awk -f "$prog" "$f" 2>&1); rc=$?
     got=$(sed -n 's/^::error file=[^,]*,line=\([0-9]*\)::.*/\1/p' <<<"$out" | sort -nu | xargs)
     case "$1" in
@@ -172,6 +175,7 @@ good action-with-include  $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\
 good concurrency-group    $'concurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}\n  cancel-in-progress: true\njobs:\n  j:\n    runs-on: ubuntu-latest\n    concurrency:\n      group: build-${{ github.ref }}'
 good os-after-matrix-end  $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n    env:\n      os: linux'
 good local-reusable       $'jobs:\n  j:\n    uses: ./.github/workflows/x.yml'
+good same-repo-reusable   $'jobs:\n  j:\n    uses: $/.github/workflows/x.yml'
 good script-string        $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo "runs-on: build-pool is banned"'
 good markdown-bullets     $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          echo "* item" >> "$GITHUB_STEP_SUMMARY"\n          echo "- **bold** item" >> "$GITHUB_STEP_SUMMARY"'
 good job-anchor           $'jobs:\n  a: &job\n    runs-on: ubuntu-latest\n  b: *job'

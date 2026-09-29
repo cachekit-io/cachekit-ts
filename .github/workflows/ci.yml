@@ -470,16 +470,16 @@ jobs:
             # runner/strategy/matrix key; strategy: or matrix: with any inline
             # value, include: with one inside a matrix; a YAML merge key or a bare
             # alias item; a job calling a reusable workflow in another repo (its
-            # runs-on is outside this scan; ./.github/workflows/ callees are
-            # scanned). Accepted false positives, all fail-closed: an env/with key
-            # named matrix or strategy with an inline value; a flow map with an
-            # os or runner key.
+            # runs-on is outside this scan; same-repo ./.github/workflows/ and
+            # $/.github/workflows/ callees are scanned). Accepted false positives,
+            # all fail-closed: an env/with key named matrix or strategy with an
+            # inline value; a flow map with an os or runner key.
             /[{,][[:space:]]*["']?(runs-on|os|runner|strategy|matrix|include)["']?[[:space:]]*:/ ||
             /^[[:space:]]*(-[[:space:]]*)?["']?(strategy|matrix)["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ ||
             (/^[[:space:]]*(-[[:space:]]*)?["']?include["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ && matrix_indent >= 0) ||
             /^[[:space:]]*(-[[:space:]]*)?(<<[[:space:]]*:|\*[^*[:space:]])/ ||
-            (/^[[:space:]]*uses[[:space:]]*:/ && /\/\.github\/workflows\// && !/uses[[:space:]]*:[[:space:]]*["']?\.\//) {
-              fail(FILENAME, FNR, "line may hide a runner label from the drift guard — write `runs-on: <label>` / `os: [<labels>]` inline; keep `strategy:`, `matrix:`, `include:` as bare keys over a static block (no expressions, anchors, aliases or flow maps); call reusable workflows only from ./.github/workflows/")
+            (/^[[:space:]]*uses[[:space:]]*:/ && /\/\.github\/workflows\// && !/uses[[:space:]]*:[[:space:]]*["']?[.$]\/\.github\/workflows\//) {
+              fail(FILENAME, FNR, "line may hide a runner label from the drift guard — write `runs-on: <label>` / `os: [<labels>]` inline; keep `strategy:`, `matrix:`, `include:` as bare keys over a static block (no expressions, anchors, aliases or flow maps); call reusable workflows only from ./.github/workflows/ or $/.github/workflows/")
             }
             /^[[:space:]]*(-[[:space:]]*)?["']?runs-on["']?[[:space:]]*:/ ||
             (/^[[:space:]]*(-[[:space:]]*)?["']?(os|runner)["']?[[:space:]]*:/ && matrix_indent >= 0) {
