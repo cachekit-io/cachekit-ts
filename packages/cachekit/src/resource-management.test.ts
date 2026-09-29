@@ -187,7 +187,12 @@ describe('invalidate("params") failure reporting', () => {
   );
 
   it('reports a failed L2 delete but still resolves', async () => {
-    const failure = new Error('backend down');
+    // Shaped like a wrapped ioredis error reply: the command and its key ride on `cause`.
+    const failure = new Error('Redis delete failed: READONLY', {
+      cause: Object.assign(new Error('READONLY'), {
+        command: { name: 'del', args: ['secret-key'] },
+      }),
+    });
     const errors: unknown[] = [];
     setLogger((message, error) => {
       reported.push(message);
@@ -203,7 +208,7 @@ describe('invalidate("params") failure reporting', () => {
       `[cachekit] invalidate("params") L2 delete failed (keyHash=${blake2b16Hex('secret-key')}):`,
     ]);
     expect(reported[0]).not.toContain('secret-key');
-    expect(errors).toEqual([failure]);
+    expect(errors).toEqual(['Redis delete failed: READONLY']);
 
     await cache.close();
   });
