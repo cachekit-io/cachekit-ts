@@ -381,6 +381,8 @@ const cache = createCache({ backend });
 
 Semantics match cachekit-py's Memcached backend: TTLs are clamped to the 30-day protocol maximum (larger values would be read as unix timestamps), values over `maxItemSizeBytes` (default 1 MiB, the server's default item-size limit) are rejected client-side with a loud error, `exists()` is GET-based (memcached has no EXISTS command), and omitting `ttl` with no `defaultTtl` means never expire. `refreshTTL(key, ttl)` is available via the `touch` command, but there is no `getTTL` — the memcached protocol cannot read a key's remaining TTL, so this backend deliberately does not implement `TTLBackend`.
 
+Keys are limited to 250 bytes of UTF-8, key prefix included, which is the memcached protocol limit. A longer key throws `BackendError` (classification `permanent`) before anything is sent and before the reliability stack runs, so it is never retried and never counts toward the circuit breaker. It is thrown to the caller even with graceful degradation on (`production`, `secure`, `io`), because it is a fault in the key rather than an outage: shorten or hash long keys.
+
 ### File
 
 ```typescript
@@ -507,7 +509,9 @@ errors resolve as a miss or a no-op, and with `reliability: { degradation: false
 they reject with the `BackendError`. With degradation on, a revoked API key
 therefore turns the cache into silent misses at one request per operation
 rather than opening the breaker; watch `cachekit_errors_total` (see
-[Observability](#observability)) to catch it.
+[Observability](#observability)) to catch it. The exception is a key the
+backend rejects before anything is sent, such as a [Memcached](#memcached) key
+over 250 bytes: that error is thrown to the caller even with degradation on.
 
 A custom backend should pass `'permanent'` only for errors that retrying cannot
 fix: `new BackendError(message, 'permanent')`. The classification defaults to
