@@ -93,6 +93,9 @@ bad next-line-include-flow $'jobs:\n  j:\n    strategy:\n      matrix:\n        
 bad next-line-matrix-anchor $'jobs:\n  j:\n    strategy:\n      matrix:\n        &m ${{ fromJSON(needs.p.outputs.m) }}\n    runs-on: ${{ matrix.os }}' 5
 bad next-line-matrix-tag  $'jobs:\n  j:\n    strategy:\n      matrix:\n        !!str ${{ fromJSON(vars.X) }}\n    runs-on: ${{ matrix.os }}' 5
 bad strategy-key-expressions $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      fail-fast: ${{ github.event_name == \'push\' }}\n      matrix:\n        os: [ubuntu-latest]\n        node: ${{ fromJSON(vars.NODES) }}' "5 8"
+bad flow-include-hash-name $'jobs:\n  j:\n    strategy:\n      matrix:\n        include:\n          - {name: "Node #24", os: build-pool}\n    runs-on: ${{ matrix.os }}' 6
+bad flow-job-hash-name    $'jobs:\n  j: {name: " #", runs-on: build-pool, steps: [{run: echo}]}' 2
+bad next-line-include-hash $'jobs:\n  j:\n    strategy:\n      matrix:\n        include:\n          [{name: " #"}, "${{ fromJSON(vars.EXTRA) }}"]\n    runs-on: ${{ matrix.os }}' 6
 bad matrix-anchor-def     $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix: &shared\n        os: [ubuntu-latest]'
 bad matrix-alias          $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix: *shared'
 bad matrix-tag            $'jobs:\n  j:\n    strategy:\n      matrix: !!map\n        os: [ubuntu-latest]'

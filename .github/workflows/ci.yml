@@ -422,7 +422,7 @@ jobs:
                 r = substr(r, 1, RSTART - 1) substr(r, RSTART + RLENGTH)
               }
               if (json && r ~ /(^|[^a-z0-9_-])os([^a-z0-9_-]|$)/) fail(FILENAME, FNR, "\"os\" in the build-matrix resolve job is not a literal the drift guard can check — write each entry as \"os\":\"<label>\"")
-              $0 = r
+              $0 = lraw = r
             }
             BEGIN { HOSTED = "^(ubuntu|macos|windows)-latest$" }
             FNR == 1 {
@@ -431,8 +431,10 @@ jobs:
               bn = (FILENAME ~ /(^|\/)build-native\.yml$/)
             }
             # A # starts a YAML comment only at the start of a line or after
-            # whitespace; ubuntu-latest#x is one plain scalar.
-            { sub(/\r$/, ""); raw = $0; sub(/(^|[[:space:]])#.*/, ""); $0 = tolower($0) }
+            # whitespace; ubuntu-latest#x is one plain scalar. The strip cannot
+            # tell a quoted " #" from a comment, so the refusal rules that look
+            # for a flow key or an expression read lraw, the unstripped line.
+            { sub(/\r$/, ""); raw = $0; lraw = tolower(raw); sub(/(^|[[:space:]])#.*/, ""); $0 = tolower($0) }
             /^[[:space:]]*$/ { if (lit) resolve_line(); next }
             {
               match($0, /^[[:space:]]*(-[[:space:]]*)?/)
@@ -484,14 +486,18 @@ jobs:
             # runs-on is outside this scan; same-repo ./.github/workflows/ and
             # $/.github/workflows/ callees are scanned). Accepted false positives,
             # all fail-closed: an env/with key named matrix or strategy with an
-            # inline value; a flow map with an os or runner key.
-            /[{,][[:space:]]*["']?(runs-on|os|runner|strategy|matrix|include)["']?[[:space:]]*:/ ||
+            # inline value; a flow map with an os or runner key; any expression
+            # under a bare strategy: line, whatever key holds it (fail-fast,
+            # max-parallel, a non-runner axis, an include or exclude value); a
+            # trailing comment that holds a flow key or, under strategy:, an
+            # expression.
+            lraw ~ /[{,][[:space:]]*["']?(runs-on|os|runner|strategy|matrix|include)["']?[[:space:]]*:/ ||
             /^[[:space:]]*(-[[:space:]]*)?["']?(strategy|matrix)["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ ||
             (/^[[:space:]]*(-[[:space:]]*)?["']?include["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ && matrix_indent >= 0) ||
             /^[[:space:]]*(-[[:space:]]*)?(<<[[:space:]]*:|\*[^*[:space:]])/ ||
-            (/\$\{\{/ && strategy_indent >= 0) ||
+            (lraw ~ /\$\{\{/ && strategy_indent >= 0) ||
             (/^[[:space:]]*uses[[:space:]]*:/ && /\/\.github\/workflows\// && !/uses[[:space:]]*:[[:space:]]*["']?[.$]\/\.github\/workflows\//) {
-              fail(FILENAME, FNR, "line may hide a runner label from the drift guard — write `runs-on: <label>` / `os: [<labels>]` inline; keep `strategy:`, `matrix:`, `include:` as bare keys over a static block (no expressions, anchors, aliases or flow maps); call reusable workflows only from ./.github/workflows/ or $/.github/workflows/")
+              fail(FILENAME, FNR, "line may hide a runner label from the drift guard — write `runs-on: <label>` / `os: [<labels>]` inline; keep `strategy:`, `matrix:`, `include:` as bare keys over a static block (no expression anywhere under strategy:, no anchors, aliases or flow maps); call reusable workflows only from ./.github/workflows/ or $/.github/workflows/")
             }
             /^[[:space:]]*(-[[:space:]]*)?["']?runs-on["']?[[:space:]]*:/ ||
             (/^[[:space:]]*(-[[:space:]]*)?["']?(os|runner)["']?[[:space:]]*:/ && matrix_indent >= 0) {
