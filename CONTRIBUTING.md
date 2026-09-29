@@ -22,7 +22,7 @@ prek install --install-hooks
 
 Hooks run on every commit (ESLint + Prettier + actionlint + secret-scan + standard whitespace/yaml/json checks) and on every push (`pnpm type-check`). Falling back to Python `pre-commit` works identically against the same `.pre-commit-config.yaml`.
 
-CI runs ESLint and the type-check, plus the tests. Prettier, actionlint, secret-scan and the whitespace/yaml/json checks run only in the local hooks, so install them.
+CI runs only ESLint, the type-check and the tests. Every other hook — Prettier, actionlint, secret-scan, cargo fmt/clippy and the file checks (whitespace, yaml/json/toml, large files, merge/case conflicts) — runs only locally, so install them.
 
 ## How to send a change
 
