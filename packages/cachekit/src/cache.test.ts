@@ -1252,7 +1252,7 @@ describe('Cache Integration', () => {
 
       const c = createCache({ backend: new InMemoryBackend() });
       const big = c.wrap(async () => oversized(), {
-        namespace: 'ns',
+        namespace: 'blobs',
         ttl: 60,
         interop: 'bigop',
         interopArity: 0,

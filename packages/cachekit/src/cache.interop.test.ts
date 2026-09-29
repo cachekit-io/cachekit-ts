@@ -325,6 +325,16 @@ describe('cache.wrap interop mode', () => {
         ttl: 60,
       })
     ).toThrow(ConfigurationError);
+    for (const namespace of ['ns', 'nsapi']) {
+      expect(() =>
+        cache!.wrap(async () => 1, {
+          namespace,
+          interop: 'get_user',
+          interopArity: 0,
+          ttl: 60,
+        })
+      ).toThrow(/reserved/);
+    }
   });
 
   it('encrypts interop entries with compressed=False AAD (cross-SDK decryptable)', async () => {
