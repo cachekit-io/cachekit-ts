@@ -51,6 +51,7 @@ bad hosted-prefix-pool    $'jobs:\n  j:\n    runs-on: ubuntu-pool'
 bad unlisted-hosted-arm   $'jobs:\n  j:\n    runs-on: ubuntu-24.04-arm'
 bad self-hosted-list      $'jobs:\n  j:\n    runs-on: [self-hosted, linux]'
 bad vars-indirection      $'jobs:\n  j:\n    runs-on: ${{ vars.RUNNER }}'
+bad matrix-os-or          $'jobs:\n  j:\n    runs-on: ${{ matrix.os || \'build-pool\' }}' 3
 bad other-matrix-key      $'jobs:\n  j:\n    runs-on: ${{ matrix.runner }}\n    strategy:\n      matrix:\n        runner: [ubuntu-latest]'
 bad matrix-os-pool        $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [ubuntu-latest, build-pool]'
 bad matrix-runner-pool    $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        runner: [build-pool]'
@@ -83,6 +84,11 @@ bad flow-runner           $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    strateg
 bad flow-env-os           $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    env: {foo: bar, os: linux}'
 bad dynamic-matrix        $'jobs:\n  j:\n    strategy:\n      matrix: ${{ fromJSON(needs.p.outputs.m) }}\n    runs-on: ${{ matrix.os }}'
 bad dynamic-include       $'jobs:\n  j:\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        include: ${{ fromJSON(vars.EXTRA) }}\n    runs-on: ${{ matrix.os }}'
+bad next-line-matrix      $'jobs:\n  j:\n    strategy:\n      matrix:\n        ${{ fromJSON(needs.p.outputs.m) }}\n    runs-on: ${{ matrix.os }}' 5
+bad next-line-include     $'jobs:\n  j:\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        include:\n          ${{ fromJSON(vars.EXTRA) }}\n    runs-on: ${{ matrix.os }}' 7
+bad next-line-strategy    $'jobs:\n  j:\n    strategy:\n      "${{ fromJSON(vars.STRATEGY) }}"\n    runs-on: ${{ matrix.os }}' 4
+bad include-expression-item $'jobs:\n  j:\n    strategy:\n      matrix:\n        include:\n          - os: ubuntu-latest\n          - ${{ fromJSON(vars.EXTRA) }}\n    runs-on: ${{ matrix.os }}' 7
+bad matrix-axis-matrix    $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        matrix:\n          - a\n        os: [build-pool]' 8
 bad matrix-anchor-def     $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix: &shared\n        os: [ubuntu-latest]'
 bad matrix-alias          $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix: *shared'
 bad matrix-tag            $'jobs:\n  j:\n    strategy:\n      matrix: !!map\n        os: [ubuntu-latest]'
@@ -179,6 +185,8 @@ good same-repo-reusable   $'jobs:\n  j:\n    uses: $/.github/workflows/x.yml'
 good script-string        $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo "runs-on: build-pool is banned"'
 good markdown-bullets     $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          echo "* item" >> "$GITHUB_STEP_SUMMARY"\n          echo "- **bold** item" >> "$GITHUB_STEP_SUMMARY"'
 good job-anchor           $'jobs:\n  a: &job\n    runs-on: ubuntu-latest\n  b: *job'
+good job-named-matrix     $'jobs:\n  matrix:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          ${{ github.workspace }}/build.sh\n  strategy:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          ${{ github.workspace }}/check.sh'
+good strategy-key-expressions $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      fail-fast: ${{ github.event_name == \'push\' }}\n      matrix:\n        os: [ubuntu-latest]\n        node: ${{ fromJSON(vars.NODES) }}'
 
 if [ "$fail" -ne 0 ]; then echo "runner-drift-guard selftest FAILED"; exit 1; fi
 echo "runner-drift-guard selftest OK ($(grep -c '^bad ' "$0") bad, $(grep -c '^good ' "$0") good, each also as CRLF)"

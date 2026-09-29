@@ -332,8 +332,8 @@ jobs:
   # This repo is public and forkable, so every job runs on GitHub-hosted
   # runners, never on self-hosted ones. Allow-list, not deny-list: a deny-list
   # cannot see a label it has no name for. The program is the heredoc below;
-  # its regression fixtures are .github/scripts/runner-drift-guard-selftest.sh,
-  # run first so a broken guard cannot pass anything. This is drift protection
+  # its regression fixtures, .github/scripts/runner-drift-guard-selftest.sh,
+  # fail the job whenever the program gets one wrong. This is drift protection
   # for maintainers, not a fork-PR control: a fork PR runs its own copy of this
   # workflow.
   runner-drift-guard:
@@ -427,7 +427,7 @@ jobs:
             BEGIN { HOSTED = "^(ubuntu|macos|windows)-latest$" }
             FNR == 1 {
               dynamic_matrix_verdict()
-              matrix_indent = value_indent = run_indent = -1; in_jobs = dyn_os = lit = 0; job = ""
+              matrix_indent = strategy_indent = value_indent = run_indent = -1; in_jobs = dyn_os = lit = 0; job = ""
               bn = (FILENAME ~ /(^|\/)build-native\.yml$/)
             }
             # A # starts a YAML comment only at the start of a line or after
@@ -438,6 +438,7 @@ jobs:
               match($0, /^[[:space:]]*(-[[:space:]]*)?/)
               indent = RLENGTH
               if (matrix_indent >= 0 && indent <= matrix_indent) matrix_indent = -1
+              if (strategy_indent >= 0 && indent <= strategy_indent) strategy_indent = -1
             }
             # A line deeper than the runner key before it continues that value
             # (a wrapped plain scalar), so the key line held only part of it.
@@ -445,19 +446,24 @@ jobs:
               if (indent > value_indent) fail(FILENAME, FNR, "runner value continues on this line — write it on one line after the key")
               value_indent = -1
             }
-            # Track the matrix block by indentation: a bare os: or runner: is
-            # validated only there, because the same key names a workflow_dispatch
-            # input or an action with: parameter, which select no runner. The
-            # tracker arms only on a bare `matrix:` line — anything else on that
-            # line (an expression, anchor, alias, tag or flow map) leaves the block
-            # unread, so the refusal rule below rejects the line instead.
-            /^[[:space:]]*(-[[:space:]]*)?["']?matrix["']?[[:space:]]*:[[:space:]]*$/ { matrix_indent = indent }
-            # build-native.yml builds its matrix as JSON in its `matrix` job and
-            # reads it in its `build` job. Only that file tracks job ids.
-            bn && /^jobs[[:space:]]*:[[:space:]]*$/ { in_jobs = 1; job_indent = -1; next }
+            # Job ids: build-native.yml's rules below key on them, and a job
+            # named matrix or strategy opens no block.
+            /^jobs[[:space:]]*:[[:space:]]*$/ { in_jobs = 1; job_indent = -1; next }
             in_jobs && indent == 0 { in_jobs = 0; job = "" }
             in_jobs && job_indent < 0 { job_indent = indent }
-            in_jobs && indent == job_indent { job = $0; sub(/^[[:space:]]*/, "", job); sub(/[[:space:]]*:.*/, "", job); lit = 0; run_indent = -1 }
+            { job_line = in_jobs && indent == job_indent }
+            job_line { job = $0; sub(/^[[:space:]]*/, "", job); sub(/[[:space:]]*:.*/, "", job); lit = 0; run_indent = -1 }
+            # Track the strategy and matrix blocks by indentation: a bare os: or
+            # runner: is validated only in a matrix, because the same key names a
+            # workflow_dispatch input or an action with: parameter, which select
+            # no runner. Each tracker arms once, on a bare key line — anything
+            # else on that line (an expression, anchor, alias, tag or flow map)
+            # leaves the block unread, so the refusal rule below rejects the line
+            # instead. A matrix axis named matrix does not re-arm it.
+            !job_line && strategy_indent < 0 && /^[[:space:]]*(-[[:space:]]*)?["']?strategy["']?[[:space:]]*:[[:space:]]*$/ { strategy_indent = indent }
+            !job_line && matrix_indent < 0 && /^[[:space:]]*(-[[:space:]]*)?["']?matrix["']?[[:space:]]*:[[:space:]]*$/ { matrix_indent = indent }
+            # build-native.yml builds its matrix as JSON in its `matrix` job and
+            # reads it in its `build` job.
             bn && job == "matrix" { resolve_line() }
             # The build job's include of that JSON is the one dynamic matrix the
             # guard accepts; dynamic_matrix_verdict() fails it unless the resolve
@@ -469,7 +475,9 @@ jobs:
             # Lines that may hide a runner label: a flow mapping carrying a
             # runner/strategy/matrix key; strategy: or matrix: with any inline
             # value, include: with one inside a matrix; a YAML merge key or a bare
-            # alias item; a job calling a reusable workflow in another repo (its
+            # alias item; inside a strategy block, a line that starts with an
+            # expression (a strategy, matrix or include value written on the line
+            # below its key); a job calling a reusable workflow in another repo (its
             # runs-on is outside this scan; same-repo ./.github/workflows/ and
             # $/.github/workflows/ callees are scanned). Accepted false positives,
             # all fail-closed: an env/with key named matrix or strategy with an
@@ -478,6 +486,7 @@ jobs:
             /^[[:space:]]*(-[[:space:]]*)?["']?(strategy|matrix)["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ ||
             (/^[[:space:]]*(-[[:space:]]*)?["']?include["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ && matrix_indent >= 0) ||
             /^[[:space:]]*(-[[:space:]]*)?(<<[[:space:]]*:|\*[^*[:space:]])/ ||
+            (/^[[:space:]]*(-[[:space:]]*)?["']?\$\{\{/ && (strategy_indent >= 0 || matrix_indent >= 0)) ||
             (/^[[:space:]]*uses[[:space:]]*:/ && /\/\.github\/workflows\// && !/uses[[:space:]]*:[[:space:]]*["']?[.$]\/\.github\/workflows\//) {
               fail(FILENAME, FNR, "line may hide a runner label from the drift guard — write `runs-on: <label>` / `os: [<labels>]` inline; keep `strategy:`, `matrix:`, `include:` as bare keys over a static block (no expressions, anchors, aliases or flow maps); call reusable workflows only from ./.github/workflows/ or $/.github/workflows/")
             }
@@ -497,13 +506,21 @@ jobs:
             END { dynamic_matrix_verdict(); exit bad }
           AWK
 
+      # One awk pass, no shell pipeline: a program error exits non-zero and
+      # fails the step instead of reading as "no match". dotglob, because
+      # GitHub runs a dot-prefixed workflow file too; with no file to match,
+      # the pattern stays literal and awk fails to open it.
+      - name: Every runner value is an allow-listed GitHub-hosted label
+        run: |
+          shopt -s dotglob
+          awk -f "$RUNNER_TEMP/runner-drift-guard.awk" .github/workflows/*.y*ml
+
+      # After the scan, not before: the script lives under .github/scripts/,
+      # which a `contents: write` job can rewrite, so it must not run ahead of
+      # the scan with the program's path in hand. It still fails the job when
+      # the program gets any fixture wrong.
       - name: Guard self-test (regression fixtures)
         run: bash .github/scripts/runner-drift-guard-selftest.sh "$RUNNER_TEMP/runner-drift-guard.awk"
-
-      # One awk pass, no shell pipeline: a program error exits non-zero and
-      # fails the step instead of reading as "no match".
-      - name: Every runner value is an allow-listed GitHub-hosted label
-        run: awk -f "$RUNNER_TEMP/runner-drift-guard.awk" .github/workflows/*.y*ml
 
   ci-success:
     name: CI Success
