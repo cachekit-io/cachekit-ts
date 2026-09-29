@@ -6,8 +6,12 @@
  * package: the auto-mode serializer, the interop/v1 value decoder and the
  * invalidation-event decoder. Spec: protocol/spec/interop-mode.md#decode-bounds
  * (LAB-2503); the bounds themselves are `assertDecodeDepth` (LAB-2487). The
- * ByteStorage envelope is decoded in Rust (cachekit-core, reached via NAPI /
- * wasm) and is verified against the same vectors there, not here (LAB-3479).
+ * ByteStorage envelope is decoded in Rust (cachekit-core, reached via NAPI
+ * `unpack` / wasm), not here. cachekit-io/cachekit-core#80 adds the envelope
+ * pre-scan to `ByteStorage::retrieve` and runs these vectors through it in core
+ * CI. The cachekit-core 0.6.0 this repo pins has no envelope pre-scan, so
+ * `unpack` gains the guard only when the pin moves to a core release that
+ * carries it.
  *
  * Provenance: cachekit-io/protocol#59 @ b75adac4 (the revision that last
  * touched the fixture). The same sha256 is pinned by cachekit-py's
