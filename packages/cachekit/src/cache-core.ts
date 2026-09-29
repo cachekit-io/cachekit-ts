@@ -1292,11 +1292,16 @@ export class CacheImpl implements SecureCache {
         // Best-effort L2 invalidation - don't fail the operation, but don't
         // hide it either. The entry stays stale in L2 until its TTL, so name
         // it — by the same digest warnValueTooLarge logs, never the
-        // caller-supplied key itself. Pass the message, not the error: a
-        // Redis error reply keeps the command and its key args on `cause`.
+        // caller-supplied key itself. Report allow-listed fields only: the
+        // error object carries backend command args on `cause`, and its
+        // message is backend-written text that can embed the key.
         logError(
           `[cachekit] invalidate("params") L2 delete failed (keyHash=${blake2b16Hex(options.key)}):`,
-          err instanceof Error ? err.message : 'Unknown error'
+          err instanceof BackendError
+            ? `${err.name}(${err.classification})`
+            : err instanceof Error
+              ? err.name
+              : 'Unknown error'
         );
       }
     }

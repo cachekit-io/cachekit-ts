@@ -9,6 +9,7 @@ import { createCache } from './cache.js';
 import { RetryPolicy } from './reliability/retry.js';
 import { CacheMetrics } from './metrics/prometheus.js';
 import { setLogger } from './logger.js';
+import { BackendError } from './errors.js';
 import { blake2b16Hex } from './serialization/key-generator.js';
 import type { Backend } from './backends/types.js';
 import type { L1Cache } from './l1/lru-cache.js';
@@ -186,32 +187,41 @@ describe('invalidate("params") failure reporting', () => {
     }
   );
 
-  it('reports a failed L2 delete but still resolves', async () => {
-    // Shaped like a wrapped ioredis error reply: the command and its key ride on `cause`.
-    const failure = new Error('Redis delete failed: READONLY', {
-      cause: Object.assign(new Error('READONLY'), {
-        command: { name: 'del', args: ['secret-key'] },
-      }),
-    });
-    const errors: unknown[] = [];
-    setLogger((message, error) => {
-      reported.push(message);
-      errors.push(error);
-    });
-    const backend = new InMemoryBackend();
-    vi.spyOn(backend, 'delete').mockRejectedValue(failure);
-    const cache = createCache({ backend, defaultTtl: 3600 });
-
-    await expect(cache.invalidate('params', { key: 'secret-key' })).resolves.toBeUndefined();
-    // The digest a holder of the key can recompute, never the key itself.
-    expect(reported).toEqual([
-      `[cachekit] invalidate("params") L2 delete failed (keyHash=${blake2b16Hex('secret-key')}):`,
-    ]);
-    expect(reported[0]).not.toContain('secret-key');
-    expect(errors).toEqual(['Redis delete failed: READONLY']);
-
-    await cache.close();
+  // Shaped like a wrapped ioredis error reply: the command and its key ride on `cause`.
+  const redisReply = Object.assign(new Error('READONLY'), {
+    command: { name: 'del', args: ['secret-key'] },
   });
+
+  it.each([
+    [
+      'a BackendError',
+      new BackendError('DELETE failed for secret-key', 'transient', { cause: redisReply }),
+      'BackendError(transient)',
+    ],
+    ['a plain Error', new Error('DELETE failed for secret-key'), 'Error'],
+  ])(
+    'reports a failed L2 delete from %s without the key, and still resolves',
+    async (_, failure, expected) => {
+      const errors: unknown[] = [];
+      setLogger((message, error) => {
+        reported.push(message);
+        errors.push(error);
+      });
+      const backend = new InMemoryBackend();
+      vi.spyOn(backend, 'delete').mockRejectedValue(failure);
+      const cache = createCache({ backend, defaultTtl: 3600 });
+
+      await expect(cache.invalidate('params', { key: 'secret-key' })).resolves.toBeUndefined();
+      // The digest a holder of the key can recompute, never the key itself.
+      expect(reported).toEqual([
+        `[cachekit] invalidate("params") L2 delete failed (keyHash=${blake2b16Hex('secret-key')}):`,
+      ]);
+      expect(errors).toEqual([expected]);
+      expect(JSON.stringify([reported, errors])).not.toContain('secret-key');
+
+      await cache.close();
+    }
+  );
 });
 
 // ========== m3: RetryPolicy Sleep Not Cancellable ==========
