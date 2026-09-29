@@ -20,6 +20,7 @@
     "format": "prettier --write \"packages/cachekit/src/**/*.ts\"",
     "format:check": "prettier --check \"packages/cachekit/src/**/*.ts\"",
     "type-check": "turbo run type-check",
+    "type-check:tests": "pnpm --filter @cachekit-io/cachekit type-check:tests",
     "clean": "turbo run clean && rm -rf node_modules .turbo"
   },
   "devDependencies": {

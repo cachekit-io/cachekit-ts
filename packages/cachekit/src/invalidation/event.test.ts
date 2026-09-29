@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { encode, DecodeError } from '@msgpack/msgpack';
-import { serializeEvent, deserializeEvent, createInvalidationEvent } from './event';
-import { SerializationError } from '../errors';
+import { serializeEvent, deserializeEvent, createInvalidationEvent } from './event.js';
+import { SerializationError } from '../errors.js';
 
 describe('InvalidationEvent serialization', () => {
   it('round-trips global event', () => {

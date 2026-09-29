@@ -13,6 +13,7 @@ import {
   type EncryptionTenantKeys,
 } from './manager-core.js';
 import { ConfigurationError, EncryptionError, NonceExhaustedError } from '../errors.js';
+import { MAX_AAD_SIZE } from '../constants.js';
 
 const MASTER_KEY_HEX = 'ab'.repeat(32);
 
@@ -121,6 +122,21 @@ describe('EncryptionManagerCore', () => {
     manager.dispose();
     manager.dispose();
     expect(freed.length).toBe(1);
+  });
+
+  it('validateKey rejects a key longer than MAX_AAD_SIZE UTF-16 units without encoding it', () => {
+    const manager = new TestManager(async () => mockBindings().bindings);
+    const encode = vi.spyOn(TextEncoder.prototype, 'encode');
+    try {
+      expect(() => manager.validateKey('k'.repeat(MAX_AAD_SIZE + 1))).toThrow(ConfigurationError);
+      expect(encode).not.toHaveBeenCalled();
+      // Control: the spy does see the measured path, so the assertion above is not vacuous.
+      manager.validateKey('ns:k');
+      expect(encode).toHaveBeenCalled();
+    } finally {
+      encode.mockRestore();
+      manager.dispose();
+    }
   });
 
   /** Reads the tenant_id component (component 1) back out of a built AAD buffer. */

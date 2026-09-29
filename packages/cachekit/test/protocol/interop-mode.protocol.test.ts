@@ -9,8 +9,13 @@
  * stdlib Python reference implementation and independently cross-checked by
  * tools/interop-crosscheck.mjs; this suite is the cachekit-ts SDK's own
  * mandatory verification (spec "SDK Implementation Requirements" #7).
+ *
+ * Provenance: cachekit-io/protocol test-vectors/interop-mode.json 1.1.0 at
+ * 965aeb01a4e8b9e7a0c9ca576b4c2cb60b63b918, copied byte-for-byte. Re-vendoring
+ * means refreshing FIXTURE_SHA256 and the counts in the first test.
  */
 
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -76,10 +81,13 @@ interface VectorFile {
   error_vectors: ErrorVector[];
 }
 
-const here = dirname(fileURLToPath(import.meta.url));
-const vectors: VectorFile = JSON.parse(
-  readFileSync(join(here, 'fixtures', 'interop-mode.json'), 'utf8')
-) as VectorFile;
+/** sha256 of test-vectors/interop-mode.json at the provenance above. */
+const FIXTURE_SHA256 = '9b1855851d888c479e37a8fff9e9bbe5738737a9a408e749d9126c7678b9e7bc'; // pragma: allowlist secret
+
+const raw = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'interop-mode.json')
+);
+const vectors = JSON.parse(raw.toString('utf8')) as VectorFile;
 
 function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);
@@ -196,6 +204,19 @@ function buildAAD(
   }
   return aad;
 }
+
+describe('interop/v1 vector fixture', () => {
+  // it.each over a truncated fixture just runs fewer cases, so pin the bytes.
+  it('is the pinned upstream file, unedited since vendoring', () => {
+    expect(
+      createHash('sha256').update(raw).digest('hex'),
+      'fixture differs from the pinned protocol revision; if intentional, refresh FIXTURE_SHA256 AND the counts'
+    ).toBe(FIXTURE_SHA256);
+    expect(vectors.key_vectors).toHaveLength(34);
+    expect(vectors.value_vectors).toHaveLength(4);
+    expect(vectors.error_vectors).toHaveLength(11);
+  });
+});
 
 describe('interop/v1 key vectors', () => {
   it.each(vectors.key_vectors)(

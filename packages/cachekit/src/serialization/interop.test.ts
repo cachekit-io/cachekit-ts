@@ -32,6 +32,31 @@ describe('interop segment validation', () => {
     expect(INTEROP_SEGMENT_PATTERN.test('users\n')).toBe(false);
     expect(INTEROP_SEGMENT_PATTERN.multiline).toBe(false);
   });
+
+  it('rejects the reserved namespaces ns and nsapi', () => {
+    for (const seg of ['ns', 'nsapi']) {
+      expect(() => validateInteropSegment('namespace', seg)).toThrow(ConfigurationError);
+      expect(() => validateInteropSegment('namespace', seg)).toThrow(/reserved/);
+    }
+  });
+
+  it('reserves ns and nsapi by exact match, as a namespace only', () => {
+    for (const seg of ['ns', 'nsapi']) {
+      expect(() => validateInteropSegment('operation', seg)).not.toThrow();
+    }
+    for (const seg of ['nsx', 'nsfw', 'nsapi2']) {
+      expect(() => validateInteropSegment('namespace', seg)).not.toThrow();
+    }
+  });
+
+  it('rejects a non-string segment before the reservation check', () => {
+    // RegExp.test string-coerces, Set.has does not: ['ns'] would pass the
+    // grammar, skip the reservation, and mint an `ns:` key.
+    for (const seg of [['ns'], new String('nsapi')] as unknown as string[]) {
+      expect(() => validateInteropSegment('namespace', seg)).toThrow(ConfigurationError);
+      expect(() => generateInteropKey(seg, 'get_user', [1])).toThrow(ConfigurationError);
+    }
+  });
 });
 
 describe('interop argument encoding (args profile)', () => {

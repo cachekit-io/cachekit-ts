@@ -44,6 +44,9 @@ import {
 /** Segment grammar for interop namespace/operation (full-string match). */
 export const INTEROP_SEGMENT_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
+// Exact-match, namespace-only reservation (see validateInteropSegment).
+const RESERVED_INTEROP_NAMESPACES: ReadonlySet<string> = new Set(['ns', 'nsapi']);
+
 // Exact float64 bounds for the integral-collapse range check. Both are powers
 // of two, hence exactly representable; 2^64-1 is NOT (it rounds up to 2^64),
 // so the upper bound must be 2^64 with a strict less-than.
@@ -86,13 +89,34 @@ export class InteropFloat {
  * and no `m` flag cannot match past a newline, so `"users\n"` fails here
  * (the `reject_trailing_newline` vector).
  *
- * @throws {ConfigurationError} if the segment does not match the grammar
+ * A namespace additionally must not be exactly `ns` or `nsapi`: the CachekitIO
+ * server parses a key starting `ns:` / `nsapi:` as namespace-prefixed
+ * (protocol spec/cache-key-format.md#server-side-requirements), so it would
+ * reject or misroute the interop key (the `reject_reserved_namespace_*`
+ * vectors). Exact-match and namespace-only: `nsx` is a valid namespace, and
+ * `ns` / `nsapi` are valid operations.
+ *
+ * A non-string is rejected first: RegExp.test string-coerces its argument but
+ * Set.has does not, so an untyped `['ns']` would otherwise pass the grammar
+ * and skip the reservation.
+ *
+ * @throws {ConfigurationError} if the segment is not a string, does not match
+ *   the grammar, or is a reserved namespace
  */
 export function validateInteropSegment(kind: 'namespace' | 'operation', value: string): void {
+  if (typeof value !== 'string') {
+    throw new ConfigurationError(`Invalid interop ${kind}: must be a string, got ${typeof value}`);
+  }
   if (!INTEROP_SEGMENT_PATTERN.test(value)) {
     throw new ConfigurationError(
       `Invalid interop ${kind} ${JSON.stringify(value)}: must full-string match ` +
         `^[a-z0-9][a-z0-9._-]{0,63}$ (lowercase ASCII letters, digits, '.', '_', '-'; 1-64 chars)`
+    );
+  }
+  if (kind === 'namespace' && RESERVED_INTEROP_NAMESPACES.has(value)) {
+    throw new ConfigurationError(
+      `Invalid interop namespace ${JSON.stringify(value)}: 'ns' and 'nsapi' are reserved — ` +
+        `the CachekitIO server parses a key starting '${value}:' as namespace-prefixed`
     );
   }
 }
@@ -536,7 +560,8 @@ export function interopArgsHash(args: readonly unknown[]): string {
  * operation name and effective argument list. Max length 194 chars — the
  * auto-mode truncation rule never applies.
  *
- * @throws {ConfigurationError} if namespace or operation violate the segment grammar
+ * @throws {ConfigurationError} if namespace or operation violate the segment
+ *   grammar, or namespace is reserved (`ns`, `nsapi`)
  * @throws {SerializationError} if an argument is outside the interop data model
  */
 export function generateInteropKey(

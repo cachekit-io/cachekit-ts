@@ -8,6 +8,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createCache } from './cache.js';
 import { RetryPolicy } from './reliability/retry.js';
 import { CacheMetrics } from './metrics/prometheus.js';
+import { setLogger } from './logger.js';
+import { BackendError } from './errors.js';
+import { blake2b16Hex } from './serialization/key-generator.js';
 import type { Backend } from './backends/types.js';
 import type { L1Cache } from './l1/lru-cache.js';
 import type { Redis } from 'ioredis';
@@ -136,6 +139,136 @@ describe('m1: InvalidationChannel Initialization', () => {
   });
 });
 
+// ========== invalidate() must not report success for work it did not do ==========
+
+describe('invalidate("params") failure reporting', () => {
+  let reported: string[];
+
+  beforeEach(() => {
+    reported = [];
+    setLogger((message) => reported.push(message));
+  });
+
+  afterEach(() => {
+    setLogger(null);
+  });
+
+  it.each([
+    ['no options', undefined],
+    ['empty options', {}],
+    ['empty key', { key: '' }],
+  ])(
+    'reports a call with %s at the caller, and deletes and publishes nothing',
+    async (_, options) => {
+      const backend = new InMemoryBackend();
+      const deleteSpy = vi.spyOn(backend, 'delete');
+      const mockRedis = createMockRedis();
+      const cache = createCache({
+        backend,
+        defaultTtl: 3600,
+        invalidation: { redis: mockRedis },
+      });
+      await cache.set('k', 'value');
+      const l1 = (cache as unknown as { l1: L1Cache }).l1;
+      expect(l1.stats.entries).toBe(1);
+
+      await expect(cache.invalidate('params', options)).resolves.toBeUndefined();
+      expect(reported).toEqual([
+        '[cachekit] invalidate("params") called with no key; nothing invalidated',
+      ]);
+      expect(deleteSpy).not.toHaveBeenCalled();
+      expect(mockRedis.publish).not.toHaveBeenCalled();
+      expect(l1.stats.entries).toBe(1);
+
+      // A well-formed call stays quiet and still publishes — the guard must not be broader.
+      reported.length = 0;
+      await cache.invalidate('params', { key: 'k' });
+      expect(reported).toEqual([]);
+      expect(deleteSpy).toHaveBeenCalledOnce();
+      expect(mockRedis.publish).toHaveBeenCalledOnce();
+
+      await cache.close();
+    }
+  );
+
+  // Shaped like a wrapped ioredis error reply: the command and its key ride on `cause`.
+  const redisReply = Object.assign(new Error('READONLY'), {
+    command: { name: 'del', args: ['secret-key'] },
+  });
+
+  // Passes the allow-list on its first read, then turns into the key.
+  let classificationReads = 0;
+  const shiftingClassification = Object.defineProperty(
+    new BackendError('failed'),
+    'classification',
+    {
+      get: () => (classificationReads++ === 0 ? 'transient' : 'secret-key'),
+    }
+  );
+  const throwingClassification = Object.defineProperty(
+    new BackendError('failed'),
+    'classification',
+    {
+      get: () => {
+        throw new Error('secret-key');
+      },
+    }
+  );
+
+  it.each([
+    [
+      'a BackendError',
+      new BackendError('DELETE failed for secret-key', 'transient', { cause: redisReply }),
+      'BackendError(transient)',
+    ],
+    ['a plain Error', new Error('DELETE failed for secret-key'), 'Error'],
+    [
+      'an Error with the key in its name',
+      Object.assign(new Error('failed'), { name: 'DELETE failed for secret-key' }),
+      'Error',
+    ],
+    [
+      'a BackendError with the key in its name',
+      Object.assign(new BackendError('failed'), { name: 'secret-key' }),
+      'BackendError(transient)',
+    ],
+    [
+      'a BackendError with the key in its classification',
+      Object.assign(new BackendError('failed'), { classification: 'secret-key' }),
+      'BackendError',
+    ],
+    [
+      'a BackendError whose classification changes between reads',
+      shiftingClassification,
+      'BackendError(transient)',
+    ],
+    ['a BackendError whose classification getter throws', throwingClassification, 'BackendError'],
+    ['a non-Error throw', 'DELETE failed for secret-key', 'Unknown error'],
+  ] as [string, unknown, string][])(
+    'reports a failed L2 delete from %s without the key, and still resolves',
+    async (_, failure, expected) => {
+      const errors: unknown[] = [];
+      setLogger((message, error) => {
+        reported.push(message);
+        errors.push(error);
+      });
+      const backend = new InMemoryBackend();
+      vi.spyOn(backend, 'delete').mockRejectedValue(failure);
+      const cache = createCache({ backend, defaultTtl: 3600 });
+
+      await expect(cache.invalidate('params', { key: 'secret-key' })).resolves.toBeUndefined();
+      // The digest a holder of the key can recompute, never the key itself.
+      expect(reported).toEqual([
+        `[cachekit] invalidate("params") L2 delete failed (keyHash=${blake2b16Hex('secret-key')}):`,
+      ]);
+      expect(errors).toEqual([expected]);
+      expect(JSON.stringify([reported, errors])).not.toContain('secret-key');
+
+      await cache.close();
+    }
+  );
+});
+
 // ========== m3: RetryPolicy Sleep Not Cancellable ==========
 
 describe('m3: RetryPolicy Cancellable Sleep', () => {
@@ -245,36 +378,6 @@ describe('m4: refreshingKeys Cleanup on Close', () => {
 
     await cache.close();
     expect(l1.stats.refreshing).toBe(0);
-  });
-
-  it('should clear L1 cache refreshingKeys on close', async () => {
-    // Direct L1 cache test
-    const { L1Cache } = await import('./l1/lru-cache.js');
-
-    const l1 = new L1Cache({
-      maxEntries: 100,
-      maxMemory: 50 * 1024 * 1024,
-      swrEnabled: true,
-      swrThresholdRatio: 0.01, // Very low to trigger refresh
-      maxConcurrentRefreshes: 10,
-      invalidationEnabled: true,
-      namespaceIndex: true,
-    });
-
-    // Set a value
-    l1.set('key1', 'value1', 10000, 'ns');
-
-    // Access with SWR to add to refreshingKeys
-    const result = l1.getWithSwr('key1');
-
-    // If shouldRefresh was true, the key is in refreshingKeys
-    if (result.shouldRefresh) {
-      // Clear the cache
-      l1.clear();
-
-      // Verify stats show no refreshing keys
-      expect(l1.stats.refreshing).toBe(0);
-    }
   });
 });
 

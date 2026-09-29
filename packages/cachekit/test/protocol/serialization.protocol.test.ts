@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { MessagePackSerializer } from '../../src/serialization/serializer';
+import { MessagePackSerializer } from '../../src/serialization/serializer.js';
 
 /**
  * Protocol v1.0 Serialization Test Vectors

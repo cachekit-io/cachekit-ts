@@ -40,7 +40,7 @@ class InMemoryBackend implements Backend {
     this.gets++;
     return this.store.get(key) ?? null;
   }
-  async set(key: string, value: Uint8Array): Promise<void> {
+  async set(key: string, value: Uint8Array, _ttl?: number): Promise<void> {
     this.store.set(key, value);
   }
   async delete(key: string): Promise<boolean> {

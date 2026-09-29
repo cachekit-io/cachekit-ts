@@ -1,5 +1,17 @@
 export type ErrorClassification = 'transient' | 'permanent' | 'authentication' | 'timeout';
 
+// Keyed by the union, so a new classification that isn't listed here fails to compile.
+const CLASSIFICATIONS: Record<ErrorClassification, true> = {
+  transient: true,
+  permanent: true,
+  authentication: true,
+  timeout: true,
+};
+
+export function isErrorClassification(value: unknown): value is ErrorClassification {
+  return typeof value === 'string' && Object.hasOwn(CLASSIFICATIONS, value);
+}
+
 export function classifyHttpError(status: number): ErrorClassification {
   if (status === 401 || status === 403) return 'authentication';
   if (status === 408 || status === 429) return 'transient';

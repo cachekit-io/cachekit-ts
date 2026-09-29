@@ -6,13 +6,17 @@
  * package: the auto-mode serializer, the interop/v1 value decoder and the
  * invalidation-event decoder. Spec: protocol/spec/interop-mode.md#decode-bounds
  * (LAB-2503); the bounds themselves are `assertDecodeDepth` (LAB-2487). The
- * ByteStorage envelope is decoded in Rust (cachekit-core, reached via NAPI /
- * wasm) and is verified against the same vectors there, not here (LAB-3479).
+ * ByteStorage envelope is decoded in Rust (cachekit-core, reached via NAPI
+ * `unpack` / wasm), not here. cachekit-io/cachekit-core#80 adds the envelope
+ * pre-scan to `ByteStorage::retrieve` and runs the protocol's
+ * decode-bounds.json 1.1.0 (newer than the copy vendored here) through it in
+ * core CI. The cachekit-core 0.6.0 this repo pins has no envelope pre-scan, so
+ * `unpack` gains the guard only when the pin moves to a core release that
+ * carries it.
  *
- * Provenance: cachekit-io/protocol#59 @ b75adac4 (the revision that last
- * touched the fixture). The same sha256 is pinned by cachekit-py's
- * tests/unit/protocol/test_decode_bounds.py, so a drift between the two SDKs
- * shows up as a hash mismatch on whichever re-vendors second.
+ * Provenance: cachekit-io/protocol @ 1729eb7e (the merge of
+ * cachekit-io/protocol#59, the revision that last touched the fixture;
+ * fixture version 1.1.0).
  *
  * Re-vendor: copy test-vectors/decode-bounds.json byte-for-byte from the
  * protocol revision you then name in `Provenance` above (the fixtures dir is
@@ -37,7 +41,7 @@ import {
 import { SerializationError } from '../../src/errors.js';
 
 /** sha256 of test-vectors/decode-bounds.json at the provenance above. */
-const FIXTURE_SHA256 = '75c1204e6f58f5220581d3e40e75a68f2df605b4e3c817107b0c690cd7da5cd4'; // pragma: allowlist secret
+const FIXTURE_SHA256 = '907b025d2b270a0f60abd9296a8a1c864e69057c553ac7a70206b44256558916'; // pragma: allowlist secret
 
 interface Vector {
   name: string;
@@ -74,6 +78,10 @@ const serializer = new MessagePackSerializer();
  * re-vendored accept vector fails the pin test until it is added here). */
 const EXPECTED: Record<string, unknown> = {
   nested_fixarray_depth_32: Array.from({ length: 32 }).reduce<unknown>((inner) => [inner], null),
+  nested_fixmap_depth_32: Array.from({ length: 32 }).reduce<unknown>(
+    (inner) => ({ '': inner }),
+    null
+  ),
   array16_256_backed_nils: new Array<null>(256).fill(null),
 };
 
@@ -136,16 +144,19 @@ describe('Protocol decode-bounds vectors (spec/interop-mode.md#decode-bounds)', 
       'fixture differs from the pinned protocol revision; if intentional, refresh FIXTURE_SHA256 AND the counts'
     ).toBe(FIXTURE_SHA256);
     expect(vectors.spec).toBe('spec/interop-mode.md#decode-bounds');
-    expect(vectors.reject_vectors).toHaveLength(13);
-    expect(vectors.accept_vectors).toHaveLength(2);
+    expect(vectors.reject_vectors).toHaveLength(17);
+    expect(vectors.accept_vectors).toHaveLength(3);
     expect(vectors.accept_vectors.map((v) => v.name).sort()).toEqual(Object.keys(EXPECTED).sort());
   });
 
   /**
-   * The bounds the vector set cannot isolate on its own. rules.depth requires
-   * the bound be >= 32 and <= 1024, but every depth-tagged vector nests >= 1100
-   * and all but one also over-claim — so the ceiling is unreachable from the
-   * vectors alone and a widened bound would otherwise stay green.
+   * The bounds pinned explicitly rather than left to the vectors. rules.depth
+   * requires the bound be >= 32 and <= 1024. Every depth-tagged vector nests
+   * >= 1025, and two of them are depth-only (nested_fixarray_depth_1025_complete
+   * and its map twin nested_fixmap_depth_1025_complete), so a value-path bound
+   * widened past 1024 now fails the vectors on their own; the rest also
+   * over-claim. The range asserts name that failure directly, and the
+   * event-site pins below cover a bound the vectors cannot place at all.
    */
   it('site bounds satisfy rules.depth and stay least-privilege', () => {
     expect(DEFAULT_MAX_DEPTH).toBeGreaterThanOrEqual(32);

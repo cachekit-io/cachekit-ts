@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { L1Cache } from './lru-cache';
-import { setLogger } from '../logger';
-import type { InvalidationEvent } from './types';
+import { L1Cache } from './lru-cache.js';
+import { setLogger } from '../logger.js';
+import type { InvalidationEvent } from './types.js';
 
 describe('L1Cache', () => {
   let cache: L1Cache<string>;
@@ -459,16 +459,41 @@ describe('L1Cache', () => {
 
       expect(reported).toHaveLength(1);
       expect(reported[0].message).toMatch(/Ignored namespace-level invalidation.*no namespace/);
-      // Fails the moment someone tidies the object wrapper into a template
-      // literal: only object string VALUES get control chars escaped.
-      expect(reported[0].message).not.toContain('FORGED LINE');
-      expect(reported[0].data).toEqual({ sourceInstance: forged });
+      // A custom sink gets the value already escaped: nothing rides in a
+      // second argument for the sink to mishandle, and the message carries no
+      // raw newline, so the forged text cannot start a log line of its own.
+      expect(reported[0].data).toBeUndefined();
+      expect(reported[0].message).not.toContain('\n');
+      expect(reported[0].message).toContain(
+        'sourceInstance="other-instance\\n[cachekit] FORGED LINE"'
+      );
+    });
+
+    it('handleInvalidationEvent - escapes the DEL/C1 and U+2028/U+2029 characters JSON.stringify leaves raw (LAB-4522)', () => {
+      // JSON.stringify passes these through untouched. NEL (U+0085) and
+      // U+2028/U+2029 can break a log line; CSI (U+009B) opens a terminal
+      // control sequence; DEL is a control character like the rest.
+      const reported: string[] = [];
+      setLogger((message) => reported.push(message));
+      try {
+        cache.handleInvalidationEvent({
+          level: 'namespace',
+          timestamp: 0,
+          sourceInstance: 'a\u0085b\u009bc\u2028d\u2029e\u007ff',
+        });
+      } finally {
+        setLogger(null);
+      }
+
+      expect(reported).toHaveLength(1);
+      expect(reported[0]).not.toMatch(/[\u007f-\u009f\u2028\u2029]/);
+      expect(reported[0]).toContain('sourceInstance="a\\u0085b\\u009bc\\u2028d\\u2029e\\u007ff"');
     });
 
     it('handleInvalidationEvent - the report is total and bounded (LAB-4336)', () => {
       // Why this exists next to the test above: that fixture is a short
       // string, so it passes with both the typeof guard and the bound deleted.
-      const reported: unknown[] = [];
+      const reported: string[] = [];
       const report = (sourceInstance: unknown) => {
         cache.handleInvalidationEvent({
           level: 'namespace',
@@ -476,7 +501,7 @@ describe('L1Cache', () => {
           sourceInstance,
         } as InvalidationEvent);
       };
-      setLogger((_message, data) => reported.push(data));
+      setLogger((message) => reported.push(message));
       try {
         for (const bad of [undefined, null, 123, { a: 1 }, Symbol('s')]) {
           expect(() => report(bad)).not.toThrow();
@@ -486,9 +511,10 @@ describe('L1Cache', () => {
         setLogger(null);
       }
 
-      expect(reported).toEqual([
-        ...Array(5).fill({ sourceInstance: 'unknown' }),
-        { sourceInstance: 'x'.repeat(64) },
+      // Unquoted `unknown` marks a non-string; a string is always quoted.
+      expect(reported.map((m) => m.match(/\(sourceInstance=(.*)\)$/)?.[1])).toEqual([
+        ...Array(5).fill('unknown'),
+        `"${'x'.repeat(64)}"`,
       ]);
     });
 
