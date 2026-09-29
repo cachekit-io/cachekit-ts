@@ -141,6 +141,44 @@ describe('m1: InvalidationChannel Initialization', () => {
 
 // ========== invalidate() must not report success for work it did not do ==========
 
+describe('invalidate("namespace") failure reporting', () => {
+  let reported: string[];
+
+  beforeEach(() => {
+    reported = [];
+    setLogger((message) => reported.push(message));
+  });
+
+  afterEach(() => {
+    setLogger(null);
+  });
+
+  it('reports a non-string namespace at the caller, and publishes nothing', async () => {
+    const mockRedis = createMockRedis();
+    const cache = createCache({
+      backend: new InMemoryBackend(),
+      defaultTtl: 3600,
+      invalidation: { redis: mockRedis },
+    });
+
+    await expect(
+      cache.invalidate('namespace', { namespace: 42 } as unknown as { namespace: string })
+    ).resolves.toBeUndefined();
+    expect(reported).toEqual([
+      '[cachekit] invalidate("namespace") called with no namespace; nothing invalidated',
+    ]);
+    expect(mockRedis.publish).not.toHaveBeenCalled();
+
+    // A well-formed call stays quiet and still publishes — the guard must not be broader.
+    reported.length = 0;
+    await cache.invalidate('namespace', { namespace: 'ns' });
+    expect(reported).toEqual([]);
+    expect(mockRedis.publish).toHaveBeenCalledOnce();
+
+    await cache.close();
+  });
+});
+
 describe('invalidate("params") failure reporting', () => {
   let reported: string[];
 
@@ -157,6 +195,7 @@ describe('invalidate("params") failure reporting', () => {
     ['no options', undefined],
     ['empty options', {}],
     ['empty key', { key: '' }],
+    ['non-string key', { key: 42 } as unknown as { key: string }],
   ])(
     'reports a call with %s at the caller, and deletes and publishes nothing',
     async (_, options) => {

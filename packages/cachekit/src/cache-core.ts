@@ -1382,7 +1382,7 @@ export class CacheImpl implements SecureCache {
   ): Promise<void> {
     this.ensureNotClosed();
 
-    if (level === 'namespace' && !options?.namespace) {
+    if (level === 'namespace' && (typeof options?.namespace !== 'string' || !options.namespace)) {
       // Nothing to invalidate here and nothing a peer could act on, so this
       // would publish an event every subscriber must discard. Report it in
       // the process that made the call — the only one that can fix it —
@@ -1391,7 +1391,7 @@ export class CacheImpl implements SecureCache {
       return;
     }
 
-    if (level === 'params' && !options?.key) {
+    if (level === 'params' && (typeof options?.key !== 'string' || !options.key)) {
       logError('[cachekit] invalidate("params") called with no key; nothing invalidated');
       return;
     }
@@ -1423,7 +1423,7 @@ export class CacheImpl implements SecureCache {
       } catch (err) {
         // Best-effort L2 invalidation - don't fail the operation, but don't
         // hide it either. The entry stays stale in L2 until its TTL, so name
-        // it — by the same digest warnValueTooLarge logs, never the
+        // it — by the same digest warnSetRejected logs, never the
         // caller-supplied key itself.
         logError(
           `[cachekit] invalidate("params") L2 delete failed (keyHash=${blake2b16Hex(options.key)}):`,
