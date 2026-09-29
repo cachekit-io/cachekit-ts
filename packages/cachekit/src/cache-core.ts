@@ -407,7 +407,7 @@ export class CacheImpl implements SecureCache {
    * envelope — the caller then decodes them as plain serialized data. A
    * header or core-cap miss rules an envelope out; a checksum/shape rejection
    * from core is ambiguous (look-alike value or damaged envelope), so it is
-   * also reported via warnEnvelopeRejected, the only use of `key`. The codec
+   * also reported via warnEnvelopeRejected. The codec
    * is created lazily and cached — except after close(), when a throwaway
    * codec is used and freed immediately.
    *
@@ -636,9 +636,13 @@ export class CacheImpl implements SecureCache {
       // Refuse ciphertext longer than any plaintext this cache would decode
       // before the codec copies it in: junk of any length otherwise reaches
       // decrypt, which allocates for all of it before the tag check fails.
+      // The AAD binds useEnvelope, so a compression-off entry that decrypts
+      // is a plain serialized value, which decode() caps at maxDecodedSize.
       const maxPlaintext = interop
         ? DEFAULT_MAX_DECODED_SIZE // decodeInteropValue's fixed input cap
-        : maxEnvelopeInputSize(this.serializer.maxDecodedSize);
+        : useEnvelope
+          ? maxEnvelopeInputSize(this.serializer.maxDecodedSize)
+          : this.serializer.maxDecodedSize;
       if (plaintext.length > maxPlaintext + AEAD_OVERHEAD_BYTES) {
         throw new ValueTooLargeError(
           `Ciphertext size ${plaintext.length} exceeds max ${maxPlaintext + AEAD_OVERHEAD_BYTES}`

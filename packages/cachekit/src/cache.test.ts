@@ -779,8 +779,12 @@ describe('Cache Integration', () => {
           async (_label, compression) => {
             const maxDecodedSize = 1000;
             const backend = new InMemoryBackend();
-            // Longest input any plaintext could need (envelope cap) + AEAD, + 1.
-            const limit = 2 * (20 + Math.floor((maxDecodedSize * 110) / 100)) + 256 + 28;
+            // Longest plaintext this cache could decode + AEAD: an envelope within
+            // the ceiling with compression on, a plain value with it off.
+            const limit =
+              (compression
+                ? 2 * (20 + Math.floor((maxDecodedSize * 110) / 100)) + 256
+                : maxDecodedSize) + 28;
             await backend.set('test:junk', new Uint8Array(limit + 1), 3600);
             const cache = createCache({
               backend,
@@ -811,6 +815,26 @@ describe('Cache Integration', () => {
           }
         );
       });
+
+      it.each([0, null, 42.5, { a: 1 }, 'x'.repeat(65)])(
+        'reads back a look-alike whose fourth element no writer emits (%j)',
+        async (fourth) => {
+          // A real envelope's slot [3] is a short string. Core refuses the
+          // non-strings before allocating, and none of these is ever unpacked,
+          // so refusing to read them would protect nothing.
+          const value = [new Uint8Array(12_000), [1, 2, 3, 4, 5, 6, 7, 8], 12_000_000, fourth];
+          const cache = createCache({
+            backend: new InMemoryBackend(),
+            compression: false,
+            l1: { enabled: false },
+            reliability: { degradation: false },
+          });
+          await cache.set('test:lookalike', value);
+
+          expect(await cache.get('test:lookalike')).toEqual(value);
+          await cache.close();
+        }
+      );
 
       it('refuses (known loss) a plain value indistinguishable from an oversized envelope', async () => {
         // Within core's caps and over the ceiling: only decompressing could tell

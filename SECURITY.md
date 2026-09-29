@@ -44,10 +44,12 @@ last check stops a small declared size from carrying a large payload into core's
 copy. A compression-on read treats such bytes as corrupt. The envelope-tolerant
 read on a compression-off cache decodes them as plain MessagePack. What `unpack`
 may allocate is then a small multiple of `maxDecodedSize`: the input, the
-compressed payload, and an output of at most `maxDecodedSize`, which is the same
-bound `serializer.decode` applies to its input. On an encrypted cache the
+compressed payload, a `format` string of at most 64 bytes, and an output of at
+most `maxDecodedSize`, which is the same bound `serializer.decode` applies to its
+input. On an encrypted cache the
 ciphertext is bounded first: bytes longer than any plaintext the cache would
-decode, plus the 28-byte AES-GCM nonce and tag, are rejected with
+decode (an envelope within the ceiling with compression on, `maxDecodedSize`
+with it off), plus the 28-byte AES-GCM nonce and tag, are rejected with
 `ValueTooLargeError` before `decrypt` copies them. The envelope-tolerant read
 also decodes as plain MessagePack an envelope that passed the header read but
 that core rejects (checksum or shape mismatch), and reports it through the SDK
@@ -61,7 +63,9 @@ exactly mimics an envelope core would decompress, and which declares more than
 it from a real oversized envelope, and serving a real one as its raw 4-tuple
 would be silent corruption. That key reads as a miss, or throws with degradation
 off. The shape required is `[bytes, [8 integers ≤ 255], an integer over
-maxDecodedSize, anything]`, with at least one byte per 1000 of that integer.
+maxDecodedSize, a string or bytes of at most 64 bytes of valid UTF-8]`, with at
+least one byte per 1000 of that integer and nothing after the last element. A
+value with any other fourth element is never unpacked, so it decodes as itself.
 
 If an allocation fails or the wasm instance traps inside `unpack` during the
 envelope-tolerant read, the SDK propagates the error instead of treating it as
@@ -76,4 +80,4 @@ envelope from getting that far.
 > what a forged envelope can make the reader allocate during `unpack`. It does
 > not bound the decoded value's heap, which can be many times larger; size it
 > as the [README's value size limits](packages/cachekit/README.md#value-size-limits--the-1-mib-default-is-a-cache-off-switch-not-a-suggestion)
-> describe. Making core's ceiling environment-aware is tracked in LAB-2505.
+> describe.

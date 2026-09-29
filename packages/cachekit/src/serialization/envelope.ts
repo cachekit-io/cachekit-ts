@@ -20,6 +20,14 @@ const CORE_MAX_COMPRESSION_RATIO = 1000;
  */
 const ENVELOPE_OVERHEAD_BYTES = 256;
 
+/**
+ * Longest `format` string accepted. Writers emit short tokens ("msgpack");
+ * the cap keeps the bytes core copies for it inside ENVELOPE_OVERHEAD_BYTES.
+ */
+const MAX_FORMAT_BYTES = 64;
+
+const UTF8 = new TextDecoder('utf-8', { fatal: true });
+
 /** lz4_flex's worst-case block size for `n` input bytes (`get_maximum_output_size`). */
 function lz4MaxCompressedSize(n: number): number {
   return 20 + Math.floor((n * 110) / 100);
@@ -51,9 +59,14 @@ export function looksLikeEnvelope(bytes: Uint8Array): boolean {
  * The compressed length and `original_size` a ByteStorage envelope carries,
  * read without unpacking it — or null when the bytes are not an envelope in
  * a shape a conforming writer emits: `[bin | legacy array of uint8,
- * [8 x uint8], uint, …]`, every uint an unsigned fixint/uint8/16/32 (no
- * uint64, no signed forms). Stricter than core's lenient rmp_serde decode on
- * purpose: a shape this rejects is never unpacked, so it cannot allocate.
+ * [8 x uint8], uint, format]`, every uint an unsigned fixint/uint8/16/32 (no
+ * uint64, no signed forms), `format` a str or bin of at most
+ * MAX_FORMAT_BYTES valid UTF-8 (core decodes it as a `String`, which takes
+ * either), and nothing after it. Stricter than core's lenient rmp_serde
+ * decode on purpose: a shape this rejects is never unpacked, so it cannot
+ * allocate. And every shape core itself refuses before allocating — a
+ * non-string `format` included — is rejected here too, so a plain value of
+ * that shape still decodes as itself.
  * Walks a legacy array-of-ints payload byte by byte, so the cost is linear in
  * input size — never in the declared size.
  */
@@ -119,7 +132,30 @@ export function readEnvelopeHeader(
 
   // [2] original_size.
   const declaredSize = uint();
-  return declaredSize === null ? null : { compressedLength, declaredSize };
+  if (declaredSize === null) return null;
+
+  // [3] format: str or bin, short, valid UTF-8, and the last bytes of the input.
+  const format = take(1);
+  if (format === null) return null;
+  let formatLength: number | null;
+  if (format >= 0xa0 && format <= 0xbf) formatLength = format & 0x1f;
+  else if (format === 0xd9 || format === 0xc4) formatLength = take(1);
+  else if (format === 0xda || format === 0xc5) formatLength = take(2);
+  else if (format === 0xdb || format === 0xc6) formatLength = take(4);
+  else return null;
+  if (
+    formatLength === null ||
+    formatLength > MAX_FORMAT_BYTES ||
+    pos + formatLength !== view.byteLength
+  ) {
+    return null;
+  }
+  try {
+    UTF8.decode(bytes.subarray(pos));
+  } catch {
+    return null;
+  }
+  return { compressedLength, declaredSize };
 }
 
 /**
@@ -130,9 +166,10 @@ export function readEnvelopeHeader(
  *   allocates is then a small multiple of maxDecodedSize: the input, the
  *   compressed payload (at most lz4's worst case for the declared size), and
  *   the output (at most maxDecodedSize).
- * - `'not-envelope'` — no envelope core would accept: the header does not
- *   parse, core's own caps would reject it, or its compressed length exceeds
- *   what any LZ4 writer emits for the declared size. Never unpack these.
+ * - `'not-envelope'` — no envelope core would accept: the bytes are not in a
+ *   shape readEnvelopeHeader admits, core's own caps would reject them, or the
+ *   compressed length exceeds what any LZ4 writer emits for the declared
+ *   size. Never unpack these.
  *
  * @throws {ValueTooLargeError} for an envelope core would accept that
  *   declares more than `maxDecodedSize`, or bytes longer than

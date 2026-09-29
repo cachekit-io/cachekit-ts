@@ -19,7 +19,8 @@ import {
 } from './serialization/interop.js';
 import { generateKey } from './serialization/key-generator.js';
 import { EncryptionManager } from './encryption/manager.js';
-import { ConfigurationError } from './errors.js';
+import { ConfigurationError, ValueTooLargeError } from './errors.js';
+import { DEFAULT_MAX_DECODED_SIZE } from './constants.js';
 
 class InMemoryBackend implements Backend {
   store = new Map<string, Uint8Array>();
@@ -373,6 +374,50 @@ describe('cache.wrap interop mode', () => {
 
     // Round-trip through the cache's own read path.
     expect(await fn(42)).toEqual({ id: 42 });
+  });
+
+  it("bounds encrypted interop ciphertext by interop's fixed cap, not serializer.maxDecodedSize", async () => {
+    const backend = new InMemoryBackend();
+    cache = createCache({
+      backend,
+      l1: { enabled: false },
+      encryption: { masterKey: '61'.repeat(32), tenantId: 'interop-cap' },
+      serializer: { maxDecodedSize: 1000 }, // governs auto mode only
+      reliability: { degradation: false, retry: { maxAttempts: 1 } },
+    });
+
+    // A legitimate interop value far above what maxDecodedSize would admit.
+    let computes = 0;
+    const fn = cache.wrap(
+      async (id: number) => {
+        computes++;
+        return { id, blob: 'x'.repeat(5000) };
+      },
+      { namespace: 'users', interop: 'get_blob', interopArity: 1, ttl: 300 }
+    );
+    await fn(1);
+    expect(await fn(1)).toEqual({ id: 1, blob: 'x'.repeat(5000) });
+    expect(computes).toBe(1);
+
+    // Junk one byte past the fixed cap + AEAD overhead never reaches decrypt.
+    const impl = cache as unknown as {
+      getEntry: (key: string, interop: boolean) => Promise<unknown>;
+      encryption: { decrypt: (...args: unknown[]) => Promise<Uint8Array> };
+    };
+    let decrypts = 0;
+    const realDecrypt = impl.encryption.decrypt.bind(impl.encryption);
+    impl.encryption.decrypt = (...args) => {
+      decrypts++;
+      return realDecrypt(...args);
+    };
+    const key = generateInteropKey('users', 'get_blob', [2]);
+    backend.store.set(key, new Uint8Array(DEFAULT_MAX_DECODED_SIZE + 29));
+    await expect(impl.getEntry(key, true)).rejects.toThrow(ValueTooLargeError);
+    expect(decrypts).toBe(0);
+
+    backend.store.set(key, new Uint8Array(DEFAULT_MAX_DECODED_SIZE + 28));
+    await expect(impl.getEntry(key, true)).rejects.toThrow();
+    expect(decrypts).toBe(1);
   });
 
   it('leaves auto mode byte-for-byte unchanged (ByteStorage envelope still applied)', async () => {

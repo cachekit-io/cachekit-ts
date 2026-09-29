@@ -291,12 +291,30 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
       }
     });
 
-    it('returns null for every truncation short of original_size', () => {
+    it('returns null for every truncation, and for trailing bytes', () => {
       const packed = bs.pack(new TextEncoder().encode('truncation walk'));
-      // Only the trailing fixstr "msgpack" (8 bytes) is past original_size.
-      const headerEnd = packed.length - 8;
       for (let len = 0; len < packed.length; len++) {
-        expect(declared(packed.subarray(0, len))).toBe(len < headerEnd ? null : 15);
+        expect(declared(packed.subarray(0, len))).toBeNull();
+      }
+      expect(declared(packed)).toBe(15);
+      const padded = new Uint8Array(packed.length + 1);
+      padded.set(packed);
+      expect(declared(padded)).toBeNull();
+    });
+
+    it('requires format to be a short UTF-8 str or bin, as core decodes it', () => {
+      // [bin(0), [8 x 0], 0, <format>]: only the format slot varies.
+      const head = [0x94, 0xc4, 0x00, 0x98, 0, 0, 0, 0, 0, 0, 0, 0, 0x00];
+      const withFormat = (tail: number[]) => declared(new Uint8Array([...head, ...tail]));
+      const text = (n: number) => Array.from({ length: n }, () => 0x61);
+
+      expect(withFormat([0xa1, 0x61])).toBe(0); // fixstr
+      expect(withFormat([0xd9, 64, ...text(64)])).toBe(0); // str8 at the cap
+      expect(withFormat([0xc4, 1, 0x61])).toBe(0); // bin: serde's String takes it
+      expect(withFormat([0xd9, 65, ...text(65)])).toBeNull(); // over the cap
+      expect(withFormat([0xa1, 0xff])).toBeNull(); // invalid UTF-8
+      for (const tail of [[0x00], [0xc0], [0xcb, 0, 0, 0, 0, 0, 0, 0, 0], [0x81, 0xa1, 0x61, 1]]) {
+        expect(withFormat(tail)).toBeNull(); // int, nil, float, map
       }
     });
 
