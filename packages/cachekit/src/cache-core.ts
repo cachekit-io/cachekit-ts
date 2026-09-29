@@ -34,6 +34,7 @@ import {
 } from './serialization/interop.js';
 import { createInvalidationEvent } from './invalidation/event.js';
 import { BackendError, ConfigurationError, ValueTooLargeError } from './errors.js';
+import { isErrorClassification } from './backends/error-classifier.js';
 import {
   DEFAULT_TTL_SECONDS,
   DEFAULT_LOCK_TIMEOUT_MS,
@@ -187,6 +188,19 @@ export interface CacheRuntime {
 /**
  * Internal cache implementation, shared across platform entrypoints.
  */
+/**
+ * A key-free label for a failed L2 delete. Every field of a thrown error —
+ * `cause`, `message`, `name`, even `classification` — is written by whoever
+ * threw it and can embed the caller's key, so only literals are emitted and
+ * `classification` is checked against its known values first.
+ */
+function describeDeleteFailure(err: unknown): string {
+  if (!(err instanceof BackendError)) return err instanceof Error ? 'Error' : 'Unknown error';
+  return isErrorClassification(err.classification)
+    ? `BackendError(${err.classification})`
+    : 'BackendError';
+}
+
 export class CacheImpl implements SecureCache {
   private readonly backend: Backend;
   private readonly l1: L1Cache | null;
@@ -1292,16 +1306,10 @@ export class CacheImpl implements SecureCache {
         // Best-effort L2 invalidation - don't fail the operation, but don't
         // hide it either. The entry stays stale in L2 until its TTL, so name
         // it — by the same digest warnValueTooLarge logs, never the
-        // caller-supplied key itself. Report allow-listed fields only: the
-        // error object carries backend command args on `cause`, and its
-        // message is backend-written text that can embed the key.
+        // caller-supplied key itself.
         logError(
           `[cachekit] invalidate("params") L2 delete failed (keyHash=${blake2b16Hex(options.key)}):`,
-          err instanceof BackendError
-            ? `${err.name}(${err.classification})`
-            : err instanceof Error
-              ? err.name
-              : 'Unknown error'
+          describeDeleteFailure(err)
         );
       }
     }

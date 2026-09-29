@@ -199,7 +199,23 @@ describe('invalidate("params") failure reporting', () => {
       'BackendError(transient)',
     ],
     ['a plain Error', new Error('DELETE failed for secret-key'), 'Error'],
-  ])(
+    [
+      'an Error with the key in its name',
+      Object.assign(new Error('failed'), { name: 'DELETE failed for secret-key' }),
+      'Error',
+    ],
+    [
+      'a BackendError with the key in its name',
+      Object.assign(new BackendError('failed'), { name: 'secret-key' }),
+      'BackendError(transient)',
+    ],
+    [
+      'a BackendError with the key in its classification',
+      Object.assign(new BackendError('failed'), { classification: 'secret-key' }),
+      'BackendError',
+    ],
+    ['a non-Error throw', 'DELETE failed for secret-key', 'Unknown error'],
+  ] as [string, unknown, string][])(
     'reports a failed L2 delete from %s without the key, and still resolves',
     async (_, failure, expected) => {
       const errors: unknown[] = [];
