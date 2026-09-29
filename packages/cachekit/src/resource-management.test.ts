@@ -168,6 +168,9 @@ describe('invalidate("params") failure reporting', () => {
         defaultTtl: 3600,
         invalidation: { redis: mockRedis },
       });
+      await cache.set('k', 'value');
+      const l1 = (cache as unknown as { l1: L1Cache }).l1;
+      expect(l1.stats.entries).toBe(1);
 
       await expect(cache.invalidate('params', options)).resolves.toBeUndefined();
       expect(reported).toEqual([
@@ -175,6 +178,7 @@ describe('invalidate("params") failure reporting', () => {
       ]);
       expect(deleteSpy).not.toHaveBeenCalled();
       expect(mockRedis.publish).not.toHaveBeenCalled();
+      expect(l1.stats.entries).toBe(1);
 
       // A well-formed call stays quiet and still publishes — the guard must not be broader.
       reported.length = 0;
