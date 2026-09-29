@@ -149,6 +149,13 @@ bad json-hash-in-literal/build-native "$(native $'builds=\'[{"target":"#","os":"
 bad json-hash-escaped-var/build-native "$(native $'builds="[{\\"target\\":\\"#\\",\\"os\\":\\"$RUNNER\\"}]"')" 12
 bad json-hash-line-in-literal/build-native "$(native $'builds=\'[\n              # {"target":"x","os":"build-pool"}\n              {"target":"x","os":"macos-latest"}]\'')" 13
 bad json-escaped-key/build-native   "$(native $'builds=\'[{"target":"x","\\u006fs":"build-pool"}]\'')" 12
+bad json-name-in-run/build-native   "$(native "$one"$'\n            name: || echo "builds=$(cat build-matrix.json)" >> "$GITHUB_OUTPUT"')" 13
+unclosed=$'jobs:\n  matrix:\n    runs-on: ubuntu-latest\n    outputs:\n      builds: ${{ steps.set.outputs.builds }}\n    steps:\n      - run: |\n          builds=\'[{"target":"x","os":"macos-latest"}]\n        continue-on-error: true\n      - id: set\n        uses: some-org/matrix-action@v1\n'
+bad json-unclosed-literal/build-native "$unclosed$build_job" "9 11"
+yaml_comments=$(s=$(native "$one"); s=${s/    runs-on: ubuntu-latest/    runs-on: ubuntu-latest  # hosted}; s=${s/    outputs:/    outputs:  # read by build}
+  s=${s/      - id: set/      - id: set  # step}; printf '%s' "${s/        run: |/        run: |  # PRs: linux only}")
+good resolve-yaml-comments/build-native "$yaml_comments"
+bad json-run-in-name/build-native   "${unclosed/      - run: |/      - name: x run: |}$build_job" "8 9 11 17"
 good resolve-job-comments/build-native "$(native $'# don\'t read this list from a file\n            '"$one")"
 # --- must pass --------------------------------------------------------------
 good ubuntu-latest        $'jobs:\n  j:\n    runs-on: ubuntu-latest'

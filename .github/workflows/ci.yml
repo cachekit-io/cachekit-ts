@@ -368,36 +368,53 @@ jobs:
             # Verdict on the one dynamic matrix the guard accepts (see the
             # build-native.yml rules below), given at the end of each file so the
             # job order does not matter.
+            function resolve_refuse() {
+              fail(FILENAME, FNR, "the build-matrix resolve job may hold only lines the drift guard can check — write its JSON as builds='<literal>'; a new line there is a deliberate edit to resolve_yaml() or resolve_shell() in the runner-drift-guard job of ci.yml")
+            }
             function dynamic_matrix_verdict() {
               if (dyn_line && !dyn_os) fail(dyn_file, dyn_line, "the build matrix comes from the resolve job, which writes no \"os\" literal the drift guard can check — write each entry as \"os\":\"<label>\"")
               dyn_line = 0
             }
             # The only lines build-native.yml's resolve job may hold, besides
-            # comment lines and the content of an open builds='...' literal.
-            # Any other line (a file read, a generated matrix, a step env,
-            # shell or container) could set the matrix to a value the guard
-            # cannot check, so a new line there is a deliberate edit here.
-            function resolve_shape(s) {
+            # comment lines and the content of an open builds='...' literal:
+            # resolve_yaml() for the job's YAML, resolve_shell() inside a
+            # `run: |` block. Any other line (a file read, a generated matrix,
+            # a step env, shell, container or action) could set the matrix to a
+            # value the guard cannot check, so a new line there is a deliberate
+            # edit here.
+            function resolve_yaml(s) {
               return s ~ /^[[:space:]]*(matrix|outputs|steps):[[:space:]]*$/ ||
                 s ~ /^[[:space:]]*(-[[:space:]]+)?(name|runs-on):/ ||
                 s ~ /^[[:space:]]*builds: \$\{\{ steps\.set\.outputs\.builds \}\}[[:space:]]*$/ ||
-                s ~ /^[[:space:]]*(-[[:space:]]+)?(id: set|run: \|)[[:space:]]*$/ ||
-                s ~ /^[[:space:]]*if \[ "\$\{\{ github\.event_name \}\}" = "pull_request" \]; then[[:space:]]*$/ ||
+                s ~ /^[[:space:]]*(-[[:space:]]+)?(id: set|run: \|)[[:space:]]*$/
+            }
+            function resolve_shell(s) {
+              return s ~ /^[[:space:]]*if \[ "\$\{\{ github\.event_name \}\}" = "pull_request" \]; then[[:space:]]*$/ ||
                 s ~ /^[[:space:]]*(else|fi)[[:space:]]*$/ ||
                 s ~ /^[[:space:]]*builds='[^$'\\]*'?[[:space:]]*$/ ||
                 s ~ /^[[:space:]]*echo "builds=\$\(echo "\$builds" \| tr -d '\\n '\)" >> "\$GITHUB_OUTPUT"[[:space:]]*$/
             }
-            # Checks one raw line of the resolve job; in a run: block a # is
-            # not a comment. Its JSON is single-quoted literal text (no $, so no
-            # expression; no \, so no JSON escape), and every "os" in it must be
-            # a quoted hosted label. Checked pairs are cut from the line so the
-            # flow-mapping rule below does not refuse them.
+            # Checks one line of the resolve job. A line indented deeper than
+            # the `run: |` above it is shell, read raw because a # there may sit
+            # inside a quote; any other line is YAML, read comment-stripped, and
+            # ends the run: block. A builds='...' literal must close inside its
+            # block, or the YAML after it would be read as literal text. The
+            # JSON is single-quoted literal text (no $, so no expression; no \,
+            # so no JSON escape), and every "os" in it must be a quoted hosted
+            # label. Checked pairs are cut from the line so the flow-mapping
+            # rule below does not refuse them.
             function resolve_line(   r, v, n, json) {
+              if (run_indent < 0 || indent <= run_indent) {
+                if (lit) fail(FILENAME, FNR, "the builds='...' literal above is not closed inside its run: block")
+                lit = 0; run_indent = -1
+                if (!resolve_yaml($0)) resolve_refuse()
+                else if (/^[[:space:]]*(-[[:space:]]+)?run: \|[[:space:]]*$/) run_indent = indent
+                return
+              }
               r = tolower(raw)
               n = gsub(/'/, "'", r)
               json = lit || raw ~ /^[[:space:]]*builds='/
-              if (lit ? raw !~ /^[^$'\\]*'?[[:space:]]*$/ : !resolve_shape(raw))
-                fail(FILENAME, FNR, "the build-matrix resolve job may hold only lines the drift guard can check — write its JSON as builds='<literal>'; a new line there is a deliberate edit to resolve_shape() in the runner-drift-guard job of ci.yml")
+              if (lit ? raw !~ /^[^$'\\]*'?[[:space:]]*$/ : !resolve_shell(raw)) resolve_refuse()
               if (json) lit = lit ? !n : n == 1
               while (json && match(r, /"os"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
                 v = substr(r, RSTART, RLENGTH); sub(/^[^:]*:[[:space:]]*"/, "", v); sub(/"$/, "", v)
@@ -410,7 +427,7 @@ jobs:
             BEGIN { HOSTED = "^(ubuntu|macos|windows)-latest$" }
             FNR == 1 {
               dynamic_matrix_verdict()
-              matrix_indent = value_indent = -1; in_jobs = dyn_os = lit = 0; job = ""
+              matrix_indent = value_indent = run_indent = -1; in_jobs = dyn_os = lit = 0; job = ""
               bn = (FILENAME ~ /(^|\/)build-native\.yml$/)
             }
             # A # starts a YAML comment only at the start of a line or after
@@ -440,7 +457,7 @@ jobs:
             bn && /^jobs[[:space:]]*:[[:space:]]*$/ { in_jobs = 1; job_indent = -1; next }
             in_jobs && indent == 0 { in_jobs = 0; job = "" }
             in_jobs && job_indent < 0 { job_indent = indent }
-            in_jobs && indent == job_indent { job = $0; sub(/^[[:space:]]*/, "", job); sub(/[[:space:]]*:.*/, "", job); lit = 0 }
+            in_jobs && indent == job_indent { job = $0; sub(/^[[:space:]]*/, "", job); sub(/[[:space:]]*:.*/, "", job); lit = 0; run_indent = -1 }
             bn && job == "matrix" { resolve_line() }
             # The build job's include of that JSON is the one dynamic matrix the
             # guard accepts; dynamic_matrix_verdict() fails it unless the resolve
