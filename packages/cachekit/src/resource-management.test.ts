@@ -192,6 +192,25 @@ describe('invalidate("params") failure reporting', () => {
     command: { name: 'del', args: ['secret-key'] },
   });
 
+  // Passes the allow-list on its first read, then turns into the key.
+  let classificationReads = 0;
+  const shiftingClassification = Object.defineProperty(
+    new BackendError('failed'),
+    'classification',
+    {
+      get: () => (classificationReads++ === 0 ? 'transient' : 'secret-key'),
+    }
+  );
+  const throwingClassification = Object.defineProperty(
+    new BackendError('failed'),
+    'classification',
+    {
+      get: () => {
+        throw new Error('secret-key');
+      },
+    }
+  );
+
   it.each([
     [
       'a BackendError',
@@ -214,6 +233,12 @@ describe('invalidate("params") failure reporting', () => {
       Object.assign(new BackendError('failed'), { classification: 'secret-key' }),
       'BackendError',
     ],
+    [
+      'a BackendError whose classification changes between reads',
+      shiftingClassification,
+      'BackendError(transient)',
+    ],
+    ['a BackendError whose classification getter throws', throwingClassification, 'BackendError'],
     ['a non-Error throw', 'DELETE failed for secret-key', 'Unknown error'],
   ] as [string, unknown, string][])(
     'reports a failed L2 delete from %s without the key, and still resolves',
