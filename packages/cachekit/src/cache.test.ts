@@ -7,8 +7,9 @@ import { file } from './backends/file.js';
 import { generateKey } from './serialization/key-generator.js';
 import { setLogger } from './logger.js';
 import { createCache as createIntentCache } from './intents.js';
-import { ConfigurationError, ValueTooLargeError } from './errors.js';
+import { ConfigurationError, SerializationError, ValueTooLargeError } from './errors.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
+import { EncryptionManagerCore } from './encryption/manager-core.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
 import type { ByteStorageLike } from './cache-core.js';
@@ -170,6 +171,28 @@ describe('Cache Integration', () => {
 
       // L1 should be cleared for namespace entries
       // Note: Backend still has data, but L1 is invalidated
+    });
+
+    it('reports invalidate("namespace") with no namespace at the caller (LAB-4336)', async () => {
+      // Nothing can carry this out, so it must not go on the wire: every peer
+      // would discard it and log a mistake it cannot fix. The report belongs
+      // in the process that made the call.
+      const reported: string[] = [];
+      setLogger((message) => reported.push(message));
+      try {
+        await cache.set('ns:key1', 'value1', { namespace: 'ns' });
+        await cache.invalidate('namespace');
+        expect(reported).toEqual([
+          '[cachekit] invalidate("namespace") called with no namespace; nothing invalidated',
+        ]);
+
+        // A well-formed call stays quiet — the guard must not be broader.
+        reported.length = 0;
+        await cache.invalidate('namespace', { namespace: 'ns' });
+        expect(reported).toEqual([]);
+      } finally {
+        setLogger(null);
+      }
     });
 
     it('should invalidate all', async () => {
@@ -973,7 +996,7 @@ describe('Cache Integration', () => {
 
       const c = createCache({ backend: new InMemoryBackend() });
       const big = c.wrap(async () => oversized(), {
-        namespace: 'ns',
+        namespace: 'blobs',
         ttl: 60,
         interop: 'bigop',
         interopArity: 0,
@@ -984,6 +1007,103 @@ describe('Cache Integration', () => {
       // greppable warning for consumers whose own try/catch absorbs it.
       await expect(big()).rejects.toThrow(ValueTooLargeError);
       expect(logs.filter((m) => m.includes('set rejected'))).toHaveLength(1);
+
+      await c.close();
+    });
+  });
+
+  describe('rejected-value set() warning beyond size (LAB-4845)', () => {
+    afterEach(() => {
+      setLogger(null);
+      vi.useRealTimers();
+    });
+
+    const nested = (depth: number): unknown => (depth === 0 ? 'leaf' : [nested(depth - 1)]);
+
+    it.each([
+      ['a non-Uint8Array binary value', () => new Float32Array([1.5])],
+      ['a depth-exceeded value', () => nested(200)],
+      // Not a SerializationError: @msgpack/msgpack throws a plain Error.
+      ['a value msgpack cannot encode', () => ({ fn: () => 1 })],
+    ])('warns when degradation absorbs %s', async (_label, value) => {
+      const logs: string[] = [];
+      setLogger((message) => logs.push(message));
+
+      const backend = new InMemoryBackend();
+      const c = createCache({ backend });
+
+      // Degradation is on by default: set() resolves and nothing is stored…
+      await expect(c.set('ns:bad', value())).resolves.toBeUndefined();
+      expect(await c.get('ns:bad')).toBeNull();
+      // …but the rejection is reported, digested, without the size hint.
+      const rejected = logs.filter((m) => m.includes('set rejected'));
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]).toContain('keyHash=');
+      expect(rejected[0]).not.toContain('ns:bad');
+      expect(rejected[0]).not.toContain('maxEncodedSize');
+
+      await c.close();
+    });
+
+    // A getter or Proxy trap runs caller code inside normalize, so its error
+    // text is caller-controlled and may carry the value or the key verbatim.
+    it.each([
+      ['an Error', (key: string) => new Error(`private=VALUE_SENTINEL key=${key}`)],
+      ['a non-Error', (key: string) => `private=VALUE_SENTINEL key=${key}`],
+      // The class is not provenance: callers can throw the SDK's own errors.
+      [
+        'a SerializationError',
+        (key: string) => new SerializationError(`private=VALUE_SENTINEL key=${key}`),
+      ],
+      [
+        'a ValueTooLargeError',
+        (key: string) => new ValueTooLargeError(`private=VALUE_SENTINEL key=${key}`),
+      ],
+    ])('never logs the message when a getter throws %s', async (_label, thrown) => {
+      const logs: string[] = [];
+      setLogger((message) => logs.push(message));
+
+      const key = 'ns:raw-KEY_SENTINEL';
+      const value = {
+        get payload(): never {
+          throw thrown(key);
+        },
+      };
+      const c = createCache({ backend: new InMemoryBackend() });
+
+      await expect(c.set(key, value)).resolves.toBeUndefined();
+      const rejected = logs.filter((m) => m.includes('set rejected'));
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]).toContain('keyHash=');
+      expect(rejected[0]).not.toContain('VALUE_SENTINEL');
+      expect(rejected[0]).not.toContain('KEY_SENTINEL');
+
+      await c.close();
+    });
+
+    it('warns through wrap(), rate-limited per cache', async () => {
+      vi.useFakeTimers();
+      const logs: string[] = [];
+      setLogger((message) => logs.push(message));
+
+      const c = createCache({ backend: new InMemoryBackend() });
+      let calls = 0;
+      const embed = c.wrap(
+        async () => {
+          calls++;
+          return new Float32Array([1.5]);
+        },
+        { namespace: 'ns', ttl: 60 }
+      );
+
+      await embed();
+      await embed();
+      expect(calls).toBe(2); // never cached
+      expect(logs.filter((m) => m.includes('set rejected'))).toHaveLength(1);
+
+      vi.advanceTimersByTime(61_000);
+      await embed();
+      expect(logs.filter((m) => m.includes('set rejected'))).toHaveLength(2);
 
       await c.close();
     });
@@ -1043,6 +1163,123 @@ describe('Cache Integration', () => {
       for (let i = 1; i < 6; i++) await c.set(`ns:wide${i}`, tooMany);
       await c.set('ns:small', 'ok');
       expect(await c.get('ns:small')).toBe('ok');
+
+      await c.close();
+    });
+  });
+
+  describe('secure keys over the AAD limit are rejected before the reliability executor (LAB-5142)', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    const TENANT = 'lab-5142';
+    const MAX_AAD = 64 * 1024;
+    // v0x03 AAD = version byte + four 4-byte length prefixes + tenant id + key
+    // + 'msgpack' + 'True'/'False' (the compressed flag). Written out rather
+    // than derived from buildAAD so the boundary is pinned to the protocol
+    // layout, not to the implementation.
+    const keyBudget = (compressed: boolean) =>
+      MAX_AAD - (1 + 16 + TENANT.length + 'msgpack'.length + (compressed ? 4 : 5));
+    /** A key of exactly `bytes` UTF-8 bytes; `multibyte` spends most of it on 2-byte 'é'. */
+    const keyOfBytes = (bytes: number, multibyte = false) => {
+      const body = bytes - 'ns:'.length;
+      const wide = multibyte ? Math.floor(body / 2) : 0;
+      return `ns:${'é'.repeat(wide)}${'k'.repeat(body - 2 * wide)}`;
+    };
+    // production reliability: retry 3x with backoff, breaker opens at 5 failures.
+    const secureCache = (backend: Backend, compression?: boolean) =>
+      createIntentCache.secure({
+        backend,
+        masterKey: '0'.repeat(64),
+        tenantId: TENANT,
+        compression,
+        metrics: false,
+      });
+    // InMemoryBackend advertises no compression default, so the envelope is on.
+    const overLimitKey = keyOfBytes(keyBudget(true) + 1);
+
+    it('six over-limit set() calls reject and leave the breaker closed', async () => {
+      const backend = new InMemoryBackend();
+      const c = secureCache(backend);
+
+      for (let i = 0; i < 6; i++) {
+        await expect(c.set(`${overLimitKey}${i}`, 'v')).rejects.toThrow(ConfigurationError);
+      }
+
+      // An open breaker would degrade this write to a no-op, so the
+      // read-back proves the rejections were never counted.
+      await c.set('ns:small', 'ok');
+      expect(await c.get('ns:small')).toBe('ok');
+      expect(await backend.get('ns:small')).not.toBeNull();
+
+      await c.close();
+    });
+
+    it('never calls encrypt for an over-limit key', async () => {
+      const encrypt = vi.spyOn(EncryptionManagerCore.prototype, 'encrypt');
+      const c = secureCache(new InMemoryBackend());
+
+      await expect(c.set(overLimitKey, 'v')).rejects.toThrow(ConfigurationError);
+      expect(encrypt).not.toHaveBeenCalled();
+
+      await c.close();
+    });
+
+    it('get() rejects before any backend or decrypt call', async () => {
+      const backend = new InMemoryBackend();
+      // Seeded, so a read that skipped the pre-flight would reach decrypt.
+      await backend.set(overLimitKey, new Uint8Array([1]), 60);
+      const backendGet = vi.spyOn(backend, 'get');
+      const decrypt = vi.spyOn(EncryptionManagerCore.prototype, 'decrypt');
+      const c = secureCache(backend);
+
+      await expect(c.get(overLimitKey)).rejects.toThrow(ConfigurationError);
+      expect(backendGet).not.toHaveBeenCalled();
+      expect(decrypt).not.toHaveBeenCalled();
+
+      await c.close();
+    });
+
+    it('wrap() whose namespace pushes the key 1 byte over the budget rejects before computing', async () => {
+      const c = secureCache(new InMemoryBackend());
+      const compute = vi.fn(async () => 'v');
+      // generateKey appends ':' + 64 hex digits, pushing this key 1 byte over.
+      const wrapped = c.wrap(compute, { namespace: keyOfBytes(keyBudget(true) - 64) });
+
+      await expect(wrapped()).rejects.toThrow(ConfigurationError);
+      expect(compute).not.toHaveBeenCalled();
+
+      await c.close();
+    });
+
+    // The at-limit key round-trips through the real native encrypt/decrypt, so
+    // this also proves the TS limit matches the binding's, byte for byte.
+    it.each([
+      { compression: true, multibyte: false },
+      { compression: false, multibyte: true },
+    ])(
+      'boundary is 65 536 AAD bytes, counted in UTF-8 (compression=$compression, multibyte=$multibyte)',
+      async ({ compression, multibyte }) => {
+        const c = secureCache(new InMemoryBackend(), compression);
+        const atLimit = keyOfBytes(keyBudget(compression), multibyte);
+
+        await c.set(atLimit, 'fits');
+        expect(await c.get(atLimit)).toBe('fits');
+        await expect(c.set(`${atLimit}k`, 'v')).rejects.toThrow(ConfigurationError);
+        await expect(c.get(`${atLimit}k`)).rejects.toThrow(ConfigurationError);
+
+        await c.close();
+      }
+    );
+
+    it('a cache without encryption stores the same key as before', async () => {
+      const backend = new InMemoryBackend();
+      const c = createIntentCache.production({ backend, metrics: false });
+
+      await c.set(overLimitKey, 'plain');
+      expect(await c.get(overLimitKey)).toBe('plain');
+      expect(await backend.get(overLimitKey)).not.toBeNull();
 
       await c.close();
     });

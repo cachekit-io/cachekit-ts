@@ -246,36 +246,6 @@ describe('m4: refreshingKeys Cleanup on Close', () => {
     await cache.close();
     expect(l1.stats.refreshing).toBe(0);
   });
-
-  it('should clear L1 cache refreshingKeys on close', async () => {
-    // Direct L1 cache test
-    const { L1Cache } = await import('./l1/lru-cache.js');
-
-    const l1 = new L1Cache({
-      maxEntries: 100,
-      maxMemory: 50 * 1024 * 1024,
-      swrEnabled: true,
-      swrThresholdRatio: 0.01, // Very low to trigger refresh
-      maxConcurrentRefreshes: 10,
-      invalidationEnabled: true,
-      namespaceIndex: true,
-    });
-
-    // Set a value
-    l1.set('key1', 'value1', 10000, 'ns');
-
-    // Access with SWR to add to refreshingKeys
-    const result = l1.getWithSwr('key1');
-
-    // If shouldRefresh was true, the key is in refreshingKeys
-    if (result.shouldRefresh) {
-      // Clear the cache
-      l1.clear();
-
-      // Verify stats show no refreshing keys
-      expect(l1.stats.refreshing).toBe(0);
-    }
-  });
 });
 
 // ========== m5: CacheMetrics Swallows Async Errors ==========

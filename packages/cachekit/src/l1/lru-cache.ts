@@ -1,5 +1,6 @@
 import { L1Config, DEFAULT_L1_CONFIG, CacheEntry, SwrResult, InvalidationEvent } from './types.js';
 import { secureRandomFloat } from '../utils/random.js';
+import { logError } from '../logger.js';
 import { extractNamespace } from '../serialization/key-generator.js';
 import {
   SWR_JITTER_MIN,
@@ -334,11 +335,39 @@ export class L1Cache<T = unknown> {
       case 'namespace':
         if (event.namespace) {
           this.invalidateByNamespace(event.namespace);
+        } else {
+          // A foreign publisher sent an instruction nothing can carry out.
+          // This class used to fail the shape guard and get logged by the
+          // channel; accepting nil must not cost that signal.
+          //
+          // sourceInstance is untrusted text, so it is escaped here rather than
+          // left to the sink: setLogger lets an application install any sink, and
+          // the message reaches every one verbatim, console.error included.
+          // JSON.stringify covers C0 controls and lone surrogates. The replace adds
+          // what it leaves raw: DEL and the C1 range (NEL U+0085 is a line break,
+          // CSI U+009B opens a terminal control sequence) and U+2028/U+2029, which
+          // some log viewers break a line on. typeof, not String(): L1Cache is
+          // exported, so a JS caller reaches this method with any value at all, and
+          // the report on an error path must not be what throws. Sliced because
+          // nothing else bounds it here: channel events are capped at 4KB, direct
+          // callers not at all.
+          const source =
+            typeof event.sourceInstance === 'string'
+              ? JSON.stringify(event.sourceInstance.slice(0, 64)).replace(
+                  /[\u007f-\u009f\u2028\u2029]/g,
+                  (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`
+                )
+              : 'unknown';
+          logError(
+            `[cachekit] Ignored namespace-level invalidation: no namespace on the event (sourceInstance=${source})`
+          );
         }
         break;
       case 'params':
-        // For params-level, we'd need the full key
-        // This is handled at a higher layer that knows the key format
+        // Nothing consumes this. No higher layer picks it up, and the `ph` on
+        // the wire is a digest of the key string rather than the canonical
+        // params hash, so it cannot be matched here: a remote instance keeps
+        // serving the invalidated key until TTL. Tracked in LAB-4359.
         break;
     }
   }

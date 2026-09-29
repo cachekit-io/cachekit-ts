@@ -37,23 +37,11 @@ env:
 
 jobs:
   build:
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'cachekit-lean' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Configure Rust paths (self-hosted)
-        if: ${{ !github.event.pull_request.head.repo.fork }}
-        run: |
-          echo "RUSTUP_HOME=/tmp/rustup" >> "$GITHUB_ENV"
-          echo "CARGO_HOME=/tmp/cargo" >> "$GITHUB_ENV"
-
-      - name: Setup Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
-        with:
-          node-version: '22'
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
+      - uses: ./.github/actions/setup-pnpm-node
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # stable

@@ -219,29 +219,22 @@ describe('Protocol decode-bounds vectors (spec/interop-mode.md#decode-bounds)', 
     /**
      * An invalidation event is a flat map of scalars, so deserializeEvent's
      * depth cap is tighter than the spec's >= 32 floor for general values: an
-     * accept vector nested deeper than that MUST be rejected there — fail-closed,
-     * SerializationError, never an abort. A shallower one is not a valid event
-     * either, but deserializeEvent has no shape check today (LAB-3477), so it
-     * returns an all-undefined event rather than throwing. Assert whichever
-     * actually happens; both are fail-closed, neither may abort.
+     * accept vector nested deeper than that MUST be rejected there by the
+     * pre-scan. A shallower one is well-formed MessagePack but not an event
+     * (no `l`/`ts`/`src` map), so the shape check rejects it (LAB-3477).
+     * Either way: fail-closed, SerializationError, never an abort and never an
+     * event assembled from undefined fields.
      */
     it.each(vectors.accept_vectors)(
-      'deserializeEvent on $name (depth $nesting_depth) rejects or returns an inert event',
+      'deserializeEvent on $name (depth $nesting_depth) rejects with SerializationError',
       (v) => {
         const run = (): unknown => deserializeEvent(build(v));
-        if (v.nesting_depth > MAX_INVALIDATION_EVENT_DEPTH) {
-          expect(run).toThrow(SerializationError);
-          expect(run).toThrow(expectedRejection(v, sites[2]));
-          return;
-        }
-        expect(run).not.toThrow();
-        expect(run()).toEqual({
-          level: undefined,
-          namespace: undefined,
-          paramsHash: undefined,
-          timestamp: undefined,
-          sourceInstance: undefined,
-        });
+        expect(run).toThrow(SerializationError);
+        expect(run).toThrow(
+          v.nesting_depth > MAX_INVALIDATION_EVENT_DEPTH
+            ? expectedRejection(v, sites[2])
+            : /^Invalidation event payload is not a map/
+        );
       }
     );
   });
