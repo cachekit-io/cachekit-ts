@@ -857,7 +857,11 @@ describe('Cache Integration', () => {
       });
 
       it('propagates a wasm trap from the tolerance sniff instead of reading it as "not an envelope"', async () => {
-        const trap = new WebAssembly.RuntimeError('unreachable');
+        // Read off globalThis, as cache-core does: the lib set carries no WebAssembly types.
+        const RuntimeError = (globalThis as { WebAssembly?: { RuntimeError?: ErrorConstructor } })
+          .WebAssembly?.RuntimeError;
+        assert(RuntimeError, 'runtime has no WebAssembly.RuntimeError');
+        const trap = new RuntimeError('unreachable');
         const { codec, calls } = spyCodec(trap);
         const reader = await readerOver(forgedEnvelope(1000), false, codec);
 
