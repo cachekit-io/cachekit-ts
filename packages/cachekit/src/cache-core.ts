@@ -193,21 +193,27 @@ export interface CacheRuntime {
 }
 
 /**
- * Internal cache implementation, shared across platform entrypoints.
- */
-/**
  * A key-free label for a failed L2 delete. Every field of a thrown error —
  * `cause`, `message`, `name`, even `classification` — is written by whoever
  * threw it and can embed the caller's key, so only literals are emitted and
- * `classification` is checked against its known values first.
+ * `classification` is checked against its known values first. It is read
+ * exactly once: a getter could pass the check and then return the key, or
+ * throw and turn best-effort invalidation into a rejection.
  */
 function describeDeleteFailure(err: unknown): string {
   if (!(err instanceof BackendError)) return err instanceof Error ? 'Error' : 'Unknown error';
-  return isErrorClassification(err.classification)
-    ? `BackendError(${err.classification})`
-    : 'BackendError';
+  let classification: unknown;
+  try {
+    classification = err.classification;
+  } catch {
+    return 'BackendError';
+  }
+  return isErrorClassification(classification) ? `BackendError(${classification})` : 'BackendError';
 }
 
+/**
+ * Internal cache implementation, shared across platform entrypoints.
+ */
 export class CacheImpl implements SecureCache {
   private readonly backend: Backend;
   private readonly l1: L1Cache | null;
