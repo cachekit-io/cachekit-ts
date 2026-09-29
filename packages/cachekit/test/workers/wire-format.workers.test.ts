@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { decode } from '@msgpack/msgpack';
 import { ByteStorage } from '../../src/workers/runtime.js';
 import fixture from './fixtures/wire-format.json';
 
@@ -26,9 +27,23 @@ const vectors = fixture.vectors as WireVector[];
 const binVectors = vectors.filter((v) => v.envelope_encoding === 'bin');
 const legacyVectors = vectors.filter((v) => v.envelope_encoding === undefined);
 
-// msgpack bin format markers: bin8 / bin16 / bin32. The envelope is a
-// 4-element fixarray (0x94), so byte 1 is the first byte of compressed_data.
-const MSGPACK_BIN_MARKERS = [0xc4, 0xc5, 0xc6];
+// The envelope is a 4-element fixarray (0x94), so byte 1 is the msgpack
+// marker of compressed_data. This returns the one marker a conforming
+// (shortest-form) writer emits for that length — bin8 / bin16 / bin32 —
+// derived, never a tolerated set, so a wider-than-needed header fails.
+function expectedBinMarker(compressedLength: number): number {
+  if (compressedLength <= 0xff) return 0xc4;
+  if (compressedLength <= 0xffff) return 0xc5;
+  return 0xc6;
+}
+
+// Envelope element [0]. bin decodes to Uint8Array; a legacy array-of-integers
+// envelope would decode to number[] and is rejected here.
+function compressedData(envelope: Uint8Array): Uint8Array {
+  const [compressed] = decode(envelope) as unknown[];
+  if (!(compressed instanceof Uint8Array)) throw new Error('compressed_data is not msgpack bin');
+  return compressed;
+}
 
 function hexToBytes(hex: string): Uint8Array {
   const bytes = new Uint8Array(hex.length / 2);
@@ -83,14 +98,21 @@ describe('wire-format vectors (wasm ByteStorage)', () => {
   );
 
   it('pack marks compressed_data as msgpack bin for arbitrary payloads', () => {
-    // Not in the vector set: one bin8-sized and one bin16-sized payload.
+    // Not in the vector set: one bin8-sized and one bin16-sized payload. The
+    // large one repeats every 256 bytes, so LZ4 shrinks it to ~270 B — just
+    // over the bin8 limit; the explicit marker keeps that claim tested.
     const small = new TextEncoder().encode('fresh bin-emit check');
     const large = new Uint8Array(1000);
-    for (let i = 0; i < large.length; i++) large[i] = (i * 131 + 17) & 0xff; // incompressible
-    for (const payload of [small, large]) {
+    for (let i = 0; i < large.length; i++) large[i] = (i * 131 + 17) & 0xff;
+    const cases = [
+      [small, 0xc4],
+      [large, 0xc5],
+    ] as const;
+    for (const [payload, marker] of cases) {
       const packed = storage.pack(payload);
       expect(packed[0]).toBe(0x94); // fixarray(4) envelope
-      expect(MSGPACK_BIN_MARKERS).toContain(packed[1]);
+      expect(packed[1]).toBe(marker);
+      expect(packed[1]).toBe(expectedBinMarker(compressedData(packed).length));
       expect(storage.unpack(packed)).toEqual(payload);
     }
   });
