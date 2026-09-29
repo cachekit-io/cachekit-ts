@@ -89,6 +89,10 @@ bad next-line-include     $'jobs:\n  j:\n    strategy:\n      matrix:\n        o
 bad next-line-strategy    $'jobs:\n  j:\n    strategy:\n      "${{ fromJSON(vars.STRATEGY) }}"\n    runs-on: ${{ matrix.os }}' 4
 bad include-expression-item $'jobs:\n  j:\n    strategy:\n      matrix:\n        include:\n          - os: ubuntu-latest\n          - ${{ fromJSON(vars.EXTRA) }}\n    runs-on: ${{ matrix.os }}' 7
 bad matrix-axis-matrix    $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        matrix:\n          - a\n        os: [build-pool]' 8
+bad next-line-include-flow $'jobs:\n  j:\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        include:\n          ["${{ fromJSON(vars.EXTRA) }}"]\n    runs-on: ${{ matrix.os }}' 7
+bad next-line-matrix-anchor $'jobs:\n  j:\n    strategy:\n      matrix:\n        &m ${{ fromJSON(needs.p.outputs.m) }}\n    runs-on: ${{ matrix.os }}' 5
+bad next-line-matrix-tag  $'jobs:\n  j:\n    strategy:\n      matrix:\n        !!str ${{ fromJSON(vars.X) }}\n    runs-on: ${{ matrix.os }}' 5
+bad strategy-key-expressions $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      fail-fast: ${{ github.event_name == \'push\' }}\n      matrix:\n        os: [ubuntu-latest]\n        node: ${{ fromJSON(vars.NODES) }}' "5 8"
 bad matrix-anchor-def     $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix: &shared\n        os: [ubuntu-latest]'
 bad matrix-alias          $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix: *shared'
 bad matrix-tag            $'jobs:\n  j:\n    strategy:\n      matrix: !!map\n        os: [ubuntu-latest]'
@@ -186,7 +190,7 @@ good script-string        $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\
 good markdown-bullets     $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          echo "* item" >> "$GITHUB_STEP_SUMMARY"\n          echo "- **bold** item" >> "$GITHUB_STEP_SUMMARY"'
 good job-anchor           $'jobs:\n  a: &job\n    runs-on: ubuntu-latest\n  b: *job'
 good job-named-matrix     $'jobs:\n  matrix:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          ${{ github.workspace }}/build.sh\n  strategy:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          ${{ github.workspace }}/check.sh'
-good strategy-key-expressions $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      fail-fast: ${{ github.event_name == \'push\' }}\n      matrix:\n        os: [ubuntu-latest]\n        node: ${{ fromJSON(vars.NODES) }}'
+good with-matrix-expression $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: some/action@abc\n        with:\n          matrix:\n            ${{ vars.CONFIG }}'
 
 if [ "$fail" -ne 0 ]; then echo "runner-drift-guard selftest FAILED"; exit 1; fi
 echo "runner-drift-guard selftest OK ($(grep -c '^bad ' "$0") bad, $(grep -c '^good ' "$0") good, each also as CRLF)"

@@ -456,10 +456,11 @@ jobs:
             # Track the strategy and matrix blocks by indentation: a bare os: or
             # runner: is validated only in a matrix, because the same key names a
             # workflow_dispatch input or an action with: parameter, which select
-            # no runner. Each tracker arms once, on a bare key line — anything
-            # else on that line (an expression, anchor, alias, tag or flow map)
-            # leaves the block unread, so the refusal rule below rejects the line
-            # instead. A matrix axis named matrix does not re-arm it.
+            # no runner. Each tracker arms on a bare key line and does not re-arm
+            # while its block is open, so a matrix axis named matrix does not
+            # move it. Anything else on the key line (an expression, anchor,
+            # alias, tag or flow map) leaves the block unread, so the refusal
+            # rule below rejects the line instead.
             !job_line && strategy_indent < 0 && /^[[:space:]]*(-[[:space:]]*)?["']?strategy["']?[[:space:]]*:[[:space:]]*$/ { strategy_indent = indent }
             !job_line && matrix_indent < 0 && /^[[:space:]]*(-[[:space:]]*)?["']?matrix["']?[[:space:]]*:[[:space:]]*$/ { matrix_indent = indent }
             # build-native.yml builds its matrix as JSON in its `matrix` job and
@@ -475,9 +476,11 @@ jobs:
             # Lines that may hide a runner label: a flow mapping carrying a
             # runner/strategy/matrix key; strategy: or matrix: with any inline
             # value, include: with one inside a matrix; a YAML merge key or a bare
-            # alias item; inside a strategy block, a line that starts with an
-            # expression (a strategy, matrix or include value written on the line
-            # below its key); a job calling a reusable workflow in another repo (its
+            # alias item; inside a strategy block, any line holding an expression,
+            # whatever precedes it (a strategy, matrix, include or axis value set
+            # by one, inline or on the line below its key, behind a quote, flow
+            # list, anchor or tag), so an expression-valued axis is a deliberate
+            # edit here; a job calling a reusable workflow in another repo (its
             # runs-on is outside this scan; same-repo ./.github/workflows/ and
             # $/.github/workflows/ callees are scanned). Accepted false positives,
             # all fail-closed: an env/with key named matrix or strategy with an
@@ -486,7 +489,7 @@ jobs:
             /^[[:space:]]*(-[[:space:]]*)?["']?(strategy|matrix)["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ ||
             (/^[[:space:]]*(-[[:space:]]*)?["']?include["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ && matrix_indent >= 0) ||
             /^[[:space:]]*(-[[:space:]]*)?(<<[[:space:]]*:|\*[^*[:space:]])/ ||
-            (/^[[:space:]]*(-[[:space:]]*)?["']?\$\{\{/ && (strategy_indent >= 0 || matrix_indent >= 0)) ||
+            (/\$\{\{/ && strategy_indent >= 0) ||
             (/^[[:space:]]*uses[[:space:]]*:/ && /\/\.github\/workflows\// && !/uses[[:space:]]*:[[:space:]]*["']?[.$]\/\.github\/workflows\//) {
               fail(FILENAME, FNR, "line may hide a runner label from the drift guard — write `runs-on: <label>` / `os: [<labels>]` inline; keep `strategy:`, `matrix:`, `include:` as bare keys over a static block (no expressions, anchors, aliases or flow maps); call reusable workflows only from ./.github/workflows/ or $/.github/workflows/")
             }
@@ -518,8 +521,11 @@ jobs:
       # After the scan, not before: the script lives under .github/scripts/,
       # which a `contents: write` job can rewrite, so it must not run ahead of
       # the scan with the program's path in hand. It still fails the job when
-      # the program gets any fixture wrong.
+      # the program gets any fixture wrong, and it runs when the scan fails too,
+      # so a program edit that breaks the real tree still shows which fixture
+      # broke; the scan's result is already recorded by then.
       - name: Guard self-test (regression fixtures)
+        if: ${{ !cancelled() }}
         run: bash .github/scripts/runner-drift-guard-selftest.sh "$RUNNER_TEMP/runner-drift-guard.awk"
 
   ci-success:
