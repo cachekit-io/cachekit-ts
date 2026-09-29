@@ -11,7 +11,7 @@ import {
   NonceExhaustedError,
   SerializationError,
   isRetryable,
-} from './errors';
+} from './errors.js';
 
 describe('Error types', () => {
   it('CachekitError is instanceof Error', () => {

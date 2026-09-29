@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { generateKey, generateParamsHash } from '../../src/serialization/key-generator';
+import { generateKey, generateParamsHash } from '../../src/serialization/key-generator.js';
 
 /**
  * Protocol v1.0 Key Generation Test Vectors

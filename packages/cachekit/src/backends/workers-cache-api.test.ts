@@ -44,7 +44,7 @@ describe('CacheAPIBackend (unit, mocked caches global)', () => {
   const value = new Uint8Array([1, 2, 3, 4]);
 
   it('does not advertise compression off (the cache-level default, on, applies)', () => {
-    expect(new CacheAPIBackend().compressionDefault).not.toBe(false);
+    expect(new CacheAPIBackend()).not.toHaveProperty('compressionDefault', false);
   });
 
   it('a secure cache with no compression option decrypts entries a compression: true cache wrote', async () => {
