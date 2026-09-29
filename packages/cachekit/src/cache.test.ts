@@ -1245,7 +1245,7 @@ describe('Cache Integration', () => {
       const c = secureCache(new InMemoryBackend());
       const compute = vi.fn(async () => 'v');
       // generateKey appends ':' + 64 hex digits, pushing this key 1 byte over.
-      const wrapped = c.wrap(compute, { namespace: keyOfBytes(keyBudget(true) - 64) });
+      const wrapped = c.wrap(compute, { namespace: keyOfBytes(keyBudget(true) - 64), ttl: 60 });
 
       await expect(wrapped()).rejects.toThrow(ConfigurationError);
       expect(compute).not.toHaveBeenCalled();
