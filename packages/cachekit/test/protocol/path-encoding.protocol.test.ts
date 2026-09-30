@@ -99,11 +99,14 @@ describe('AC-0 repro — raw encodeURIComponent lets a dot-segment key escape /v
 });
 
 describe('rule 2 — reserved keys are rejected before the URL is built', () => {
-  // The reserved set is the fixture's: a re-vendored reject row runs through every
-  // loop below with no test edit. Vitest registers nothing for an empty
-  // `it.each` table, so a fixture that parsed to no rows would pass silently.
-  it('the vendored fixture has reject and transmittable rows', () => {
-    expect(reserved.length).toBeGreaterThan(0);
+  // A floor, not the set: a re-vendored reject row runs through every loop below
+  // with no test edit, but a dropped row would take its loop coverage with it and
+  // let a regression in that key's guard pass. Vitest registers nothing for an
+  // empty `it.each` table, so the transmittable rows need the same guard.
+  it('the vendored fixture rejects at least the six spec rule-2 keys', () => {
+    expect(reserved.map((v) => v.key)).toEqual(
+      expect.arrayContaining(['', '.', '..', 'health', 'ttl', 'lock'])
+    );
     expect(transmittable.length).toBeGreaterThan(0);
   });
 
