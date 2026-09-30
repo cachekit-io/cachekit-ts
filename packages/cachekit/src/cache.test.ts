@@ -667,7 +667,7 @@ describe('Cache Integration', () => {
       async function readerOver(
         stored: Uint8Array,
         compression: boolean,
-        codec: ByteStorageLike,
+        codec?: ByteStorageLike, // omitted: the real core codec
         serializer?: { maxDecodedSize: number }
       ) {
         const backend = new InMemoryBackend();
@@ -683,6 +683,7 @@ describe('Cache Integration', () => {
           byteStorage: ByteStorageLike | null;
           createByteStorage: () => ByteStorageLike;
         };
+        if (codec === undefined) return reader;
         if (compression) impl.byteStorage = codec;
         impl.createByteStorage = () => codec;
         return reader;
@@ -921,8 +922,9 @@ describe('Cache Integration', () => {
       });
 
       it('never unpacks bytes that only pass the one-byte sniff', async () => {
-        // A plain user value that passes looksLikeEnvelope's fixarray(4)+bin
-        // sniff, but whose [1] is not a checksum: the header read rules it out.
+        // A plain user value that passes looksLikeEnvelope's fixarray(4) sniff
+        // with a bin [0], but whose [1] is not a checksum: the header read
+        // rules it out.
         const plain = new MessagePackSerializer().encode([new Uint8Array([1]), 'x', 3, 'y']);
         const { codec, calls } = spyCodec();
         const reader = await readerOver(plain, false, codec);
@@ -932,20 +934,20 @@ describe('Cache Integration', () => {
         await reader.close();
       });
 
-      describe('legacy (array-of-ints) envelopes, as published 0.1.5 writes them', () => {
-        /** Compression-off, L1-off, degradation-off reader over `stored`. */
-        async function plainReaderOver(stored: Uint8Array, maxDecodedSize?: number) {
-          const backend = new InMemoryBackend();
-          await backend.set('test:legacy', stored, 3600);
-          return createCache({
-            backend,
-            compression: false,
-            serializer: maxDecodedSize === undefined ? undefined : { maxDecodedSize },
-            l1: { enabled: false },
-            reliability: { degradation: false, retry: { maxAttempts: 1 } },
-          });
-        }
+      it('rejects an oversized plain 4-tuple as too large, never unpacking it', async () => {
+        // Every fixarray(4) value reaches envelopeVerdict now; one longer than
+        // any envelope within the ceiling fails there, with the same error a
+        // plain decode over maxDecodedSize would give.
+        const plain = new MessagePackSerializer().encode(['x'.repeat(3000), 1, 2, 3]);
+        const { codec, calls } = spyCodec();
+        const reader = await readerOver(plain, false, codec, { maxDecodedSize: 1000 });
 
+        await expect(reader.get('test:ceiling')).rejects.toThrow(ValueTooLargeError);
+        expect(calls.unpack).toBe(0);
+        await reader.close();
+      });
+
+      describe('legacy (array-of-ints) envelopes, as published 0.1.5 writes them', () => {
         it('reads a fixarray-encoded legacy envelope back as its value', async () => {
           // The exact bytes published @cachekit-io/cachekit-core-wasm 0.1.1
           // packs for { data: 'legacy' }: compressed_data is fixarray(14).
@@ -954,9 +956,9 @@ describe('Cache Integration', () => {
             'hex'
           );
           expect(stored[1]).toBe(0x9e);
-          const reader = await plainReaderOver(new Uint8Array(stored));
+          const reader = await readerOver(new Uint8Array(stored), false);
 
-          expect(await reader.get('test:legacy')).toEqual({ data: 'legacy' });
+          expect(await reader.get('test:ceiling')).toEqual({ data: 'legacy' });
           await reader.close();
         });
 
@@ -972,20 +974,27 @@ describe('Cache Integration', () => {
           ];
           const stored = msgpackEncode([Array.from(data), checksum, size, format]);
           expect([stored[0], stored[1]]).toEqual([0x94, 0xdc]);
-          const reader = await plainReaderOver(stored);
+          const reader = await readerOver(stored, false);
 
-          expect(await reader.get('test:legacy')).toEqual(value);
+          expect(await reader.get('test:ceiling')).toEqual(value);
           await reader.close();
         });
 
         it('still reads a plain legacy-shaped 4-tuple that core rejects as itself', async () => {
           // Passes the header read and envelopeVerdict, so it reaches the real
           // unpack — which rejects [1, 2, 3] as an LZ4 block for 3 bytes.
-          const value = [[1, 2, 3], [1, 2, 3, 4, 5, 6, 7, 8], 3, 'msgpack'];
-          const reader = await plainReaderOver(new MessagePackSerializer().encode(value));
+          const logs: string[] = [];
+          setLogger((message) => logs.push(message));
+          try {
+            const value = [[1, 2, 3], [1, 2, 3, 4, 5, 6, 7, 8], 3, 'msgpack'];
+            const reader = await readerOver(new MessagePackSerializer().encode(value), false);
 
-          expect(await reader.get('test:legacy')).toEqual(value);
-          await reader.close();
+            expect(await reader.get('test:ceiling')).toEqual(value);
+            expect(logs.filter((m) => m.includes('failed verified unpack'))).toHaveLength(1);
+            await reader.close();
+          } finally {
+            setLogger(null);
+          }
         });
 
         it('never unpacks a legacy-shaped 4-tuple whose [1] is not a checksum', async () => {
@@ -1007,12 +1016,16 @@ describe('Cache Integration', () => {
             9_000_000,
             'x',
           ];
-          const reader = await plainReaderOver(
+          const reader = await readerOver(
             new MessagePackSerializer().encode(value),
-            1024 * 1024
+            false,
+            undefined,
+            {
+              maxDecodedSize: 1024 * 1024,
+            }
           );
 
-          await expect(reader.get('test:legacy')).rejects.toThrow(ValueTooLargeError);
+          await expect(reader.get('test:ceiling')).rejects.toThrow(ValueTooLargeError);
           await reader.close();
         });
       });

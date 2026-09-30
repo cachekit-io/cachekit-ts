@@ -45,22 +45,16 @@ export function maxEnvelopeInputSize(maxDecodedSize: number): number {
 
 /**
  * Cheap structural sniff for the ByteStorage envelope: a positional msgpack
- * 4-tuple whose first element is `compressed_data` in either encoding —
- * fixarray(4) marker followed by a bin8/bin16/bin32 marker (protocol 1.1) or
- * a fixarray/array16/array32 marker (the legacy array of ints, which older
- * writers still emit). Gates envelope tolerance on compression-off caches so
- * ordinary reads never pay the header read. User values matching this shape
- * are possible — envelopeVerdict and the verified unpack disambiguate.
+ * 4-tuple (fixarray(4) marker). Gates envelope tolerance on compression-off
+ * caches so reads of anything else never pay envelopeVerdict. Which
+ * `compressed_data` encodings count — bin (protocol 1.1) or the legacy array
+ * of ints older writers still emit — is readEnvelopeHeader's call alone, so
+ * the two cannot drift; any other `[0]` marker fails its read at byte 2.
+ * User values matching an envelope are possible — envelopeVerdict and the
+ * verified unpack disambiguate.
  */
 export function looksLikeEnvelope(bytes: Uint8Array): boolean {
-  if (bytes.length <= 2 || bytes[0] !== 0x94) return false;
-  const marker = bytes[1];
-  return (
-    (marker >= 0xc4 && marker <= 0xc6) || // bin8/16/32
-    (marker >= 0x90 && marker <= 0x9f) || // fixarray
-    marker === 0xdc || // array16
-    marker === 0xdd // array32
-  );
+  return bytes.length > 2 && bytes[0] === 0x94;
 }
 
 /**
@@ -172,8 +166,9 @@ export function readEnvelopeHeader(
  *
  * - `'unpack'` — a conforming envelope within the ceiling. Everything unpack
  *   allocates is then a small multiple of maxDecodedSize: the input, the
- *   compressed payload (at most lz4's worst case for the declared size), and
- *   the output (at most maxDecodedSize).
+ *   compressed payload (at most lz4's worst case for the declared size; a
+ *   legacy array-of-ints payload is decoded into a buffer grown by doubling,
+ *   so up to about twice that), and the output (at most maxDecodedSize).
  * - `'not-envelope'` — no envelope core would accept: the bytes are not in a
  *   shape readEnvelopeHeader admits, core's own caps would reject them, or the
  *   compressed length exceeds what any LZ4 writer emits for the declared

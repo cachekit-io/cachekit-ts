@@ -8,15 +8,11 @@ const MiB = 1024 * 1024;
 const MAX = 10 * MiB;
 
 describe('looksLikeEnvelope', () => {
-  // fixarray(4), then a bin marker (protocol 1.1) or any array marker (legacy
-  // array-of-ints compressed_data).
-  const hex = (markers: number[]) => markers.map((m) => [m.toString(16), m] as const);
-  it.each(hex([0x90, 0x9f, 0xdc, 0xdd, 0xc4, 0xc6]))('accepts second byte 0x%s', (_hex, marker) => {
-    expect(looksLikeEnvelope(new Uint8Array([0x94, marker, 0x00]))).toBe(true);
-  });
-
-  it.each(hex([0x80, 0xa0, 0xde]))('rejects second byte 0x%s', (_hex, marker) => {
-    expect(looksLikeEnvelope(new Uint8Array([0x94, marker, 0x00]))).toBe(false);
+  // Only fixarray(4): which [0] encodings count is readEnvelopeHeader's call.
+  it('accepts fixarray(4) followed by any second byte', () => {
+    for (let marker = 0; marker <= 0xff; marker++) {
+      expect(looksLikeEnvelope(new Uint8Array([0x94, marker, 0x00]))).toBe(true);
+    }
   });
 
   it('rejects inputs of 2 bytes or fewer, and any first byte but fixarray(4)', () => {

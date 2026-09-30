@@ -701,11 +701,12 @@ export class CacheImpl implements SecureCache {
       // a compression-off secure cache reading a compression-on entry fails
       // AAD verification in decrypt() above — a loud, counted decrypt
       // failure (miss / L1 drop), never a silent wrong decode. Tolerance
-      // after a SUCCESSFUL decrypt only guards the same-AAD case: a
+      // after a SUCCESSFUL decrypt only sees the same-AAD case: mostly a
       // plaintext user value that happens to look like an envelope, resolved
-      // by the verified unpack. An envelope stored under compressed=false is
-      // refused above maxDecodedSize by the ciphertext cap, and no ts, py or
-      // rs writer produces one. We deliberately do NOT retry decrypt() with
+      // by the verified unpack. An envelope stored under compressed=false
+      // whose bytes exceed maxDecodedSize is refused by the ciphertext cap
+      // above; a smaller one is unwrapped like any look-alike, and no ts, py
+      // or rs writer produces one. We deliberately do NOT retry decrypt() with
       // the flipped AAD flag: that would reintroduce exactly the envelope-
       // mode ambiguity the AAD binding exists to rule out.
       plaintext = this.tryUnwrapEnvelope(plaintext, key) ?? plaintext;
