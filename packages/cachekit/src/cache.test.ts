@@ -1,4 +1,6 @@
 import { describe, it, expect, assert, beforeEach, afterEach, vi } from 'vitest';
+import { decode as msgpackDecode, encode as msgpackEncode } from '@msgpack/msgpack';
+import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -928,6 +930,91 @@ describe('Cache Integration', () => {
         expect(await reader.get('test:ceiling')).toEqual([new Uint8Array([1]), 'x', 3, 'y']);
         expect(calls.unpack).toBe(0);
         await reader.close();
+      });
+
+      describe('legacy (array-of-ints) envelopes, as published 0.1.5 writes them', () => {
+        /** Compression-off, L1-off, degradation-off reader over `stored`. */
+        async function plainReaderOver(stored: Uint8Array, maxDecodedSize?: number) {
+          const backend = new InMemoryBackend();
+          await backend.set('test:legacy', stored, 3600);
+          return createCache({
+            backend,
+            compression: false,
+            serializer: maxDecodedSize === undefined ? undefined : { maxDecodedSize },
+            l1: { enabled: false },
+            reliability: { degradation: false, retry: { maxAttempts: 1 } },
+          });
+        }
+
+        it('reads a fixarray-encoded legacy envelope back as its value', async () => {
+          // The exact bytes published @cachekit-io/cachekit-core-wasm 0.1.1
+          // packs for { data: 'legacy' }: compressed_data is fixarray(14).
+          const stored = Buffer.from(
+            '949eccd0cc81cca464617461cca66c65676163799847cca5ccbf281e65ccbaccad0da76d73677061636b', // pragma: allowlist secret
+            'hex'
+          );
+          expect(stored[1]).toBe(0x9e);
+          const reader = await plainReaderOver(new Uint8Array(stored));
+
+          expect(await reader.get('test:legacy')).toEqual({ data: 'legacy' });
+          await reader.close();
+        });
+
+        it('reads an array16-encoded legacy envelope back as its value', async () => {
+          const value = { data: 'a legacy envelope with more than fifteen compressed bytes' };
+          // Today's bin-form envelope, re-encoded with compressed_data as ints.
+          const binForm = new ByteStorage().pack(new MessagePackSerializer().encode(value));
+          const [data, checksum, size, format] = msgpackDecode(binForm) as [
+            Uint8Array,
+            number[],
+            number,
+            string,
+          ];
+          const stored = msgpackEncode([Array.from(data), checksum, size, format]);
+          expect([stored[0], stored[1]]).toEqual([0x94, 0xdc]);
+          const reader = await plainReaderOver(stored);
+
+          expect(await reader.get('test:legacy')).toEqual(value);
+          await reader.close();
+        });
+
+        it('still reads a plain legacy-shaped 4-tuple that core rejects as itself', async () => {
+          // Passes the header read and envelopeVerdict, so it reaches the real
+          // unpack — which rejects [1, 2, 3] as an LZ4 block for 3 bytes.
+          const value = [[1, 2, 3], [1, 2, 3, 4, 5, 6, 7, 8], 3, 'msgpack'];
+          const reader = await plainReaderOver(new MessagePackSerializer().encode(value));
+
+          expect(await reader.get('test:legacy')).toEqual(value);
+          await reader.close();
+        });
+
+        it('never unpacks a legacy-shaped 4-tuple whose [1] is not a checksum', async () => {
+          const value = [[1, 2, 3], 'x', 3, 'y'];
+          const { codec, calls } = spyCodec();
+          const reader = await readerOver(new MessagePackSerializer().encode(value), false, codec);
+
+          expect(await reader.get('test:ceiling')).toEqual(value);
+          expect(calls.unpack).toBe(0);
+          await reader.close();
+        });
+
+        it('refuses (known loss) a plain value indistinguishable from an oversized legacy envelope', async () => {
+          // Legacy twin of the bin-form known loss above: under the 1000:1 cap
+          // and over a lowered ceiling, so only decompressing could tell it apart.
+          const value = [
+            Array.from({ length: 9_000 }, (_, i) => i % 256),
+            [1, 2, 3, 4, 5, 6, 7, 8],
+            9_000_000,
+            'x',
+          ];
+          const reader = await plainReaderOver(
+            new MessagePackSerializer().encode(value),
+            1024 * 1024
+          );
+
+          await expect(reader.get('test:legacy')).rejects.toThrow(ValueTooLargeError);
+          await reader.close();
+        });
       });
     });
   });

@@ -46,8 +46,10 @@ read on a compression-off cache decodes them as plain MessagePack. What `unpack`
 may allocate is then a small multiple of `maxDecodedSize`: the input, the
 compressed payload, a `format` string of at most 64 bytes, and an output of at
 most `maxDecodedSize`, which is the same bound `serializer.decode` applies to its
-input. On an encrypted cache the
-ciphertext is bounded first: bytes longer than any plaintext the cache would
+input. Core grows its buffer by doubling while it decodes `compressed_data`, so
+the transient peak is about 3.2× `maxDecodedSize` in the worst case for the bin
+form and about 5.5× for a forged legacy array-of-ints envelope. On an encrypted
+cache the ciphertext is bounded first: bytes longer than any plaintext the cache would
 decode (an envelope within the ceiling with compression on, `maxDecodedSize`
 with it off), plus the 28-byte AES-GCM nonce and tag, are rejected with
 `ValueTooLargeError` before `decrypt` copies them. The envelope-tolerant read
@@ -62,9 +64,10 @@ exactly mimics an envelope core would decompress, and which declares more than
 `maxDecodedSize`, is refused rather than decoded. Only decompressing could tell
 it from a real oversized envelope, and serving a real one as its raw 4-tuple
 would be silent corruption. That key reads as a miss, or throws with degradation
-off. The shape required is `[bytes, [8 integers ≤ 255], an integer over
-maxDecodedSize, a string or bytes of at most 64 bytes of valid UTF-8]`, with at
-least one byte per 1000 of that integer and nothing after the last element. A
+off. The shape required is `[bytes or an array of integers ≤ 255, [8 integers
+≤ 255], an integer over maxDecodedSize, a string or bytes of at most 64 bytes of
+valid UTF-8]`, with at least one byte (or integer) per 1000 of that integer and
+nothing after the last element. A
 value with any other fourth element is never unpacked, so it decodes as itself.
 
 If an allocation fails or the wasm instance traps inside `unpack` during the

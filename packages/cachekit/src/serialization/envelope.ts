@@ -45,14 +45,22 @@ export function maxEnvelopeInputSize(maxDecodedSize: number): number {
 
 /**
  * Cheap structural sniff for the ByteStorage envelope: a positional msgpack
- * 4-tuple whose first element is binary — fixarray(4) marker followed by a
- * bin8/bin16/bin32 marker. Gates envelope tolerance on compression-off
- * caches so ordinary reads never pay the header read; bin-form (protocol 1.1)
- * envelopes only. User values matching this shape are possible —
- * envelopeVerdict and the verified unpack disambiguate.
+ * 4-tuple whose first element is `compressed_data` in either encoding —
+ * fixarray(4) marker followed by a bin8/bin16/bin32 marker (protocol 1.1) or
+ * a fixarray/array16/array32 marker (the legacy array of ints, which older
+ * writers still emit). Gates envelope tolerance on compression-off caches so
+ * ordinary reads never pay the header read. User values matching this shape
+ * are possible — envelopeVerdict and the verified unpack disambiguate.
  */
 export function looksLikeEnvelope(bytes: Uint8Array): boolean {
-  return bytes.length > 2 && bytes[0] === 0x94 && bytes[1] >= 0xc4 && bytes[1] <= 0xc6;
+  if (bytes.length <= 2 || bytes[0] !== 0x94) return false;
+  const marker = bytes[1];
+  return (
+    (marker >= 0xc4 && marker <= 0xc6) || // bin8/16/32
+    (marker >= 0x90 && marker <= 0x9f) || // fixarray
+    marker === 0xdc || // array16
+    marker === 0xdd // array32
+  );
 }
 
 /**

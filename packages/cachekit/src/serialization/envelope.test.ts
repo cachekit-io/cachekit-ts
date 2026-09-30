@@ -1,11 +1,34 @@
 import { describe, it, expect } from 'vitest';
 import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
-import { envelopeVerdict } from './envelope.js';
+import { envelopeVerdict, looksLikeEnvelope } from './envelope.js';
 import { ValueTooLargeError } from '../errors.js';
 import { forgedEnvelope } from '../../test/fixtures/forged-envelope.js';
 
 const MiB = 1024 * 1024;
 const MAX = 10 * MiB;
+
+describe('looksLikeEnvelope', () => {
+  // fixarray(4), then a bin marker (protocol 1.1) or any array marker (legacy
+  // array-of-ints compressed_data).
+  const hex = (markers: number[]) => markers.map((m) => [m.toString(16), m] as const);
+  it.each(hex([0x90, 0x9f, 0xdc, 0xdd, 0xc4, 0xc6]))('accepts second byte 0x%s', (_hex, marker) => {
+    expect(looksLikeEnvelope(new Uint8Array([0x94, marker, 0x00]))).toBe(true);
+  });
+
+  it.each(hex([0x80, 0xa0, 0xde]))('rejects second byte 0x%s', (_hex, marker) => {
+    expect(looksLikeEnvelope(new Uint8Array([0x94, marker, 0x00]))).toBe(false);
+  });
+
+  it('rejects inputs of 2 bytes or fewer, and any first byte but fixarray(4)', () => {
+    expect(looksLikeEnvelope(new Uint8Array([]))).toBe(false);
+    expect(looksLikeEnvelope(new Uint8Array([0x94]))).toBe(false);
+    expect(looksLikeEnvelope(new Uint8Array([0x94, 0x9e]))).toBe(false);
+    for (const first of [0x93, 0x95, 0xdc, 0x84]) {
+      expect(looksLikeEnvelope(new Uint8Array([first, 0x9e, 0x00]))).toBe(false);
+      expect(looksLikeEnvelope(new Uint8Array([first, 0xc4, 0x00]))).toBe(false);
+    }
+  });
+});
 
 describe('envelopeVerdict', () => {
   const bs = new ByteStorage();
