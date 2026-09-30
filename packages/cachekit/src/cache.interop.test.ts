@@ -336,6 +336,38 @@ describe('cache.wrap interop mode', () => {
         })
       ).toThrow(/reserved/);
     }
+    // The server rejects '..' anywhere in a key, so neither segment may hold it.
+    for (const [namespace, interop] of [
+      ['a..b', 'get_user'],
+      ['users', 'x..y'],
+    ] as const) {
+      expect(() =>
+        cache!.wrap(async () => 1, {
+          namespace,
+          interop,
+          interopArity: 0,
+          ttl: 60,
+        })
+      ).toThrow(/must not contain '\.\.'/);
+    }
+  });
+
+  it('accepts lone dots in segments and writes the pinned vector key', async () => {
+    const backend = new InMemoryBackend();
+    cache = createCache({ backend, l1: { enabled: false } });
+
+    const fn = cache.wrap(async (x: number) => x, {
+      namespace: 'app.',
+      interop: 'users.fetch.by_id',
+      interopArity: 1,
+      ttl: 60,
+    });
+    await fn(1);
+
+    // lone_dots_stay_valid in test-vectors/interop-mode.json.
+    expect([...backend.store.keys()]).toEqual([
+      'app.:users.fetch.by_id:405f09a3617bcc1425ea95b9840d9c2713e3ecebd5a3227abc599317b732e21a',
+    ]);
   });
 
   it('encrypts interop entries with compressed=False AAD (cross-SDK decryptable)', async () => {

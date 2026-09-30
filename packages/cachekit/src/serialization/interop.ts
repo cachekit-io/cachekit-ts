@@ -96,12 +96,18 @@ export class InteropFloat {
  * vectors). Exact-match and namespace-only: `nsx` is a valid namespace, and
  * `ns` / `nsapi` are valid operations.
  *
+ * Neither segment may contain `..`: the pattern admits it, but the server
+ * rejects `..` anywhere in a key (the Traversal row of the same spec section),
+ * so the key would fail on every request (the `reject_double_dot_*` vectors).
+ * The `:` delimiters separate the segments and the hash is hex, so any `..` in
+ * a key lies inside one segment. A lone `.` stays valid.
+ *
  * A non-string is rejected first: RegExp.test string-coerces its argument but
  * Set.has does not, so an untyped `['ns']` would otherwise pass the grammar
  * and skip the reservation.
  *
  * @throws {ConfigurationError} if the segment is not a string, does not match
- *   the grammar, or is a reserved namespace
+ *   the grammar, contains `..`, or is a reserved namespace
  */
 export function validateInteropSegment(kind: 'namespace' | 'operation', value: string): void {
   if (typeof value !== 'string') {
@@ -111,6 +117,12 @@ export function validateInteropSegment(kind: 'namespace' | 'operation', value: s
     throw new ConfigurationError(
       `Invalid interop ${kind} ${JSON.stringify(value)}: must full-string match ` +
         `^[a-z0-9][a-z0-9._-]{0,63}$ (lowercase ASCII letters, digits, '.', '_', '-'; 1-64 chars)`
+    );
+  }
+  if (value.includes('..')) {
+    throw new ConfigurationError(
+      `Invalid interop ${kind} ${JSON.stringify(value)}: must not contain '..' — ` +
+        `the CachekitIO server rejects '..' anywhere in a key`
     );
   }
   if (kind === 'namespace' && RESERVED_INTEROP_NAMESPACES.has(value)) {

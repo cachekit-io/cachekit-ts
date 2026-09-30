@@ -10,8 +10,8 @@
  * tools/interop-crosscheck.mjs; this suite is the cachekit-ts SDK's own
  * mandatory verification (spec "SDK Implementation Requirements" #7).
  *
- * Provenance: cachekit-io/protocol test-vectors/interop-mode.json 1.1.0 at
- * 965aeb01a4e8b9e7a0c9ca576b4c2cb60b63b918, copied byte-for-byte. Re-vendoring
+ * Provenance: cachekit-io/protocol test-vectors/interop-mode.json 1.2.0 from
+ * https://github.com/cachekit-io/protocol/pull/94, copied byte-for-byte. Re-vendoring
  * means refreshing FIXTURE_SHA256 and the counts in the first test.
  */
 
@@ -82,7 +82,7 @@ interface VectorFile {
 }
 
 /** sha256 of test-vectors/interop-mode.json at the provenance above. */
-const FIXTURE_SHA256 = '9b1855851d888c479e37a8fff9e9bbe5738737a9a408e749d9126c7678b9e7bc'; // pragma: allowlist secret
+const FIXTURE_SHA256 = '702613766d1b92bc3a337627a96b9aedc89abfeb4d9208c2bb00c9539a0a1f40'; // pragma: allowlist secret
 
 const raw = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'interop-mode.json')
@@ -212,9 +212,9 @@ describe('interop/v1 vector fixture', () => {
       createHash('sha256').update(raw).digest('hex'),
       'fixture differs from the pinned protocol revision; if intentional, refresh FIXTURE_SHA256 AND the counts'
     ).toBe(FIXTURE_SHA256);
-    expect(vectors.key_vectors).toHaveLength(34);
+    expect(vectors.key_vectors).toHaveLength(35);
     expect(vectors.value_vectors).toHaveLength(4);
-    expect(vectors.error_vectors).toHaveLength(11);
+    expect(vectors.error_vectors).toHaveLength(13);
   });
 });
 

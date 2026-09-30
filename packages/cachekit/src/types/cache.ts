@@ -85,7 +85,9 @@ export type WrapOptions = WrapOptionsBase &
          * operation name must match `^[a-z0-9][a-z0-9._-]{0,63}$` (validated
          * at wrap time). `ns` and `nsapi` are reserved as namespaces (the
          * CachekitIO server parses a key starting `ns:` / `nsapi:` as
-         * namespace-prefixed); operation names are unaffected.
+         * namespace-prefixed); operation names are unaffected. Neither may
+         * contain `..` (the server rejects `..` anywhere in a key); a lone
+         * `.` is fine.
          *
          * Fails closed — at wrap time and on every call — if the backend
          * applies a key prefix (e.g. Redis `keyPrefix`): a prefixed interop
