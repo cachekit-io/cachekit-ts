@@ -98,7 +98,7 @@ describe('AC-0 repro — raw encodeURIComponent lets a dot-segment key escape /v
   });
 });
 
-describe('rule 2 — reserved segments are rejected before the URL is built', () => {
+describe('rule 2 — reserved keys are rejected before the URL is built', () => {
   // The reserved set is the fixture's: a re-vendored reject row runs through every
   // loop below with no test edit. Vitest registers nothing for an empty
   // `it.each` table, so a fixture that parsed to no rows would pass silently.

@@ -25,13 +25,13 @@ const RESERVED_SEGMENTS = new Set(['.', '..', 'health', 'ttl', 'lock']);
  * encode `! * ' ( )` (spec rule 4; fixture `encoded_alternates`).
  */
 export function encodeKey(key: string): string {
-  // An empty key encodes to an empty segment, so `/v1/cache/${''}` collapses to
-  // the `/v1/cache/` collection path — the same CWE-22 escape as a dot segment,
-  // reached without ever hitting RESERVED_SEGMENTS. Reject it up front.
+  // An empty key encodes to an empty segment, so /v1/cache/{key} becomes /v1/cache/
+  // and /v1/cache/{key}/ttl becomes /v1/cache//ttl, neither of which addresses a
+  // stored entry (spec rule 2). RESERVED_SEGMENTS never sees it; reject it up front.
   if (key === '') {
     throw new ConfigurationError(
-      'Cache key must not be empty: an empty key addresses the /v1/cache/ collection path, ' +
-        'not a keyed resource (CWE-22). Use a non-empty, namespaced key.'
+      'Cache key must not be empty: it encodes to an empty path segment, so /v1/cache/{key} and ' +
+        '/v1/cache/{key}/ttl address no stored entry (CWE-22). Use a non-empty, namespaced key.'
     );
   }
   let encoded: string;
@@ -148,8 +148,9 @@ export class CachekitIOCore implements Backend {
     validateTtl(ttl);
   }
 
-  /** Backend.validateKey capability — rejects a reserved path segment
-   * synchronously, before the reliability executor can swallow it. */
+  /** Backend.validateKey capability — rejects any key `encodeKey` refuses (empty,
+   * reserved segment, malformed UTF-16) synchronously, before the reliability
+   * executor can swallow it. */
   validateKey(key: string): void {
     encodeKey(key);
   }
