@@ -79,8 +79,8 @@ export interface Backend {
 
   /**
    * Reject a key this backend cannot address, synchronously and before the
-   * reliability executor runs — CachekitIO refuses the reserved path
-   * segments `.` `..` `health` `ttl` `lock` (protocol spec/saas-api.md
+   * reliability executor runs — CachekitIO refuses the empty key and the
+   * reserved path segments `.` `..` `health` `ttl` `lock` (protocol spec/saas-api.md
    * § Cache-Key Path Encoding); Memcached refuses keys over 250 bytes.
    * Same contract as validateTtl: inside `run`, degradation would swallow
    * the deterministic caller error and retry/circuit-breaker would count it

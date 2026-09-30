@@ -19,8 +19,8 @@ const RESERVED_SEGMENTS = new Set(['.', '..', 'health', 'ttl', 'lock']);
 
 /**
  * Percent-encode a cache key as a single URL path segment, or throw
- * `ConfigurationError` if it is a reserved segment (RESERVED_SEGMENTS) or
- * malformed UTF-16. Every other key is exactly `encodeURIComponent(key)`:
+ * `ConfigurationError` if it is empty, a reserved segment (RESERVED_SEGMENTS)
+ * or malformed UTF-16. Every other key is exactly `encodeURIComponent(key)`:
  * decode-equivalent to cachekit-py and cachekit-rs, which additionally
  * encode `! * ' ( )` (spec rule 4; fixture `encoded_alternates`).
  */
