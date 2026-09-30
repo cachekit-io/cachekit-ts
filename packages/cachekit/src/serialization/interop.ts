@@ -573,7 +573,7 @@ export function interopArgsHash(args: readonly unknown[]): string {
  * auto-mode truncation rule never applies.
  *
  * @throws {ConfigurationError} if namespace or operation violate the segment
- *   grammar, or namespace is reserved (`ns`, `nsapi`)
+ *   grammar or contain `..`, or namespace is reserved (`ns`, `nsapi`)
  * @throws {SerializationError} if an argument is outside the interop data model
  */
 export function generateInteropKey(
