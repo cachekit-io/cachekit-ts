@@ -42,9 +42,10 @@ import { parseArgs } from 'node:util';
 import { WORKLOADS } from './ir-workload.mjs';
 
 // Any failure of the run itself exits 4, so a script never reads it as the
-// regression code 1.
+// regression code 1. The handler must not read `opt`: a parseArgs error fires
+// it before `opt` is initialised, and a throw here exits 7, not 4.
 process.on('uncaughtException', (error) => {
-  console.error(error);
+  console.error('ir bench: the run failed (exit 4):', error);
   process.exit(4);
 });
 
@@ -87,7 +88,14 @@ if (opt.save && opt.compare && resolve(opt.save) === resolve(opt.compare)) {
   throw new Error('--save and --compare must be different files');
 }
 // Read the base before measuring, so a missing or corrupt file fails in seconds.
-const base = opt.compare ? JSON.parse(readFileSync(opt.compare, 'utf8')) : null;
+function readBase(file) {
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'));
+  } catch (error) {
+    throw new Error(`cannot read --compare file ${file}`, { cause: error });
+  }
+}
+const base = opt.compare ? readBase(opt.compare) : null;
 // A NaN in the base makes every comparison false, so the row would read `ok`.
 const positive = (x) => typeof x === 'number' && Number.isFinite(x) && x > 0;
 const nonNegative = (x) => typeof x === 'number' && Number.isFinite(x) && x >= 0;
@@ -217,7 +225,10 @@ function buildHash() {
   );
   try {
     add(wasmPkg, (f) => f.endsWith('.wasm'));
-  } catch {
+  } catch (error) {
+    // Only an absent build is a state; any other read failure would drop the
+    // wasm that ran from the hash.
+    if (error?.code !== 'ENOENT') throw error;
     hash.update('no wasm build');
   }
   return hash.digest('hex').slice(0, 16);

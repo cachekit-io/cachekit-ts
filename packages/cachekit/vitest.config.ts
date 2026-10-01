@@ -16,9 +16,12 @@ export default defineConfig({
         functions: 80,
         statements: 80,
       },
+      // Vitest 4 reports every file a test loads, so test/ support code (the
+      // fake SaaS, fixtures) would count as product code without this.
       exclude: [
         'node_modules',
         'dist',
+        'test/**',
         '**/*.test.ts',
         '**/types.ts',
         '**/*.config.ts',

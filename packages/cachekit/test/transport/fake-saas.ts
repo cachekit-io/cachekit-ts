@@ -19,7 +19,7 @@ import dns from 'node:dns';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import https from 'node:https';
-import type { AddressInfo, Socket } from 'node:net';
+import type { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import tls from 'node:tls';
@@ -146,7 +146,11 @@ export async function startFakeSaas(): Promise<FakeSaas> {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', () => resolve());
   });
-  const { port } = server.address() as AddressInfo;
+  const address = server.address();
+  if (address === null || typeof address === 'string') {
+    throw new Error(`fake-saas: expected a TCP listener address, got ${String(address)}`);
+  }
+  const { port } = address;
 
   // Route FAKE_HOST to the listener and trust its certificate; everything
   // else resolves and verifies as normal. Both are undone by close().
