@@ -518,13 +518,22 @@ limit, an out-of-range TTL) and for calls on a closed backend. So a run of keys
 the service rejects cannot open the breaker and cut off every other key.
 
 Graceful degradation still applies: under `production`, `secure` and `io` these
-errors resolve as a miss or a no-op, and with `reliability: { degradation: false }`
-they reject with the `BackendError`. With degradation on, a revoked API key
-therefore turns the cache into silent misses at one request per operation
-rather than opening the breaker; watch `cachekit_errors_total` (see
-[Observability](#observability)) to catch it. The exception is a key the
-backend rejects before anything is sent, such as a [Memcached](#memcached) key
-over 250 bytes: that error is thrown to the caller even with degradation on.
+errors resolve as a miss or a no-op, and with
+`reliability: { degradation: false }` they reject with the `BackendError`. With
+degradation on, a revoked API key therefore turns L2 into misses at one request
+per operation rather than opening the breaker. A write that fails this way, or
+under any other L2 failure, still fills L1, so a repeat `wrap()` or `get()` on
+that key is served from L1 for its TTL instead of recomputing; with degradation
+off the write rejects and L1 stays empty. An encrypted cache's L1 holds only the
+ciphertext, so a write that never got as far as encrypting (an open breaker, or
+encryption itself failing) leaves L1 empty there. An `authentication` failure is
+logged through the error logger, at most once a minute per cache, as
+`[cachekit] backend rejected <op> as an authentication failure (keyHash=…)`. The
+line carries a digest of the key, never the key, the API key or the response
+body. `cachekit_errors_total` (see [Observability](#observability)) counts every
+failure. The exception is a key the backend rejects before anything is sent,
+such as a [Memcached](#memcached) key over 250 bytes: that error is thrown to
+the caller even with degradation on.
 
 A custom backend should pass `'permanent'` only for errors that retrying cannot
 fix: `new BackendError(message, 'permanent')`. The classification defaults to

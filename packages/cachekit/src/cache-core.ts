@@ -433,6 +433,9 @@ export class CacheImpl implements SecureCache {
   /** Timestamp of the last envelope-unpack-rejected warning (rate limiting). */
   private lastEnvelopeRejectWarnAt = 0;
 
+  /** Timestamp of the last authentication-rejected warning (rate limiting). */
+  private lastAuthRejectWarnAt = 0;
+
   /**
    * Verified unpack of a suspected legacy/foreign ByteStorage envelope on a
    * compression-off cache. Returns null when the bytes aren't treated as an
@@ -564,6 +567,25 @@ export class CacheImpl implements SecureCache {
     );
   }
 
+  /**
+   * Rate-limited report of a backend op rejected as `authentication` (a bad or
+   * revoked API key, or an edge block). It is never retried and never counts
+   * toward the breaker, and degradation turns it into a miss or a no-op, so
+   * without this line a misconfigured key is invisible — and once a failed
+   * write still fills L1, it hides behind L1 hits too. The error text is left
+   * out: it can carry the response body. The key is digested for the reason
+   * warnSetRejected gives.
+   */
+  private warnAuthRejected(operation: string, key: string, error: unknown): void {
+    if (!(error instanceof BackendError) || error.classification !== 'authentication') return;
+    const now = Date.now();
+    if (now - this.lastAuthRejectWarnAt < WARN_INTERVAL_MS) return;
+    this.lastAuthRejectWarnAt = now;
+    logError(
+      `[cachekit] backend rejected ${operation} as an authentication failure (keyHash=${blake2b16Hex(key)}). Check the API key; with degradation on, L2 is being skipped.`
+    );
+  }
+
   private publishL1Stats(): void {
     if (!this.l1) return;
     const stats = this.l1.stats;
@@ -589,7 +611,7 @@ export class CacheImpl implements SecureCache {
    * so each retry attempt counts as one operation — the honest reading of
    * `operations_total`.
    */
-  private async instrument<T>(operation: string, fn: () => Promise<T>): Promise<T> {
+  private async instrument<T>(operation: string, key: string, fn: () => Promise<T>): Promise<T> {
     const endTimer = await this.metrics.startTimer(operation);
     try {
       const result = await fn();
@@ -597,6 +619,7 @@ export class CacheImpl implements SecureCache {
       return result;
     } catch (error) {
       this.recordFailure(operation, error);
+      this.warnAuthRejected(operation, key, error);
       throw error;
     } finally {
       endTimer();
@@ -609,8 +632,8 @@ export class CacheImpl implements SecureCache {
    * (retry + circuit breaker, publishing the CB gauge). Every public op goes
    * through here so none can silently drift out of the metrics set.
    */
-  private run<T>(operation: string, fallback: T, fn: () => Promise<T>): Promise<T> {
-    return this.execute(() => this.instrument(operation, fn), fallback);
+  private run<T>(operation: string, key: string, fallback: T, fn: () => Promise<T>): Promise<T> {
+    return this.execute(() => this.instrument(operation, key, fn), fallback);
   }
 
   async get<T>(key: string): Promise<T | null> {
@@ -804,7 +827,7 @@ export class CacheImpl implements SecureCache {
     this.encryption?.validateKey(key, this.useEnvelope(interop));
 
     // Fetch from L2 (backend)
-    return this.run('get', null, async (): Promise<T | null> => {
+    return this.run('get', key, null, async (): Promise<T | null> => {
       // When L1 will be re-populated, prefer the TTL-carrying read (same
       // storage round trip — see Backend.getWithTtl) so the L1 copy can be
       // capped at the entry's remaining lifetime below (LAB-1388).
@@ -944,7 +967,7 @@ export class CacheImpl implements SecureCache {
       return l1Write;
     }
 
-    await this.run('set', undefined, async (): Promise<void> => {
+    await this.run('set', key, undefined, async (): Promise<void> => {
       // Compress with ByteStorage (before encryption)
       let data: Uint8Array = useEnvelope
         ? this.withEnvelopeCodec((codec) => codec.pack(serialized))
@@ -958,22 +981,26 @@ export class CacheImpl implements SecureCache {
 
       // Store in backend
       await this.backend.set(key, data, ttl);
-
-      // Update L1 for direct writes, with `data` (the ciphertext just written
-      // to the backend) rather than the caller's plaintext `value` whenever
-      // the cache is encrypted. The SWR refresh path passes updateL1=false and
-      // writes L1 only through completeRefresh, whose version token discards
-      // the refresh if an explicit write or invalidation landed meanwhile —
-      // the guard is authoritative for L1 ONLY. The backend.set above is
-      // unconditional last-write-wins: an interleaved explicit set() survives
-      // in L1 but is overwritten in L2 by the refresh's value until the entry
-      // next expires or refreshes (a conditional L2 write would need CAS the
-      // Backend contract doesn't have).
-      if (updateL1 && this.l1) {
-        this.l1.set(key, l1Write!.l1, ttl * 1000, namespace);
-        this.publishL1Stats();
-      }
     });
+
+    // Update L1 for direct writes — after `run`, so a backend write that
+    // degradation absorbed still fills it, as cachekit-py's sync path does.
+    // Otherwise every wrap() during an L2 outage or a 401/403 recomputes the
+    // origin and re-pays the doomed round trips. With degradation off `run`
+    // throws and L1 stays empty. On an encrypted cache L1 gets `data` (the
+    // ciphertext) rather than the caller's plaintext, and nothing at all if
+    // encryption itself threw (`l1Write` stays null). The SWR refresh path
+    // passes updateL1=false and writes L1 only through completeRefresh, whose
+    // version token discards the refresh if an explicit write or invalidation
+    // landed meanwhile — the guard is authoritative for L1 ONLY. The
+    // backend.set above is unconditional last-write-wins: an interleaved
+    // explicit set() survives in L1 but is overwritten in L2 by the refresh's
+    // value until the entry next expires or refreshes (a conditional L2 write
+    // would need CAS the Backend contract doesn't have).
+    if (updateL1 && this.l1 && l1Write) {
+      this.l1.set(key, l1Write.l1, ttl * 1000, namespace);
+      this.publishL1Stats();
+    }
 
     return l1Write;
   }
@@ -982,7 +1009,7 @@ export class CacheImpl implements SecureCache {
     this.ensureNotClosed();
     this.backend.validateKey?.(key); // see Backend.validateKey
 
-    return this.run('delete', false, async (): Promise<boolean> => {
+    return this.run('delete', key, false, async (): Promise<boolean> => {
       // Delete from backend
       const deleted = await this.backend.delete(key);
 
@@ -1016,7 +1043,7 @@ export class CacheImpl implements SecureCache {
     // Record the L2 outcome too — the L1 path above already counts hits, so
     // skipping L2 here would skew the hit/miss counters (and the SaaS L1
     // telemetry headers they feed) for L2-only existence checks.
-    return this.run('exists', false, async () => {
+    return this.run('exists', key, false, async () => {
       const exists = await this.backend.exists(key);
       if (exists) this.recordHit('l2');
       else this.recordMiss();
