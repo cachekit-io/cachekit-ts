@@ -523,8 +523,9 @@ errors resolve as a miss or a no-op, and with
 degradation on, a revoked API key therefore turns L2 into misses at one request
 per operation rather than opening the breaker. A write that fails this way, or
 under any other L2 failure, still fills L1, so a repeat `wrap()` or `get()` on
-that key is served from L1 for its TTL instead of recomputing; with degradation
-off the write rejects and L1 stays empty. A `delete()` evicts the L1 copy
+that key is served from L1 for its TTL instead of recomputing. With degradation
+off the write rejects and L1 stays empty, and so does a write the backend
+rejects before anything is sent (the exception below). A `delete()` evicts the L1 copy
 whether or not its L2 delete succeeds. When the L2 delete fails the value stays
 in L2, so the next read that reaches L2 can return it and fill L1 again. An
 encrypted cache's L1 holds only the
