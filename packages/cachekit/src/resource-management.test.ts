@@ -9,7 +9,11 @@ import { createCache } from './cache.js';
 import { RetryPolicy } from './reliability/retry.js';
 import { CacheMetrics } from './metrics/prometheus.js';
 import { setLogger } from './logger.js';
-import { BackendError } from './errors.js';
+import { BackendError, ConfigurationError } from './errors.js';
+import { CacheImpl, type CacheRuntime } from './cache-core.js';
+import { EncryptionManager } from './encryption/manager.js';
+import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
+import type { CacheOptions } from './types/cache.js';
 import { blake2b16Hex } from './serialization/key-generator.js';
 import type { Backend } from './backends/types.js';
 import type { L1Cache } from './l1/lru-cache.js';
@@ -63,6 +67,52 @@ function createMockRedis(): Redis {
   };
   return redis as unknown as Redis;
 }
+
+// ========== Config errors open no backend ==========
+
+describe('config errors throw before the backend is resolved', () => {
+  // resolveBackend opens the connection (a URL config builds a reconnecting
+  // Redis client), so a ConfigurationError thrown after it would leak that
+  // client to a caller who catches the error.
+  function fakeRuntime() {
+    const resolveBackend = vi.fn(() => new InMemoryBackend());
+    const runtime: CacheRuntime = {
+      resolveBackend,
+      createByteStorage: () => new ByteStorage(),
+      createEncryption: (config) =>
+        new EncryptionManager(config.masterKey, config.tenantId, config.previousMasterKeys),
+    };
+    return { runtime, resolveBackend };
+  }
+
+  const backend = { url: 'redis://localhost:6379' };
+
+  it.each<[string, Partial<CacheOptions>, RegExp]>([
+    [
+      'serializer bound',
+      { serializer: { maxDecodedSize: NaN } },
+      /serializer\.maxDecodedSize must be a positive safe integer/,
+    ],
+    [
+      'stampede.lockTimeoutMs',
+      { stampede: { lockTimeoutMs: 0 } },
+      /stampede\.lockTimeoutMs must be > 0/,
+    ],
+    ['encryption masterKey', { encryption: { masterKey: 'not-hex' } }, /Master key/],
+  ])('%s: throws ConfigurationError without calling resolveBackend', (_name, extra, message) => {
+    const { runtime, resolveBackend } = fakeRuntime();
+    const build = () => new CacheImpl({ backend, ...extra } as CacheOptions, runtime);
+    expect(build).toThrow(ConfigurationError);
+    expect(build).toThrow(message);
+    expect(resolveBackend).not.toHaveBeenCalled();
+  });
+
+  it('resolves the backend once config is valid', () => {
+    const { runtime, resolveBackend } = fakeRuntime();
+    new CacheImpl({ backend } as CacheOptions, runtime);
+    expect(resolveBackend).toHaveBeenCalledTimes(1);
+  });
+});
 
 // ========== m1: InvalidationChannel Never Initialized ==========
 

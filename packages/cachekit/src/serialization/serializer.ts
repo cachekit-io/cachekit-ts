@@ -12,9 +12,15 @@ import {
  * Serializer configuration with DoS protection limits.
  */
 export interface SerializerConfig {
-  /** Maximum size of encoded output in bytes (default: 1MB) */
+  /**
+   * Maximum size of encoded output in bytes (default: 1MB). Must be a positive
+   * safe integer; the constructor throws `ConfigurationError` otherwise.
+   */
   maxEncodedSize: number;
-  /** Maximum size of decoded input in bytes (default: 10MB) */
+  /**
+   * Maximum size of decoded input in bytes (default: 10MB). Must be a positive
+   * safe integer; the constructor throws `ConfigurationError` otherwise.
+   */
   maxDecodedSize: number;
   /**
    * Maximum object nesting depth (default: 100). Must be an integer from 32 to
@@ -26,6 +32,8 @@ export interface SerializerConfig {
    * Maximum collection size for Maps, Sets, Arrays, Objects (default: 10000).
    * Enforced on encode and decode; decode-time rejections report the
    * underlying @msgpack/msgpack option names (maxArrayLength/maxMapLength).
+   * Must be a positive safe integer; the constructor throws
+   * `ConfigurationError` otherwise.
    */
   maxCollectionSize: number;
 }
@@ -34,10 +42,14 @@ export interface SerializerConfig {
  * Valid range for `maxDepth`, from the protocol's decode-bounds rule
  * (spec/interop-mode.md, "Decode bounds"): a reader's nesting bound MUST be at
  * least 32 and MUST NOT exceed 1024. Above it, a backed nesting chain decodes
- * and recurses unbounded; below it, legal interop values are rejected.
+ * and recurses past the protocol's bound; below it, legal interop values are
+ * rejected.
  */
 const MIN_MAX_DEPTH = 32;
 const MAX_MAX_DEPTH = 1024;
+
+/** Size bounds that must be positive safe integers (see the constructor). */
+const SIZE_BOUND_FIELDS = ['maxEncodedSize', 'maxDecodedSize', 'maxCollectionSize'] as const;
 
 const DEFAULT_CONFIG: SerializerConfig = {
   maxEncodedSize: DEFAULT_MAX_ENCODED_SIZE,
@@ -486,9 +498,11 @@ export class MessagePackSerializer implements Serializer {
   private readonly config: SerializerConfig;
 
   /**
-   * @throws {ConfigurationError} if `maxDepth` is not an integer in [32, 1024].
-   *   Rejected, never clamped: `NaN` or an explicit `undefined` would otherwise
-   *   switch the depth check off (`depth > NaN` is always false).
+   * @throws {ConfigurationError} if `maxDepth` is not an integer in [32, 1024],
+   *   or if `maxEncodedSize`, `maxDecodedSize` or `maxCollectionSize` is not a
+   *   positive safe integer. Rejected, never clamped: `NaN`, `Infinity` or an
+   *   explicit `undefined` would otherwise switch the bound off
+   *   (`size > NaN` is always false).
    */
   constructor(config: Partial<SerializerConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -497,6 +511,14 @@ export class MessagePackSerializer implements Serializer {
       throw new ConfigurationError(
         `serializer.maxDepth must be an integer from ${MIN_MAX_DEPTH} to ${MAX_MAX_DEPTH}, got ${String(maxDepth)}`
       );
+    }
+    for (const field of SIZE_BOUND_FIELDS) {
+      const value = this.config[field];
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new ConfigurationError(
+          `serializer.${field} must be a positive safe integer, got ${String(value)}`
+        );
+      }
     }
   }
 

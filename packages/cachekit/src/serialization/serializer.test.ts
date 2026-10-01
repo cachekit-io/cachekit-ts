@@ -220,6 +220,7 @@ describe('MessagePackSerializer', () => {
 
     it('throws SerializationError for excessive depth', () => {
       expect(() => shallowSerializer.encode(nest(33))).toThrow(SerializationError);
+      expect(() => shallowSerializer.encode(nest(33))).toThrow('Max depth of 32 exceeded');
     });
 
     it('throws with correct error message for depth', () => {
@@ -238,11 +239,13 @@ describe('MessagePackSerializer', () => {
 
     it('checks depth for arrays', () => {
       expect(() => shallowSerializer.encode(nest(33, true))).toThrow(SerializationError);
+      expect(() => shallowSerializer.encode(nest(33, true))).toThrow('Max depth of 32 exceeded');
     });
 
     it('checks depth for Map values', () => {
       const deep = new Map([['key', nest(32)]]); // Map + 32 levels = 33
       expect(() => shallowSerializer.encode(deep)).toThrow(SerializationError);
+      expect(() => shallowSerializer.encode(deep)).toThrow('Max depth of 32 exceeded');
     });
   });
 
@@ -279,14 +282,14 @@ describe('MessagePackSerializer', () => {
       expect(() => customSerializer.encode({ test: 'data' })).not.toThrow();
     });
 
-    it.each([32, 100, 1024])(
+    it.each([32, 1024])(
       'accepts maxDepth %s (inside the protocol bound [32, 1024])',
       (maxDepth) => {
         expect(() => new MessagePackSerializer({ maxDepth })).not.toThrow();
       }
     );
 
-    it.each([31, 1025, 0, -1, 2048, 100.5, NaN, Infinity, undefined])(
+    it.each([31, 1025, 0, -1, 100.5, NaN, Infinity, undefined])(
       'rejects maxDepth %s with ConfigurationError, never clamps',
       (maxDepth) => {
         const config = { maxDepth } as { maxDepth: number };
@@ -294,6 +297,26 @@ describe('MessagePackSerializer', () => {
         expect(() => new MessagePackSerializer(config)).toThrow(
           /maxDepth must be an integer from 32 to 1024/
         );
+      }
+    );
+
+    describe.each(['maxEncodedSize', 'maxDecodedSize', 'maxCollectionSize'] as const)(
+      '%s',
+      (field) => {
+        it.each([undefined, NaN, Infinity, 0, -1, 1.5])(
+          'rejects %s with ConfigurationError naming the field',
+          (value) => {
+            const config = { [field]: value } as Record<string, number>;
+            expect(() => new MessagePackSerializer(config)).toThrow(ConfigurationError);
+            expect(() => new MessagePackSerializer(config)).toThrow(
+              `serializer.${field} must be a positive safe integer, got ${String(value)}`
+            );
+          }
+        );
+
+        it.each([1, Number.MAX_SAFE_INTEGER])('accepts %s', (value) => {
+          expect(() => new MessagePackSerializer({ [field]: value })).not.toThrow();
+        });
       }
     );
   });

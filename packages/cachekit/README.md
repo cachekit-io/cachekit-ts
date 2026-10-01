@@ -140,9 +140,9 @@ const cache = createCache({
 
   // Serializer DoS-protection limits — see "Value size limits" below.
   serializer: {
-    maxEncodedSize: 1024 * 1024, // 1 MiB default
-    maxDecodedSize: 10 * 1024 * 1024, // 10 MiB default
-    maxDepth: 100, // default; must be 32-1024, else ConfigurationError
+    maxEncodedSize: 1024 * 1024, // 1 MiB default; must be a positive safe integer
+    maxDecodedSize: 10 * 1024 * 1024, // 10 MiB default; must be a positive safe integer
+    maxDepth: 100, // default; must be an integer from 32 to 1024, else ConfigurationError
   },
 
   // ByteStorage envelope (LZ4 + integrity). Defaults to true on every
@@ -191,6 +191,14 @@ large for what it declares, is never unpacked, so the core codec never
 allocates for it. Size it against your runtime's memory limit (and, on a shared/concurrent runtime, against peak concurrent
 reads), not just your largest value: on a 128 MiB Workers isolate a 10 MiB cap
 already permits a multi-hundred-MiB transient.
+
+Every limit is validated when the cache is created. `maxEncodedSize`,
+`maxDecodedSize` and `maxCollectionSize` must be positive safe integers;
+anything else — `undefined`, `NaN`, `Infinity`, `0`, a negative or a fraction —
+throws `ConfigurationError` naming the field, before any backend connection
+opens. So `maxDecodedSize: Number(process.env.LIMIT)` fails loudly when the
+variable is unset instead of silently switching the bound off. For "no
+practical limit", pass `Number.MAX_SAFE_INTEGER`.
 
 The SDK also reports every rejected `set()` through its
 [pluggable logger](#observability) as a rate-limited, greppable
