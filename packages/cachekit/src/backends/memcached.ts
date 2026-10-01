@@ -15,6 +15,15 @@ const DEFAULT_MAX_ITEM_SIZE_BYTES = 1024 * 1024;
 /** Memcached protocol key limit, in bytes (key prefix included). */
 const MAX_KEY_BYTES = 250;
 
+/** memjs's fixed `retry_delay` between tries (0.2 s). */
+const MEMJS_RETRY_DELAY_MS = 200;
+
+/** Headroom over memjs's own worst case, so the deadline fires only once memjs has lost the request. */
+const DEADLINE_SLACK_MS = 500;
+
+/** The memjs internals the deadline needs: `close()`/`quit()` only half-close a socket. */
+type MemjsSockets = { servers: ReadonlyArray<{ _socket?: { destroy(): void } }> };
+
 /**
  * Memcached backend using memjs (binary protocol, multi-server support).
  *
@@ -30,6 +39,16 @@ const MAX_KEY_BYTES = 250;
  * `refreshTTL` ships anyway because the `touch` command makes it trivially
  * free, exactly mirroring py's `refresh_ttl`.
  *
+ * Every operation settles within a deadline of
+ * `tries × (connectTimeout + timeout) + (tries − 1) × 200 ms + 500 ms`, where
+ * `tries` is `retries` (memjs counts total tries; 0 or 1 means one try) —
+ * 6.7 s at the defaults. memjs can lose a request's timeout when it is sent
+ * just after another request timed out, which would otherwise hang the op
+ * forever against a server that stops answering. On expiry the op rejects
+ * with `TimeoutError` (retryable, so retries and the circuit breaker see a
+ * bounded failure) and the memjs client is discarded, so the next op starts
+ * on a fresh connection.
+ *
  * @example
  * ```typescript
  * import { memcached } from '@cachekit-io/cachekit/backends/memcached';
@@ -41,6 +60,8 @@ const MAX_KEY_BYTES = 250;
  */
 export class MemcachedBackend implements Backend {
   private readonly config: Required<MemcachedBackendConfig>;
+  /** Per-op bound — see the class docs. */
+  private readonly deadlineMs: number;
   private closed = false;
   /** Memoized lazy client — memjs is an optional peer dep, imported on first use. */
   private clientPromise: Promise<MemjsClient> | null = null;
@@ -74,19 +95,22 @@ export class MemcachedBackend implements Backend {
       keyPrefix: config.keyPrefix ?? '',
       maxItemSizeBytes: config.maxItemSizeBytes ?? DEFAULT_MAX_ITEM_SIZE_BYTES,
     };
+
+    // Each try may spend connectTimeout connecting before memjs arms its
+    // request timer, and every retry reconnects — leaving out the connect term
+    // would cut off a try memjs is still running legitimately.
+    const tries = Math.max(1, Math.ceil(this.config.retries));
+    this.deadlineMs =
+      tries * (this.config.connectTimeout + this.config.timeout) +
+      (tries - 1) * MEMJS_RETRY_DELAY_MS +
+      DEADLINE_SLACK_MS;
   }
 
   async get(key: string): Promise<Uint8Array | null> {
     this.ensureNotClosed();
     this.validateKey(key);
-    const client = await this.getClient();
-
-    try {
-      const { value } = await client.get(this.prefixedKey(key));
-      return value ? new Uint8Array(value) : null;
-    } catch (error) {
-      throw this.wrapError('get', error);
-    }
+    const { value } = await this.run('get', (client) => client.get(this.prefixedKey(key)));
+    return value ? new Uint8Array(value) : null;
   }
 
   async set(key: string, value: Uint8Array, ttl?: number): Promise<void> {
@@ -110,38 +134,23 @@ export class MemcachedBackend implements Backend {
     const expires =
       effectiveTtl > 0 ? Math.min(Math.max(1, Math.floor(effectiveTtl)), MAX_MEMCACHED_TTL) : 0;
 
-    const client = await this.getClient();
-    try {
-      await client.set(this.prefixedKey(key), Buffer.from(value), { expires });
-    } catch (error) {
-      throw this.wrapError('set', error);
-    }
+    await this.run('set', (client) =>
+      client.set(this.prefixedKey(key), Buffer.from(value), { expires })
+    );
   }
 
   async delete(key: string): Promise<boolean> {
     this.ensureNotClosed();
     this.validateKey(key);
-    const client = await this.getClient();
-
-    try {
-      return await client.delete(this.prefixedKey(key));
-    } catch (error) {
-      throw this.wrapError('delete', error);
-    }
+    return this.run('delete', (client) => client.delete(this.prefixedKey(key)));
   }
 
   /** Memcached has no native EXISTS command; GET and check for null (matches py). */
   async exists(key: string): Promise<boolean> {
     this.ensureNotClosed();
     this.validateKey(key);
-    const client = await this.getClient();
-
-    try {
-      const { value } = await client.get(this.prefixedKey(key));
-      return value !== null;
-    } catch (error) {
-      throw this.wrapError('exists', error);
-    }
+    const { value } = await this.run('exists', (client) => client.get(this.prefixedKey(key)));
+    return value !== null;
   }
 
   /**
@@ -167,12 +176,9 @@ export class MemcachedBackend implements Backend {
       );
     }
 
-    const client = await this.getClient();
-    try {
-      return await client.touch(this.prefixedKey(key), Math.min(seconds, MAX_MEMCACHED_TTL));
-    } catch (error) {
-      throw this.wrapError('refreshTTL', error);
-    }
+    return this.run('refreshTTL', (client) =>
+      client.touch(this.prefixedKey(key), Math.min(seconds, MAX_MEMCACHED_TTL))
+    );
   }
 
   /**
@@ -205,6 +211,47 @@ export class MemcachedBackend implements Backend {
   }
 
   // ==================== private ====================
+
+  /**
+   * Run one memjs call, bounded by the per-op deadline. On expiry, reject with
+   * TimeoutError and discard the client: its sockets may carry the stale
+   * close handler and timeout state that lost the request.
+   */
+  private async run<T>(operation: string, call: (client: MemjsClient) => Promise<T>): Promise<T> {
+    const clientPromise = this.getClient();
+    const client = await clientPromise;
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        this.discardClient(clientPromise, client);
+        reject(
+          new TimeoutError(
+            `Memcached ${operation} timed out: no response within ${this.deadlineMs}ms`
+          )
+        );
+      }, this.deadlineMs);
+    });
+
+    try {
+      return await Promise.race([call(client), deadline]);
+    } catch (error) {
+      if (error instanceof TimeoutError) throw error;
+      throw this.wrapError(operation, error);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private discardClient(clientPromise: Promise<MemjsClient>, client: MemjsClient): void {
+    // A concurrent op may already have replaced it; never discard the new one.
+    if (this.clientPromise === clientPromise) this.clientPromise = null;
+    // destroy(), not memjs's close()/quit(): those only end() the socket, which
+    // then waits on a FIN from a server that may never send one.
+    for (const server of (client as unknown as MemjsSockets).servers) {
+      server._socket?.destroy();
+    }
+  }
 
   private prefixedKey(key: string): string {
     return this.config.keyPrefix ? `${this.config.keyPrefix}${key}` : key;
