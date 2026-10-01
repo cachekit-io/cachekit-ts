@@ -208,7 +208,7 @@ export interface RedisBackendConfig {
  *
  * The backend lives at the `@cachekit-io/cachekit/backends/memcached` subpath
  * export and requires the optional `memjs` peer dependency — neither enters
- * the root bundle, so browser/edge consumers are unaffected.
+ * the root entry or the Workers entry.
  */
 export interface MemcachedBackendConfig {
   /**

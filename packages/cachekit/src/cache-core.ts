@@ -151,9 +151,11 @@ export interface InvalidationChannelLike {
 
 /**
  * Structural subset of the Workers `ExecutionContext` the cache uses.
- * Structural on purpose: no dependency on @cloudflare/workers-types, and
- * any platform exposing a compatible waitUntil (Vercel Edge, Deno Deploy)
- * satisfies it.
+ * Structural on purpose: no dependency on @cloudflare/workers-types. Any
+ * object with a compatible waitUntil satisfies the type; that is not a
+ * runtime-support claim. The SDK ships two entries: Node (the `import` /
+ * `require` conditions) and workerd (the `workerd` condition and the
+ * `/workers` subpath).
  */
 export interface ExecutionContextLike {
   waitUntil(promise: Promise<unknown>): void;

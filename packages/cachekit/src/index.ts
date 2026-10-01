@@ -12,10 +12,13 @@ export type {
   FileBackendConfig,
 } from './backends/types.js';
 // NOTE: the Memcached and File backends themselves are deliberately NOT
-// re-exported here. They are Node-runtime only (memjs / node:fs) and live
-// behind subpath exports so browser/edge bundles never pull them in:
+// re-exported here. They live behind subpath exports so the root entry never
+// loads memjs or the File backend:
 //   import { file } from '@cachekit-io/cachekit/backends/file';
 //   import { memcached } from '@cachekit-io/cachekit/backends/memcached';
+// The root entry is still Node-only: it loads ioredis, node:crypto and the
+// NAPI core, whose loader requires node:fs. Edge code uses the `workerd`
+// condition or '@cachekit-io/cachekit/workers'.
 export type { InvalidationConfig } from './types/cache.js';
 // Observability: the Prometheus collector reaches the optional prom-client
 // peer dependency, so it stays off the shared (Workers-safe) surface.
