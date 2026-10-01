@@ -296,10 +296,10 @@ describe('keyring rotation — Workers EncryptionManager (wasm keyring loop)', (
 });
 
 // The vendored vectors are at most 9 B, a single AES block. This ciphertext
-// spans 13 blocks plus a partial, produced by OpenSSL (python cryptography
-// AESGCM) under the HKDF key for the fixture's master key and tenant, so the
-// multi-block CTR/GHASH path of the wasm build is pinned to an independent
-// implementation (LAB-7083).
+// spans 12 full blocks plus an 8 B partial, produced by OpenSSL (python
+// cryptography AESGCM) under the HKDF key for the fixture's master key and
+// tenant, so the multi-block CTR/GHASH path of the wasm build is pinned to an
+// independent implementation (LAB-7083).
 describe('multi-block AES-GCM (independent reference)', () => {
   const CIPHERTEXT_200_HEX =
     '000102030405060708090a0b8097c102501a4144c6382413769eb585cf2d43ce4f64e557d38ce9086cc8cac41621d10bf0bd7c7d7752d18e' + // pragma: allowlist secret
