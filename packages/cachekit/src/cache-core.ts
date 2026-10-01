@@ -1009,18 +1009,19 @@ export class CacheImpl implements SecureCache {
     this.ensureNotClosed();
     this.backend.validateKey?.(key); // see Backend.validateKey
 
-    return this.run('delete', key, false, async (): Promise<boolean> => {
-      // Delete from backend
-      const deleted = await this.backend.delete(key);
-
-      // Invalidate L1
+    // Invalidate L1 after the L2 attempt whatever its outcome — a failed
+    // write still fills L1 (setEntry), so an L1 eviction gated on L2 success
+    // would serve the deleted value for its full TTL. Not before: get()
+    // refills L1 from L2 unguarded, so evicting first lets a concurrent read
+    // put the old value back before the backend delete lands.
+    try {
+      return await this.run('delete', key, false, () => this.backend.delete(key));
+    } finally {
       if (this.l1) {
         this.l1.invalidateByKey(key);
         this.publishL1Stats();
       }
-
-      return deleted;
-    });
+    }
   }
 
   async exists(key: string): Promise<boolean> {

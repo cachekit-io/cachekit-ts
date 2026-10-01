@@ -8,7 +8,7 @@
  * the L1 copy after a failed L2 write; these pin the same behaviour here.
  */
 import { createHash } from 'node:crypto';
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { assert, describe, it, expect, afterEach, vi } from 'vitest';
 import { createCache } from './cache.js';
 import { BackendError } from './errors.js';
 import { setLogger } from './logger.js';
@@ -19,9 +19,9 @@ import type { L1Cache } from './l1/lru-cache.js';
 const MASTER_KEY = createHash('sha256').update('cachekit LAB-7157 test fixture').digest('hex');
 const CANARY = 'ssn-000-00-0000-do-not-leak';
 
-/** A backend whose reads miss and whose writes reject with `classification`. */
+/** A backend whose reads miss and whose writes and deletes reject with `classification`. */
 function rejectingBackend(classification: ErrorClassification) {
-  const calls = { get: 0, set: 0 };
+  const calls = { get: 0, set: 0, delete: 0 };
   const backend: Backend = {
     get: async () => {
       calls.get++;
@@ -31,7 +31,10 @@ function rejectingBackend(classification: ErrorClassification) {
       calls.set++;
       throw new BackendError(`rejected: body text ${CANARY}`, classification);
     },
-    delete: async () => false,
+    delete: async () => {
+      calls.delete++;
+      throw new BackendError(`rejected: body text ${CANARY}`, classification);
+    },
     exists: async () => false,
     close: async () => {},
   };
@@ -122,8 +125,8 @@ describe('a failed L2 write still fills L1 (LAB-7157)', () => {
     await cache.set('users:1', { ssn: CANARY });
 
     const stored = l1Of(cache).get('users:1');
-    expect(stored).toBeInstanceOf(Uint8Array);
-    expect(new TextDecoder().decode(stored as Uint8Array)).not.toContain(CANARY);
+    assert(stored instanceof Uint8Array, 'expected L1 to hold ciphertext bytes');
+    expect(new TextDecoder().decode(stored)).not.toContain(CANARY);
     expect(await cache.get('users:1')).toEqual({ ssn: CANARY });
   });
 
@@ -159,6 +162,46 @@ describe('a failed L2 write still fills L1 (LAB-7157)', () => {
       expect(l1Of(cache).get('users:1')).toEqual(encrypted ? null : 'v');
     }
   );
+
+  // A failed L2 write now leaves the value in L1, so a delete() whose L2 leg
+  // fails must still evict it, or get() and wrap() serve the deleted value
+  // for its full TTL.
+  it('delete() clears L1 even when the L2 delete fails', async () => {
+    setLogger(() => {});
+    const { backend, calls } = rejectingBackend('authentication');
+    const cache = makeCache(backend);
+    await cache.set('users:1', 'v');
+
+    await expect(cache.delete('users:1')).resolves.toBe(false);
+
+    expect(calls.delete).toBeGreaterThan(0);
+    expect(l1Of(cache).get('users:1')).toBeNull();
+    expect(await cache.get('users:1')).toBeNull();
+  });
+
+  it('delete() clears L1 when the breaker skips the L2 delete', async () => {
+    setLogger(() => {});
+    const { backend, calls } = rejectingBackend('transient');
+    const cache = makeCache(backend, { failureThreshold: 1 });
+    await cache.set('users:0', 'v');
+    await cache.set('users:1', 'v');
+
+    await expect(cache.delete('users:1')).resolves.toBe(false);
+
+    expect(calls.delete).toBe(0);
+    expect(l1Of(cache).get('users:1')).toBeNull();
+  });
+
+  it('with degradation off, a failed delete throws and still clears L1', async () => {
+    const { backend } = rejectingBackend('authentication');
+    backend.set = async () => {};
+    const cache = makeCache(backend, { degradation: false });
+    await cache.set('users:1', 'v');
+
+    await expect(cache.delete('users:1')).rejects.toBeInstanceOf(BackendError);
+
+    expect(l1Of(cache).get('users:1')).toBeNull();
+  });
 
   it('logs an authentication failure at most once per window, without the key or the error text', async () => {
     const logs: unknown[][] = [];
