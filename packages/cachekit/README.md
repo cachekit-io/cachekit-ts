@@ -603,7 +603,7 @@ bundle contains no `node:*` builtins, no native addons, no ioredis, and no
 prom-client. Crypto (AES-256-GCM + HKDF-SHA256, counter nonces) and the
 ByteStorage wire envelope (LZ4 + xxHash3-64) run on a wasm32 build of the
 same audited Rust core the Node SDK uses (`@cachekit-io/cachekit-core-wasm`,
-~55 KB gzipped), so ciphertexts and envelopes are byte-compatible across
+~64 KB gzipped), so ciphertexts and envelopes are byte-compatible across
 Node, Workers, Python, and Rust.
 
 ```typescript

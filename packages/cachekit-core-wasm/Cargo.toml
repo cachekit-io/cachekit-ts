@@ -31,8 +31,12 @@ zeroize = "1"
 # Standalone crate — never join an enclosing cargo workspace.
 [workspace]
 
+# opt-level 3, not "z": the LZ4, xxh3, AES-GCM, GHASH and SHA-256 loops run on
+# every SET pack, L2 read and secure op, and "z" made them 2-4x (LZ4) and ~1.5x
+# (AES) slower for ~7 KB gzip saved (LAB-7083). Flags only — output bytes are
+# unchanged; the workers-lane fixtures pin that.
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"

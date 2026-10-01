@@ -23,9 +23,10 @@ cargo build --release --target wasm32-unknown-unknown
 wasm-bindgen --target web --out-dir pkg \
   target/wasm32-unknown-unknown/release/cachekit_core_wasm.wasm
 
-# Rust emits bulk-memory / nontrapping-fptoint ops by default; workerd
-# supports both, wasm-opt just needs them enabled to validate.
-wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int \
+# Rust emits bulk-memory / nontrapping-fptoint ops by default, and
+# .cargo/config.toml enables simd128; workerd supports all three, wasm-opt just
+# needs them enabled to validate. -O3 matches the crate's opt-level (LAB-7083).
+wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-simd \
   -o pkg/cachekit_core_wasm_bg.wasm pkg/cachekit_core_wasm_bg.wasm
 
 # Size budget (LAB-595 acceptance criterion): gzipped wasm < 100 KB.
