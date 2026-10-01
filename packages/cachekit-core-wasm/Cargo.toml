@@ -32,9 +32,10 @@ zeroize = "1"
 [workspace]
 
 # opt-level 3, not "z": the LZ4, xxh3, AES-GCM, GHASH and SHA-256 loops run on
-# every SET pack, L2 read and secure op, and "z" made them 2-4x (LZ4) and ~1.5x
-# (AES) slower for ~7 KB gzip saved (LAB-7083). Flags only — output bytes are
-# unchanged; the workers-lane fixtures pin that.
+# every SET pack, L2 read and secure op. z -> 3 plus simd128 (.cargo/config.toml)
+# measured 2-4x faster LZ4 and ~1.5x faster AES for ~7 KB more gzip (LAB-7083).
+# Output bytes are unchanged; the workers-lane fixtures pin that, including
+# independent-reference vectors for the >1 KB xxh3 and multi-block AES paths.
 [profile.release]
 opt-level = 3
 lto = true

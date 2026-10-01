@@ -22,7 +22,7 @@ let initialized = false;
  * Instantiate the bundled wasm module (synchronous, idempotent).
  *
  * Must be called before any other export is used. Instantiation is a
- * one-time cost per isolate (~150 KB module); Workers permits synchronous
+ * one-time cost per isolate (~177 KB module); Workers permits synchronous
  * `new WebAssembly.Instance` on precompiled modules.
  */
 export function ensureInitialized() {

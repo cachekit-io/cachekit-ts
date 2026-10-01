@@ -141,3 +141,15 @@ describe('wire-format vectors (wasm ByteStorage)', () => {
     expect(storage.unpack(packed)).toEqual(data);
   });
 });
+
+// The vendored vectors stop at 1 KB, but xxh3 runs its scramble step only on
+// longer inputs, and under simd128 that step is xxhash-rust's hand-written
+// wasm SIMD path (LAB-7083). Pin it to an independent xxh3 (python-xxhash,
+// C reference): a same-build round-trip cannot catch a wrong checksum.
+describe('xxh3 checksum above 1 KB (independent reference)', () => {
+  it('4 KB envelope carries the reference xxh3_64 digest', () => {
+    const data = Uint8Array.from({ length: 4096 }, (_, i) => (i * 131 + (i >> 7)) & 0xff);
+    const [, checksum] = decode(new ByteStorage().pack(data)) as [unknown, ArrayLike<number>];
+    expect(bytesToHex(Uint8Array.from(checksum))).toBe('b1d101cdbe66c94d'); // pragma: allowlist secret
+  });
+});

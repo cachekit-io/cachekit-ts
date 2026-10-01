@@ -64,8 +64,9 @@ pub fn version() -> String {
 /// ByteStorage provides LZ4 compression with xxHash3-64 integrity verification.
 ///
 /// Thin wrapper around cachekit-core's ByteStorage — the full msgpack
-/// envelope (compressed_data, checksum, original_size, format), identical
-/// bytes to the NAPI binding.
+/// envelope (compressed_data, checksum, original_size, format). Envelopes
+/// interoperate with the NAPI binding and every other SDK (each reads the
+/// others'), but LZ4 output bytes can differ for inputs of about 64 KiB and up.
 #[wasm_bindgen]
 pub struct ByteStorage {
     inner: CoreByteStorage,

@@ -117,8 +117,9 @@ const NOOP_METRICS: MetricsCollector = {
 
 /**
  * ByteStorage envelope surface (LZ4 + xxHash3-64 + msgpack envelope).
- * Implemented by the NAPI binding on Node and the wasm binding on Workers —
- * byte-identical output.
+ * Implemented by the NAPI binding on Node and the wasm binding on Workers.
+ * Envelopes interoperate both ways; LZ4 output bytes can differ for inputs of
+ * about 64 KiB and up.
  */
 export interface ByteStorageLike {
   pack(data: Uint8Array): Uint8Array;

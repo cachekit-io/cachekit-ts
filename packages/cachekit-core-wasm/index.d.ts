@@ -11,7 +11,9 @@
 
 /**
  * ByteStorage provides LZ4 compression with xxHash3-64 integrity verification.
- * Full msgpack envelope — byte-identical to the NAPI binding.
+ * Full msgpack envelope. Envelopes interoperate with the NAPI binding and
+ * every other SDK (each reads the others'), but LZ4 output bytes can differ
+ * for inputs of about 64 KiB and up.
  */
 export declare class ByteStorage {
   constructor();

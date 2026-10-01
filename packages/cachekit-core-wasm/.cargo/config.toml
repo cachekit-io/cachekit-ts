@@ -1,5 +1,7 @@
-# simd128 lets LLVM vectorise the AES/GHASH/xxh3 loops (LAB-7083). workerd's V8
-# supports wasm SIMD, and this package is Workers-only. build.sh's wasm-opt must
-# pass --enable-simd to match.
+# simd128 switches xxhash-rust to its hand-written wasm SIMD xxh3 path and lets
+# LLVM auto-vectorise elsewhere (LAB-7083). workerd's V8 supports wasm SIMD, and
+# this package is Workers-only. build.sh's wasm-opt must pass --enable-simd to
+# match. An exported RUSTFLAGS overrides this file and silently drops SIMD
+# (slower, not incorrect).
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "target-feature=+simd128"]
