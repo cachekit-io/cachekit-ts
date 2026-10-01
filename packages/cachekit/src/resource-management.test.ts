@@ -103,9 +103,15 @@ describe('config errors throw before the backend is resolved', () => {
       { encryption: { masterKey: 'not-hex' } },
       /Master key must be hex-encoded/,
     ],
+    [
+      // fakeRuntime has no createInvalidationChannel, as on Workers
+      'invalidation without Pub/Sub',
+      { invalidation: { redis: createMockRedis() } },
+      /Cross-instance invalidation is not supported in this runtime/,
+    ],
   ])('%s: throws ConfigurationError without calling resolveBackend', (_name, extra, message) => {
     const { runtime, resolveBackend } = fakeRuntime();
-    const build = () => new CacheImpl({ backend, ...extra } as CacheOptions, runtime);
+    const build = () => new CacheImpl({ backend, ...extra }, runtime);
     expect(build).toThrow(ConfigurationError);
     expect(build).toThrow(message);
     expect(resolveBackend).not.toHaveBeenCalled();
@@ -113,7 +119,7 @@ describe('config errors throw before the backend is resolved', () => {
 
   it('resolves the backend once config is valid', () => {
     const { runtime, resolveBackend } = fakeRuntime();
-    new CacheImpl({ backend } as CacheOptions, runtime);
+    new CacheImpl({ backend }, runtime);
     expect(resolveBackend).toHaveBeenCalledTimes(1);
   });
 });
