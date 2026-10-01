@@ -525,8 +525,9 @@ per operation rather than opening the breaker. A write that fails this way, or
 under any other L2 failure, still fills L1, so a repeat `wrap()` or `get()` on
 that key is served from L1 for its TTL instead of recomputing; with degradation
 off the write rejects and L1 stays empty. A `delete()` evicts the L1 copy
-whether or not its L2 delete succeeds, so L1 never keeps serving a value the
-caller deleted. An encrypted cache's L1 holds only the
+whether or not its L2 delete succeeds. When the L2 delete fails the value stays
+in L2, so the next read that reaches L2 can return it and fill L1 again. An
+encrypted cache's L1 holds only the
 ciphertext, so a write that never got as far as encrypting (an open breaker, or
 encryption itself failing) leaves L1 empty there. An `authentication` failure is
 logged through the error logger, at most once a minute per cache, as
