@@ -142,6 +142,7 @@ const cache = createCache({
   serializer: {
     maxEncodedSize: 1024 * 1024, // 1 MiB default
     maxDecodedSize: 10 * 1024 * 1024, // 10 MiB default
+    maxDepth: 100, // default; must be 32-1024, else ConfigurationError
   },
 
   // ByteStorage envelope (LZ4 + integrity). Defaults to true on every

@@ -2,10 +2,16 @@ import { describe, it, expect, vi } from 'vitest';
 import { runInNewContext } from 'node:vm';
 import { decode as msgpackDecode, encode as msgpackEncode } from '@msgpack/msgpack';
 import { MessagePackSerializer, assertDecodeDepth, boundedDecodeOptions } from './serializer.js';
-import { ValueTooLargeError, SerializationError } from '../errors.js';
+import { ConfigurationError, ValueTooLargeError, SerializationError } from '../errors.js';
 
 const retag = <T extends object>(value: T, tag: string): T =>
   Object.defineProperty(value, Symbol.toStringTag, { value: tag });
+/** `levels` nested collections around `1`: objects by default, arrays on request. */
+const nest = (levels: number, array = false): unknown => {
+  let v: unknown = 1;
+  for (let i = 0; i < levels; i++) v = array ? [v] : { n: v };
+  return v;
+};
 const detach = (buf: ArrayBuffer) => {
   structuredClone(buf, { transfer: [buf] });
   return buf;
@@ -209,39 +215,33 @@ describe('MessagePackSerializer', () => {
   });
 
   describe('DoS protection - maxDepth', () => {
+    // 32 is the lowest maxDepth the constructor accepts (protocol decode bound).
+    const shallowSerializer = new MessagePackSerializer({ maxDepth: 32 });
+
     it('throws SerializationError for excessive depth', () => {
-      const shallowSerializer = new MessagePackSerializer({ maxDepth: 3 });
-      const deep = { a: { b: { c: { d: 1 } } } };
-      expect(() => shallowSerializer.encode(deep)).toThrow(SerializationError);
+      expect(() => shallowSerializer.encode(nest(33))).toThrow(SerializationError);
     });
 
     it('throws with correct error message for depth', () => {
-      const shallowSerializer = new MessagePackSerializer({ maxDepth: 3 });
-      const deep = { a: { b: { c: { d: 1 } } } };
       try {
-        shallowSerializer.encode(deep);
+        shallowSerializer.encode(nest(33));
         expect.fail('Should have thrown');
       } catch (error) {
         expect(error).toBeInstanceOf(SerializationError);
-        expect((error as Error).message).toContain('Max depth of 3 exceeded');
+        expect((error as Error).message).toContain('Max depth of 32 exceeded');
       }
     });
 
     it('allows nesting at depth limit', () => {
-      const shallowSerializer = new MessagePackSerializer({ maxDepth: 3 });
-      const acceptable = { a: { b: { c: 1 } } }; // depth 3
-      expect(() => shallowSerializer.encode(acceptable)).not.toThrow();
+      expect(() => shallowSerializer.encode(nest(32))).not.toThrow();
     });
 
     it('checks depth for arrays', () => {
-      const shallowSerializer = new MessagePackSerializer({ maxDepth: 2 });
-      const deep = [[[1]]]; // depth 3
-      expect(() => shallowSerializer.encode(deep)).toThrow(SerializationError);
+      expect(() => shallowSerializer.encode(nest(33, true))).toThrow(SerializationError);
     });
 
     it('checks depth for Map values', () => {
-      const shallowSerializer = new MessagePackSerializer({ maxDepth: 2 });
-      const deep = new Map([['key', { nested: { tooDeep: 1 } }]]);
+      const deep = new Map([['key', nest(32)]]); // Map + 32 levels = 33
       expect(() => shallowSerializer.encode(deep)).toThrow(SerializationError);
     });
   });
@@ -278,6 +278,24 @@ describe('MessagePackSerializer', () => {
       const customSerializer = new MessagePackSerializer({ maxDepth: 50 });
       expect(() => customSerializer.encode({ test: 'data' })).not.toThrow();
     });
+
+    it.each([32, 100, 1024])(
+      'accepts maxDepth %s (inside the protocol bound [32, 1024])',
+      (maxDepth) => {
+        expect(() => new MessagePackSerializer({ maxDepth })).not.toThrow();
+      }
+    );
+
+    it.each([31, 1025, 0, -1, 2048, 100.5, NaN, Infinity, undefined])(
+      'rejects maxDepth %s with ConfigurationError, never clamps',
+      (maxDepth) => {
+        const config = { maxDepth } as { maxDepth: number };
+        expect(() => new MessagePackSerializer(config)).toThrow(ConfigurationError);
+        expect(() => new MessagePackSerializer(config)).toThrow(
+          /maxDepth must be an integer from 32 to 1024/
+        );
+      }
+    );
   });
 
   describe('LAB-281: DoS protection - forged collection headers on decode', () => {
@@ -393,10 +411,8 @@ describe('MessagePackSerializer', () => {
     });
 
     it('enforces the depth bound at the configured maxDepth', () => {
-      const shallow = new MessagePackSerializer({ maxDepth: 3 });
-      let v: unknown = 1;
-      for (let i = 0; i < 4; i++) v = [v]; // 4 levels of nesting
-      const buf = serializer.encode(v); // default serializer encodes fine (maxDepth 100)
+      const shallow = new MessagePackSerializer({ maxDepth: 32 });
+      const buf = serializer.encode(nest(33, true)); // default serializer encodes fine (maxDepth 100)
       expect(() => shallow.decode(buf)).toThrow(/depth/);
     });
 

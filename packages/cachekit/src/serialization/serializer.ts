@@ -1,6 +1,6 @@
 import { ExtData, encode, decode } from '@msgpack/msgpack';
 import { blake2b } from '@noble/hashes/blake2.js';
-import { SerializationError, ValueTooLargeError } from '../errors.js';
+import { ConfigurationError, SerializationError, ValueTooLargeError } from '../errors.js';
 import {
   DEFAULT_MAX_ENCODED_SIZE,
   DEFAULT_MAX_DECODED_SIZE,
@@ -16,7 +16,11 @@ export interface SerializerConfig {
   maxEncodedSize: number;
   /** Maximum size of decoded input in bytes (default: 10MB) */
   maxDecodedSize: number;
-  /** Maximum object nesting depth (default: 100) */
+  /**
+   * Maximum object nesting depth (default: 100). Must be an integer from 32 to
+   * 1024, the protocol's decode bound; the constructor throws
+   * `ConfigurationError` otherwise.
+   */
   maxDepth: number;
   /**
    * Maximum collection size for Maps, Sets, Arrays, Objects (default: 10000).
@@ -25,6 +29,15 @@ export interface SerializerConfig {
    */
   maxCollectionSize: number;
 }
+
+/**
+ * Valid range for `maxDepth`, from the protocol's decode-bounds rule
+ * (spec/interop-mode.md, "Decode bounds"): a reader's nesting bound MUST be at
+ * least 32 and MUST NOT exceed 1024. Above it, a backed nesting chain decodes
+ * and recurses unbounded; below it, legal interop values are rejected.
+ */
+const MIN_MAX_DEPTH = 32;
+const MAX_MAX_DEPTH = 1024;
 
 const DEFAULT_CONFIG: SerializerConfig = {
   maxEncodedSize: DEFAULT_MAX_ENCODED_SIZE,
@@ -472,8 +485,19 @@ export function normalize(
 export class MessagePackSerializer implements Serializer {
   private readonly config: SerializerConfig;
 
+  /**
+   * @throws {ConfigurationError} if `maxDepth` is not an integer in [32, 1024].
+   *   Rejected, never clamped: `NaN` or an explicit `undefined` would otherwise
+   *   switch the depth check off (`depth > NaN` is always false).
+   */
   constructor(config: Partial<SerializerConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
+    const { maxDepth } = this.config;
+    if (!Number.isInteger(maxDepth) || maxDepth < MIN_MAX_DEPTH || maxDepth > MAX_MAX_DEPTH) {
+      throw new ConfigurationError(
+        `serializer.maxDepth must be an integer from ${MIN_MAX_DEPTH} to ${MAX_MAX_DEPTH}, got ${String(maxDepth)}`
+      );
+    }
   }
 
   /** The decoded-size ceiling, for callers that must enforce it upstream of decode(). */
