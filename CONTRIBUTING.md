@@ -69,6 +69,23 @@ pnpm --filter @cachekit-io/cachekit test:integration
 pnpm test:coverage
 ```
 
+## Measuring performance
+
+Three harnesses measure the client. None of them adds a dependency.
+
+**Call shape (runs in `pnpm test`).** `packages/cachekit/test/transport/call-shape.test.ts` runs the CachekitIO backend against a local TLS fake of the SaaS. It asserts the exact requests each op sends (a wrap miss is `GET` then `PUT`; a locked miss is `GET`, lock, `GET`, `PUT`, unlock) and the connections 100 ops use. Each extra request is a round trip, and each extra connection is a TCP and TLS handshake. So if you change one of these numbers, change the expectation in the same PR and say why. The fake mints a throwaway certificate with the `openssl` CLI, and it needs Node 22.19+ or 24.5+ for `tls.setDefaultCACertificates`.
+
+**Instructions per op (`pnpm --filter @cachekit-io/cachekit bench:ir`).** This counts the main-thread instructions of each hot path under callgrind: key generation, the serializer, the NAPI and wasm envelopes, both encrypted paths, and the L1 hit through `wrap()`. Unlike wall-clock timing, instruction counts repeat on a busy machine. The suite pins V8's flags and counts only the measured ops. On Node 22 and 24, every path repeats within 0.01%. On Node 26, paths through the native cores repeat within about 0.3%. It needs Linux and valgrind, and it imports `dist/`, so run `pnpm build` first. To A/B a change, run it on both builds on the same machine:
+
+```bash
+pnpm --filter @cachekit-io/cachekit bench:ir --save /tmp/base.json      # on the base build
+pnpm --filter @cachekit-io/cachekit bench:ir --compare /tmp/base.json   # on your build
+```
+
+A workload more than 2% worse fails, and more than 1% worse warns. If the two runs come from a different node, V8 or valgrind, the compare refuses them. A run whose own repeats spread more than 0.4% (the A/A) reports inconclusive rather than passing. Add `--wall 9` for indicative ns per op. An instruction delta times ns per instruction is an estimate, not a measured saving.
+
+**Cold start (`pnpm --filter @cachekit-io/cachekit bench:cold-start`).** This times the import of the Node entry and the first and second `wrap()` call in fresh processes, interleaving the arms (default, metrics on, encryption on, and an A/A twin of default). Claim only deltas larger than the A/A floor and the min-max band it prints.
+
 ## What `main` looks like
 
 `main` is the integration branch and is **not guaranteed stable between releases**. Per-PR CI only builds the native crate on linux-x64 to keep PR turnaround fast; the full 5-platform matrix (linux x64/arm64, macOS x86/arm64, Windows) runs on `push: main` and on release tags. Cross-platform regressions can land on `main` and stay there until the post-merge run catches them — they're always caught before a release tag is cut, so published artifacts on npm are always validated against every platform.
