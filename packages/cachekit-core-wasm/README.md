@@ -14,9 +14,11 @@ native matrix. The artifact is ~177 KB raw / ~64 KB gzipped plus ~26 KB of
 wasm-bindgen glue.
 
 It is built for speed, not size: `opt-level = 3` with wasm `simd128`
-(`.cargo/config.toml`) and `wasm-opt -O3`. That makes LZ4 pack/unpack 2-4x and
-AES-256-GCM ~1.5x faster than a size-optimised build, for ~7 KB more gzip. The
-runtime must support wasm SIMD, which workerd does.
+(`.cargo/config.toml`) and `wasm-opt -O3`, for ~7 KB more gzip than a
+size-optimised build. In steady state, once V8 has tiered the module up to
+optimised code, LZ4 pack/unpack runs 2-4x and AES-256-GCM ~1.5x faster; the
+gain before tier-up is unmeasured. The runtime must support wasm SIMD, which
+workerd does.
 
 Most users never install this directly — it is a dependency of
 [`@cachekit-io/cachekit`](../cachekit)'s `/workers` entrypoint.
