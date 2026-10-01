@@ -14,6 +14,7 @@
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import {
+  deriveKey,
   deriveTenantKeys,
   encryptWithTenantKeys,
   decryptWithTenantKeys,
@@ -340,6 +341,72 @@ const PYTHON_COMPRESSED_FIXTURE = {
     ciphertextHex: '44cc06e600000000000000000eb8450c4aac2337265323f7f1b03fc3966deaa515f7',
   },
 };
+
+// LAB-7084: every byte-returning export hands back a V8-owned Buffer copy,
+// not an external ArrayBuffer with a Rust finalizer. The L1 ciphertext guard
+// (cache-core l1Payload) stores without copying only when the result owns its
+// whole ArrayBuffer, so a pooled or offset view must never come back.
+function expectOwnedBuffer(bytes: Uint8Array): void {
+  expect(Buffer.isBuffer(bytes)).toBe(true);
+  expect(bytes.byteOffset).toBe(0);
+  expect(bytes.byteLength).toBe(bytes.buffer.byteLength);
+}
+
+describe('NAPI byte results are owned Buffer copies', () => {
+  const masterKey = hexToBytes(PYTHON_FIXTURES.masterKeyHex);
+  const keys = deriveTenantKeys(masterKey, PYTHON_FIXTURES.tenantId);
+
+  it('encryptionFingerprint matches the Python fixture', () => {
+    const fingerprint = keys.encryptionFingerprint();
+    expectOwnedBuffer(fingerprint);
+    expect(bytesToHex(fingerprint)).toBe(PYTHON_FIXTURES.keyFingerprintHex);
+  });
+
+  it('decryptWithTenantKeys recovers every Python vector', () => {
+    for (const vector of PYTHON_FIXTURES.vectors) {
+      const plaintext = decryptWithTenantKeys(
+        hexToBytes(vector.ciphertextHex),
+        hexToBytes(vector.aadHex),
+        keys
+      );
+      expectOwnedBuffer(plaintext);
+      expect(bytesToHex(plaintext)).toBe(vector.plaintextHex);
+    }
+  });
+
+  it('decryptWithTenantKeys returns an owned Buffer on the keyring path', () => {
+    const rotating = deriveTenantKeys(new Uint8Array(32).fill(0x62), PYTHON_FIXTURES.tenantId, [
+      masterKey,
+    ]);
+    const vector = PYTHON_FIXTURES.vectors[0]!;
+    const plaintext = decryptWithTenantKeys(
+      hexToBytes(vector.ciphertextHex),
+      hexToBytes(vector.aadHex),
+      rotating
+    );
+    expectOwnedBuffer(plaintext);
+    expect(bytesToHex(plaintext)).toBe(vector.plaintextHex);
+  });
+
+  it('encryptWithTenantKeys output round-trips', () => {
+    const plaintext = hexToBytes(PYTHON_FIXTURES.vectors[0]!.plaintextHex);
+    const aad = buildAAD(PYTHON_FIXTURES.tenantId, 'owned:buffer');
+    const ciphertext = encryptWithTenantKeys(plaintext, aad, keys);
+    expectOwnedBuffer(ciphertext);
+    expect(ciphertext.length).toBe(12 + 16 + plaintext.length);
+    expect(bytesToHex(decryptWithTenantKeys(ciphertext, aad, keys))).toBe(
+      PYTHON_FIXTURES.vectors[0]!.plaintextHex
+    );
+  });
+
+  it('deriveKey returns a deterministic 32-byte key', () => {
+    const a = deriveKey(masterKey, 'cachekit:encryption', 'tenant-123');
+    const b = deriveKey(masterKey, 'cachekit:encryption', 'tenant-123');
+    expectOwnedBuffer(a);
+    expect(a.length).toBe(32);
+    expect(bytesToHex(a)).toBe(bytesToHex(b));
+  });
+});
 
 describe('Python AAD Format Verification', () => {
   /**

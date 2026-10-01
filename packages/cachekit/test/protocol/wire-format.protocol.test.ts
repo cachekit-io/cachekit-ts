@@ -47,6 +47,14 @@ function hexToBytes(hex: string): Uint8Array {
   return bytes;
 }
 
+// LAB-7084: pack/unpack return a V8-owned Buffer copy that owns its whole
+// ArrayBuffer (no pool slab, no offset view), never an external buffer.
+function expectOwnedBuffer(bytes: Uint8Array): void {
+  expect(Buffer.isBuffer(bytes)).toBe(true);
+  expect(bytes.byteOffset).toBe(0);
+  expect(bytes.byteLength).toBe(bytes.buffer.byteLength);
+}
+
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
@@ -184,12 +192,14 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
       const input = hexToBytes(CANONICAL_INPUT_HEX);
       const packed = bs.pack(input);
       expect(bytesToHex(packed)).toBe(CANONICAL_PACKED_HEX);
+      expectOwnedBuffer(packed);
     });
 
     it('unpack recovers original payload from canonical envelope', () => {
       const packed = hexToBytes(CANONICAL_PACKED_HEX);
       const unpacked = bs.unpack(packed);
       expect(bytesToHex(unpacked)).toBe(CANONICAL_INPUT_HEX);
+      expectOwnedBuffer(unpacked);
     });
 
     it('legacy (pre-0.4.0) envelope unpacks correctly', () => {

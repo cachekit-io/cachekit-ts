@@ -95,11 +95,12 @@ impl ByteStorage {
     /// # Errors
     /// Returns GenericFailure if compression fails
     #[napi]
-    pub fn pack(&self, data: Uint8Array) -> Result<Uint8Array> {
-        self.inner
+    pub fn pack<'env>(&self, env: &'env Env, data: Uint8Array) -> Result<BufferSlice<'env>> {
+        let envelope = self
+            .inner
             .store(&data, None)
-            .map(|envelope| envelope.into())
-            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
+            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+        BufferSlice::copy_from(env, envelope)
     }
 
     /// Unpack data, verifying xxHash3-64 integrity and decompressing LZ4.
@@ -115,11 +116,12 @@ impl ByteStorage {
     /// - Integrity check fails (data corrupted)
     /// - Decompression fails (invalid format)
     #[napi]
-    pub fn unpack(&self, packed: Uint8Array) -> Result<Uint8Array> {
-        self.inner
+    pub fn unpack<'env>(&self, env: &'env Env, packed: Uint8Array) -> Result<BufferSlice<'env>> {
+        let (data, _format) = self
+            .inner
             .retrieve(&packed)
-            .map(|(data, _format)| data.into())
-            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
+            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+        BufferSlice::copy_from(env, data)
     }
 
     /// Get compression ratio estimate for given data.
@@ -174,11 +176,12 @@ impl ByteStorage {
 /// const derivedKey = deriveKey(masterKey, 'cachekit:encryption', 'tenant-123');
 /// ```
 #[napi]
-pub fn derive_key(
+pub fn derive_key<'env>(
+    env: &'env Env,
     master_key: Uint8Array,
     domain: String,
     tenant_salt: String,
-) -> Result<Uint8Array> {
+) -> Result<BufferSlice<'env>> {
     if master_key.len() != 32 {
         return Err(Error::new(
             Status::InvalidArg,
@@ -205,9 +208,9 @@ pub fn derive_key(
         .try_into()
         .map_err(|_| Error::new(Status::InvalidArg, "Master key must be 32 bytes"))?;
 
-    derive_domain_key(&key_arr, &domain, tenant_salt.as_bytes())
-        .map(|derived| derived.to_vec().into())
-        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
+    let derived = derive_domain_key(&key_arr, &domain, tenant_salt.as_bytes())
+        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+    BufferSlice::copy_from(env, derived)
 }
 
 /// Per-tenant derived keys with automatic zeroization.
@@ -254,8 +257,8 @@ impl TenantKeys {
 
     /// Get the encryption key fingerprint (safe to log/expose).
     #[napi]
-    pub fn encryption_fingerprint(&self) -> Uint8Array {
-        self.inner.encryption_fingerprint().to_vec().into()
+    pub fn encryption_fingerprint<'env>(&self, env: &'env Env) -> Result<BufferSlice<'env>> {
+        BufferSlice::copy_from(env, self.inner.encryption_fingerprint())
     }
 
     /// Get the current nonce counter value.
@@ -395,18 +398,19 @@ pub fn derive_tenant_keys(
 /// # Returns
 /// Ciphertext containing: [nonce][tag][encrypted_data]
 #[napi]
-pub fn encrypt_with_tenant_keys(
+pub fn encrypt_with_tenant_keys<'env>(
+    env: &'env Env,
     plaintext: Uint8Array,
     aad: Uint8Array,
     tenant_keys: &TenantKeys,
-) -> Result<Uint8Array> {
+) -> Result<BufferSlice<'env>> {
     validate_encryption_input(plaintext.len(), aad.len())?;
 
-    tenant_keys
+    let ciphertext = tenant_keys
         .encryptor
         .encrypt_aes_gcm(&plaintext, &tenant_keys.inner.encryption_key, &aad)
-        .map(|ciphertext| ciphertext.into())
-        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
+        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+    BufferSlice::copy_from(env, ciphertext)
 }
 
 /// Decrypt ciphertext using TenantKeys (keys stay in Rust memory).
@@ -426,27 +430,27 @@ pub fn encrypt_with_tenant_keys(
 /// # Returns
 /// Original plaintext
 #[napi]
-pub fn decrypt_with_tenant_keys(
+pub fn decrypt_with_tenant_keys<'env>(
+    env: &'env Env,
     ciphertext: Uint8Array,
     aad: Uint8Array,
     tenant_keys: &TenantKeys,
-) -> Result<Uint8Array> {
+) -> Result<BufferSlice<'env>> {
     validate_decryption_input(ciphertext.len(), aad.len())?;
 
-    match &tenant_keys.keyring {
-        Some(keyring) => keyring
-            .decrypt(
-                &tenant_keys.encryptor,
-                &ciphertext,
-                &tenant_keys.inner.tenant_id,
-                &aad,
-            )
-            .map(|plaintext| plaintext.into())
-            .map_err(|e| Error::new(Status::GenericFailure, e.to_string())),
-        None => tenant_keys
-            .encryptor
-            .decrypt_aes_gcm(&ciphertext, &tenant_keys.inner.encryption_key, &aad)
-            .map(|plaintext| plaintext.into())
-            .map_err(|e| Error::new(Status::GenericFailure, e.to_string())),
+    let plaintext = match &tenant_keys.keyring {
+        Some(keyring) => keyring.decrypt(
+            &tenant_keys.encryptor,
+            &ciphertext,
+            &tenant_keys.inner.tenant_id,
+            &aad,
+        ),
+        None => tenant_keys.encryptor.decrypt_aes_gcm(
+            &ciphertext,
+            &tenant_keys.inner.encryption_key,
+            &aad,
+        ),
     }
+    .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+    BufferSlice::copy_from(env, plaintext)
 }
