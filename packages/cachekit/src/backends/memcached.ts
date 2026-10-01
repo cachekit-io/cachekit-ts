@@ -123,7 +123,8 @@ function releaseSockets(client: MemjsClient, which: 'abandoned' | 'all'): void {
  * forever against a server that stops answering. On expiry the op rejects
  * with `TimeoutError` (retryable, so retries and the circuit breaker see a
  * bounded failure) and the memjs client is discarded, so the next op starts
- * on a fresh connection.
+ * on a fresh connection. Connections memjs gives up on are reset rather than
+ * left half-open, so a stalled server cannot accumulate them.
  *
  * @example
  * ```typescript
