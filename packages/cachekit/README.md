@@ -143,6 +143,7 @@ const cache = createCache({
     maxEncodedSize: 1024 * 1024, // 1 MiB default; must be a positive safe integer
     maxDecodedSize: 10 * 1024 * 1024, // 10 MiB default; must be a positive safe integer
     maxDepth: 100, // default; must be an integer from 32 to 1024, else ConfigurationError
+    maxCollectionSize: 10_000, // default; must be a positive safe integer
   },
 
   // ByteStorage envelope (LZ4 + integrity). Defaults to true on every
@@ -195,10 +196,11 @@ already permits a multi-hundred-MiB transient.
 Every limit is validated when the cache is created. `maxEncodedSize`,
 `maxDecodedSize` and `maxCollectionSize` must be positive safe integers;
 anything else — `undefined`, `NaN`, `Infinity`, `0`, a negative or a fraction —
-throws `ConfigurationError` naming the field, before any backend connection
-opens. So `maxDecodedSize: Number(process.env.LIMIT)` fails loudly when the
-variable is unset instead of silently switching the bound off. For "no
-practical limit", pass `Number.MAX_SAFE_INTEGER`.
+throws `ConfigurationError` naming the field, before the cache opens a
+connection from a `url` or `apiKey` config. So
+`maxDecodedSize: Number(process.env.LIMIT)` fails loudly when the variable is
+unset instead of silently switching the bound off. For "no practical limit",
+pass `Number.MAX_SAFE_INTEGER`.
 
 The SDK also reports every rejected `set()` through its
 [pluggable logger](#observability) as a rate-limited, greppable

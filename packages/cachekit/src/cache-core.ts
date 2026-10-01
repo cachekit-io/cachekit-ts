@@ -272,8 +272,6 @@ export class CacheImpl implements SecureCache {
     // a throw after that point would leak it to a caller who catches the error.
     // The one exception is the distributedLock check below, which needs the
     // backend instance.
-
-    // Stampede config.
     this.stampede = {
       distributedLock: options.stampede?.distributedLock ?? false,
       lockTimeoutMs: options.stampede?.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS,
@@ -326,9 +324,10 @@ export class CacheImpl implements SecureCache {
 
     // Lock capability. Duck-typed like cachekit-py's hasattr check:
     // user-supplied Backend instances aren't required to declare the
-    // LockableBackend interface, only to implement it. The distributedLock
-    // check cannot fire for a URL or apiKey config: both resolve to
-    // lock-capable backends.
+    // LockableBackend interface, only to implement it. On Node, URL and apiKey
+    // configs resolve to lock-capable backends, so the distributedLock check
+    // cannot fire for them. On Workers, apiKey resolves to a lockless fetch
+    // backend that holds no connection, so throwing here leaks nothing.
     const maybeLockable = this.backend as Partial<LockableBackend>;
     this.lockable =
       typeof maybeLockable.acquireLock === 'function' &&

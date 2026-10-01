@@ -98,7 +98,11 @@ describe('config errors throw before the backend is resolved', () => {
       { stampede: { lockTimeoutMs: 0 } },
       /stampede\.lockTimeoutMs must be > 0/,
     ],
-    ['encryption masterKey', { encryption: { masterKey: 'not-hex' } }, /Master key/],
+    [
+      'encryption masterKey',
+      { encryption: { masterKey: 'not-hex' } },
+      /Master key must be hex-encoded/,
+    ],
   ])('%s: throws ConfigurationError without calling resolveBackend', (_name, extra, message) => {
     const { runtime, resolveBackend } = fakeRuntime();
     const build = () => new CacheImpl({ backend, ...extra } as CacheOptions, runtime);

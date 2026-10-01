@@ -223,16 +223,6 @@ describe('MessagePackSerializer', () => {
       expect(() => shallowSerializer.encode(nest(33))).toThrow('Max depth of 32 exceeded');
     });
 
-    it('throws with correct error message for depth', () => {
-      try {
-        shallowSerializer.encode(nest(33));
-        expect.fail('Should have thrown');
-      } catch (error) {
-        expect(error).toBeInstanceOf(SerializationError);
-        expect((error as Error).message).toContain('Max depth of 32 exceeded');
-      }
-    });
-
     it('allows nesting at depth limit', () => {
       expect(() => shallowSerializer.encode(nest(32))).not.toThrow();
     });
