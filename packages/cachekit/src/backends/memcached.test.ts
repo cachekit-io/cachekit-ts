@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { memcached, MemcachedBackend, MAX_MEMCACHED_TTL } from './memcached.js';
 import { BackendError, ConfigurationError, TimeoutError } from '../errors.js';
 
@@ -236,6 +236,49 @@ describe('MemcachedBackend', () => {
         classification: 'permanent',
       });
       expect(clientCreate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('per-op deadline', () => {
+    // tries × (connectTimeout + timeout) + (tries − 1) × 200 ms + 500 ms slack
+    const deadline = (retries: number) => retries * (100 + 50) + (retries - 1) * 200 + 500;
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it.each([0, 1, 2, 3])(
+      'rejects a call memjs never settles with TimeoutError at the deadline (retries %i)',
+      async (retries) => {
+        vi.useFakeTimers();
+        const b = memcached({ timeout: 50, connectTimeout: 100, retries });
+        mockClient.get.mockReturnValue(new Promise(() => {}));
+
+        let settled = false;
+        const op = b.get('k').finally(() => {
+          settled = true;
+        });
+        op.catch(() => {});
+
+        await vi.advanceTimersByTimeAsync(deadline(Math.max(1, retries)) - 1);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(op).rejects.toBeInstanceOf(TimeoutError);
+      }
+    );
+
+    it('discards the client on expiry, so the next op creates a fresh one', async () => {
+      vi.useFakeTimers();
+      const b = memcached({ timeout: 50, connectTimeout: 100, retries: 1 });
+      mockClient.get.mockReturnValueOnce(new Promise(() => {}));
+
+      const op = b.get('k');
+      op.catch(() => {});
+      await vi.advanceTimersByTimeAsync(deadline(1));
+      await expect(op).rejects.toBeInstanceOf(TimeoutError);
+
+      expect(await b.get('k')).toBeNull();
+      expect(clientCreate).toHaveBeenCalledTimes(2);
     });
   });
 
