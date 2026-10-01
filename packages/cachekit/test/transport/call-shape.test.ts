@@ -62,6 +62,13 @@ async function shapes(n: number, op: (i: number) => Promise<unknown>): Promise<s
 
 const compute = async (id: number) => ({ id, name: `user-${id}` });
 
+/** Requests each op sends, as asserted per op below and over whole runs. */
+const SHAPES: Record<string, string[]> = {
+  'wrap miss': ['GET cache', 'PUT cache'],
+  'wrap L2 hit': ['GET cache'],
+  'locked wrap miss': ['GET cache', 'POST lock', 'GET cache', 'PUT cache', 'DELETE lock'],
+};
+
 beforeEach(async () => {
   diagnosticsChannel.subscribe('undici:request:create', onCreate);
   diagnosticsChannel.subscribe('undici:request:trailers', onDone);
@@ -86,7 +93,7 @@ describe('CachekitIO call shape: requests per op', () => {
   it('wrap miss is GET then PUT', async () => {
     const getUser = cacheFor().wrap(compute, { namespace: 'shape', ttl: 60 });
     const seen = await shapes(N, (i) => getUser(i));
-    expect(seen).toEqual(Array.from({ length: N }, () => ['GET cache', 'PUT cache']));
+    expect(seen).toEqual(Array.from({ length: N }, () => SHAPES['wrap miss']));
   });
 
   it('wrap L2 hit is one GET', async () => {
@@ -94,22 +101,14 @@ describe('CachekitIO call shape: requests per op', () => {
     for (let i = 0; i < N; i++) await getUser(i);
     await settle();
     const seen = await shapes(N, (i) => getUser(i));
-    expect(seen).toEqual(Array.from({ length: N }, () => ['GET cache']));
+    expect(seen).toEqual(Array.from({ length: N }, () => SHAPES['wrap L2 hit']));
   });
 
   it('locked wrap miss is GET, lock, double-check GET, PUT, unlock', async () => {
     const cache = cacheFor({ stampede: { distributedLock: true } });
     const getUser = cache.wrap(compute, { namespace: 'shape', ttl: 60 });
     const seen = await shapes(N, (i) => getUser(i));
-    expect(seen).toEqual(
-      Array.from({ length: N }, () => [
-        'GET cache',
-        'POST lock',
-        'GET cache',
-        'PUT cache',
-        'DELETE lock',
-      ])
-    );
+    expect(seen).toEqual(Array.from({ length: N }, () => SHAPES['locked wrap miss']));
   });
 });
 
@@ -123,14 +122,6 @@ describe('CachekitIO call shape: connections', () => {
   // macrotask between requests keeps it at one.
   const ops = 100;
 
-  it('a wrap miss on a cold client opens a second connection for its PUT', async () => {
-    const getUser = cacheFor().wrap(compute, { namespace: 'shape', ttl: 60 });
-    await getUser(1);
-    await settle();
-    expect(saas.requests()).toEqual(['GET cache', 'PUT cache']);
-    expect(saas.connections()).toBe(2);
-  });
-
   it('control: requests a macrotask apart share one connection', async () => {
     const cache = cacheFor();
     for (let i = 0; i < ops; i++) {
@@ -141,15 +132,22 @@ describe('CachekitIO call shape: connections', () => {
     expect(saas.connections()).toBe(1);
   });
 
+  // These runs cannot go through shapes(): its settle() puts a macrotask
+  // between ops, which is exactly what changes the connection count. So the
+  // per-op shape is checked over the whole run instead: the request list must
+  // be that shape repeated, so an op that gains a request cannot hide behind
+  // one that loses one. Connections stay a run total; they belong to the run.
   it.each([
-    { scenario: 'wrap miss', lock: false, prefill: false, perOp: 2, connections: 2 },
-    { scenario: 'wrap L2 hit', lock: false, prefill: true, perOp: 1, connections: 2 },
+    { scenario: 'wrap miss', lock: false, prefill: false, connections: 2, ordered: true },
+    { scenario: 'wrap L2 hit', lock: false, prefill: true, connections: 2, ordered: true },
     // The unlock is not awaited, so it is still in flight when the next op
-    // starts, and that op needs a third connection.
-    { scenario: 'locked wrap miss', lock: true, prefill: false, perOp: 5, connections: 3 },
+    // starts: that op needs a third connection, and the unlock can land after
+    // its first GET. So only the multiset of requests is fixed, not the order.
+    { scenario: 'locked wrap miss', lock: true, prefill: false, connections: 3, ordered: false },
   ])(
     '$connections connections per $scenario x 100, back to back',
-    async ({ lock, prefill, perOp, connections }) => {
+    async ({ scenario, lock, prefill, connections, ordered }) => {
+      const shape = SHAPES[scenario];
       const getUser = cacheFor({ stampede: { distributedLock: lock } }).wrap(compute, {
         namespace: 'shape',
         ttl: 60,
@@ -161,7 +159,10 @@ describe('CachekitIO call shape: connections', () => {
       }
       for (let i = 0; i < ops; i++) await getUser(i);
       await settle();
-      expect(saas.requests()).toHaveLength(ops * perOp);
+      const expected = Array.from({ length: ops }, () => shape).flat();
+      const seen = saas.requests();
+      if (ordered) expect(seen).toEqual(expected);
+      else expect([...seen].sort()).toEqual([...expected].sort());
       expect(saas.connections()).toBe(connections);
     }
   );

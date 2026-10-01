@@ -8,7 +8,7 @@
 // the n ops and nothing else: module load, setup and warm-up stay out.
 // --wall prints the steady-state ns per op of the n iterations instead
 // (indicative only). Imports the built package: run `pnpm build` first.
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
@@ -19,6 +19,13 @@ const napi = () => createRequire(import.meta.url)('@cachekit-io/cachekit-core-ts
 // resolves; load its wasm-bindgen glue directly and hand it the bytes.
 async function wasm() {
   const pkg = new URL('pkg/', import.meta.resolve('@cachekit-io/cachekit-core-wasm'));
+  if (!existsSync(new URL('cachekit_core_wasm_bg.wasm', pkg))) {
+    throw new Error(
+      'the wasm workloads need the wasm build, which `pnpm build` does not make: run ' +
+        '`pnpm --filter @cachekit-io/cachekit-core-wasm build:wasm` (needs the wasm32 target, ' +
+        'wasm-bindgen and wasm-opt), or skip them with --only'
+    );
+  }
   const glue = await import(new URL('cachekit_core_wasm.js', pkg));
   glue.initSync({ module: readFileSync(new URL('cachekit_core_wasm_bg.wasm', pkg)) });
   return glue;

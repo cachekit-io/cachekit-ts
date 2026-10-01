@@ -24,18 +24,29 @@
 //
 // --compare gates a head run against a base run made on the same machine and
 // toolchain (fingerprint): +2% per op fails, +1% warns. Exit codes: 0 pass,
-// 1 regression, 2 fingerprint or workload-set mismatch, 3 A/A over the limit.
+// 1 regression, 2 not comparable (fingerprint or workload-set mismatch, or
+// the same build on both sides), 3 A/A over the limit, 4 the run itself
+// failed (bad arguments, valgrind crash, missing build output).
 //
 // --wall K adds K interleaved plain-node processes per workload and prints
 // steady-state ns/op (median, min-max), on screen only. It gives the scale of
 // an Ir delta, never a measured saving.
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { availableParallelism, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { WORKLOADS } from './ir-workload.mjs';
+
+// Any failure of the run itself exits 4, so a script never reads it as the
+// regression code 1.
+process.on('uncaughtException', (error) => {
+  console.error(error);
+  process.exit(4);
+});
 
 const V8_FLAGS = [
   '--single-threaded',
@@ -63,13 +74,35 @@ const { values: opt } = parseArgs({
 const repeats = Number(opt.repeats);
 const jobs = Number(opt.jobs);
 const wallRounds = Number(opt.wall);
-const names = opt.only ? opt.only.split(',') : Object.keys(N);
+// Deduped: two runs of one workload would share a callgrind output prefix.
+const names = opt.only ? [...new Set(opt.only.split(','))] : Object.keys(N);
 for (const name of names) if (!(name in N)) throw new Error(`unknown workload "${name}"`);
 const isInt = (x, min) => Number.isInteger(x) && x >= min;
 if (!isInt(repeats, 3))
   throw new Error('--repeats must be an integer >= 3: the A/A spread needs them');
 if (!isInt(jobs, 1)) throw new Error('--jobs must be an integer >= 1');
 if (!isInt(wallRounds, 0)) throw new Error('--wall must be an integer >= 0');
+if (opt.save && opt.compare && resolve(opt.save) === resolve(opt.compare)) {
+  // The save would overwrite the base before it is read: a self-compare that always passes.
+  throw new Error('--save and --compare must be different files');
+}
+// Read the base before measuring, so a missing or corrupt file fails in seconds.
+const base = opt.compare ? JSON.parse(readFileSync(opt.compare, 'utf8')) : null;
+// A NaN in the base makes every comparison false, so the row would read `ok`.
+const positive = (x) => typeof x === 'number' && Number.isFinite(x) && x > 0;
+const nonNegative = (x) => typeof x === 'number' && Number.isFinite(x) && x >= 0;
+if (base) {
+  if (typeof base.benches !== 'object' || base.benches === null) {
+    throw new Error(`${opt.compare}: no benches object; not a --save file`);
+  }
+  for (const [name, b] of Object.entries(base.benches)) {
+    if (!positive(b?.irPerOp) || !nonNegative(b?.aa)) {
+      throw new Error(
+        `${opt.compare}: ${name} needs a positive irPerOp and a non-negative aa, got ${JSON.stringify(b)}`
+      );
+    }
+  }
+}
 
 const workload = fileURLToPath(new URL('ir-workload.mjs', import.meta.url));
 const cwd = fileURLToPath(new URL('..', import.meta.url));
@@ -165,6 +198,32 @@ const fingerprint = {
   flags: V8_FLAGS.join(' '),
 };
 
+/**
+ * Hash of what the workloads execute: dist/, the NAPI binary and the wasm.
+ * A compare of a build against itself reads 0% and proves nothing.
+ */
+function buildHash() {
+  const hash = createHash('sha256');
+  const add = (dir, filter) => {
+    for (const f of readdirSync(dir, { recursive: true }).filter(filter).sort()) {
+      hash.update(f).update(readFileSync(join(dir, f)));
+    }
+  };
+  add(fileURLToPath(new URL('../dist/', import.meta.url)), (f) => /\.(js|mjs|cjs)$/.test(f));
+  const req = createRequire(import.meta.url);
+  add(dirname(req.resolve('@cachekit-io/cachekit-core-ts')), (f) => f.endsWith('.node'));
+  const wasmPkg = fileURLToPath(
+    new URL('pkg/', import.meta.resolve('@cachekit-io/cachekit-core-wasm'))
+  );
+  try {
+    add(wasmPkg, (f) => f.endsWith('.wasm'));
+  } catch {
+    hash.update('no wasm build');
+  }
+  return hash.digest('hex').slice(0, 16);
+}
+const build = buildHash();
+
 const dir = mkdtempSync(join(tmpdir(), 'cachekit-ir-'));
 let irByRun;
 try {
@@ -222,7 +281,7 @@ if (wallRounds > 0) {
   }
 }
 
-const result = { fingerprint, repeats, aaLimit: AA_LIMIT, rawIr: irByRun, benches };
+const result = { fingerprint, build, repeats, aaLimit: AA_LIMIT, rawIr: irByRun, benches };
 if (opt.save) writeFileSync(opt.save, JSON.stringify(result, null, 2) + '\n');
 
 const pct = (x) => `${(x * 100).toFixed(2)}%`;
@@ -230,7 +289,12 @@ let mismatch = false;
 let regressed = false;
 let noisyAny = false;
 const rows = [];
-const base = opt.compare ? JSON.parse(readFileSync(opt.compare, 'utf8')) : null;
+if (base && base.build === build) {
+  console.error(
+    `same build: base and head both hash to ${build}; rebuild one side before comparing.`
+  );
+  mismatch = true;
+}
 if (base && JSON.stringify(base.fingerprint) !== JSON.stringify(fingerprint)) {
   console.error(
     `fingerprint mismatch: base ${JSON.stringify(base.fingerprint)}\n                     head ${JSON.stringify(fingerprint)}\n` +

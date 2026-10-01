@@ -71,18 +71,18 @@ pnpm test:coverage
 
 ## Measuring performance
 
-Three harnesses measure the client. None of them adds a dependency.
+Three harnesses measure the client.
 
 **Call shape (runs in `pnpm test`).** `packages/cachekit/test/transport/call-shape.test.ts` runs the CachekitIO backend against a local TLS fake of the SaaS. It asserts the exact requests each op sends (a wrap miss is `GET` then `PUT`; a locked miss is `GET`, lock, `GET`, `PUT`, unlock) and the connections 100 ops use. Each extra request is a round trip, and each extra connection is a TCP and TLS handshake. So if you change one of these numbers, change the expectation in the same PR and say why. The fake mints a throwaway certificate with the `openssl` CLI, and it needs Node 22.19+ or 24.5+ for `tls.setDefaultCACertificates`. Where either is missing, the tests fail with a message that names the requirement.
 
-**Instructions per op (`pnpm --filter @cachekit-io/cachekit bench:ir`).** This counts the main-thread instructions of each hot path under callgrind: key generation, the serializer, the NAPI and wasm envelopes, both encrypted paths, and the L1 hit through `wrap()`. Unlike wall-clock timing, instruction counts repeat on a busy machine. The suite pins V8's flags and counts only the measured ops. On Node 22 and 24, every path repeats within 0.01%. On Node 26, paths through the native cores repeat within about 0.3%, and `napi-encrypted` sometimes has a run about 1% low, which makes it read inconclusive. Gate on Node 22 or 24. It needs Linux and valgrind, and it imports `dist/`, so run `pnpm build` first. To A/B a change, run it on both builds on the same machine:
+**Instructions per op (`pnpm --filter @cachekit-io/cachekit bench:ir`).** This counts the main-thread instructions of each hot path under callgrind: key generation, the serializer, the NAPI and wasm envelopes, both encrypted paths, and the L1 hit through `wrap()`. Unlike wall-clock timing, instruction counts repeat on a busy machine. The suite pins V8's flags and counts only the measured ops. On Node 22 and 24, every path repeats within 0.01%. On Node 26, paths through the native cores repeat within about 0.3%, and `napi-encrypted` sometimes has a run about 1% low, which makes it read inconclusive. Gate on Node 22 or 24. It needs Linux and valgrind. It imports `dist/` and the wasm build, so run `pnpm build` and `pnpm --filter @cachekit-io/cachekit-core-wasm build:wasm` first; the second needs the `wasm32-unknown-unknown` target, `wasm-bindgen` and `wasm-opt`, and without it pass `--only` to skip the two wasm workloads. To A/B a change, run it on both builds on the same machine:
 
 ```bash
 pnpm --filter @cachekit-io/cachekit bench:ir --save /tmp/base.json      # on the base build
 pnpm --filter @cachekit-io/cachekit bench:ir --compare /tmp/base.json   # on your build
 ```
 
-A workload more than 2% worse fails, and more than 1% worse warns. If the two runs come from a different node, V8 or valgrind, the compare refuses them. A run whose own repeats spread more than 0.4% (the A/A) reports inconclusive rather than passing. A compare also refuses two runs that measured different workloads. Add `--wall 9` to print indicative ns per op; it is not saved, and it is never a measured saving.
+A workload more than 2% worse fails, and more than 1% worse warns. If the two runs come from a different node, V8 or valgrind, the compare refuses them. A run whose own repeats spread more than 0.4% (the A/A) reports inconclusive rather than passing. A compare also refuses (exit 2) two runs that measured different workloads, or two runs of the same build, and refuses to start when `--save` and `--compare` name the same file. A run that fails for any other reason (bad arguments, valgrind crash, missing build) exits 4, never 1. Add `--wall 9` to print indicative ns per op; it is not saved, and it is never a measured saving.
 
 **Cold start (`pnpm --filter @cachekit-io/cachekit bench:cold-start`).** This times the import of the Node entry and the first and second `wrap()` call in fresh processes, interleaving the arms (default, metrics on, encryption on, and an A/A twin of default). Claim only deltas larger than the A/A floor and the min-max band it prints.
 

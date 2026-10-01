@@ -1,12 +1,11 @@
 /**
  * Local TLS fake of the CacheKit SaaS data plane, for counting what the SDK
- * puts on the wire. It answers only the shapes the CachekitIO backend reads
- * (protocol spec/saas-api.md):
+ * puts on the wire. It answers only the routes these tests drive, in the
+ * shapes the CachekitIO backend reads (protocol spec/saas-api.md); anything
+ * else is still counted, then answered 405:
  *
  *   GET    /v1/cache/{key}       200 octet-stream | 404
- *   HEAD   /v1/cache/{key}       200 | 404
  *   PUT    /v1/cache/{key}       200 {"success":true}
- *   DELETE /v1/cache/{key}       200 {"success":true} | 404
  *   POST   /v1/cache/{key}/lock  200 {"lock_id": "<id>" | null}
  *   DELETE /v1/cache/{key}/lock  200 {"success":true}
  *
@@ -135,15 +134,9 @@ export async function startFakeSaas(): Promise<FakeSaas> {
                 'content-length': value.length,
               })
               .end(value);
-          case 'HEAD':
-            return res.writeHead(value ? 200 : 404).end();
           case 'PUT':
             store.set(cacheKey, Buffer.concat(body));
             return json(200, { success: true });
-          case 'DELETE':
-            return store.delete(cacheKey)
-              ? json(200, { success: true })
-              : json(404, { error: 'Not Found' });
         }
       }
       res.writeHead(405).end();
