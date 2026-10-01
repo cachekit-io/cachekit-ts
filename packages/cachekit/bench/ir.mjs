@@ -24,11 +24,11 @@
 //
 // --compare gates a head run against a base run made on the same machine and
 // toolchain (fingerprint): +2% per op fails, +1% warns. Exit codes: 0 pass,
-// 1 regression, 2 fingerprint mismatch, 3 A/A over the limit.
+// 1 regression, 2 fingerprint or workload-set mismatch, 3 A/A over the limit.
 //
-// --wall K adds K interleaved plain-node processes per workload and reports
-// steady-state ns/op (median, min-max), so an Ir delta converts to indicative
-// time: ms = dIr x (ns/op / Ir/op). Never a measured saving on its own.
+// --wall K adds K interleaved plain-node processes per workload and prints
+// steady-state ns/op (median, min-max), on screen only. It gives the scale of
+// an Ir delta, never a measured saving.
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { availableParallelism, tmpdir } from 'node:os';
@@ -65,7 +65,11 @@ const jobs = Number(opt.jobs);
 const wallRounds = Number(opt.wall);
 const names = opt.only ? opt.only.split(',') : Object.keys(N);
 for (const name of names) if (!(name in N)) throw new Error(`unknown workload "${name}"`);
-if (!(repeats >= 3)) throw new Error('--repeats must be at least 3: the A/A spread needs them');
+const isInt = (x, min) => Number.isInteger(x) && x >= min;
+if (!isInt(repeats, 3))
+  throw new Error('--repeats must be an integer >= 3: the A/A spread needs them');
+if (!isInt(jobs, 1)) throw new Error('--jobs must be an integer >= 1');
+if (!isInt(wallRounds, 0)) throw new Error('--wall must be an integer >= 0');
 
 const workload = fileURLToPath(new URL('ir-workload.mjs', import.meta.url));
 const cwd = fileURLToPath(new URL('..', import.meta.url));
@@ -74,9 +78,12 @@ function valgrindVersion() {
   try {
     return execFileSync('valgrind', ['--version'], { encoding: 'utf8' }).trim();
   } catch (error) {
-    throw new Error('valgrind is required (apt install valgrind / brew install valgrind)', {
-      cause: error,
-    });
+    throw new Error(
+      'valgrind is required, and this suite runs on Linux only (apt install valgrind)',
+      {
+        cause: error,
+      }
+    );
   }
 }
 
@@ -185,8 +192,15 @@ for (const name of names) {
     aa: (Math.max(...perOp) - Math.min(...perOp)) / irPerOp,
     perRepeat: perOp.map(Math.round),
   };
+  // A verdict on a NaN would read `ok`: refuse rather than pass on nothing measured.
+  if (!perOp.every(Number.isFinite) || !(irPerOp > 0)) {
+    throw new Error(`${name}: Ir/op is not a positive finite number (${perOp.join(', ')})`);
+  }
 }
 
+// Wall time stays on screen and out of --save: it is measured under other
+// flags than the Ir, and a stored ratio of the two reads like a saving.
+const wall = {};
 if (wallRounds > 0) {
   const samples = Object.fromEntries(names.map((name) => [name, []]));
   for (let round = 0; round < wallRounds; round++) {
@@ -199,13 +213,12 @@ if (wallRounds > 0) {
   }
   for (const name of names) {
     const ns = samples[name];
-    benches[name].wall = {
+    wall[name] = {
       nsPerOp: Math.round(median(ns)),
       min: Math.round(Math.min(...ns)),
       max: Math.round(Math.max(...ns)),
       k: ns.length,
     };
-    benches[name].nsPerIr = +(median(ns) / benches[name].irPerOp).toFixed(4);
   }
 }
 
@@ -225,10 +238,22 @@ if (base && JSON.stringify(base.fingerprint) !== JSON.stringify(fingerprint)) {
   );
   mismatch = true;
 }
+const baseNames = base ? Object.keys(base.benches).sort().join(',') : '';
+if (base && baseNames !== [...names].sort().join(',')) {
+  // A workload missing from either run would get no verdict, and the gate
+  // would pass while gating nothing.
+  console.error(
+    `workload mismatch: base measured ${baseNames}, head measured ${[...names].sort().join(',')}`
+  );
+  mismatch = true;
+}
 for (const [name, b] of Object.entries(benches)) {
   const row = { workload: name, 'Ir/op': b.irPerOp, 'A/A': pct(b.aa) };
-  if (b.wall)
-    Object.assign(row, { 'ns/op': b.wall.nsPerOp, 'ns min-max': `${b.wall.min}-${b.wall.max}` });
+  if (wall[name])
+    Object.assign(row, {
+      'ns/op': wall[name].nsPerOp,
+      'ns min-max': `${wall[name].min}-${wall[name].max}`,
+    });
   const noisy = b.aa > AA_LIMIT || (base?.benches[name] && base.benches[name].aa > AA_LIMIT);
   noisyAny ||= Boolean(noisy);
   if (base?.benches[name] && !mismatch) {

@@ -39,7 +39,11 @@ export interface FakeSaas {
   close(): Promise<void>;
 }
 
+// One certificate per test module: minting is a subprocess, the listener per test is not.
+let minted: { key: Buffer; cert: Buffer } | undefined;
+
 function selfSignedCert(): { key: Buffer; cert: Buffer } {
+  if (minted) return minted;
   const dir = mkdtempSync(join(tmpdir(), 'cachekit-fake-saas-'));
   try {
     execFileSync(
@@ -65,7 +69,8 @@ function selfSignedCert(): { key: Buffer; cert: Buffer } {
       ],
       { stdio: 'pipe' }
     );
-    return { key: readFileSync(join(dir, 'key.pem')), cert: readFileSync(join(dir, 'cert.pem')) };
+    minted = { key: readFileSync(join(dir, 'key.pem')), cert: readFileSync(join(dir, 'cert.pem')) };
+    return minted;
   } catch (error) {
     throw new Error(
       'fake-saas needs the openssl CLI to mint its throwaway TLS certificate; install openssl',
