@@ -17,7 +17,9 @@ const MAX_AAD_SIZE: usize = 64 * 1024; // 64 KB
 /// Copy `data` into a V8-owned ArrayBuffer and return a plain Uint8Array over it.
 ///
 /// Returning `Vec<u8>` as `Uint8Array` hands V8 an external backing store with a boxed
-/// Rust finalizer, which costs more than this copy. A `Buffer` copy would change the
+/// Rust finalizer. At the measured 1 KB-64 KB sizes that is slower per call than this copy,
+/// though at 64 KB the copy executes more instructions. The cost of the copy: peak memory
+/// briefly holds both the Rust result and its V8 copy. A `Buffer` copy would change the
 /// public return type, so the result stays a plain Uint8Array.
 ///
 /// napi's `Uint8ArraySlice::copy_from` allocates a zero-filled buffer of the right length

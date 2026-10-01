@@ -111,6 +111,17 @@ function buildAAD(
   return aad;
 }
 
+// LAB-7084: every byte-returning export hands back a plain Uint8Array (not a
+// Buffer, whose .slice and toJSON differ) that owns its whole ArrayBuffer. The
+// L1 ciphertext guard (cache-core l1Payload) stores without copying only when
+// the result owns its whole ArrayBuffer, so a pooled or offset view must never
+// come back. Byte checks against fixtures catch an unfilled copy.
+function expectOwnedCopy(bytes: Uint8Array): void {
+  expect(bytes.constructor).toBe(Uint8Array);
+  expect(bytes.byteOffset).toBe(0);
+  expect(bytes.byteLength).toBe(bytes.buffer.byteLength);
+}
+
 describe('Cross-SDK Interoperability (Python <-> TypeScript)', () => {
   let tsKeys: TenantKeys;
 
@@ -123,6 +134,7 @@ describe('Cross-SDK Interoperability (Python <-> TypeScript)', () => {
   describe('Key derivation compatibility', () => {
     it('produces same key fingerprint as Python', () => {
       const tsFingerprint = tsKeys.encryptionFingerprint();
+      expectOwnedCopy(tsFingerprint);
       const expectedFingerprint = hexToBytes(PYTHON_FIXTURES.keyFingerprintHex);
 
       expect(bytesToHex(tsFingerprint)).toBe(PYTHON_FIXTURES.keyFingerprintHex);
@@ -156,6 +168,7 @@ describe('Cross-SDK Interoperability (Python <-> TypeScript)', () => {
         // Decrypt Python's ciphertext using TypeScript
         const decrypted = decryptWithTenantKeys(pythonCiphertext, aad, tsKeys);
 
+        expectOwnedCopy(decrypted);
         expect(bytesToHex(decrypted)).toBe(vector.plaintextHex);
         expect(Array.from(decrypted)).toEqual(Array.from(expectedPlaintext));
       });
@@ -195,6 +208,7 @@ describe('Cross-SDK Interoperability (Python <-> TypeScript)', () => {
 
       // Encrypt with TypeScript
       const ciphertext = encryptWithTenantKeys(plaintext, aad, tsKeys);
+      expectOwnedCopy(ciphertext);
 
       // Decrypt with TypeScript (simulating Python with same Rust core)
       const decrypted = decryptWithTenantKeys(ciphertext, aad, tsKeys);
@@ -342,38 +356,9 @@ const PYTHON_COMPRESSED_FIXTURE = {
   },
 };
 
-// LAB-7084: every byte-returning export hands back a plain Uint8Array (not a
-// Buffer, whose .slice and toJSON differ) that owns its whole ArrayBuffer. The
-// L1 ciphertext guard (cache-core l1Payload) stores without copying only when
-// the result owns its whole ArrayBuffer, so a pooled or offset view must never
-// come back. Byte checks against fixtures catch an unfilled copy.
-function expectOwnedCopy(bytes: Uint8Array): void {
-  expect(bytes.constructor).toBe(Uint8Array);
-  expect(bytes.byteOffset).toBe(0);
-  expect(bytes.byteLength).toBe(bytes.buffer.byteLength);
-}
-
+// Paths the fixture tests above do not reach. Those tests also assert ownership.
 describe('NAPI byte results are owned Uint8Array copies', () => {
   const masterKey = hexToBytes(PYTHON_FIXTURES.masterKeyHex);
-  const keys = deriveTenantKeys(masterKey, PYTHON_FIXTURES.tenantId);
-
-  it('encryptionFingerprint matches the Python fixture', () => {
-    const fingerprint = keys.encryptionFingerprint();
-    expectOwnedCopy(fingerprint);
-    expect(bytesToHex(fingerprint)).toBe(PYTHON_FIXTURES.keyFingerprintHex);
-  });
-
-  it('decryptWithTenantKeys recovers every Python vector', () => {
-    for (const vector of PYTHON_FIXTURES.vectors) {
-      const plaintext = decryptWithTenantKeys(
-        hexToBytes(vector.ciphertextHex),
-        hexToBytes(vector.aadHex),
-        keys
-      );
-      expectOwnedCopy(plaintext);
-      expect(bytesToHex(plaintext)).toBe(vector.plaintextHex);
-    }
-  });
 
   it('decryptWithTenantKeys returns an owned Uint8Array on the keyring path', () => {
     const rotating = deriveTenantKeys(new Uint8Array(32).fill(0x62), PYTHON_FIXTURES.tenantId, [
@@ -387,17 +372,6 @@ describe('NAPI byte results are owned Uint8Array copies', () => {
     );
     expectOwnedCopy(plaintext);
     expect(bytesToHex(plaintext)).toBe(vector.plaintextHex);
-  });
-
-  it('encryptWithTenantKeys output round-trips', () => {
-    const plaintext = hexToBytes(PYTHON_FIXTURES.vectors[0]!.plaintextHex);
-    const aad = buildAAD(PYTHON_FIXTURES.tenantId, 'owned:buffer');
-    const ciphertext = encryptWithTenantKeys(plaintext, aad, keys);
-    expectOwnedCopy(ciphertext);
-    expect(ciphertext.length).toBe(12 + 16 + plaintext.length);
-    expect(bytesToHex(decryptWithTenantKeys(ciphertext, aad, keys))).toBe(
-      PYTHON_FIXTURES.vectors[0]!.plaintextHex
-    );
   });
 
   // No fixture pins deriveKey output, so guard the copy itself: an unfilled
