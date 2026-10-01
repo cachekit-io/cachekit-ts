@@ -20,7 +20,7 @@ export declare class ByteStorage {
    * # Errors
    * Returns GenericFailure if compression fails
    */
-  pack(data: Uint8Array): Buffer
+  pack(data: Uint8Array): Uint8Array
   /**
    * Unpack data, verifying xxHash3-64 integrity and decompressing LZ4.
    *
@@ -35,7 +35,7 @@ export declare class ByteStorage {
    * - Integrity check fails (data corrupted)
    * - Decompression fails (invalid format)
    */
-  unpack(packed: Uint8Array): Buffer
+  unpack(packed: Uint8Array): Uint8Array
   /**
    * Get compression ratio estimate for given data.
    *
@@ -81,7 +81,7 @@ export declare class TenantKeys {
   /** Get the tenant ID these keys were derived for. */
   get tenantId(): string
   /** Get the encryption key fingerprint (safe to log/expose). */
-  encryptionFingerprint(): Buffer
+  encryptionFingerprint(): Uint8Array
   /**
    * Get the current nonce counter value.
    *
@@ -126,7 +126,7 @@ export declare class TenantKeys {
  * # Returns
  * Original plaintext
  */
-export declare function decryptWithTenantKeys(ciphertext: Uint8Array, aad: Uint8Array, tenantKeys: TenantKeys): Buffer
+export declare function decryptWithTenantKeys(ciphertext: Uint8Array, aad: Uint8Array, tenantKeys: TenantKeys): Uint8Array
 
 /**
  * Key derivation using HKDF-SHA256.
@@ -154,7 +154,7 @@ export declare function decryptWithTenantKeys(ciphertext: Uint8Array, aad: Uint8
  * const derivedKey = deriveKey(masterKey, 'cachekit:encryption', 'tenant-123');
  * ```
  */
-export declare function deriveKey(masterKey: Uint8Array, domain: string, tenantSalt: string): Buffer
+export declare function deriveKey(masterKey: Uint8Array, domain: string, tenantSalt: string): Uint8Array
 
 /**
  * Derive per-tenant keys using HKDF-SHA256.
@@ -207,7 +207,7 @@ export declare function deriveTenantKeys(masterKey: Uint8Array, tenantId: string
  * # Returns
  * Ciphertext containing: [nonce][tag][encrypted_data]
  */
-export declare function encryptWithTenantKeys(plaintext: Uint8Array, aad: Uint8Array, tenantKeys: TenantKeys): Buffer
+export declare function encryptWithTenantKeys(plaintext: Uint8Array, aad: Uint8Array, tenantKeys: TenantKeys): Uint8Array
 
 /** Version of the cachekit-core-ts package */
 export declare function version(): string

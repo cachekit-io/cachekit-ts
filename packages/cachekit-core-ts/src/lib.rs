@@ -14,6 +14,22 @@ const MAX_PLAINTEXT_SIZE: usize = 100 * 1024 * 1024; // 100 MB
 const MAX_CIPHERTEXT_SIZE: usize = MAX_PLAINTEXT_SIZE + 1024; // plaintext + nonce + tag overhead
 const MAX_AAD_SIZE: usize = 64 * 1024; // 64 KB
 
+/// Copy `data` into a V8-owned ArrayBuffer and return a plain Uint8Array over it.
+///
+/// Returning `Vec<u8>` as `Uint8Array` hands V8 an external backing store with a boxed
+/// Rust finalizer, which costs more than this copy. A `Buffer` copy would change the
+/// public return type, so the result stays a plain Uint8Array.
+///
+/// napi's `Uint8ArraySlice::copy_from` allocates a zero-filled buffer of the right length
+/// but never copies `data` into it (napi 3.8.4 through 3.14.0), so the bytes are written here.
+fn copy_to_js<'env>(env: &'env Env, data: &[u8]) -> Result<Uint8ArraySlice<'env>> {
+    let mut out = Uint8ArraySlice::copy_from(env, data)?;
+    // SAFETY: `out` was created above and has not been returned to JS, so nothing else
+    // can read or write its backing store while we fill it.
+    unsafe { out.as_mut() }.copy_from_slice(data);
+    Ok(out)
+}
+
 /// Validate plaintext and AAD sizes to prevent DoS.
 fn validate_encryption_input(plaintext_len: usize, aad_len: usize) -> Result<()> {
     if plaintext_len > MAX_PLAINTEXT_SIZE {
@@ -95,12 +111,12 @@ impl ByteStorage {
     /// # Errors
     /// Returns GenericFailure if compression fails
     #[napi]
-    pub fn pack<'env>(&self, env: &'env Env, data: Uint8Array) -> Result<BufferSlice<'env>> {
+    pub fn pack<'env>(&self, env: &'env Env, data: Uint8Array) -> Result<Uint8ArraySlice<'env>> {
         let envelope = self
             .inner
             .store(&data, None)
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
-        BufferSlice::copy_from(env, envelope)
+        copy_to_js(env, &envelope)
     }
 
     /// Unpack data, verifying xxHash3-64 integrity and decompressing LZ4.
@@ -116,12 +132,16 @@ impl ByteStorage {
     /// - Integrity check fails (data corrupted)
     /// - Decompression fails (invalid format)
     #[napi]
-    pub fn unpack<'env>(&self, env: &'env Env, packed: Uint8Array) -> Result<BufferSlice<'env>> {
+    pub fn unpack<'env>(
+        &self,
+        env: &'env Env,
+        packed: Uint8Array,
+    ) -> Result<Uint8ArraySlice<'env>> {
         let (data, _format) = self
             .inner
             .retrieve(&packed)
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
-        BufferSlice::copy_from(env, data)
+        copy_to_js(env, &data)
     }
 
     /// Get compression ratio estimate for given data.
@@ -181,7 +201,7 @@ pub fn derive_key<'env>(
     master_key: Uint8Array,
     domain: String,
     tenant_salt: String,
-) -> Result<BufferSlice<'env>> {
+) -> Result<Uint8ArraySlice<'env>> {
     if master_key.len() != 32 {
         return Err(Error::new(
             Status::InvalidArg,
@@ -210,7 +230,7 @@ pub fn derive_key<'env>(
 
     let derived = derive_domain_key(&key_arr, &domain, tenant_salt.as_bytes())
         .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
-    BufferSlice::copy_from(env, derived)
+    copy_to_js(env, &derived)
 }
 
 /// Per-tenant derived keys with automatic zeroization.
@@ -257,8 +277,8 @@ impl TenantKeys {
 
     /// Get the encryption key fingerprint (safe to log/expose).
     #[napi]
-    pub fn encryption_fingerprint<'env>(&self, env: &'env Env) -> Result<BufferSlice<'env>> {
-        BufferSlice::copy_from(env, self.inner.encryption_fingerprint())
+    pub fn encryption_fingerprint<'env>(&self, env: &'env Env) -> Result<Uint8ArraySlice<'env>> {
+        copy_to_js(env, &self.inner.encryption_fingerprint())
     }
 
     /// Get the current nonce counter value.
@@ -403,14 +423,14 @@ pub fn encrypt_with_tenant_keys<'env>(
     plaintext: Uint8Array,
     aad: Uint8Array,
     tenant_keys: &TenantKeys,
-) -> Result<BufferSlice<'env>> {
+) -> Result<Uint8ArraySlice<'env>> {
     validate_encryption_input(plaintext.len(), aad.len())?;
 
     let ciphertext = tenant_keys
         .encryptor
         .encrypt_aes_gcm(&plaintext, &tenant_keys.inner.encryption_key, &aad)
         .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
-    BufferSlice::copy_from(env, ciphertext)
+    copy_to_js(env, &ciphertext)
 }
 
 /// Decrypt ciphertext using TenantKeys (keys stay in Rust memory).
@@ -435,7 +455,7 @@ pub fn decrypt_with_tenant_keys<'env>(
     ciphertext: Uint8Array,
     aad: Uint8Array,
     tenant_keys: &TenantKeys,
-) -> Result<BufferSlice<'env>> {
+) -> Result<Uint8ArraySlice<'env>> {
     validate_decryption_input(ciphertext.len(), aad.len())?;
 
     let plaintext = match &tenant_keys.keyring {
@@ -452,5 +472,5 @@ pub fn decrypt_with_tenant_keys<'env>(
         ),
     }
     .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
-    BufferSlice::copy_from(env, plaintext)
+    copy_to_js(env, &plaintext)
 }

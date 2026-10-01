@@ -342,23 +342,24 @@ const PYTHON_COMPRESSED_FIXTURE = {
   },
 };
 
-// LAB-7084: every byte-returning export hands back a V8-owned Buffer copy,
-// not an external ArrayBuffer with a Rust finalizer. The L1 ciphertext guard
-// (cache-core l1Payload) stores without copying only when the result owns its
-// whole ArrayBuffer, so a pooled or offset view must never come back.
-function expectOwnedBuffer(bytes: Uint8Array): void {
-  expect(Buffer.isBuffer(bytes)).toBe(true);
+// LAB-7084: every byte-returning export hands back a plain Uint8Array (not a
+// Buffer, whose .slice and toJSON differ) that owns its whole ArrayBuffer. The
+// L1 ciphertext guard (cache-core l1Payload) stores without copying only when
+// the result owns its whole ArrayBuffer, so a pooled or offset view must never
+// come back. Byte checks against fixtures catch an unfilled copy.
+function expectOwnedCopy(bytes: Uint8Array): void {
+  expect(bytes.constructor).toBe(Uint8Array);
   expect(bytes.byteOffset).toBe(0);
   expect(bytes.byteLength).toBe(bytes.buffer.byteLength);
 }
 
-describe('NAPI byte results are owned Buffer copies', () => {
+describe('NAPI byte results are owned Uint8Array copies', () => {
   const masterKey = hexToBytes(PYTHON_FIXTURES.masterKeyHex);
   const keys = deriveTenantKeys(masterKey, PYTHON_FIXTURES.tenantId);
 
   it('encryptionFingerprint matches the Python fixture', () => {
     const fingerprint = keys.encryptionFingerprint();
-    expectOwnedBuffer(fingerprint);
+    expectOwnedCopy(fingerprint);
     expect(bytesToHex(fingerprint)).toBe(PYTHON_FIXTURES.keyFingerprintHex);
   });
 
@@ -369,12 +370,12 @@ describe('NAPI byte results are owned Buffer copies', () => {
         hexToBytes(vector.aadHex),
         keys
       );
-      expectOwnedBuffer(plaintext);
+      expectOwnedCopy(plaintext);
       expect(bytesToHex(plaintext)).toBe(vector.plaintextHex);
     }
   });
 
-  it('decryptWithTenantKeys returns an owned Buffer on the keyring path', () => {
+  it('decryptWithTenantKeys returns an owned Uint8Array on the keyring path', () => {
     const rotating = deriveTenantKeys(new Uint8Array(32).fill(0x62), PYTHON_FIXTURES.tenantId, [
       masterKey,
     ]);
@@ -384,7 +385,7 @@ describe('NAPI byte results are owned Buffer copies', () => {
       hexToBytes(vector.aadHex),
       rotating
     );
-    expectOwnedBuffer(plaintext);
+    expectOwnedCopy(plaintext);
     expect(bytesToHex(plaintext)).toBe(vector.plaintextHex);
   });
 
@@ -392,19 +393,24 @@ describe('NAPI byte results are owned Buffer copies', () => {
     const plaintext = hexToBytes(PYTHON_FIXTURES.vectors[0]!.plaintextHex);
     const aad = buildAAD(PYTHON_FIXTURES.tenantId, 'owned:buffer');
     const ciphertext = encryptWithTenantKeys(plaintext, aad, keys);
-    expectOwnedBuffer(ciphertext);
+    expectOwnedCopy(ciphertext);
     expect(ciphertext.length).toBe(12 + 16 + plaintext.length);
     expect(bytesToHex(decryptWithTenantKeys(ciphertext, aad, keys))).toBe(
       PYTHON_FIXTURES.vectors[0]!.plaintextHex
     );
   });
 
-  it('deriveKey returns a deterministic 32-byte key', () => {
+  // No fixture pins deriveKey output, so guard the copy itself: an unfilled
+  // copy is deterministic and 32 bytes long, but all zeros and domain-blind.
+  it('deriveKey returns a deterministic, domain-separated 32-byte key', () => {
     const a = deriveKey(masterKey, 'cachekit:encryption', 'tenant-123');
     const b = deriveKey(masterKey, 'cachekit:encryption', 'tenant-123');
-    expectOwnedBuffer(a);
+    const other = deriveKey(masterKey, 'cachekit:authentication', 'tenant-123');
+    expectOwnedCopy(a);
     expect(a.length).toBe(32);
+    expect(a.some((byte) => byte !== 0)).toBe(true);
     expect(bytesToHex(a)).toBe(bytesToHex(b));
+    expect(bytesToHex(a)).not.toBe(bytesToHex(other));
   });
 });
 
