@@ -29,21 +29,27 @@ interface Stub {
   port: number;
   /** false: read and never reply. true: answer GET with a miss and SET with OK. */
   answering: boolean;
+  /**
+   * Connections the client still holds. Each probe writes a byte: a peer that
+   * has released its socket answers with RST, which closes the stub's side.
+   */
+  probeConnections(): number;
   close(): Promise<void>;
 }
 
 /**
- * A memcached binary-protocol stub. `closeDelayMs` makes it ignore the
- * client's FIN for that long, so a timed-out socket's 'close' lands late.
+ * A memcached binary-protocol stub. `closeDelay` makes it ignore the client's
+ * FIN for that many ms, so a timed-out socket's 'close' lands late; `'never'`
+ * leaves every connection half-open until the client destroys it.
  */
-async function startStub(closeDelayMs?: number): Promise<Stub> {
+async function startStub(closeDelay?: number | 'never'): Promise<Stub> {
   const sockets = new Set<net.Socket>();
-  const server = net.createServer({ allowHalfOpen: closeDelayMs !== undefined }, (socket) => {
+  const server = net.createServer({ allowHalfOpen: closeDelay !== undefined }, (socket) => {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
     socket.on('error', () => {});
-    if (closeDelayMs !== undefined) {
-      socket.on('end', () => setTimeout(() => socket.end(), closeDelayMs));
+    if (typeof closeDelay === 'number') {
+      socket.on('end', () => setTimeout(() => socket.end(), closeDelay));
     }
     let buffered = Buffer.alloc(0);
     socket.on('data', (chunk: Buffer) => {
@@ -65,6 +71,10 @@ async function startStub(closeDelayMs?: number): Promise<Stub> {
   const stub: Stub = {
     port: (server.address() as AddressInfo).port,
     answering: false,
+    probeConnections: () => {
+      for (const socket of sockets) socket.write(Buffer.from([0]));
+      return sockets.size;
+    },
     close: () =>
       new Promise<void>((resolve) => {
         for (const socket of sockets) socket.destroy();
@@ -87,8 +97,8 @@ describe('MemcachedBackend against a stalled server', () => {
   let stub: Stub;
   let backend: MemcachedBackend;
 
-  const open = async (closeDelayMs?: number) => {
-    stub = await startStub(closeDelayMs);
+  const open = async (closeDelay?: number | 'never') => {
+    stub = await startStub(closeDelay);
     backend = memcached({
       servers: [`127.0.0.1:${stub.port}`],
       timeout: TIMEOUT,
@@ -168,6 +178,31 @@ describe('MemcachedBackend against a stalled server', () => {
         await expect(backend.get(`k${i}`)).resolves.toBeNull();
         await expect(backend.set(`k${i}`, new Uint8Array([i]), 60)).resolves.toBeUndefined();
       }
+    }
+  );
+
+  it(
+    '(e) abandoned connections close even when the server never closes its side',
+    { timeout: 8 * DEADLINE },
+    async () => {
+      await backend.close();
+      await stub.close();
+      await open('never');
+
+      for (const key of ['a', 'b', 'c', 'd']) {
+        await expect(backend.get(key)).rejects.toBeInstanceOf(TimeoutError);
+      }
+      await backend.close();
+
+      // memjs end()s a socket it gives up on and drops it; against a server
+      // that never closes, only a destroy releases the connection. Let the
+      // QUIT time out first: each probe byte resets the socket's idle timer.
+      await new Promise((resolve) => setTimeout(resolve, TIMEOUT + SCHEDULING_MS));
+      const start = Date.now();
+      while (stub.probeConnections() > 0 && Date.now() - start < DEADLINE) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(stub.probeConnections()).toBe(0);
     }
   );
 });

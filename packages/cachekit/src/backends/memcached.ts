@@ -1,3 +1,4 @@
+import type { Socket } from 'node:net';
 import type { Client as MemjsClient } from 'memjs';
 import { Backend, MemcachedBackendConfig } from './types.js';
 import { BackendError, ConfigurationError, TimeoutError } from '../errors.js';
@@ -21,8 +22,83 @@ const MEMJS_RETRY_DELAY_MS = 200;
 /** Headroom over memjs's own worst case, so the deadline fires only once memjs has lost the request. */
 const DEADLINE_SLACK_MS = 500;
 
-/** The memjs internals the deadline needs: `close()`/`quit()` only half-close a socket. */
-type MemjsSockets = { servers: ReadonlyArray<{ _socket?: { destroy(): void } }> };
+/** The memjs 1.3.2 `Server` internals this backend reaches into (lib/memjs/server.js). */
+type MemjsServer = {
+  _socket?: Socket;
+  sock?(sasl: boolean, go: (socket: Socket) => void): void;
+};
+
+/** A client's servers, or none if memjs internals ever stop matching. */
+function memjsServers(client: MemjsClient): readonly MemjsServer[] {
+  return (client as unknown as { servers?: MemjsServer[] }).servers ?? [];
+}
+
+/** Every socket memjs has opened for a client and not yet closed, with its server. */
+const clientSockets = new WeakMap<MemjsClient, Map<Socket, MemjsServer>>();
+
+/**
+ * Record each socket memjs opens, so the ones it abandons can be destroyed.
+ *
+ * memjs end()s a socket it gives up on (request timeout, connect timeout) and
+ * drops its reference. Against a server that never closes its side, that
+ * leaves the connection half-open for good. Each abandoned socket is released
+ * once its end() flushes, and whenever memjs opens a replacement.
+ */
+function trackSockets(client: MemjsClient): void {
+  const tracked = new Map<Socket, MemjsServer>();
+  clientSockets.set(client, tracked);
+  for (const server of memjsServers(client)) {
+    const sock = server.sock;
+    if (!sock) continue;
+    server.sock = function (this: MemjsServer, sasl, go) {
+      const previous = this._socket;
+      sock.call(this, sasl, go);
+      const socket = this._socket;
+      if (!socket || socket === previous) return;
+      tracked.set(socket, this);
+      socket.once('close', () => tracked.delete(socket));
+      socket.once('finish', () => releaseSockets(client, 'abandoned'));
+      releaseSockets(client, 'abandoned');
+    };
+  }
+}
+
+/**
+ * A socket memjs has ended and moved off: it never touches it again. Wait for
+ * the FIN to flush, because a destroy while end() is still shutting the socket
+ * down leaves the handle open. A socket still connecting never flushes, so it
+ * goes at once.
+ */
+function isAbandoned(socket: Socket, server: MemjsServer): boolean {
+  return (
+    socket.writableEnded &&
+    server._socket !== socket &&
+    (socket.writableFinished || socket.connecting)
+  );
+}
+
+/**
+ * Destroy a client's sockets: `'abandoned'` takes only those {@link isAbandoned}
+ * accepts; `'all'` takes every one, for a client being discarded.
+ */
+function releaseSockets(client: MemjsClient, which: 'abandoned' | 'all'): void {
+  for (const [socket, server] of clientSockets.get(client) ?? []) {
+    if (which === 'abandoned' && !isAbandoned(socket, server)) continue;
+    clientSockets.get(client)?.delete(socket);
+    // memjs's 'close' and 'error' handlers act on the server's CURRENT socket,
+    // not their own: fired from this one, they would disarm the live
+    // request's timeout and orphan it. Strip them before destroying.
+    socket
+      .removeAllListeners('close')
+      .removeAllListeners('error')
+      .on('error', () => {});
+    // RST, not FIN: memjs already sent FIN, and a server that never closes its
+    // side would otherwise hold the connection open. resetAndDestroy() on a
+    // socket still connecting waits for the connect, so destroy that outright.
+    if (socket.connecting) socket.destroy();
+    else socket.resetAndDestroy();
+  }
+}
 
 /**
  * Memcached backend using memjs (binary protocol, multi-server support).
@@ -206,7 +282,10 @@ export class MemcachedBackend implements Backend {
     if (this.clientPromise) {
       // quit() flushes outstanding requests before closing (vs close()'s abort).
       const client = await this.clientPromise.catch(() => null);
-      client?.quit();
+      if (client) {
+        client.quit();
+        releaseSockets(client, 'abandoned');
+      }
     }
   }
 
@@ -246,11 +325,7 @@ export class MemcachedBackend implements Backend {
   private discardClient(clientPromise: Promise<MemjsClient>, client: MemjsClient): void {
     // A concurrent op may already have replaced it; never discard the new one.
     if (this.clientPromise === clientPromise) this.clientPromise = null;
-    // destroy(), not memjs's close()/quit(): those only end() the socket, which
-    // then waits on a FIN from a server that may never send one.
-    for (const server of (client as unknown as MemjsSockets).servers) {
-      server._socket?.destroy();
-    }
+    releaseSockets(client, 'all');
   }
 
   private prefixedKey(key: string): string {
@@ -271,12 +346,14 @@ export class MemcachedBackend implements Backend {
         );
       }
       // memjs timeouts are in (fractional) seconds; cachekit config is ms.
-      return memjs.Client.create(this.config.servers.join(','), {
+      const client = memjs.Client.create(this.config.servers.join(','), {
         expires: 0, // per-op expires is always passed explicitly in set()
         timeout: this.config.timeout / 1000,
         conntimeout: this.config.connectTimeout / 1000,
         retries: this.config.retries,
       });
+      trackSockets(client);
+      return client;
     })();
     return this.clientPromise;
   }
