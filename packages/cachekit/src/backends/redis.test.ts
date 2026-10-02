@@ -116,14 +116,14 @@ describe('RedisBackend ioredis lifecycle', () => {
     }));
     const backend = redis({ url: 'redis://localhost:6379' });
 
+    const message =
+      'The Redis backend could not create its ioredis client; check its url and options';
     const error = await backend.get('k').catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ConfigurationError);
-    expect((error as Error).message).toBe(
-      'The Redis backend could not create its ioredis client; check its url and options'
-    );
-    expect((error as Error).cause).toBeUndefined();
+    expect(error).toHaveProperty('message', message);
+    expect(error).not.toHaveProperty('cause');
     await expect(backend.exists('k')).rejects.toBe(error);
-    expect(logs).toEqual([`[cachekit] ${(error as Error).message}`]);
+    expect(logs).toEqual([`[cachekit] ${message}`]);
     expect(JSON.stringify(logs)).not.toContain('s3cret');
     await expect(backend.close()).resolves.toBeUndefined();
   });
@@ -177,7 +177,7 @@ describe('RedisBackend url check', () => {
   ])(
     'a bad url (%j) fails at redis() without echoing the url or its password',
     async (url, message) => {
-      const { redis } = await loadBackend(() => ({ Redis: FakeClient }));
+      const { redis, ConfigurationError } = await loadBackend(() => ({ Redis: FakeClient }));
       let error: unknown;
       try {
         redis({ url });
@@ -185,9 +185,10 @@ describe('RedisBackend url check', () => {
         error = caught;
       }
 
-      expect((error as Error).message).toBe(message);
+      expect(error).toBeInstanceOf(ConfigurationError);
+      expect(error).toHaveProperty('message', message);
+      expect(error).not.toHaveProperty('cause');
       expect(JSON.stringify(error, Object.getOwnPropertyNames(error))).not.toContain('s3cret');
-      expect((error as Error).cause).toBeUndefined();
       expect(FakeClient.instances).toHaveLength(0);
     }
   );
