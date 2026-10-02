@@ -1,3 +1,7 @@
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import { decode } from '@msgpack/msgpack';
 import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
@@ -6,6 +10,20 @@ import { readEnvelopeHeader } from '../../src/serialization/envelope.js';
 // workers lane header for the re-copy rule); this lane runs the same vectors
 // through the NAPI binding so both bindings are held to identical bytes.
 import fixture from '../workers/fixtures/wire-format.json' with { type: 'json' };
+
+/**
+ * sha256 of test-vectors/wire-format.json (fixture version 1.1.1).
+ * Provenance: cachekit-io/protocol @ 5be35d5. Re-vendoring means copying the
+ * file byte-for-byte from a named protocol revision and updating this line,
+ * FIXTURE_SHA256 and the version/count guard below together.
+ */
+const FIXTURE_SHA256 = 'b902db88fb9b2c4a2d0def7266f8199a858fcb921262c1eaf2c2c03412b5b56a'; // pragma: allowlist secret
+
+// Raw bytes of the same file the JSON import above parses: the pin covers
+// every byte (legacy vectors and the limits block included), not a re-serialisation.
+const rawFixture = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'workers', 'fixtures', 'wire-format.json')
+);
 
 interface WireVector {
   name: string;
@@ -212,6 +230,13 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
   });
 
   describe('protocol wire-format.json vectors', () => {
+    it('fixture is the pinned upstream file, unedited since vendoring', () => {
+      expect(
+        createHash('sha256').update(rawFixture).digest('hex'),
+        'fixture differs from the pinned protocol revision; if intentional, refresh FIXTURE_SHA256 AND the version/count guard'
+      ).toBe(FIXTURE_SHA256);
+    });
+
     it('vendors fixture 1.1.1: seven legacy vectors, seven bin twins, bin8 and bin16 pinned', () => {
       expect(fixture.version).toBe('1.1.1');
       expect(legacyVectors).toHaveLength(7);
