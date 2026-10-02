@@ -11,10 +11,11 @@ import type { Backend } from '../backends/types.js';
 const promClientLoad = vi.hoisted(() => {
   let release!: () => void;
   const released = new Promise<void>((resolve) => (release = resolve));
-  return { released, release };
+  return { started: false, released, release };
 });
 
 vi.mock('prom-client', async () => {
+  promClientLoad.started = true;
   await promClientLoad.released;
   return vi.importActual('prom-client');
 });
@@ -74,10 +75,15 @@ describe('CacheMetrics initialization off the operation path', () => {
     expect(await within(2000, cache.get('ns:missing'))).toBeNull();
     await within(2000, cache.set('ns:key', 'value'));
     expect(await registry.getMetricsAsJSON()).toEqual([]);
+    // The import starts on the next event-loop turn: Node evaluates an
+    // imported CommonJS package in the microtasks after import(), where it
+    // would have held up these operations.
+    expect(promClientLoad.started).toBe(false);
 
     // A duration taken when the sample is recorded, not when the operation
     // ran, would include this wait.
     await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(promClientLoad.started).toBe(true);
     promClientLoad.release();
 
     await vi.waitFor(async () => {

@@ -71,9 +71,9 @@ export interface MetricsCollector {
  *
  * Requires the optional `prom-client` peer dependency; when it is missing,
  * initialization reports once through the library logger and metrics degrade
- * to no-ops. prom-client loads in the background from the constructor, and
- * no operation waits for it: metrics recorded while it loads land once it
- * has loaded.
+ * to no-ops. prom-client loads in the background, starting on the event-loop
+ * turn after construction, and no operation waits for it: metrics recorded
+ * while it loads land once it has loaded.
  *
  * @example
  * ```typescript
@@ -110,8 +110,8 @@ export class CacheMetrics implements MetricsCollector {
 
   /**
    * Settles true once prom-client has loaded and every metric is registered,
-   * false if either failed. Never rejects. Started by the constructor, so no
-   * operation waits for the import.
+   * false if either failed. Never rejects. Scheduled by the constructor, so
+   * no operation waits for the import.
    */
   private readonly ready: Promise<boolean>;
   /** Set with `ready` resolving true; lets a stopped timer record at once. */
@@ -124,7 +124,13 @@ export class CacheMetrics implements MetricsCollector {
     this.defaultLabels = config.defaultLabels ?? {};
     this.registry = config.registry;
     this.errorHandler = config.onError;
-    this.ready = this.initialize();
+    // Load prom-client on the next turn of the event loop, not in this one:
+    // Node evaluates a dynamically imported CommonJS package in the
+    // microtasks right after the import() call, which would hold up an
+    // operation started right after construction.
+    this.ready = new Promise<void>((resolve) => setImmediate(resolve)).then(() =>
+      this.initialize()
+    );
   }
 
   /**
