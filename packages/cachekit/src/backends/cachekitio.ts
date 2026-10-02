@@ -177,16 +177,14 @@ export class CachekitIOCore implements Backend {
     }
   }
 
+  /** @returns true on every successful delete, whether or not the key
+   * existed: the server does not report existence on DELETE. */
   async delete(key: string): Promise<boolean> {
     this.ensureNotClosed();
     const url = this.cacheUrl(key);
 
     try {
       const response = await this.request('DELETE', url);
-
-      if (response.status === 404) {
-        return false;
-      }
 
       if (!response.ok) {
         throw await this.httpError('delete', response);

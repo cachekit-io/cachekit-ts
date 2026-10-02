@@ -29,7 +29,8 @@ function createMockCachekitIO() {
       case 'HEAD':
         return new Response(null, { status: store.has(key) ? 200 : 404 });
       case 'DELETE':
-        return new Response(null, { status: store.delete(key) ? 200 : 404 });
+        store.delete(key);
+        return Response.json({ success: true });
       default:
         return new Response('method not allowed', { status: 405 });
     }

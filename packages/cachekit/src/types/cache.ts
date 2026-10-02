@@ -278,7 +278,9 @@ export interface Cache {
    * Delete a key from cache.
    *
    * @param key - Cache key to delete
-   * @returns true if key existed and was deleted
+   * @returns true if key existed and was deleted. CachekitIO returns true on
+   *   every successful delete, whether or not the key existed: the server does
+   *   not report existence on DELETE.
    */
   delete(key: string): Promise<boolean>;
 

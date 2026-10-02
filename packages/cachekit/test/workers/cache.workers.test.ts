@@ -55,7 +55,7 @@ describe('CachekitIO backend inside workerd (mocked upstream)', () => {
     expect(await backend.exists('smoke:key')).toBe(true);
 
     expect(await backend.delete('smoke:key')).toBe(true);
-    expect(await backend.delete('smoke:key')).toBe(false);
+    expect(await backend.delete('smoke:key')).toBe(true); // DELETE is idempotent
     expect(await backend.get('smoke:key')).toBeNull();
     expect(await backend.exists('smoke:key')).toBe(false);
 
