@@ -147,7 +147,12 @@ bad block-text-arms-strategy $'jobs:\n  b:\n    steps:\n      - run: |\n        
 bad quoted-text-block-header $'jobs:\n  j:\n    name: \'foo\n  x: |\n    \'\n    runs-on: self-hosted' 6
 bad quoted-text-block-header-matrix $'jobs:\n  j:\n    name: \'foo\n  x: |\n    \'\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [self-hosted]' 9
 bad include-block-scalar-item $'jobs:\n  j:\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        include:\n          - |-\n              ${{ fromJSON(vars.EXTRA) }}\n    runs-on: ${{ matrix.os }}' 7 'block scalar'
-bad first-unlisted-label  $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [macos-latest, self-hosted, ubuntu-latest]' 6 'runner value "self-hosted" is not an allow-listed'
+bad first-unlisted-label  $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [macos-latest, self-hosted, ubuntu-latest]' 6 'runner value "self-hosted" selects a self-hosted runner'
+bad runs-on-label-list    $'jobs:\n  j:\n    runs-on: [linux, x64]' 3 'runner value "linux,x64" selects a self-hosted runner'
+bad first-unlisted-hosted-advice $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [macos-latest, ubuntu-24.04-arm]' 6 'runner value "ubuntu-24.04-arm" is not an allow-listed'
+bad expression-quoted-whole $'jobs:\n  j:\n    runs-on: ${{ fromJSON(\'["ubuntu-latest","self-hosted"]\') }}' 3 'runner value "${{fromjson(ubuntu-latest,self-hosted)}}" is not a plain label'
+bad block-header-in-quoted-key $'jobs:\n  a:\n    runs-on: ubuntu-latest\n    services:\n      "svc: | #x":\n        image: nginx\n        env: &j\n          uses: evil/repo/.github/workflows/x.yml@v1\n    steps:\n      - run: echo\n  b: *j' 8
+bad phantom-quote-backstop $'jobs:\n  b:\n    runs-on: ubuntu-latest\n    name: foo\n      \'bar\n    steps:\n      - run: |\n          Matrix:\n            echo hi\n    strategy:\n      matrix:\n        note: [it\'s]\n        os: [self-hosted]' 13
 # --- must pass --------------------------------------------------------------
 good ubuntu-latest        $'jobs:\n  j:\n    runs-on: ubuntu-latest'
 good upper-hosted-label   $'jobs:\n  j:\n    runs-on: Ubuntu-Latest'

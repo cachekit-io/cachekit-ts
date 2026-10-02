@@ -365,12 +365,14 @@ jobs:
               printf "::error file=%s,line=%d::%s\n", file, line, msg
               bad = 1
             }
-            # The advice fits the value: only an unknown plain label is fixed by
-            # adding it to HOSTED.
-            function label(v) {
+            # The advice fits the value: only one unknown plain label is fixed by
+            # adding it to HOSTED. self-hosted, or a runs-on list of labels (a
+            # selector a runner must match in full), picks a self-hosted runner.
+            function label(v, item, selector) {
               if (v == "") fail(FILENAME, FNR, "runner value is not whole on this line (written below the key, wrapped, or cut by a # inside a quote) — write it on the key's line")
-              else if (v !~ /^[a-z0-9._-]+(,[a-z0-9._-]+)*$/) fail(FILENAME, FNR, "runner value \"" v "\" is not a plain label the drift guard can check — write a hosted label, or $" "{{ matrix.os }} over a static os axis")
-              else fail(FILENAME, FNR, "runner value \"" v "\" is not an allow-listed GitHub-hosted label — this public repo runs only on GitHub-hosted runners; adopting a new hosted image means adding its label to HOSTED in the runner-drift-guard job of ci.yml")
+              else if (item == "") fail(FILENAME, FNR, "runner value \"" v "\" is not a plain label the drift guard can check — write a hosted label, or $" "{{ matrix.os }} over a static os axis")
+              else if (selector || item == "self-hosted") fail(FILENAME, FNR, "runner value \"" (selector ? v : item) "\" selects a self-hosted runner — this public repo runs only on GitHub-hosted runners; write one GitHub-hosted label")
+              else fail(FILENAME, FNR, "runner value \"" item "\" is not an allow-listed GitHub-hosted label — this public repo runs only on GitHub-hosted runners; adopting a new hosted image means adding its label to HOSTED in the runner-drift-guard job of ci.yml")
             }
             # True for a uses: line the scan cannot clear: a value not whole on
             # the line (below the key, a block scalar, an alias, an open quote),
@@ -388,17 +390,18 @@ jobs:
             # open quote character. A quote or bracket opens only where a value
             # starts (line start, after "- ", ": ", an anchor or a tag, or inside
             # a flow), so the ' in a plain scalar like don't opens nothing. A #
-            # after whitespace, outside a quote, starts a comment. It reads every
-            # line but block-scalar text, so a | or > inside a multi-line quoted
-            # scalar or flow is never taken for a block scalar.
+            # after whitespace, outside a quote, starts a comment: cut holds its
+            # column, or one past the end. It reads every line but block-scalar
+            # text, so a | or > inside a multi-line quoted scalar or flow is never
+            # taken for a block scalar.
             function scan(s,   i, c, start) {
-              start = 1
+              start = 1; cut = length(s) + 1
               for (i = 1; i <= length(s); i++) {
                 c = substr(s, i, 1)
                 if (quote == "'") { if (c == "'") { if (substr(s, i + 1, 1) == "'") i++; else quote = "" } }
                 else if (quote != "") { if (c == "\\") i++; else if (c == "\"") quote = "" }
                 else if (c == " " || c == "\t") continue
-                else if (c == "#" && (i == 1 || substr(s, i - 1, 1) ~ /[ \t]/)) break
+                else if (c == "#" && (i == 1 || substr(s, i - 1, 1) ~ /[ \t]/)) { cut = i; break }
                 else if (start && (c == "&" || c == "!")) { while (i < length(s) && substr(s, i + 1, 1) !~ /[ \t]/) i++ }
                 else if (start && (c == "\"" || c == "'")) { quote = c; start = 0 }
                 else if ((start || flow) && (c == "[" || c == "{")) { flow++; start = 1 }
@@ -418,7 +421,8 @@ jobs:
             # A # starts a YAML comment only at the start of a line or after
             # whitespace; ubuntu-latest#x is one plain scalar. The strip cannot
             # tell a quoted " #" from a comment, so the refusal rules that look
-            # for a flow key or an expression read lraw, the unstripped line.
+            # for a flow key or an expression read lraw, the unstripped line, and
+            # the block-scalar header is matched on lraw as scan() cut it.
             { sub(/\r$/, ""); lraw = tolower($0); sub(/(^|[[:space:]])#.*/, ""); $0 = tolower($0) }
             /^[[:space:]]*$/ { next }
             { match($0, /^[[:space:]]*/); if (block >= 0 && RLENGTH > block) next; block = -1 }
@@ -439,7 +443,7 @@ jobs:
               scan(lraw)
               # A | or > value opens a block scalar. Under strategy: its text
               # could hold an expression no rule would read, so it is refused.
-              if (!flow && quote == "" && /^[[:space:]]*(-[[:space:]]+)*([^[:space:]#][^#]*:[[:space:]]+)?([&!][^[:space:]]*[[:space:]]+)*[|>][-+0-9]*[[:space:]]*$/) {
+              if (!flow && quote == "" && substr(lraw, 1, cut - 1) ~ /^[[:space:]]*(-[[:space:]]+)*([^[:space:]#][^#]*:[[:space:]]+)?([&!][^[:space:]]*[[:space:]]+)*[|>][-+0-9]*[[:space:]]*$/) {
                 block = indent
                 if (strategy_indent >= 0) fail(FILENAME, FNR, "block scalar (| or >) under strategy: — write each matrix value inline, so the drift guard can read it")
               }
@@ -479,8 +483,9 @@ jobs:
             # runner or uses key; any expression under a bare strategy: line,
             # whatever key holds it (fail-fast, max-parallel, a non-runner axis,
             # an include or exclude value); a trailing comment that holds a flow
-            # key or, under strategy:, an expression; a step uses: value that is
-            # an alias or is written below its key.
+            # key or, under strategy:, an expression; a block scalar (| or >)
+            # under strategy:, even a multi-line non-runner value; a step uses:
+            # value that is an alias or is written below its key.
             lraw ~ /[{,][[:space:]]*["']?(runs-on|os|runner|strategy|matrix|include|uses)["']?[[:space:]]*:/ ||
             /^[[:space:]]*(-[[:space:]]*)?["']?(strategy|matrix)["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ ||
             (/^[[:space:]]*(-[[:space:]]*)?["']?include["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ && matrix_indent >= 0) ||
@@ -497,10 +502,11 @@ jobs:
               # An unclosed list or quote was wrapped, or cut by a # inside it.
               if (v ~ /^\[/ && v !~ /\]$/ || gsub(/"/, "&", v) % 2 || gsub(/'/, "&", v) % 2) v = ""
               gsub(/[][ "']/, "", v)
-              # The advice names the first label that is not allow-listed.
-              n = split(v, items, ",")
+              # Only a plain comma list is split, so an expression is quoted
+              # whole; the advice names the first label that is not allow-listed.
+              n = v ~ /^[a-z0-9._-]+(,[a-z0-9._-]+)*$/ ? split(v, items, ",") : 0
               for (i = 1; i <= n && (items[i] in HOSTED); i++) ;
-              if (v == "" || i <= n) label(items[i] == "" ? v : items[i])
+              if (!n || i <= n) label(v, n ? items[i] : "", n > 1 && /^[[:space:]]*(-[[:space:]]*)?["']?runs-on/)
             }
             END { exit bad }
           AWK
