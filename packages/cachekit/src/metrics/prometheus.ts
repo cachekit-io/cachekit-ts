@@ -125,9 +125,9 @@ export class CacheMetrics implements MetricsCollector {
     this.registry = config.registry;
     this.errorHandler = config.onError;
     // Load prom-client on the next turn of the event loop, not in this one:
-    // Node evaluates a dynamically imported CommonJS package in the
-    // microtasks right after the import() call, which would hold up an
-    // operation started right after construction.
+    // Node can evaluate a dynamically imported CommonJS package in the
+    // microtasks right after the import() call (Node 24 and 26 do), which
+    // would hold up an operation started right after construction.
     this.ready = new Promise<void>((resolve) => setImmediate(resolve)).then(() =>
       this.initialize()
     );
