@@ -153,25 +153,6 @@ describe('CacheMetrics error handling', () => {
   });
 });
 
-describe('CacheMetrics init failure handling', () => {
-  it('logs to console.error when prom-client import fails and no handler', async () => {
-    // We can't easily make prom-client import fail since it's mocked,
-    // but we can verify the init short-circuits on second call
-    const metrics = new CacheMetrics();
-    // First call initializes
-    await metrics.recordOperation('get', 'success');
-    // Second call should use cached init result
-    await metrics.recordOperation('set', 'success');
-  });
-
-  it('startTimer returns noop when already initialized', async () => {
-    const metrics = new CacheMetrics();
-    const timer = await metrics.startTimer('get');
-    expect(typeof timer).toBe('function');
-    timer(); // should not throw
-  });
-});
-
 describe('CacheMetrics guards the onError handler', () => {
   // The cache layer calls every collector method fire-and-forget
   // (`void this.metrics.*()`) on the invariant that they never reject. A

@@ -3,29 +3,13 @@ import { Registry } from 'prom-client';
 import { createCache } from './cache.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
+import { InMemoryBackend, metricValue } from '../test/fixtures/metrics.js';
 
 /**
  * LAB-517 regression tests: `metrics` must actually work, not be silently
  * accepted. These drive the REAL prom-client (devDependency) through
  * CacheImpl end-to-end — no mocks on the metrics path.
  */
-
-class InMemoryBackend implements Backend {
-  store = new Map<string, Uint8Array>();
-  async get(key: string): Promise<Uint8Array | null> {
-    return this.store.get(key) ?? null;
-  }
-  async set(key: string, value: Uint8Array): Promise<void> {
-    this.store.set(key, value);
-  }
-  async delete(key: string): Promise<boolean> {
-    return this.store.delete(key);
-  }
-  async exists(key: string): Promise<boolean> {
-    return this.store.has(key);
-  }
-  async close(): Promise<void> {}
-}
 
 class FailingBackend implements Backend {
   async get(): Promise<Uint8Array | null> {
@@ -41,28 +25,6 @@ class FailingBackend implements Backend {
     throw new Error('backend down');
   }
   async close(): Promise<void> {}
-}
-
-async function metricValue(
-  registry: Registry,
-  name: string,
-  labels?: Record<string, string>
-): Promise<number> {
-  const metrics = await registry.getMetricsAsJSON();
-  return metrics
-    .flatMap((m) =>
-      m.values.map((v) => ({
-        value: v.value,
-        labels: v.labels,
-        // prom-client emits metricName on histogram sub-series
-        // (_count/_sum/_bucket) at runtime but omits it from MetricValue's
-        // declared type — narrow only that one optional field.
-        seriesName: (v as { metricName?: string }).metricName ?? m.name,
-      }))
-    )
-    .filter((v) => v.seriesName === name)
-    .filter((v) => !labels || Object.entries(labels).every(([k, val]) => v.labels[k] === val))
-    .reduce((sum, v) => sum + v.value, 0);
 }
 
 describe('Cache metrics wiring (LAB-517)', () => {

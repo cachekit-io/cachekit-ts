@@ -237,9 +237,8 @@ export class CacheMetrics implements MetricsCollector {
 
   /**
    * Wait for initialization. A failure is reported once, at the first metric
-   * call rather than at construction — as when initialization itself ran on
-   * first use — so it reaches an onError handler registered after the
-   * collector was built.
+   * call rather than when the load fails, so it reaches an onError handler
+   * registered after the collector was built.
    */
   private async whenReady(): Promise<boolean> {
     if (await this.ready) return true;

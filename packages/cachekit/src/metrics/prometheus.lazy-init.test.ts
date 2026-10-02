@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import type { Registry } from 'prom-client';
 import { createCache } from '../cache.js';
-import type { Backend } from '../backends/types.js';
+import { InMemoryBackend, metricValue } from '../../test/fixtures/metrics.js';
 
 /**
  * No cache operation may wait for prom-client to load (about 20 ms on a
@@ -19,38 +18,6 @@ vi.mock('prom-client', async () => {
   await promClientLoad.released;
   return vi.importActual('prom-client');
 });
-
-class InMemoryBackend implements Backend {
-  store = new Map<string, Uint8Array>();
-  async get(key: string): Promise<Uint8Array | null> {
-    return this.store.get(key) ?? null;
-  }
-  async set(key: string, value: Uint8Array): Promise<void> {
-    this.store.set(key, value);
-  }
-  async delete(key: string): Promise<boolean> {
-    return this.store.delete(key);
-  }
-  async exists(key: string): Promise<boolean> {
-    return this.store.has(key);
-  }
-  async close(): Promise<void> {}
-}
-
-async function metricValue(
-  registry: Registry,
-  name: string,
-  labels: Record<string, string> = {}
-): Promise<number> {
-  const metrics = await registry.getMetricsAsJSON();
-  return metrics
-    .flatMap((m) =>
-      m.values.map((v) => ({ ...v, series: (v as { metricName?: string }).metricName ?? m.name }))
-    )
-    .filter((v) => v.series === name)
-    .filter((v) => Object.entries(labels).every(([k, val]) => v.labels[k] === val))
-    .reduce((sum, v) => sum + v.value, 0);
-}
 
 /** Settle `promise` within `ms`, or fail: an operation must not wait for the import. */
 function within<T>(ms: number, promise: Promise<T>): Promise<T> {

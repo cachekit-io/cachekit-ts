@@ -82,4 +82,27 @@ describe('CacheMetrics with prom-client missing', () => {
     }
     expect(logs).toHaveLength(1);
   });
+
+  it('a timer stopped before a failed load, with a throwing onError, rejects nothing', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    const logs: string[] = [];
+    setLogger((message) => logs.push(message));
+    try {
+      const metrics = new CacheMetrics({
+        onError: () => {
+          throw new Error('handler bug');
+        },
+      });
+      // Stopped before the load has started: the sample waits on it.
+      (await metrics.startTimer('get'))();
+
+      await vi.waitFor(() => expect(logs).toContain('[cachekit] metrics onError handler threw:'));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
 });

@@ -18,7 +18,7 @@
 // in the same rotation, and reports base minus head per arm as the median of
 // the per-round differences.
 import { execFileSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -118,6 +118,10 @@ if (process.argv[2] === '--probe') {
   const latencyMs = Number(opt.latency);
   if (!(latencyMs >= 0)) throw new Error('--latency must be a number of ms >= 0');
   const builds = { head: HEAD_DIST, ...(opt.base ? { base: resolve(opt.base) } : {}) };
+  for (const [build, dist] of Object.entries(builds)) {
+    const entryFile = join(dist, ...(opt.entry === 'cjs' ? ['cjs', 'index.js'] : ['index.js']));
+    if (!existsSync(entryFile)) throw new Error(`${build} build is missing ${entryFile}`);
+  }
   const names = Object.keys(ARMS);
   const cells = Object.keys(builds).flatMap((build) => names.map((arm) => [build, arm]));
   const samples = Object.fromEntries(
@@ -150,8 +154,8 @@ if (process.argv[2] === '--probe') {
     ),
   };
   if (opt.base) {
-    // Rounds pair the samples: round r of base and round r of head ran
-    // back to back in the same rotation.
+    // Rounds pair the samples: round r of base and round r of head ran in
+    // the same round of the rotation, a few probes apart.
     result.baseMinusHead = Object.fromEntries(
       names.map((arm) => [
         arm,

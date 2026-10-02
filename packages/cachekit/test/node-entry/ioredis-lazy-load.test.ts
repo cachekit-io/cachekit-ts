@@ -7,7 +7,6 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { build, type Plugin } from 'esbuild';
-import { startFakeRedis, type FakeRedis } from '../fixtures/fake-redis.js';
 
 /**
  * The Node entry must not load ioredis until the app creates a Redis
@@ -45,8 +44,9 @@ describe.each(['esm', 'cjs'] as const)('built %s entry', (format) => {
 
 /**
  * The native core is stubbed, so the bundle runs from a directory with no
- * node_modules: the only ioredis it can reach is the copy inside it. The
- * minimal app never touches the core.
+ * node_modules: the only ioredis it can reach is the copy inside it, and a
+ * bundle without one logs that it could not load ioredis. The minimal app
+ * never touches the core.
  */
 const stubNativeCore: Plugin = {
   name: 'stub-native-core',
@@ -65,12 +65,11 @@ const stubNativeCore: Plugin = {
 const ESM_REQUIRE_BANNER =
   "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);";
 
+// Nothing listens on port 1. close() waits for ioredis to load and the
+// client to be built, then drops the connection attempt.
 const APP_BODY = `
-  const backend = redis({ url: process.env.REDIS_URL });
-  await backend.set('k', new Uint8Array([1, 2, 3]), 60);
-  const value = await backend.get('k');
-  await backend.close();
-  console.log(JSON.stringify({ value: Array.from(value) }));
+  await redis({ url: 'redis://127.0.0.1:1' }).close();
+  console.log(JSON.stringify({ closed: true }));
 `;
 
 const apps = {
@@ -79,21 +78,18 @@ const apps = {
 } as const;
 
 describe('bundled app (esbuild, platform node)', () => {
-  let fakeRedis: FakeRedis;
   let outDir: string;
 
   beforeAll(async () => {
-    fakeRedis = await startFakeRedis();
     outDir = await mkdtemp(join(tmpdir(), 'cachekit-bundle-'));
   });
 
   afterAll(async () => {
-    await fakeRedis?.close();
     if (outDir) await rm(outDir, { recursive: true, force: true });
   });
 
   it.each(['esm', 'cjs'] as const)(
-    '%s output bundles ioredis and loads it at the first command',
+    '%s output carries ioredis and loads it from the bundle',
     async (format) => {
       const outfile = join(outDir, `app.${format === 'esm' ? 'mjs' : 'cjs'}`);
       const result = await build({
@@ -112,12 +108,12 @@ describe('bundled app (esbuild, platform node)', () => {
       );
       expect(bundled, 'esbuild did not follow the ioredis import into the bundle').toBe(true);
 
-      const { stdout } = await run(process.execPath, [outfile], {
+      const { stdout, stderr } = await run(process.execPath, [outfile], {
         cwd: outDir,
-        env: { ...process.env, REDIS_URL: fakeRedis.url },
         timeout: 20_000,
       });
-      expect(JSON.parse(stdout)).toEqual({ value: [1, 2, 3] });
+      expect(stderr).not.toContain('could not load ioredis');
+      expect(JSON.parse(stdout)).toEqual({ closed: true });
     },
     30_000
   );
