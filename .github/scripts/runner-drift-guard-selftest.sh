@@ -115,6 +115,7 @@ bad external-reusable-literal $'jobs:\n  j:\n    uses: |-\n      other-org/tooli
 bad external-reusable-flow-job $'jobs:\n  j: {uses: other-org/tooling/.github/workflows/build.yml@main}' 2
 bad external-reusable-open-quote $'jobs:\n  j:\n    uses: "other-org/tooling/\\\n      .github/workflows/build.yml@main"' 3
 bad external-reusable-alias $'x: &w other-org/tooling/.github/workflows/build.yml@main\njobs:\n  j:\n    uses: *w' 4
+bad external-reusable-quoted-hash $'jobs:\n  j:\n    uses: "o/r/x #/.github/workflows/w.yml@v1"' 3
 # --- a verdict never depends on a non-runner key: each pair differs only in
 # the sibling key, and both fail on the os line, never on the sibling's -----
 bad os-object-list-pkg    $'jobs:\n  j:\n    strategy:\n      matrix:\n        os:\n          - runner: ubuntu-latest\n            artifact: cachekit.linux-x64-gnu.node' 5
@@ -144,19 +145,23 @@ bad flow-job-deeper-brace $'jobs:\n  build: {\n     strategy:\n       {\n     ma
 # | or > header inside a quoted scalar opens no block
 bad block-text-arms-matrix $'jobs:\n  b:\n    steps:\n      - run: |\n          cat >> "$GITHUB_STEP_SUMMARY" <<\'EOF2\'\n          Matrix:\n            \'tis built\n          EOF2\n    strategy:\n      matrix:\n        note: [it\'s]\n        os: [self-hosted]\n    runs-on: ${{ matrix.os }}' 12
 bad block-text-arms-strategy $'jobs:\n  b:\n    steps:\n      - run: |\n          Strategy:\n          Matrix:\n            \'tis built\n    strategy:\n      matrix:\n        note: [it\'s]\n        os: [ubuntu-latest]\n        include: ${{ fromJSON(vars.EXTRA) }}\n    runs-on: ${{ matrix.os }}' 12
-bad quoted-text-block-header $'jobs:\n  j:\n    name: \'foo\n  x: |\n    \'\n    runs-on: self-hosted' "3 4 6"
-bad quoted-text-block-header-matrix $'jobs:\n  j:\n    name: \'foo\n  x: |\n    \'\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [self-hosted]' "3 4 9"
+bad quoted-text-block-header $'jobs:\n  j:\n    name: \'foo\n  x: |\n    \'\n    runs-on: self-hosted' "3 6"
+bad quoted-text-block-header-matrix $'jobs:\n  j:\n    name: \'foo\n  x: |\n    \'\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [self-hosted]' "3 9"
 bad include-block-scalar-item $'jobs:\n  j:\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        include:\n          - |-\n              ${{ fromJSON(vars.EXTRA) }}\n    runs-on: ${{ matrix.os }}' 7 'block scalar'
 bad first-unlisted-label  $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [macos-latest, self-hosted, ubuntu-latest]' 6 'runner value "self-hosted" selects a self-hosted runner'
 bad runs-on-label-list    $'jobs:\n  j:\n    runs-on: [linux, x64]' 3 'runner value "linux,x64" selects a self-hosted runner'
 bad expression-quoted-whole $'jobs:\n  j:\n    runs-on: ${{ fromJSON(\'["ubuntu-latest","self-hosted"]\') }}' 3 'runner value "${{fromjson(ubuntu-latest,self-hosted)}}" is not a plain label'
 bad block-header-in-quoted-key $'jobs:\n  a:\n    runs-on: ubuntu-latest\n    services:\n      "svc: | #x":\n        image: nginx\n        env: &j\n          uses: evil/repo/.github/workflows/x.yml@v1\n    steps:\n      - run: echo\n  b: *j' 8
-bad phantom-quote-backstop $'jobs:\n  b:\n    runs-on: ubuntu-latest\n    name: foo\n      \'bar\n    steps:\n      - run: |\n          Matrix:\n            echo hi\n    strategy:\n      matrix:\n        note: [it\'s]\n        os: [self-hosted]' "5 6 7 8 9 10 11 13"
-# --- a quote left open at the end of a line is refused, so a quote YAML
-# never opened cannot turn a quoted continuation into a block-scalar header
+bad phantom-flow-matrix-backstop $'jobs:\n  b:\n    runs-on: ${{ matrix.os }}\n    name: foo\n      [x\n    steps:\n      - uses: some/action@v1\n        with:\n          matrix:\n            cfg: a\n    strategy:\n      matrix:\n        note:\n          - a]\n        os: [self-hosted]' 15
+# --- a quote left open at the end of a line is refused, so a file whose quote
+# state the scan could misread fails at that line; a line holding a flow that
+# is not a flat one-line list turns the block-scalar skip off for the file
 bad quote-inversion-hash-key $'jobs:\n  j:\n    env:\n      foo#bar: |\n        \'open\n    name: \'foo\n  x: |\n    \'\n    runs-on: self-hosted' 5
-bad quote-inversion-plain-continuation $'jobs:\n  j:\n    name: foo\n      \'bar\n    env:\n      A: \'x\n  x: |\n    \'\n    runs-on: self-hosted' "4 5"
-bad strategy-backstop      $'jobs:\n  b:\n    runs-on: ${{ matrix.os }}\n    env:\n      foo#bar: |\n        Strategy:\n          [x,\n    strategy:\n      matrix:\n        note:\n          - a]\n        os: [ubuntu-latest]\n        cfg: ${{ fromJSON(vars.CFG) }}' 13
+bad quote-inversion-plain-continuation $'jobs:\n  j:\n    name: foo\n      \'bar\n    env:\n      A: \'x\n  x: |\n    \'\n    runs-on: self-hosted' 4
+bad phantom-flow-strategy-backstop $'jobs:\n  b:\n    runs-on: ${{ matrix.os }}\n    name: foo\n      [x\n    steps:\n      - uses: some/action@v1\n        with:\n          strategy:\n            cfg: a\n    strategy:\n      matrix:\n        note:\n          - a]\n        os: [ubuntu-latest]\n        cfg: ${{ fromJSON(vars.CFG) }}' 16
+bad flow-inversion-colon-quote $'jobs:\n  j:\n    env:\n      A: [a:"b, [c, d", e],\n  f, "x: |\n      "]\n    runs-on: self-hosted\n    steps:\n      - run: echo' "6 7"
+bad flow-inversion-hash-comma $'jobs:\n  j:\n    env:\n      A: [a,#]\n  b, "x: |\n      "]\n    runs-on: self-hosted\n    steps:\n      - run: echo' "6 7"
+bad explicit-key-block-indent $'jobs:\n  ? b\n  : x: |\n      text\n    runs-on: self-hosted' 5
 # --- must pass --------------------------------------------------------------
 good ubuntu-latest        $'jobs:\n  j:\n    runs-on: ubuntu-latest'
 good upper-hosted-label   $'jobs:\n  j:\n    runs-on: Ubuntu-Latest'

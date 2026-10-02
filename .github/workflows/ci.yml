@@ -415,10 +415,12 @@ jobs:
             # HOSTED is a set of exact labels, one word each: add a hosted
             # image's label to the list, never a pattern.
             BEGIN { split("ubuntu-latest macos-latest windows-latest", h); for (i in h) HOSTED[h[i]] = 1 }
-            FNR == 1 { matrix_indent = strategy_indent = value_indent = armed = block = -1; in_jobs = flow = 0; quote = "" }
+            FNR == 1 { matrix_indent = strategy_indent = value_indent = armed = block = -1; in_jobs = flow = noskip = 0; quote = "" }
             # The text of a block scalar (the lines deeper than its | or > key)
             # is a string, never YAML: no rule reads it, so a script line that
-            # says matrix: arms nothing and a ' in it opens nothing.
+            # says matrix: arms nothing and a ' in it opens nothing. The skip is
+            # only as safe as knowing where that text starts, so noskip turns it
+            # off for the rest of a file that holds a flow the skip cannot trust.
             # A # starts a YAML comment only at the start of a line or after
             # whitespace; ubuntu-latest#x is one plain scalar. The strip cannot
             # tell a quoted " #" from a comment, so the refusal rules that look
@@ -441,16 +443,23 @@ jobs:
                 if (matrix_indent >= 0 && indent <= matrix_indent) matrix_indent = -1
                 if (strategy_indent >= 0 && indent <= strategy_indent) strategy_indent = -1
               }
+              q0 = quote
               scan(lraw)
-              # A quote left open at the end of the line is refused: once the
-              # scan's quote state can disagree with YAML's, the block-scalar skip
-              # below could hide real lines. The state is kept, so the lines it
-              # spans stay held as above.
-              if (quote != "") fail(FILENAME, FNR, "quoted scalar continues past this line — keep a quoted value on one line")
+              # A flow is the one state the scan carries across lines that it can
+              # misread, so the skip does not trust it: a line that holds any [ or
+              # { besides a flat one-line list (no quote, #, : or bracket inside)
+              # turns the skip off for the rest of the file. A byte test, with no
+              # scan state for an input to corrupt.
+              t = lraw; gsub(/\$\{\{|\}\}/, "", t); gsub(/\[[^][{}"'#:,]*(,[^][{}"'#:,]*)*\]/, "", t); if (t ~ /[[{]/) noskip = 1
+              # A quote left open at the end of a line is refused, because the
+              # scan's quote state could then disagree with YAML's. It is reported
+              # where it opens; the kept state only holds the lines it spans, and
+              # changes no verdict, since this line already fails.
+              if (quote != "" && q0 == "") fail(FILENAME, FNR, "quoted scalar continues past this line — keep a quoted value on one line, or, outside strategy:, write a long value as a >- block scalar" (noskip ? " (this file holds a multi-line or nested flow, so | and > text is read as YAML)" : ""))
               # A | or > value opens a block scalar. Under strategy: its text
               # could hold an expression no rule would read, so it is refused.
-              if (!flow && quote == "" && substr(lraw, 1, cut - 1) ~ /^[[:space:]]*(-[[:space:]]+)*([^[:space:]#][^#]*:[[:space:]]+)?([&!][^[:space:]]*[[:space:]]+)*[|>][-+0-9]*[[:space:]]*$/) {
-                block = indent
+              if (!noskip && !flow && quote == "" && substr(lraw, 1, cut - 1) ~ /^[[:space:]]*(-[[:space:]]+)*([^[:space:]][^#]*:[[:space:]]+)?([&!][^[:space:]]*[[:space:]]+)*[|>][-+0-9]*[[:space:]]*$/) {
+                match(lraw, /^[[:space:]]*([-?:][[:space:]]+)*/); block = RLENGTH
                 if (strategy_indent >= 0) fail(FILENAME, FNR, "block scalar (| or >) under strategy: — write each matrix value inline, so the drift guard can read it")
               }
             }
@@ -491,8 +500,9 @@ jobs:
             # an include or exclude value); a trailing comment that holds a flow
             # key or, under strategy:, an expression; a block scalar (| or >)
             # under strategy:, even a multi-line non-runner value; a quoted
-            # scalar that continues past its line; a step uses: value that is an
-            # alias or is written below its key.
+            # scalar that continues past its line; | or > text read as YAML in a
+            # file that holds a multi-line or nested flow; a step uses: value
+            # that is an alias or is written below its key.
             lraw ~ /[{,][[:space:]]*["']?(runs-on|os|runner|strategy|matrix|include|uses)["']?[[:space:]]*:/ ||
             /^[[:space:]]*(-[[:space:]]*)?["']?(strategy|matrix)["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ ||
             (/^[[:space:]]*(-[[:space:]]*)?["']?include["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ && matrix_indent >= 0) ||
