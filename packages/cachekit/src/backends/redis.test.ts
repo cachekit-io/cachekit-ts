@@ -102,4 +102,77 @@ describe('RedisBackend ioredis lifecycle', () => {
       process.off('unhandledRejection', onUnhandled);
     }
   });
+
+  it('a client ioredis cannot build rejects every command with a ConfigurationError, reported once', async () => {
+    const { redis, ConfigurationError, logs } = await loadBackend(() => ({
+      Redis: class {
+        constructor() {
+          throw new TypeError('Invalid URL');
+        }
+      },
+    }));
+    const backend = redis({ url: 'redis://localhost:6379' });
+
+    await expect(backend.get('k')).rejects.toBeInstanceOf(ConfigurationError);
+    await expect(backend.exists('k')).rejects.toThrow(
+      /^The Redis backend could not create its ioredis client: Invalid URL$/
+    );
+    expect(logs.filter((m) => m.includes('could not create its ioredis client'))).toHaveLength(1);
+    await expect(backend.close()).resolves.toBeUndefined();
+  });
+});
+
+describe('RedisBackend url check', () => {
+  // Inputs ioredis 5 parses differently: a port, a socket path, no scheme, a
+  // protocol-relative url, an over-large "port" it parses as a host, and bad
+  // urls (a space, a non-numeric port, broken percent-encoding of a password).
+  const URLS = [
+    'redis://localhost:6379',
+    'redis://user:pw@localhost:6379/2', // pragma: allowlist secret
+    'rediss://cache.example.com',
+    'redis://[::1]:6379',
+    '6379',
+    '/tmp/redis.sock',
+    '/tmp/redis.sock?db=2',
+    '127.0.0.1:6379',
+    'localhost',
+    '//cache.example.com:6379',
+    '10000000000',
+    'not a url',
+    'redis://cache.example.com:abc',
+    'redis://:p%ZZ@cache.example.com:6379',
+    'redis://user:s3cret@cache.example.com:abc', // pragma: allowlist secret
+  ];
+
+  it.each(URLS)('redis(%j) throws exactly when ioredis rejects the url', async (url) => {
+    const { Redis: RealRedis } = await vi.importActual<typeof import('ioredis')>('ioredis');
+    let ioredisRejects = false;
+    try {
+      new RealRedis(url, { lazyConnect: true }).disconnect();
+    } catch {
+      ioredisRejects = true;
+    }
+    const { redis, ConfigurationError } = await loadBackend(() => ({ Redis: FakeClient }));
+
+    if (ioredisRejects) {
+      expect(() => redis({ url })).toThrow(ConfigurationError);
+    } else {
+      await redis({ url }).close();
+    }
+  });
+
+  it('a bad url fails at redis() without echoing the url or its password', async () => {
+    const { redis } = await loadBackend(() => ({ Redis: FakeClient }));
+    let error: unknown;
+    try {
+      redis({ url: 'redis://user:s3cret@cache.example.com:abc' }); // pragma: allowlist secret
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect((error as Error).message).toBe("The Redis backend's url is not valid: Invalid URL");
+    expect(JSON.stringify(error, Object.getOwnPropertyNames(error))).not.toContain('s3cret');
+    expect((error as Error).cause).toBeUndefined();
+    expect(FakeClient.instances).toHaveLength(0);
+  });
 });
