@@ -388,7 +388,9 @@ jobs:
             # open quote character. A quote or bracket opens only where a value
             # starts (line start, after "- ", ": ", an anchor or a tag, or inside
             # a flow), so the ' in a plain scalar like don't opens nothing. A #
-            # after whitespace, outside a quote, starts a comment.
+            # after whitespace, outside a quote, starts a comment. A | or > there
+            # opens a block scalar: block holds its key line's indent, and the
+            # deeper lines below are its text, which scan() does not read.
             function scan(s,   i, c, start) {
               start = 1
               for (i = 1; i <= length(s); i++) {
@@ -398,6 +400,7 @@ jobs:
                 else if (c == " " || c == "\t") continue
                 else if (c == "#" && (i == 1 || substr(s, i - 1, 1) ~ /[ \t]/)) break
                 else if (start && (c == "&" || c == "!")) { while (i < length(s) && substr(s, i + 1, 1) !~ /[ \t]/) i++ }
+                else if (start && !flow && (c == "|" || c == ">")) { block = indent; break }
                 else if (start && (c == "\"" || c == "'")) { quote = c; start = 0 }
                 else if ((start || flow) && (c == "[" || c == "{")) { flow++; start = 1 }
                 else if (flow && (c == "]" || c == "}")) { flow--; start = 0 }
@@ -409,23 +412,29 @@ jobs:
             # HOSTED is a set of exact labels, one word each: add a hosted
             # image's label to the list, never a pattern.
             BEGIN { split("ubuntu-latest macos-latest windows-latest", h); for (i in h) HOSTED[h[i]] = 1 }
-            FNR == 1 { matrix_indent = strategy_indent = value_indent = -1; in_jobs = flow = 0; quote = "" }
+            FNR == 1 { matrix_indent = strategy_indent = value_indent = armed = block = -1; in_jobs = flow = 0; quote = "" }
             # A # starts a YAML comment only at the start of a line or after
             # whitespace; ubuntu-latest#x is one plain scalar. The strip cannot
             # tell a quoted " #" from a comment, so the refusal rules that look
             # for a flow key or an expression read lraw, the unstripped line.
             { sub(/\r$/, ""); lraw = tolower($0); sub(/(^|[[:space:]])#.*/, ""); $0 = tolower($0) }
             /^[[:space:]]*$/ { next }
-            # A line inside a flow collection or quoted scalar left open above
-            # continues that value however it is indented, so it ends no block.
+            # A bare strategy: or matrix: key holds the block below it, so the
+            # next line must be deeper; one that is not continues a flow the key
+            # sits in, and would end the block before its first line. A line
+            # inside a flow collection or quoted scalar left open above continues
+            # that value however it is indented, so it ends no block.
             {
               match($0, /^[[:space:]]*(-[[:space:]]*)?/)
               indent = RLENGTH
+              if (armed >= 0 && indent <= armed) fail(FILENAME, FNR, "this line is not indented under the strategy: or matrix: key above it — keep that key bare over an indented block, not inside a flow map")
+              armed = -1
+              if (block >= 0 && indent <= block) block = -1
               if (!flow && quote == "") {
                 if (matrix_indent >= 0 && indent <= matrix_indent) matrix_indent = -1
                 if (strategy_indent >= 0 && indent <= strategy_indent) strategy_indent = -1
               }
-              if (strategy_indent >= 0 || matrix_indent >= 0) scan(lraw)
+              if (block < 0 && (strategy_indent >= 0 || matrix_indent >= 0)) scan(lraw)
             }
             # A line deeper than the runner key before it continues that value
             # (a wrapped plain scalar), so the key line held only part of it.
@@ -446,8 +455,8 @@ jobs:
             # move it. Anything else on the key line (an expression, anchor,
             # alias, tag or flow map) leaves the block unread, so the refusal
             # rule below rejects the line instead.
-            !job_line && strategy_indent < 0 && /^[[:space:]]*(-[[:space:]]*)?["']?strategy["']?[[:space:]]*:[[:space:]]*$/ { strategy_indent = indent }
-            !job_line && matrix_indent < 0 && /^[[:space:]]*(-[[:space:]]*)?["']?matrix["']?[[:space:]]*:[[:space:]]*$/ { matrix_indent = indent }
+            !job_line && strategy_indent < 0 && /^[[:space:]]*(-[[:space:]]*)?["']?strategy["']?[[:space:]]*:[[:space:]]*$/ { strategy_indent = armed = indent }
+            !job_line && matrix_indent < 0 && /^[[:space:]]*(-[[:space:]]*)?["']?matrix["']?[[:space:]]*:[[:space:]]*$/ { matrix_indent = armed = indent }
             # Lines that may hide a runner label: a flow mapping carrying a
             # runner/strategy/matrix/uses key; strategy: or matrix: with any
             # inline value, include: with one inside a matrix; a YAML merge key
@@ -461,8 +470,8 @@ jobs:
             # runner or uses key; any expression under a bare strategy: line,
             # whatever key holds it (fail-fast, max-parallel, a non-runner axis,
             # an include or exclude value); a trailing comment that holds a flow
-            # key or, under strategy:, an expression; a step uses: value written
-            # below its key.
+            # key or, under strategy:, an expression; a step uses: value that is
+            # an alias or is written below its key.
             lraw ~ /[{,][[:space:]]*["']?(runs-on|os|runner|strategy|matrix|include|uses)["']?[[:space:]]*:/ ||
             /^[[:space:]]*(-[[:space:]]*)?["']?(strategy|matrix)["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ ||
             (/^[[:space:]]*(-[[:space:]]*)?["']?include["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ && matrix_indent >= 0) ||

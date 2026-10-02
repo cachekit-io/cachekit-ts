@@ -136,6 +136,10 @@ bad open-single-quote-dedent $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    s
 bad open-double-quote-dedent $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        foo: "a\n    b"\n        os: [self-hosted]' 8
 bad open-flow-map-dedent  $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        foo: {a: 1,\n    b: 2}\n        os: [self-hosted]' 8
 bad open-anchored-flow-dedent $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        foo: &x [a,\n    b]\n        os: [self-hosted]' 8
+# a job written as a flow map, its strategy: and matrix: on lines of their own
+bad flow-job-strategy     $'jobs:\n  build: {\n     strategy:\n   {\n     matrix:\n   {\n     os: [self-hosted]\n   }\n   },\n   steps: [{run: echo hi}],\n   runs-on: "${{ matrix.os }}"\n   }' "4 6"
+bad flow-job-dynamic-matrix $'jobs:\n  build: {\n     strategy:\n   {\n     matrix:\n   "${{ fromJSON(vars.M) }}"\n   },\n   steps: [{run: echo hi}],\n   runs-on: "${{ matrix.os }}"\n   }' "4 6"
+bad flow-job-deeper-brace $'jobs:\n  build: {\n     strategy:\n       {\n     matrix:\n       {\n     os: [self-hosted]\n       }\n       },\n     steps: [{run: echo hi}],\n     runs-on: "${{ matrix.os }}"\n     }' "7 8"
 # --- must pass --------------------------------------------------------------
 good ubuntu-latest        $'jobs:\n  j:\n    runs-on: ubuntu-latest'
 good upper-hosted-label   $'jobs:\n  j:\n    runs-on: Ubuntu-Latest'
@@ -159,6 +163,7 @@ good job-named-matrix     $'jobs:\n  matrix:\n    runs-on: ubuntu-latest\n    st
 good with-matrix-expression $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: some/action@abc\n        with:\n          matrix:\n            ${{ vars.CONFIG }}'
 good quoted-step-uses     $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - "uses": \'actions/checkout@v4\''
 good closed-flow-then-dedent $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        foo: [a,\n          b]\n        os: [ubuntu-latest]\n    env:\n      os: linux\n    steps:\n      - run: echo ${{ matrix.foo }}'
+good block-scalar-in-matrix $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        node: [22]\n        include:\n          - node: 22\n            setup: |\n              ["unclosed\n              it\'s\n    steps:\n      - run: echo ${{ matrix.node }}'
 good apostrophe-in-matrix $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        note: [don\'t, it\'s]\n        name: it\'s fine\n    steps:\n      - run: echo ${{ matrix.note }}'
 good static-jobs-step-alias $'jobs:\n  build:\n    if: github.event_name != \'pull_request\'\n    strategy:\n      matrix:\n        include:\n          - target: x86_64-apple-darwin\n            os: macos-latest\n    runs-on: ${{ matrix.os }}\n    steps: &build-steps\n      - run: echo ${{ matrix.target }}\n  build-pr:\n    if: github.event_name == \'pull_request\'\n    strategy:\n      matrix:\n        include:\n          - target: x86_64-unknown-linux-gnu\n            os: ubuntu-latest\n    runs-on: ${{ matrix.os }}\n    steps: *build-steps'
 
