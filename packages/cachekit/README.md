@@ -517,6 +517,15 @@ for client-side validation failures (a value over the File or Memcached size
 limit, an out-of-range TTL) and for calls on a closed backend. So a run of keys
 the service rejects cannot open the breaker and cut off every other key.
 
+A read whose bytes arrive but will not decode is not a backend failure either.
+A decrypt or AAD failure (an entry written under a key no longer in
+`previousMasterKeys`, or under the other `compression` setting on a secure
+cache), a corrupt or foreign entry, or ciphertext over the size cap is fetched
+once and never retried, and it never counts toward the breaker, so a handful of
+undecodable entries cannot cut off every other key. It is still counted in
+`cachekit_errors_total`, and it resolves as a miss with degradation on and
+rejects with degradation off.
+
 Graceful degradation still applies: under `production`, `secure` and `io` these
 errors resolve as a miss or a no-op, and with
 `reliability: { degradation: false }` they reject with the `BackendError`. With

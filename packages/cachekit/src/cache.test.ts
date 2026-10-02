@@ -15,7 +15,7 @@ import { MessagePackSerializer } from './serialization/serializer.js';
 import { EncryptionManagerCore } from './encryption/manager-core.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
-import type { ByteStorageLike } from './cache-core.js';
+import { CacheImpl, type ByteStorageLike } from './cache-core.js';
 
 /**
  * Simple in-memory backend for testing cache integration.
@@ -1548,6 +1548,132 @@ describe('Cache Integration', () => {
       for (let i = 1; i < 6; i++) await c.set(`ns:wide${i}`, tooMany);
       await c.set('ns:small', 'ok');
       expect(await c.get('ns:small')).toBe('ok');
+
+      await c.close();
+    });
+  });
+
+  describe('L2 decode failures bypass retry and the circuit breaker (LAB-7079)', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    const KEY_A = 'a'.repeat(64);
+    const KEY_B = 'b'.repeat(64);
+    // production reliability: retry 3x with backoff, breaker opens at 5 failures.
+    // l1 off so every read reaches L2.
+    const secureCache = (backend: Backend, masterKey: string, degradation = true) =>
+      createIntentCache.secure({
+        backend,
+        masterKey,
+        tenantId: 'lab-7079',
+        l1: { enabled: false },
+        metrics: false,
+        reliability: { degradation },
+      });
+    const productionCache = (backend: Backend, degradation = true) =>
+      createIntentCache.production({
+        backend,
+        l1: { enabled: false },
+        metrics: false,
+        reliability: { degradation },
+      });
+
+    /**
+     * Seed `count` entries under KEY_A, so a KEY_B cache cannot decrypt them
+     * (rotation). The writer is left open: close() would close the shared
+     * backend, and InMemoryBackend.close() clears the store.
+     */
+    async function seedRotated(backend: Backend, count: number): Promise<void> {
+      const writer = secureCache(backend, KEY_A);
+      for (let i = 0; i < count; i++) await writer.set(`ns:old${i}`, `v${i}`);
+    }
+
+    it('a read after key rotation fetches once and returns null', async () => {
+      const backend = new InMemoryBackend();
+      await seedRotated(backend, 1);
+      const backendGet = vi.spyOn(backend, 'get');
+      const recordFailure = vi.spyOn(
+        CacheImpl.prototype as unknown as { recordFailure: (op: string, e: unknown) => void },
+        'recordFailure'
+      );
+      const c = secureCache(backend, KEY_B);
+
+      expect(await c.get('ns:old0')).toBeNull();
+      expect(backendGet).toHaveBeenCalledTimes(1);
+      // The error metric still records the failure, once.
+      expect(recordFailure).toHaveBeenCalledTimes(1);
+      expect(recordFailure.mock.calls[0]?.[0]).toBe('get');
+
+      await c.close();
+    });
+
+    it('ten undecryptable reads leave the breaker closed for a healthy key', async () => {
+      const backend = new InMemoryBackend();
+      await seedRotated(backend, 10);
+      const c = secureCache(backend, KEY_B);
+      await c.set('ns:fresh', 'ok');
+      const backendGet = vi.spyOn(backend, 'get');
+
+      for (let i = 0; i < 10; i++) expect(await c.get(`ns:old${i}`)).toBeNull();
+      expect(backendGet).toHaveBeenCalledTimes(10);
+
+      // An open breaker would degrade this read to null with 0 GETs.
+      backendGet.mockClear();
+      expect(await c.get('ns:fresh')).toBe('ok');
+      expect(backendGet).toHaveBeenCalledTimes(1);
+
+      await c.close();
+    });
+
+    it('a corrupt envelope on a compression-on cache fetches once per read, breaker closed', async () => {
+      const backend = new InMemoryBackend();
+      const c = productionCache(backend);
+      await c.set('ns:fresh', 'ok');
+      for (let i = 0; i < 10; i++)
+        await backend.set(`ns:bad${i}`, new Uint8Array([0xde, 0xad, 0xbe, 0xef]), 60);
+      const backendGet = vi.spyOn(backend, 'get');
+
+      for (let i = 0; i < 10; i++) expect(await c.get(`ns:bad${i}`)).toBeNull();
+      expect(backendGet).toHaveBeenCalledTimes(10);
+
+      backendGet.mockClear();
+      expect(await c.get('ns:fresh')).toBe('ok');
+      expect(backendGet).toHaveBeenCalledTimes(1);
+
+      await c.close();
+    });
+
+    it('with degradation off a decode failure still throws, after one fetch', async () => {
+      const backend = new InMemoryBackend();
+      await seedRotated(backend, 1);
+      await backend.set('ns:bad', new Uint8Array([0xde, 0xad, 0xbe, 0xef]), 60);
+      const backendGet = vi.spyOn(backend, 'get');
+      const secure = secureCache(backend, KEY_B, false);
+      const plain = productionCache(backend, false);
+
+      await expect(secure.get('ns:old0')).rejects.toThrow();
+      await expect(plain.get('ns:bad')).rejects.toThrow(SerializationError);
+      expect(backendGet).toHaveBeenCalledTimes(2);
+
+      await secure.close();
+      await plain.close();
+    });
+
+    it('a transient decrypt failure (e.g. first-use binding load) is not retried and self-heals', async () => {
+      // Pinned on purpose: decrypt runs after the executor, so even a
+      // transient failure inside it is a single miss, not a retried read.
+      const backend = new InMemoryBackend();
+      const c = secureCache(backend, KEY_A);
+      await c.set('ns:k', 'v');
+      const backendGet = vi.spyOn(backend, 'get');
+      vi.spyOn(EncryptionManagerCore.prototype, 'decrypt').mockRejectedValueOnce(
+        new Error('native binding failed to load')
+      );
+
+      expect(await c.get('ns:k')).toBeNull();
+      expect(backendGet).toHaveBeenCalledTimes(1);
+      expect(await c.get('ns:k')).toBe('v');
 
       await c.close();
     });

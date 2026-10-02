@@ -829,62 +829,89 @@ export class CacheImpl implements SecureCache {
     this.backend.validateKey?.(key);
     this.encryption?.validateKey(key, this.useEnvelope(interop));
 
-    // Fetch from L2 (backend)
-    return this.run('get', key, null, async (): Promise<T | null> => {
-      // When L1 will be re-populated, prefer the TTL-carrying read (same
-      // storage round trip — see Backend.getWithTtl) so the L1 copy can be
-      // capped at the entry's remaining lifetime below (LAB-1388).
-      let data: Uint8Array | null;
-      let remainingTtl: number | null = null;
-      if (this.l1 && this.backend.getWithTtl) {
-        const result = await this.backend.getWithTtl(key);
-        data = result?.value ?? null;
-        remainingTtl = result?.ttlSeconds ?? null;
-      } else {
-        data = await this.backend.get(key);
-      }
-      if (data === null) {
-        this.recordMiss();
-        return null;
-      }
-
-      // Decrypt, unpack, deserialize — the same sequence an L1 hit runs.
-      const value = await this.decodeEntry<T>(data, key, interop);
-
-      // Populate L1 with `data` — the bytes the backend returned, still
-      // encrypted — not the plaintext `value` decoded above. Interop keys are
-      // {namespace}:{operation}:{hash} — group under the user-facing namespace
-      // segment so namespace-level invalidation matches entries written
-      // through wrap(). The lifetime is the declared TTL (or defaultTtl on a
-      // plain get), capped at the L2 entry's remaining TTL when the backend
-      // surfaced it — so the L1 copy never outlives the entry it was read
-      // from (LAB-1388).
-      if (this.l1) {
-        const namespace = interop ? key.slice(0, key.indexOf(':')) : extractNamespace(key);
-        const capSeconds = ttlSeconds ?? this.defaultTtl;
-        // ttl <= 0 means "no expiry" (ts-wide Backend contract) — treat it
-        // as infinite here so Math.min still caps to a real remainingTtl
-        // when the backend reports one, instead of collapsing to 0 and
-        // tripping the skip-guard below for an entry that should never
-        // expire in L1 (LAB-1388).
-        const capOrForever = capSeconds > 0 ? capSeconds : Infinity;
-        const l1TtlSeconds =
-          remainingTtl !== null ? Math.min(capOrForever, remainingTtl) : capOrForever;
-        if (l1TtlSeconds > 0) {
-          // Hand L1 its own canonical no-expiry encoding (ttl <= 0), never
-          // Infinity ms: an Infinity originalTtl turns getWithSwr's
-          // freshness check into `Infinity > Infinity` — permanently stale,
-          // arming a spurious background refresh per marker window, forever
-          // (LAB-1768).
-          const l1TtlMs = Number.isFinite(l1TtlSeconds) ? l1TtlSeconds * 1000 : 0;
-          this.l1.set(key, this.l1Payload(value, data), l1TtlMs, namespace);
-          this.publishL1Stats();
+    // Fetch from L2 (backend). Only the round trip runs inside the reliability
+    // executor; decode runs after it. A decode or decrypt failure is a
+    // deterministic property of the stored bytes (rotated key without
+    // previousMasterKeys, an envelope-mode flip the AAD binds, a foreign or
+    // corrupt entry): retrying re-fetches the same bytes and sleeps the backoff
+    // for nothing, and the circuit breaker would count it as a backend failure
+    // — five poisoned reads in a window would open the breaker and degrade
+    // every key on this cache (LAB-7079, the read-side mirror of LAB-5139).
+    // A first-use native-binding load failure inside decrypt is no longer
+    // retried either; it self-heals on the next read (initPromise resets).
+    const fetched = await this.run(
+      'get',
+      key,
+      null,
+      async (): Promise<{ data: Uint8Array; remainingTtl: number | null } | null> => {
+        // When L1 will be re-populated, prefer the TTL-carrying read (same
+        // storage round trip — see Backend.getWithTtl) so the L1 copy can be
+        // capped at the entry's remaining lifetime below (LAB-1388).
+        let data: Uint8Array | null;
+        let remainingTtl: number | null = null;
+        if (this.l1 && this.backend.getWithTtl) {
+          const result = await this.backend.getWithTtl(key);
+          data = result?.value ?? null;
+          remainingTtl = result?.ttlSeconds ?? null;
+        } else {
+          data = await this.backend.get(key);
         }
+        if (data === null) {
+          this.recordMiss();
+          return null;
+        }
+        return { data, remainingTtl };
       }
+    );
+    // A miss (counted above) or a backend failure degradation absorbed.
+    if (fetched === null) return null;
+    const { data, remainingTtl } = fetched;
 
-      this.recordHit('l2');
-      return value;
-    });
+    // Decrypt, unpack, deserialize — the same sequence an L1 hit runs. The
+    // failure keeps the degradation contract it had inside the executor:
+    // counted, then thrown with degradation off, a miss with it on.
+    let value: T;
+    try {
+      value = await this.decodeEntry<T>(data, key, interop);
+    } catch (error) {
+      this.recordFailure('get', error);
+      if (!this.degradationEnabled) throw error;
+      return null;
+    }
+
+    // Populate L1 with `data` — the bytes the backend returned, still
+    // encrypted — not the plaintext `value` decoded above. Interop keys are
+    // {namespace}:{operation}:{hash} — group under the user-facing namespace
+    // segment so namespace-level invalidation matches entries written
+    // through wrap(). The lifetime is the declared TTL (or defaultTtl on a
+    // plain get), capped at the L2 entry's remaining TTL when the backend
+    // surfaced it — so the L1 copy never outlives the entry it was read
+    // from (LAB-1388).
+    if (this.l1) {
+      const namespace = interop ? key.slice(0, key.indexOf(':')) : extractNamespace(key);
+      const capSeconds = ttlSeconds ?? this.defaultTtl;
+      // ttl <= 0 means "no expiry" (ts-wide Backend contract) — treat it
+      // as infinite here so Math.min still caps to a real remainingTtl
+      // when the backend reports one, instead of collapsing to 0 and
+      // tripping the skip-guard below for an entry that should never
+      // expire in L1 (LAB-1388).
+      const capOrForever = capSeconds > 0 ? capSeconds : Infinity;
+      const l1TtlSeconds =
+        remainingTtl !== null ? Math.min(capOrForever, remainingTtl) : capOrForever;
+      if (l1TtlSeconds > 0) {
+        // Hand L1 its own canonical no-expiry encoding (ttl <= 0), never
+        // Infinity ms: an Infinity originalTtl turns getWithSwr's
+        // freshness check into `Infinity > Infinity` — permanently stale,
+        // arming a spurious background refresh per marker window, forever
+        // (LAB-1768).
+        const l1TtlMs = Number.isFinite(l1TtlSeconds) ? l1TtlSeconds * 1000 : 0;
+        this.l1.set(key, this.l1Payload(value, data), l1TtlMs, namespace);
+        this.publishL1Stats();
+      }
+    }
+
+    this.recordHit('l2');
+    return value;
   }
 
   async set<T>(key: string, value: T, options?: SetOptions): Promise<void> {
