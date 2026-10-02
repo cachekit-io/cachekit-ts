@@ -155,8 +155,9 @@ bad expression-quoted-whole $'jobs:\n  j:\n    runs-on: ${{ fromJSON(\'["ubuntu-
 bad block-header-in-quoted-key $'jobs:\n  a:\n    runs-on: ubuntu-latest\n    services:\n      "svc: | #x":\n        image: nginx\n        env: &j\n          uses: evil/repo/.github/workflows/x.yml@v1\n    steps:\n      - run: echo\n  b: *j' 8
 bad phantom-flow-matrix-backstop $'jobs:\n  b:\n    runs-on: ${{ matrix.os }}\n    name: foo\n      [x\n    steps:\n      - uses: some/action@v1\n        with:\n          matrix:\n            cfg: a\n    strategy:\n      matrix:\n        note:\n          - a]\n        os: [self-hosted]' 15
 # --- a quote left open at the end of a line is refused, so a file whose quote
-# state the scan could misread fails at that line; a line holding a flow that
-# is not a flat one-line list turns the block-scalar skip off for the file
+# state the scan could misread fails at that line; a line holding a [ or { that
+# is not a flat one-line list, an empty {} or the braces of a ${{ }} expression
+# turns the block-scalar skip off for the file
 bad quote-inversion-hash-key $'jobs:\n  j:\n    env:\n      foo#bar: |\n        \'open\n    name: \'foo\n  x: |\n    \'\n    runs-on: self-hosted' 5
 bad quote-inversion-plain-continuation $'jobs:\n  j:\n    name: foo\n      \'bar\n    env:\n      A: \'x\n  x: |\n    \'\n    runs-on: self-hosted' 4
 bad phantom-flow-strategy-backstop $'jobs:\n  b:\n    runs-on: ${{ matrix.os }}\n    name: foo\n      [x\n    steps:\n      - uses: some/action@v1\n        with:\n          strategy:\n            cfg: a\n    strategy:\n      matrix:\n        note:\n          - a]\n        os: [ubuntu-latest]\n        cfg: ${{ fromJSON(vars.CFG) }}' 16
@@ -166,6 +167,10 @@ bad gated-text-hint      $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    env: {CI
 bad gate-flow-map-colon-quote $'jobs:\n  j:\n    env:\n      A: {a:"b, x: {c: d", e: f},\n  g: h, "x: |\n      "}\n    runs-on: self-hosted\n    steps:\n      - run: echo' "6 7"
 bad gate-anchor-quote-item $'jobs:\n  j:\n    env:\n      A: [&a,"x ]\n  y: |\n    "]\n    runs-on: self-hosted\n    steps:\n      - run: echo' "6 7"
 bad gate-same-line-header $'jobs:\n  j: {a:"b, "}, c, x: |\n       ", runs-on: self-hosted, steps: [{run: echo}]}' 3
+# --- a CR, NEL, LS or PS inside a line is a YAML line break awk does not see
+bad mid-line-cr           $'on: push\njobs:\n  j:\r    steps:\r      - run: |\n          echo hi\n    runs-on: self-hosted' 3 'which YAML reads as a line break'
+bad mid-line-nel          $'on: push\njobs:\n  j:\xc2\x85    steps:\xc2\x85      - run: |\n          echo hi\n    runs-on: self-hosted' 3 'which YAML reads as a line break'
+bad mid-line-ls           $'on: push\njobs:\n  j:\xe2\x80\xa8    steps:\xe2\x80\xa8      - run: |\n          echo hi\n    runs-on: self-hosted' 3 'which YAML reads as a line break'
 bad explicit-key-block-indent $'jobs:\n  ? b\n  : x: |\n      text\n    runs-on: self-hosted' 5
 # --- must pass --------------------------------------------------------------
 good ubuntu-latest        $'jobs:\n  j:\n    runs-on: ubuntu-latest'

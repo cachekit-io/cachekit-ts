@@ -362,7 +362,7 @@ jobs:
             # ubuntu-<anything>) and not a copy of GitHub's image table (it
             # rots): adopting another hosted image is a deliberate edit to HOSTED.
             function fail(file, line, msg) {
-              if (gated) msg = msg " (this line is | or > text, read as YAML because line " noskip " holds a [ or { other than a flat one-line list)"
+              if (gated) msg = msg " (if this line is | or > text, it was read as YAML because line " noskip " holds a [ or { that is not a flat one-line list, an empty {} or an expression's double braces)"
               printf "::error file=%s,line=%d::%s\n", file, line, msg
               bad = 1
             }
@@ -430,7 +430,10 @@ jobs:
             # tell a quoted " #" from a comment, so the refusal rules that look
             # for a flow key or an expression read lraw, the unstripped line, and
             # the block-scalar header is matched on lraw as scan() cut it.
-            { sub(/\r$/, ""); lraw = tolower($0); sub(/(^|[[:space:]])#.*/, ""); $0 = tolower($0) }
+            # A CR, NEL, LS or PS left inside a line is a YAML line break that
+            # awk does not split on, so the guard would read two lines as one.
+            { gated = 0; sub(/\r$/, ""); if (index($0, "\r") || index($0, "\302\205") || index($0, "\342\200\250") || index($0, "\342\200\251")) fail(FILENAME, FNR, "line holds a CR, NEL, LS or PS, which YAML reads as a line break — use LF line ends") }
+            { lraw = tolower($0); sub(/(^|[[:space:]])#.*/, ""); $0 = tolower($0) }
             /^[[:space:]]*$/ { next }
             { match($0, /^[[:space:]]*/); if (block >= 0 && RLENGTH > block) next; block = -1; gated = gtext >= 0 && RLENGTH > gtext; if (!gated) gtext = -1 }
             # A bare strategy: or matrix: key holds the block below it, so the
@@ -451,11 +454,13 @@ jobs:
               scan(lraw)
               # The skip trusts no scan state for flows. A [ or { anywhere on the
               # line (a value, a quoted string, an expression, a trailing comment)
-              # turns it off for the rest of the file, unless it is part of an
-              # expression, an empty {} or a flat one-line list, whose items are plain
-              # (no quote, #, :, bracket, &, ! or *) or wholly quoted (no #, and
-              # no backslash in double quotes). noskip holds the first such line.
-              # A byte test, with no state for an input to corrupt.
+              # turns it off for the rest of the file, unless it is a flat one-line
+              # list, an empty {} or an expression's own double braces. Only those
+              # braces are dropped, so a [ or { inside an expression still counts.
+              # A flat list's items are plain (no quote, #, :, bracket, &, ! or *)
+              # or wholly quoted (no #, and no backslash in double quotes). noskip
+              # holds the first such line. A byte test, with no state for an input
+              # to corrupt.
               t = lraw; gsub(/\$\{\{|\}\}/, "", t); gsub(/\{[[:space:]]*\}/, "", t)
               gsub(/\[([^][{}"'#:,&!*]*|[[:space:]]*"[^"\\#]*"[[:space:]]*|[[:space:]]*'[^'#]*'[[:space:]]*)(,([^][{}"'#:,&!*]*|[[:space:]]*"[^"\\#]*"[[:space:]]*|[[:space:]]*'[^'#]*'[[:space:]]*))*\]/, "", t)
               if (!noskip && t ~ /[[{]/) noskip = FNR
@@ -465,14 +470,15 @@ jobs:
               # changes no verdict, since this line already fails.
               if (quote != "" && q0 == "") fail(FILENAME, FNR, "quoted scalar continues past this line — keep a quoted value on one line" (noskip ? "" : ", or, outside strategy:, write a long value as a >- block scalar"))
               # A | or > value opens a block scalar. Under strategy: its text
-              # could hold an expression no rule would read, so it is refused.
+              # could hold an expression no rule would read, so it is refused
+              # while the skip is on; with the skip off, its text is read as YAML.
               # !flow stays as a backstop: it keeps a header inside a flow the
               # scan did see from opening a skip. block counts every "- ", "? "
               # and ": " before the key, unlike indent, because the text has to
               # be deeper than the key itself wherever the key sits.
               if (!flow && quote == "" && substr(lraw, 1, cut - 1) ~ /^[[:space:]]*(-[[:space:]]+)*([^[:space:]][^#]*:[[:space:]]+)?([&!][^[:space:]]*[[:space:]]+)*[|>][-+0-9]*[[:space:]]*$/) {
                 match(lraw, /^[[:space:]]*([-?:][[:space:]]+)*/)
-                if (noskip) gtext = RLENGTH
+                if (noskip) { if (!gated) gtext = RLENGTH }
                 else {
                   block = RLENGTH
                   if (strategy_indent >= 0) fail(FILENAME, FNR, "block scalar (| or >) under strategy: — write each matrix value inline, so the drift guard can read it")
@@ -517,8 +523,9 @@ jobs:
             # key or, under strategy:, an expression; a block scalar (| or >)
             # under strategy:, even a multi-line non-runner value; a quoted
             # scalar that continues past its line; | or > text read as YAML in a
-            # file where a line holds a [ or { other than a flat one-line list
-            # (the noskip gate); a step uses: value that is an alias or is
+            # file where a line holds a [ or { that is not a flat one-line list,
+            # an empty {} or an expression's double braces (the noskip gate); a
+            # step uses: value that is an alias or is
             # written below its key.
             lraw ~ /[{,][[:space:]]*["']?(runs-on|os|runner|strategy|matrix|include|uses)["']?[[:space:]]*:/ ||
             /^[[:space:]]*(-[[:space:]]*)?["']?(strategy|matrix)["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ ||
