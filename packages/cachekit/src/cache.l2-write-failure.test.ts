@@ -6,12 +6,6 @@
  * timeout — skipped it. Every repeat wrap() then re-ran the origin and
  * re-paid the GET+PUT, and nothing was logged. cachekit-py's sync path keeps
  * the L1 copy after a failed L2 write; these pin the same behaviour here.
- *
- * An encrypted cache needs its ciphertext before the executor runs: an open
- * breaker rejects before the write closure, so ciphertext produced inside it
- * never existed and every wrap() recomputed the origin until the breaker
- * closed. Producing the bytes is not a backend operation either, so a failure
- * there must not be retried or counted by the breaker.
  */
 import { createHash } from 'node:crypto';
 import { assert, describe, it, expect, afterEach, vi } from 'vitest';

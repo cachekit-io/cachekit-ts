@@ -994,16 +994,13 @@ export class CacheImpl implements SecureCache {
     }
 
     // Compress (ByteStorage envelope, before encryption) and encrypt before
-    // the executor too. An open breaker rejects before the write closure runs,
-    // so ciphertext produced inside it never existed: an encrypted cache kept
-    // nothing in L1, and every wrap() of a key first computed while the breaker
-    // was open re-ran the origin until it closed. Like an encode rejection, a
-    // pack or encrypt failure is not a backend failure: a retry repeats the
-    // same local work, and the breaker would count it as an outage. It gets
-    // the auto-mode encode contract above (counted, then thrown with
-    // degradation off and absorbed with it on, never written to L2) for
-    // interop entries too, since the spec's always-throw covers encoding, not
-    // encryption.
+    // the executor too: an open breaker rejects before the write closure runs,
+    // so the bytes L1 keeps must exist before `run`. A pack or encrypt failure
+    // is not a backend failure either — a retry repeats the same local work,
+    // and the breaker would count it as an outage — so it is counted, then
+    // thrown with degradation off and absorbed with it on, and never written
+    // to L2. Interop entries get the same handling: the spec's always-throw
+    // covers encoding, not encryption.
     let data: Uint8Array;
     try {
       data = useEnvelope ? this.withEnvelopeCodec((codec) => codec.pack(serialized)) : serialized;
@@ -1023,18 +1020,18 @@ export class CacheImpl implements SecureCache {
     await this.run('set', key, undefined, () => this.backend.set(key, data, ttl));
 
     // Update L1 for direct writes — after `run`, so a backend write that
-    // degradation absorbed still fills it, as cachekit-py's sync path does,
-    // and so does one an open breaker never sent. Otherwise every wrap()
-    // during an L2 outage, a 401/403 or an open breaker recomputes the origin.
-    // With degradation off `run` throws and L1 stays empty. On an encrypted
-    // cache L1 gets the ciphertext, never the caller's plaintext. The SWR
-    // refresh path passes updateL1=false and writes L1 only through
-    // completeRefresh, whose version token discards the refresh if an explicit
-    // write or invalidation landed meanwhile — the guard is authoritative for
-    // L1 ONLY. The backend.set above is unconditional last-write-wins: an
-    // interleaved explicit set() survives in L1 but is overwritten in L2 by the
-    // refresh's value until the entry next expires or refreshes (a conditional
-    // L2 write would need CAS the Backend contract doesn't have).
+    // degradation absorbed still fills it, as cachekit-py's sync path does.
+    // Otherwise every wrap() during an L2 outage or a 401/403 recomputes the
+    // origin and re-pays the doomed round trips. With degradation off `run`
+    // throws and L1 stays empty. On an encrypted cache L1 gets the ciphertext,
+    // never the caller's plaintext. The SWR refresh path passes updateL1=false
+    // and writes L1 only through completeRefresh, whose version token discards
+    // the refresh if an explicit write or invalidation landed meanwhile — the
+    // guard is authoritative for L1 ONLY. The backend.set above is
+    // unconditional last-write-wins: an interleaved explicit set() survives in
+    // L1 but is overwritten in L2 by the refresh's value until the entry next
+    // expires or refreshes (a conditional L2 write would need CAS the Backend
+    // contract doesn't have).
     if (updateL1 && this.l1) {
       this.l1.set(key, l1Write.l1, ttl * 1000, namespace);
       this.publishL1Stats();

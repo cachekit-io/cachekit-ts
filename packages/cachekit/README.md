@@ -564,13 +564,13 @@ whether or not its L2 delete succeeds. When the L2 delete fails the value stays
 in L2, so the next read that reaches L2 can return it and fill L1 again. An
 encrypted cache's L1 holds only the ciphertext. The value is compressed and
 encrypted before the write reaches retry and the breaker, so a write that an
-open breaker skips still fills L1 there, with ciphertext. Apart from the
-exception below, only a value that fails to serialize, compress or encrypt
-leaves L1 empty with degradation on. A compress or encrypt failure, like a
-serialize failure, is not a backend failure: it is attempted once, never
-retried or counted toward the breaker, sends nothing to L2, is counted in
-`cachekit_errors_total`, and rejects with degradation off. An `authentication`
-failure is logged through the error logger, at most once a minute per cache, as
+open breaker skips still fills L1 there, with ciphertext. On an encrypted
+cache, a value that fails to serialize, compress or encrypt is never stored in
+L1. A compress or encrypt failure is not a backend failure: it is attempted
+once, never retried or counted toward the breaker, sends nothing to L2, is
+counted in `cachekit_errors_total`, and rejects with degradation off. An
+`authentication` failure is logged through the error logger, at most once a
+minute per cache, as
 `[cachekit] backend rejected <op> as an authentication failure (keyHash=…)`. The
 line carries a digest of the key, never the key, the API key or the response
 body. `cachekit_errors_total` (see [Observability](#observability)) counts every

@@ -33,9 +33,10 @@ export interface L1Write {
 /**
  * Callback for persisting refreshed values to L2 cache. Returns the payload
  * L1 should hold for the entry, or null when the write produced nothing L1 may
- * hold (a secure cache whose value failed to compress or encrypt — no
- * ciphertext to store, and the refresh must not fall back to the plaintext it
- * computed). A degraded or breaker-skipped L2 write still returns ciphertext.
+ * hold (a secure cache whose value failed to serialize, compress or encrypt —
+ * no ciphertext to store, and the refresh must not fall back to the plaintext
+ * it computed). A degraded or breaker-skipped L2 write still returns
+ * ciphertext.
  */
 export type PersistCallback<T> = (
   key: string,
@@ -105,15 +106,15 @@ export class BackgroundRefreshManager {
         // If version changed during L2 update, L1 update is rejected (stale data protection)
         if (l1Cache) {
           if (!persisted) {
-            // Nothing storable came back — the value could not even be
-            // encrypted (nonce exhausted, manager disposed). Deliberately do
-            // NOT cancelRefresh: a cancel frees the marker immediately while
-            // leaving the stale entry's expiresAt untouched, so the next read
-            // re-arms shouldRefresh and the one after that, hammering the
-            // origin for the rest of the TTL. Letting the marker lapse via
-            // SWR_REFRESH_MARKER_TTL_MS throttles retries to one per key per
-            // minute, and hasRefreshSlot sweeps expired markers so no refresh
-            // slot is wedged.
+            // Nothing storable came back — the value could not be serialized,
+            // compressed or encrypted (an encode rejection, nonce exhausted,
+            // manager disposed). Deliberately do NOT cancelRefresh: a cancel
+            // frees the marker immediately while leaving the stale entry's
+            // expiresAt untouched, so the next read re-arms shouldRefresh and
+            // the one after that, hammering the origin for the rest of the
+            // TTL. Letting the marker lapse via SWR_REFRESH_MARKER_TTL_MS
+            // throttles retries to one per key per minute, and hasRefreshSlot
+            // sweeps expired markers so no refresh slot is wedged.
           } else {
             l1Cache.completeRefresh(
               key,
