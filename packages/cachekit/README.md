@@ -367,10 +367,14 @@ guide on docs.cachekit.io, with the
 as the normative reference. Both win over this README on any conflict.
 
 > [!WARNING]
-> Every service that binds one `(namespace, operation)` must use the same
-> encryption config. With mismatched configs, values can end up **stored
-> unencrypted** at the shared key: the plaintext side usually cannot decode the
-> ciphertext, so it recomputes and re-stores the value in the clear. See
+> Every service that binds one `(namespace, operation)` must agree on
+> encryption: on in all of them or off in all of them, with the same
+> `masterKey` and `tenantId` (the decrypt-only `previousMasterKeys` may
+> differ). If an unencrypted service shares the operation with an encrypted
+> one, values end up **stored unencrypted** at the shared key: the unencrypted
+> service writes in the clear whenever it fills the entry, and unless it fails
+> closed (`reliability.degradation: false` in this SDK) it also replaces
+> ciphertext it cannot decode. See
 > [Shared entries are a contract](https://docs.cachekit.io/concepts/using-interop-mode/#shared-entries-are-a-contract).
 
 ## Backends
