@@ -137,9 +137,17 @@ bad open-double-quote-dedent $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    s
 bad open-flow-map-dedent  $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        foo: {a: 1,\n    b: 2}\n        os: [self-hosted]' 8
 bad open-anchored-flow-dedent $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        foo: &x [a,\n    b]\n        os: [self-hosted]' 8
 # a job written as a flow map, its strategy: and matrix: on lines of their own
-bad flow-job-strategy     $'jobs:\n  build: {\n     strategy:\n   {\n     matrix:\n   {\n     os: [self-hosted]\n   }\n   },\n   steps: [{run: echo hi}],\n   runs-on: "${{ matrix.os }}"\n   }' "4 6"
-bad flow-job-dynamic-matrix $'jobs:\n  build: {\n     strategy:\n   {\n     matrix:\n   "${{ fromJSON(vars.M) }}"\n   },\n   steps: [{run: echo hi}],\n   runs-on: "${{ matrix.os }}"\n   }' "4 6"
-bad flow-job-deeper-brace $'jobs:\n  build: {\n     strategy:\n       {\n     matrix:\n       {\n     os: [self-hosted]\n       }\n       },\n     steps: [{run: echo hi}],\n     runs-on: "${{ matrix.os }}"\n     }' "7 8"
+bad flow-job-strategy     $'jobs:\n  build: {\n     strategy:\n   {\n     matrix:\n   {\n     os: [self-hosted]\n   }\n   },\n   steps: [{run: echo hi}],\n   runs-on: "${{ matrix.os }}"\n   }' "4 6 7 11"
+bad flow-job-dynamic-matrix $'jobs:\n  build: {\n     strategy:\n   {\n     matrix:\n   "${{ fromJSON(vars.M) }}"\n   },\n   steps: [{run: echo hi}],\n   runs-on: "${{ matrix.os }}"\n   }' "4 6 9"
+bad flow-job-deeper-brace $'jobs:\n  build: {\n     strategy:\n       {\n     matrix:\n       {\n     os: [self-hosted]\n       }\n       },\n     steps: [{run: echo hi}],\n     runs-on: "${{ matrix.os }}"\n     }' "7 8 11"
+# --- block-scalar text is a string: it arms nothing and opens no quote, and a
+# | or > header inside a quoted scalar opens no block
+bad block-text-arms-matrix $'jobs:\n  b:\n    steps:\n      - run: |\n          cat >> "$GITHUB_STEP_SUMMARY" <<\'EOF2\'\n          Matrix:\n            \'tis built\n          EOF2\n    strategy:\n      matrix:\n        note: [it\'s]\n        os: [self-hosted]\n    runs-on: ${{ matrix.os }}' 12
+bad block-text-arms-strategy $'jobs:\n  b:\n    steps:\n      - run: |\n          Strategy:\n          Matrix:\n            \'tis built\n    strategy:\n      matrix:\n        note: [it\'s]\n        os: [ubuntu-latest]\n        include: ${{ fromJSON(vars.EXTRA) }}\n    runs-on: ${{ matrix.os }}' 12
+bad quoted-text-block-header $'jobs:\n  j:\n    name: \'foo\n  x: |\n    \'\n    runs-on: self-hosted' 6
+bad quoted-text-block-header-matrix $'jobs:\n  j:\n    name: \'foo\n  x: |\n    \'\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [self-hosted]' 9
+bad include-block-scalar-item $'jobs:\n  j:\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        include:\n          - |-\n              ${{ fromJSON(vars.EXTRA) }}\n    runs-on: ${{ matrix.os }}' 7 'block scalar'
+bad first-unlisted-label  $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [macos-latest, self-hosted, ubuntu-latest]' 6 'runner value "self-hosted" is not an allow-listed'
 # --- must pass --------------------------------------------------------------
 good ubuntu-latest        $'jobs:\n  j:\n    runs-on: ubuntu-latest'
 good upper-hosted-label   $'jobs:\n  j:\n    runs-on: Ubuntu-Latest'
@@ -163,7 +171,9 @@ good job-named-matrix     $'jobs:\n  matrix:\n    runs-on: ubuntu-latest\n    st
 good with-matrix-expression $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: some/action@abc\n        with:\n          matrix:\n            ${{ vars.CONFIG }}'
 good quoted-step-uses     $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - "uses": \'actions/checkout@v4\''
 good closed-flow-then-dedent $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        foo: [a,\n          b]\n        os: [ubuntu-latest]\n    env:\n      os: linux\n    steps:\n      - run: echo ${{ matrix.foo }}'
-good block-scalar-in-matrix $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        node: [22]\n        include:\n          - node: 22\n            setup: |\n              ["unclosed\n              it\'s\n    steps:\n      - run: echo ${{ matrix.node }}'
+bad block-scalar-in-matrix $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        node: [22]\n        include:\n          - node: 22\n            setup: |\n              ["unclosed\n              it\'s\n    steps:\n      - run: echo ${{ matrix.node }}' 9 'block scalar'
+good block-text-matrix-key $'jobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          echo "Matrix:" >> x\n          Matrix:\n          done'
+good block-text-uses-key  $'jobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          cat <<EOF\n          Uses:\n          EOF'
 good apostrophe-in-matrix $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        note: [don\'t, it\'s]\n        name: it\'s fine\n    steps:\n      - run: echo ${{ matrix.note }}'
 good static-jobs-step-alias $'jobs:\n  build:\n    if: github.event_name != \'pull_request\'\n    strategy:\n      matrix:\n        include:\n          - target: x86_64-apple-darwin\n            os: macos-latest\n    runs-on: ${{ matrix.os }}\n    steps: &build-steps\n      - run: echo ${{ matrix.target }}\n  build-pr:\n    if: github.event_name == \'pull_request\'\n    strategy:\n      matrix:\n        include:\n          - target: x86_64-unknown-linux-gnu\n            os: ubuntu-latest\n    runs-on: ${{ matrix.os }}\n    steps: *build-steps'
 

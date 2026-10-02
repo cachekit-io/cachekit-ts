@@ -110,16 +110,14 @@ jobs:
   # PRs build the cheap linux-x64 target only (catches the vast majority of
   # compile errors fast), keeping the macOS/Windows cost off the PR review
   # loop. Same steps as build, through the YAML alias. Static matrices only:
-  # the runner drift guard in ci.yml reads every os value as written.
+  # the runner drift guard in ci.yml reads every runner value as written.
   build-pr:
     if: github.event_name == 'pull_request'
     strategy:
       matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+        target: [x86_64-unknown-linux-gnu]
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
 
     steps: *build-steps
 
