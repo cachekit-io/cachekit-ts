@@ -75,11 +75,11 @@ repos:
       - id: trailing-whitespace
         # markdown uses trailing whitespace for line breaks; the protocol
         # fixtures are sha256-pinned byte-for-byte against cachekit-io/protocol
-        exclude: (\.md|^packages/cachekit/test/protocol/fixtures/.*)$
+        exclude: (\.md|^packages/cachekit/test/(protocol|workers)/fixtures/.*)$
       - id: end-of-file-fixer
         # never append a newline to a byte-pinned vendored fixture: the pin
         # would then be refreshed against our mutation, not upstream's bytes
-        exclude: ^packages/cachekit/test/protocol/fixtures/.*$
+        exclude: ^packages/cachekit/test/(protocol|workers)/fixtures/.*$
       - id: check-yaml
       - id: check-json
         exclude: ^(\.vscode/|tsconfig.*\.json$) # tsconfig allows comments
