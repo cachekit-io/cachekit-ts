@@ -69,6 +69,22 @@ describe('MemcachedBackend', () => {
       });
     });
 
+    it('defaults memjs to a single try, leaving retries to the cache policy', async () => {
+      await backend.get('k');
+      expect(clientCreate).toHaveBeenCalledWith(
+        '127.0.0.1:11211',
+        expect.objectContaining({ retries: 1 })
+      );
+    });
+
+    it('passes an explicit retries: 2 through to memjs', async () => {
+      await memcached({ retries: 2 }).get('k');
+      expect(clientCreate).toHaveBeenCalledWith(
+        '127.0.0.1:11211',
+        expect.objectContaining({ retries: 2 })
+      );
+    });
+
     it('creates the client once and reuses it', async () => {
       await backend.get('a');
       await backend.get('b');
@@ -266,6 +282,23 @@ describe('MemcachedBackend', () => {
         await expect(op).rejects.toBeInstanceOf(TimeoutError);
       }
     );
+
+    it('is 3.5 s at the defaults: one try of 2000 ms connect + 1000 ms timeout, + 500 ms', async () => {
+      vi.useFakeTimers();
+      mockClient.get.mockReturnValue(new Promise(() => {}));
+
+      let settled = false;
+      const op = backend.get('k').finally(() => {
+        settled = true;
+      });
+      op.catch(() => {});
+
+      await vi.advanceTimersByTimeAsync(3499);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+      await expect(op).rejects.toThrow('no response within 3500ms');
+    });
 
     it('discards the client on expiry, so the next op creates a fresh one', async () => {
       vi.useFakeTimers();

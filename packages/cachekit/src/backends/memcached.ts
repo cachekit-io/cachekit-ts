@@ -40,7 +40,8 @@ const clientSockets = new WeakMap<MemjsClient, Map<Socket, MemjsServer>>();
 const discardedClients = new WeakSet<MemjsClient>();
 
 /**
- * Record each socket memjs opens, so the ones it abandons can be destroyed.
+ * Record each socket memjs opens, so the ones it abandons can be destroyed,
+ * and disable Nagle on it.
  *
  * memjs end()s a socket it gives up on (request timeout, connect timeout) and
  * drops its reference. Against a server that never closes its side, that
@@ -61,6 +62,9 @@ function trackSockets(client: MemjsClient): void {
       sock.call(this, sasl, go);
       const socket = currentSocket(this);
       if (!socket || socket === previous) return;
+      // memjs never disables Nagle, so a request sent while another is in
+      // flight on this socket would wait for the earlier one's ACK.
+      socket.setNoDelay(true);
       tracked.set(socket, this);
       socket.once('close', () => tracked.delete(socket));
       socket.once('finish', () => releaseSockets(client, 'abandoned'));
@@ -125,7 +129,7 @@ function releaseSockets(client: MemjsClient, which: 'abandoned' | 'all'): void {
  * Every operation settles within a deadline of
  * `tries × (connectTimeout + timeout) + (tries − 1) × 200 ms + 500 ms`, where
  * `tries` is `retries` (memjs counts total tries; 0 or 1 means one try) —
- * 6.7 s at the defaults. memjs can lose a request's timeout when it is sent
+ * 3.5 s at the defaults. memjs can lose a request's timeout when it is sent
  * just after another request timed out, which would otherwise hang the op
  * forever against a server that stops answering. On expiry the op rejects
  * with `TimeoutError` (retryable, so retries and the circuit breaker see a
@@ -179,7 +183,7 @@ export class MemcachedBackend implements Backend {
       defaultTtl: config.defaultTtl ?? 0,
       timeout: config.timeout ?? 1000,
       connectTimeout: config.connectTimeout ?? 2000,
-      retries: config.retries ?? 2,
+      retries: config.retries ?? 1,
       keyPrefix: config.keyPrefix ?? '',
       maxItemSizeBytes: config.maxItemSizeBytes ?? DEFAULT_MAX_ITEM_SIZE_BYTES,
     };
