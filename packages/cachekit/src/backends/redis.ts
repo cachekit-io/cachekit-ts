@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { Redis as IoRedis, type RedisOptions } from 'ioredis';
+import type { Redis as IoRedis, RedisOptions } from 'ioredis';
 import { GetWithTtlResult, LockableBackend, RedisBackendConfig, TTLBackend } from './types.js';
 import type { RedisPubSubLike } from '../types/cache.js';
-import { BackendError, TimeoutError } from '../errors.js';
+import { BackendError, ConfigurationError, TimeoutError } from '../errors.js';
 import { logError } from '../logger.js';
 import {
   DEFAULT_TTL_SECONDS,
@@ -56,7 +56,14 @@ type _IoRedisIsPubSubCompatible = AssertPubSubCompatible<IoRedis>;
  * ```
  */
 export class RedisBackend implements LockableBackend, TTLBackend {
-  private readonly client: IoRedis;
+  /**
+   * The ioredis client, created as soon as ioredis has loaded. This module
+   * holds no value import of ioredis, so importing cachekit does not load it:
+   * the constructor starts the load, and the literal `import()` keeps it
+   * visible to bundlers. Rejects with a ConfigurationError if ioredis cannot
+   * be loaded, or with the closed-backend error if close() ran first.
+   */
+  private readonly client: Promise<IoRedis>;
   private readonly config: Required<RedisBackendConfig>;
   private closed = false;
 
@@ -100,10 +107,30 @@ export class RedisBackend implements LockableBackend, TTLBackend {
       redisOptions.keyPrefix = this.config.keyPrefix;
     }
 
-    this.client = new IoRedis(this.config.url, redisOptions);
+    this.client = this.createClient(redisOptions);
+    // Commands and close() handle a rejection; this stops a backend that
+    // never runs one from raising an unhandled rejection.
+    this.client.catch(() => {});
+  }
+
+  private async createClient(redisOptions: RedisOptions): Promise<IoRedis> {
+    const { Redis } = await import('ioredis').catch((error: unknown) => {
+      const loadError = new ConfigurationError(
+        `The Redis backend could not load ioredis: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
+      );
+      // Reported here once: a cache with degradation on swallows the
+      // per-command errors.
+      logError(`[cachekit] ${loadError.message}`);
+      throw loadError;
+    });
+    // close() ran while ioredis was loading: never open the connection.
+    this.ensureNotClosed();
+
+    const client = new Redis(this.config.url, redisOptions);
 
     // Error handling - log but don't throw (connection errors handled per-operation)
-    this.client.on('error', (err: Error) => {
+    client.on('error', (err: Error) => {
       // Sanitize both message AND stack to prevent credential leakage (CWE-532)
       const sanitize = (text: string | undefined): string => {
         if (!text) return '';
@@ -115,13 +142,16 @@ export class RedisBackend implements LockableBackend, TTLBackend {
       const safeMessage = sanitize(err.message) || 'Unknown Redis error';
       logError(`[cachekit] Redis error: ${safeMessage}`);
     });
+
+    return client;
   }
 
   async get(key: string): Promise<Uint8Array | null> {
     this.ensureNotClosed();
+    const client = await this.client;
 
     try {
-      const result = await this.client.getBuffer(key);
+      const result = await client.getBuffer(key);
       return result ? new Uint8Array(result) : null;
     } catch (error) {
       throw this.wrapError('get', error);
@@ -149,9 +179,10 @@ export class RedisBackend implements LockableBackend, TTLBackend {
    */
   async getWithTtl(key: string): Promise<GetWithTtlResult | null> {
     this.ensureNotClosed();
+    const client = await this.client;
 
     try {
-      const results = await this.client.pipeline().getBuffer(key).ttl(key).exec();
+      const results = await client.pipeline().getBuffer(key).ttl(key).exec();
       if (!results || results.length !== 2) {
         throw new Error('pipeline returned no results');
       }
@@ -181,14 +212,15 @@ export class RedisBackend implements LockableBackend, TTLBackend {
 
   async set(key: string, value: Uint8Array, ttl?: number): Promise<void> {
     this.ensureNotClosed();
+    const client = await this.client;
 
     const effectiveTtl = ttl ?? this.config.defaultTtl;
 
     try {
       if (effectiveTtl > 0) {
-        await this.client.setex(key, effectiveTtl, Buffer.from(value));
+        await client.setex(key, effectiveTtl, Buffer.from(value));
       } else {
-        await this.client.set(key, Buffer.from(value));
+        await client.set(key, Buffer.from(value));
       }
     } catch (error) {
       throw this.wrapError('set', error);
@@ -197,9 +229,10 @@ export class RedisBackend implements LockableBackend, TTLBackend {
 
   async delete(key: string): Promise<boolean> {
     this.ensureNotClosed();
+    const client = await this.client;
 
     try {
-      const result = await this.client.del(key);
+      const result = await client.del(key);
       return result > 0;
     } catch (error) {
       throw this.wrapError('delete', error);
@@ -208,9 +241,10 @@ export class RedisBackend implements LockableBackend, TTLBackend {
 
   async exists(key: string): Promise<boolean> {
     this.ensureNotClosed();
+    const client = await this.client;
 
     try {
-      const result = await this.client.exists(key);
+      const result = await client.exists(key);
       return result > 0;
     } catch (error) {
       throw this.wrapError('exists', error);
@@ -220,9 +254,10 @@ export class RedisBackend implements LockableBackend, TTLBackend {
   /** See {@link TTLBackend.getTTL}: -2 (missing) / -1 (no expiry) → null. */
   async getTTL(key: string): Promise<number | null> {
     this.ensureNotClosed();
+    const client = await this.client;
 
     try {
-      const ttl = await this.client.ttl(key);
+      const ttl = await client.ttl(key);
       return ttl > 0 ? ttl : null;
     } catch (error) {
       throw this.wrapError('getTTL', error);
@@ -240,9 +275,10 @@ export class RedisBackend implements LockableBackend, TTLBackend {
     if (seconds <= 0) {
       throw new BackendError(`Redis refreshTTL requires ttl >= 1 second, got ${ttl}`, 'permanent');
     }
+    const client = await this.client;
 
     try {
-      const result = await this.client.expire(key, seconds);
+      const result = await client.expire(key, seconds);
       return result === 1;
     } catch (error) {
       throw this.wrapError('refreshTTL', error);
@@ -267,9 +303,11 @@ export class RedisBackend implements LockableBackend, TTLBackend {
       );
     }
 
+    const client = await this.client;
+
     const lockId = randomUUID();
     try {
-      const result = await this.client.set(this.lockKey(key), lockId, 'PX', px, 'NX');
+      const result = await client.set(this.lockKey(key), lockId, 'PX', px, 'NX');
       return result === 'OK' ? lockId : null;
     } catch (error) {
       throw this.wrapError('acquireLock', error);
@@ -281,9 +319,10 @@ export class RedisBackend implements LockableBackend, TTLBackend {
    */
   async releaseLock(key: string, lockId: string): Promise<boolean> {
     this.ensureNotClosed();
+    const client = await this.client;
 
     try {
-      const result = await this.client.eval(RELEASE_LOCK_SCRIPT, 1, this.lockKey(key), lockId);
+      const result = await client.eval(RELEASE_LOCK_SCRIPT, 1, this.lockKey(key), lockId);
       return result === 1;
     } catch (error) {
       throw this.wrapError('releaseLock', error);
@@ -305,7 +344,9 @@ export class RedisBackend implements LockableBackend, TTLBackend {
     if (this.closed) return;
 
     this.closed = true;
-    await this.client.quit();
+    // No connection to close if ioredis failed to load or close() beat it.
+    const client = await this.client.catch(() => null);
+    await client?.quit();
   }
 
   private ensureNotClosed(): void {
