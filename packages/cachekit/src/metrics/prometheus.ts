@@ -3,6 +3,7 @@
  *
  * Uses prom-client types when available, otherwise provides compatible interface.
  */
+import { setImmediate } from 'node:timers';
 import { logError } from '../logger.js';
 
 // Types for prom-client (peer dependency)
@@ -128,6 +129,8 @@ export class CacheMetrics implements MetricsCollector {
     // Node can evaluate a dynamically imported CommonJS package in the
     // microtasks right after the import() call (Node 24 and 26 do), which
     // would hold up an operation started right after construction.
+    // setImmediate comes from node:timers, which fake timers leave alone, so
+    // a test suite that fakes the global timers still gets its metrics.
     this.ready = new Promise<void>((resolve) => setImmediate(resolve)).then(() =>
       this.initialize()
     );

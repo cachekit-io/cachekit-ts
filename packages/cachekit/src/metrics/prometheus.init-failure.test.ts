@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { setTimeout as realSetTimeout } from 'node:timers';
 import { CacheMetrics } from './prometheus.js';
 import { setLogger } from '../logger.js';
 
@@ -61,5 +62,24 @@ describe('CacheMetrics with prom-client missing', () => {
     await expect(metrics.recordOperation('get', 'error')).resolves.toBeUndefined();
     await expect(metrics.recordError('Error')).resolves.toBeUndefined();
     await expect(metrics.updateCircuitBreakerState('open')).resolves.toBeUndefined();
+  });
+
+  it('still loads, and reports, when the test suite fakes the global timers', async () => {
+    const logs: string[] = [];
+    setLogger((message) => logs.push(message));
+    vi.useFakeTimers();
+    try {
+      const metrics = new CacheMetrics();
+      // node:timers is not faked: this fails fast if the load never starts.
+      await Promise.race([
+        metrics.recordMiss(),
+        new Promise((_, reject) =>
+          realSetTimeout(() => reject(new Error('prom-client never loaded')), 2000)
+        ),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(logs).toHaveLength(1);
   });
 });
