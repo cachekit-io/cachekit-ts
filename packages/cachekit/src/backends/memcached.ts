@@ -40,8 +40,7 @@ const clientSockets = new WeakMap<MemjsClient, Map<Socket, MemjsServer>>();
 const discardedClients = new WeakSet<MemjsClient>();
 
 /**
- * Record each socket memjs opens, so the ones it abandons can be destroyed,
- * and disable Nagle on it.
+ * Record each socket memjs opens, so the ones it abandons can be destroyed.
  *
  * memjs end()s a socket it gives up on (request timeout, connect timeout) and
  * drops its reference. Against a server that never closes its side, that
@@ -62,9 +61,6 @@ function trackSockets(client: MemjsClient): void {
       sock.call(this, sasl, go);
       const socket = currentSocket(this);
       if (!socket || socket === previous) return;
-      // memjs never disables Nagle, so a request sent while another is in
-      // flight on this socket would wait for the earlier one's ACK.
-      socket.setNoDelay(true);
       tracked.set(socket, this);
       socket.once('close', () => tracked.delete(socket));
       socket.once('finish', () => releaseSockets(client, 'abandoned'));

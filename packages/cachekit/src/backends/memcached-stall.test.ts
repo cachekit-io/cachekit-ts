@@ -212,37 +212,6 @@ describe('MemcachedBackend against a stalled server', () => {
   );
 
   it(
-    '(g) every socket memjs opens has Nagle off, reconnects included',
-    { timeout: 4 * DEADLINE },
-    async () => {
-      const connected: net.Socket[] = [];
-      const connect = net.connect.bind(net) as (...args: unknown[]) => net.Socket;
-      vi.spyOn(net, 'connect').mockImplementation(((...args: unknown[]) => {
-        const socket = connect(...args);
-        connected.push(socket);
-        return socket;
-      }) as typeof net.connect);
-      const noDelay = vi.spyOn(net.Socket.prototype, 'setNoDelay');
-
-      stub.answering = true;
-      await expect(backend.get('first')).resolves.toBeNull();
-      expect(connected).toHaveLength(1);
-
-      // A try that times out drops its socket; the next try and the next op reconnect.
-      stub.answering = false;
-      await expect(backend.get('stalled')).rejects.toBeInstanceOf(TimeoutError);
-      stub.answering = true;
-      await expect(backend.get('after')).resolves.toBeNull();
-
-      expect(connected.length).toBeGreaterThan(1);
-      for (const socket of connected) {
-        expect(noDelay.mock.contexts).toContain(socket);
-      }
-      expect(noDelay.mock.calls.every(([enable]) => enable === true)).toBe(true);
-    }
-  );
-
-  it(
     '(f) a client discarded at the deadline never connects again',
     { timeout: 4 * DEADLINE },
     async () => {
