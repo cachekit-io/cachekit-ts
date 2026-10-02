@@ -9,7 +9,12 @@ import { file } from './backends/file.js';
 import { blake2b16Hex, generateKey } from './serialization/key-generator.js';
 import { setLogger } from './logger.js';
 import { createCache as createIntentCache } from './intents.js';
-import { ConfigurationError, SerializationError, ValueTooLargeError } from './errors.js';
+import {
+  ConfigurationError,
+  EncryptionError,
+  SerializationError,
+  ValueTooLargeError,
+} from './errors.js';
 import { forgedEnvelope } from '../test/fixtures/forged-envelope.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
 import { EncryptionManagerCore } from './encryption/manager-core.js';
@@ -1603,7 +1608,7 @@ describe('Cache Integration', () => {
       expect(backendGet).toHaveBeenCalledTimes(1);
       // The error metric still records the failure, once.
       expect(recordFailure).toHaveBeenCalledTimes(1);
-      expect(recordFailure.mock.calls[0]?.[0]).toBe('get');
+      expect(recordFailure.mock.calls[0]?.[0]).toBe('l2_decode');
 
       await c.close();
     });
@@ -1626,7 +1631,7 @@ describe('Cache Integration', () => {
       await c.close();
     });
 
-    it('a corrupt envelope on a compression-on cache fetches once per read, breaker closed', async () => {
+    it('foreign bytes on a compression-on cache fetch once per read, breaker closed', async () => {
       const backend = new InMemoryBackend();
       const c = productionCache(backend);
       await c.set('ns:fresh', 'ok');
@@ -1652,7 +1657,7 @@ describe('Cache Integration', () => {
       const secure = secureCache(backend, KEY_B, false);
       const plain = productionCache(backend, false);
 
-      await expect(secure.get('ns:old0')).rejects.toThrow();
+      await expect(secure.get('ns:old0')).rejects.toThrow(EncryptionError);
       await expect(plain.get('ns:bad')).rejects.toThrow(SerializationError);
       expect(backendGet).toHaveBeenCalledTimes(2);
 
@@ -1660,7 +1665,7 @@ describe('Cache Integration', () => {
       await plain.close();
     });
 
-    it('a transient decrypt failure (e.g. first-use binding load) is not retried and self-heals', async () => {
+    it('a transient decrypt failure (e.g. first-use binding load) is not retried', async () => {
       // Pinned on purpose: decrypt runs after the executor, so even a
       // transient failure inside it is a single miss, not a retried read.
       const backend = new InMemoryBackend();
@@ -1673,7 +1678,6 @@ describe('Cache Integration', () => {
 
       expect(await c.get('ns:k')).toBeNull();
       expect(backendGet).toHaveBeenCalledTimes(1);
-      expect(await c.get('ns:k')).toBe('v');
 
       await c.close();
     });

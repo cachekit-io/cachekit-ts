@@ -523,11 +523,11 @@ A decrypt or AAD failure (an entry written under a key no longer in
 cache), a corrupt or foreign entry, or ciphertext over the size cap is fetched
 once and never retried, and it never counts toward the breaker, so a handful of
 undecodable entries cannot cut off every other key. It is still counted in
-`cachekit_errors_total`, and it resolves as a miss with degradation on and
-rejects with degradation off.
+`cachekit_errors_total` and as `cachekit_operations_total{operation="l2_decode",status="error"}`,
+and it resolves as a miss with degradation on and rejects with degradation off.
 
 Graceful degradation still applies: under `production`, `secure` and `io` these
-errors resolve as a miss or a no-op, and with
+`BackendError`s resolve as a miss or a no-op, and with
 `reliability: { degradation: false }` they reject with the `BackendError`. With
 degradation on, a revoked API key therefore turns L2 into misses at one request
 per operation rather than opening the breaker. A write that fails this way, or

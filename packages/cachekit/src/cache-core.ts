@@ -258,9 +258,9 @@ export class CacheImpl implements SecureCache {
   private readonly telemetry = { l1Hits: 0, l2Hits: 0, misses: 0 };
   private readonly swrRequiresWaitUntil: boolean;
   /**
-   * Mirrors ReliabilityExecutor's own default. Read directly so the L1 decrypt
-   * path can honour the same fail-open/fail-closed choice the L2 decrypt path
-   * gets for free by running inside the executor.
+   * Mirrors ReliabilityExecutor's own default. Read directly by the
+   * decode/encode paths that run outside the executor (L1 decrypt, L2 decode,
+   * set encode), so they honour the same fail-open/fail-closed choice.
    */
   private readonly degradationEnabled: boolean;
   private closed = false;
@@ -461,7 +461,8 @@ export class CacheImpl implements SecureCache {
     if (envelopeVerdict(bytes, this.serializer.maxDecodedSize) === 'not-envelope') return null;
 
     // Codec construction stays OUTSIDE the try: a broken binding must fail
-    // loudly (through the reliability executor), not be conflated with "not
+    // loudly (through getEntry's decode-failure path: counted, then a miss or
+    // a rethrow per degradation), not be conflated with "not
     // an envelope" — that would silently serve raw envelope tuples, the
     // exact corruption this path exists to prevent (LAB-1768).
     //
@@ -765,7 +766,8 @@ export class CacheImpl implements SecureCache {
    * every hit, invalidating and re-fetching a perfectly good entry forever.
    *
    * Fail policy follows `reliability.degradation`, the same lever that governs
-   * an L2 decrypt failure (which happens inside run()): degradation on absorbs
+   * an L2 decrypt failure (decoded after run() in getEntry, so never retried
+   * or counted by the breaker): degradation on absorbs
    * the failure and falls through to L2, degradation off rethrows so a tamper
    * signal reaches the caller. Either way it is counted and logged, never
    * silently swallowed.
@@ -839,30 +841,25 @@ export class CacheImpl implements SecureCache {
     // every key on this cache (LAB-7079, the read-side mirror of LAB-5139).
     // A first-use native-binding load failure inside decrypt is no longer
     // retried either; it self-heals on the next read (initPromise resets).
-    const fetched = await this.run(
-      'get',
-      key,
-      null,
-      async (): Promise<{ data: Uint8Array; remainingTtl: number | null } | null> => {
-        // When L1 will be re-populated, prefer the TTL-carrying read (same
-        // storage round trip — see Backend.getWithTtl) so the L1 copy can be
-        // capped at the entry's remaining lifetime below (LAB-1388).
-        let data: Uint8Array | null;
-        let remainingTtl: number | null = null;
-        if (this.l1 && this.backend.getWithTtl) {
-          const result = await this.backend.getWithTtl(key);
-          data = result?.value ?? null;
-          remainingTtl = result?.ttlSeconds ?? null;
-        } else {
-          data = await this.backend.get(key);
-        }
-        if (data === null) {
-          this.recordMiss();
-          return null;
-        }
-        return { data, remainingTtl };
+    const fetched = await this.run('get', key, null, async () => {
+      // When L1 will be re-populated, prefer the TTL-carrying read (same
+      // storage round trip — see Backend.getWithTtl) so the L1 copy can be
+      // capped at the entry's remaining lifetime below (LAB-1388).
+      let data: Uint8Array | null;
+      let remainingTtl: number | null = null;
+      if (this.l1 && this.backend.getWithTtl) {
+        const result = await this.backend.getWithTtl(key);
+        data = result?.value ?? null;
+        remainingTtl = result?.ttlSeconds ?? null;
+      } else {
+        data = await this.backend.get(key);
       }
-    );
+      if (data === null) {
+        this.recordMiss();
+        return null;
+      }
+      return { data, remainingTtl };
+    });
     // A miss (counted above) or a backend failure degradation absorbed.
     if (fetched === null) return null;
     const { data, remainingTtl } = fetched;
@@ -874,7 +871,10 @@ export class CacheImpl implements SecureCache {
     try {
       value = await this.decodeEntry<T>(data, key, interop);
     } catch (error) {
-      this.recordFailure('get', error);
+      // Its own operation label, like 'l1_decrypt': the fetch already
+      // recorded a successful 'get', so counting this under 'get' too would
+      // report one read as two operations.
+      this.recordFailure('l2_decode', error);
       if (!this.degradationEnabled) throw error;
       return null;
     }
