@@ -33,8 +33,9 @@ export interface L1Write {
 /**
  * Callback for persisting refreshed values to L2 cache. Returns the payload
  * L1 should hold for the entry, or null when the write produced nothing L1 may
- * hold (a degraded write on a secure cache — no ciphertext to store, and the
- * refresh must not fall back to the plaintext it computed).
+ * hold (a secure cache whose value failed to compress or encrypt — no
+ * ciphertext to store, and the refresh must not fall back to the plaintext it
+ * computed). A degraded or breaker-skipped L2 write still returns ciphertext.
  */
 export type PersistCallback<T> = (
   key: string,
