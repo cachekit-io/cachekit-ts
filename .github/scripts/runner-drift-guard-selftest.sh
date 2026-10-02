@@ -117,6 +117,7 @@ bad external-reusable-open-quote $'jobs:\n  j:\n    uses: "other-org/tooling/\\\
 bad external-reusable-alias $'x: &w other-org/tooling/.github/workflows/build.yml@main\njobs:\n  j:\n    uses: *w' 4
 bad external-reusable-quoted-hash $'jobs:\n  j:\n    uses: "o/r/x #/.github/workflows/w.yml@v1"' 3
 bad external-reusable-single-quoted-hash $'jobs:\n  j:\n    uses: \'o/r/x #/.github/workflows/w.yml@v1\'' 3
+bad external-reusable-escaped $'jobs:\n  j:\n    uses: "other-org/tooling/\\x2egithub/workflows/build.yml@main"' 3
 # --- a verdict never depends on a non-runner key: each pair differs only in
 # the sibling key, and both fail on the os line, never on the sibling's -----
 bad os-object-list-pkg    $'jobs:\n  j:\n    strategy:\n      matrix:\n        os:\n          - runner: ubuntu-latest\n            artifact: cachekit.linux-x64-gnu.node' 5
@@ -151,6 +152,7 @@ bad quoted-text-block-header-matrix $'jobs:\n  j:\n    name: \'foo\n  x: |\n    
 bad include-block-scalar-item $'jobs:\n  j:\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        include:\n          - |-\n              ${{ fromJSON(vars.EXTRA) }}\n    runs-on: ${{ matrix.os }}' 7 'block scalar'
 bad first-unlisted-label  $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [macos-latest, self-hosted, ubuntu-latest]' 6 'runner value "self-hosted" selects a self-hosted runner'
 bad runs-on-label-list    $'jobs:\n  j:\n    runs-on: [linux, x64]' 3 'runner value "linux,x64" selects a self-hosted runner'
+bad runs-on-hosted-list   $'jobs:\n  j:\n    runs-on: [ubuntu-latest, macos-latest]' 3 'runner value "ubuntu-latest,macos-latest" selects a self-hosted runner'
 bad expression-quoted-whole $'jobs:\n  j:\n    runs-on: ${{ fromJSON(\'["ubuntu-latest","self-hosted"]\') }}' 3 'runner value "${{fromjson(ubuntu-latest,self-hosted)}}" is not a plain label'
 bad block-header-in-quoted-key $'jobs:\n  a:\n    runs-on: ubuntu-latest\n    services:\n      "svc: | #x":\n        image: nginx\n        env: &j\n          uses: evil/repo/.github/workflows/x.yml@v1\n    steps:\n      - run: echo\n  b: *j' 8
 bad phantom-flow-matrix-backstop $'jobs:\n  b:\n    runs-on: ${{ matrix.os }}\n    name: foo\n      [x\n    steps:\n      - uses: some/action@v1\n        with:\n          matrix:\n            cfg: a\n    strategy:\n      matrix:\n        note:\n          - a]\n        os: [self-hosted]' 15
@@ -208,6 +210,9 @@ good apostrophe-in-matrix $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    stra
 good static-jobs-step-alias $'jobs:\n  build:\n    if: github.event_name != \'pull_request\'\n    strategy:\n      matrix:\n        include:\n          - target: x86_64-apple-darwin\n            os: macos-latest\n    runs-on: ${{ matrix.os }}\n    steps: &build-steps\n      - run: echo ${{ matrix.target }}\n  build-pr:\n    if: github.event_name == \'pull_request\'\n    strategy:\n      matrix:\n        include:\n          - target: x86_64-unknown-linux-gnu\n            os: ubuntu-latest\n    runs-on: ${{ matrix.os }}\n    steps: *build-steps'
 
 # --- the scan driver reads each workflow's committed bytes at HEAD -----------
+# No global or system git config (core.autocrlf, an attributes file) may change
+# the bytes these fixtures commit or check out.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 repo() { # name: an empty repository at $tmp/<name>, in $r
   r=$tmp/$1
   mkdir -p "$r/.github/workflows" && git -C "$r" -c init.defaultBranch=main init -q

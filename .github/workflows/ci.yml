@@ -367,9 +367,9 @@ jobs:
               bad = 1
             }
             # The advice fits the value: only one unknown plain label is fixed by
-            # adding it to HOSTED. self-hosted, or a runs-on list of labels that
-            # fails (a selector a runner must match in full), is named as picking a
-            # self-hosted runner.
+            # adding it to HOSTED. self-hosted, or a runs-on list of two or more
+            # labels (a selector a runner must match in full, which no
+            # GitHub-hosted runner does), is named as picking a self-hosted runner.
             function label(v, item, selector) {
               if (v == "") fail(FILENAME, FNR, "runner value is not whole on this line (written below the key, wrapped, or cut by a # inside a quote) — write it on the key's line")
               else if (item == "") fail(FILENAME, FNR, "runner value \"" v "\" is not a plain label the drift guard can check — write a hosted label, or $" "{{ matrix.os }} over a static os axis")
@@ -378,13 +378,15 @@ jobs:
             }
             # True for a uses: line the scan cannot clear: a value not whole on
             # the line (below the key, a block scalar, an alias, an open quote),
-            # or a reusable workflow in another repo, whose runs-on this scan
-            # never reads. Same-repo ./.github/workflows/ and $/.github/workflows/
-            # callees are scanned.
+            # a value holding a backslash (an escape in a double-quoted value can
+            # spell any path, and no uses: reference needs one), or a reusable
+            # workflow in another repo, whose runs-on this scan never reads.
+            # Same-repo ./.github/workflows/ and $/.github/workflows/ callees are
+            # scanned.
             function callee(   v) {
               if ($0 !~ /^[[:space:]]*(-[[:space:]]*)?["']?uses["']?[[:space:]]*:/) return 0
               v = $0; sub(/^[^:]*:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
-              return v == "" || v ~ /^[>|*]/ || gsub(/"/, "&", v) % 2 || gsub(/'/, "&", v) % 2 ||
+              return v == "" || v ~ /^[>|*]/ || v ~ /\\/ || gsub(/"/, "&", v) % 2 || gsub(/'/, "&", v) % 2 ||
                 v ~ /\/\.github\/workflows\// && v !~ /^["']?[.$]\/\.github\/workflows\//
             }
             # Carries a flow collection or quoted scalar left open at the end of
@@ -516,8 +518,10 @@ jobs:
             # a quote, flow list, anchor or tag), so an expression-valued axis is
             # a deliberate edit here; a uses: line callee() cannot clear.
             # Accepted false positives, all fail-closed: an env/with key named
-            # matrix or strategy with an inline value; a flow map with an os,
-            # runner or uses key; any expression under a bare strategy: line,
+            # matrix or strategy with an inline value, or with no value and a
+            # sibling key on the next line; a runs-on list that repeats one
+            # hosted label; a flow map with an os, runner or uses key; any
+            # expression under a bare strategy: line,
             # whatever key holds it (fail-fast, max-parallel, a non-runner axis,
             # an include or exclude value); a trailing comment that holds a flow
             # key or, under strategy:, an expression; a block scalar (| or >)
@@ -546,9 +550,12 @@ jobs:
               gsub(/[][ "']/, "", v)
               # Only a plain comma list is split, so an expression is quoted
               # whole; the advice names the first label that is not allow-listed.
+              # A runs-on list of two or more labels fails even when HOSTED holds
+              # each one.
               n = v ~ /^[a-z0-9._-]+(,[a-z0-9._-]+)*$/ ? split(v, items, ",") : 0
               for (i = 1; i <= n && (items[i] in HOSTED); i++) ;
-              if (!n || i <= n) label(v, n ? items[i] : "", n > 1 && /^[[:space:]]*(-[[:space:]]*)?["']?runs-on/)
+              sel = n > 1 && /^[[:space:]]*(-[[:space:]]*)?["']?runs-on/
+              if (!n || i <= n || sel) label(v, n ? items[i <= n ? i : 1] : "", sel)
             }
             END { exit bad }
           AWK
