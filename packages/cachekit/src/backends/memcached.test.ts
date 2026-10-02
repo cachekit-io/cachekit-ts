@@ -280,6 +280,26 @@ describe('MemcachedBackend', () => {
       expect(await b.get('k')).toBeNull();
       expect(clientCreate).toHaveBeenCalledTimes(2);
     });
+
+    it('fails every other op on the discarded client at once, not at its own deadline', async () => {
+      vi.useFakeTimers();
+      const b = memcached({ timeout: 50, connectTimeout: 100, retries: 1 });
+      mockClient.get.mockReturnValue(new Promise(() => {}));
+
+      const first = b.get('a');
+      first.catch(() => {});
+      await vi.advanceTimersByTimeAsync(deadline(1) / 2);
+      let laterSettled = false;
+      const later = b.get('b').finally(() => {
+        laterSettled = true;
+      });
+      later.catch(() => {});
+
+      await vi.advanceTimersByTimeAsync(deadline(1) / 2);
+      await expect(first).rejects.toThrow('no response within');
+      expect(laterSettled).toBe(true);
+      await expect(later).rejects.toBeInstanceOf(TimeoutError);
+    });
   });
 
   describe('close', () => {

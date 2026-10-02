@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import net from 'node:net';
-import type { AddressInfo } from 'node:net';
+import memjs from 'memjs';
 import { memcached, type MemcachedBackend } from './memcached.js';
 import { TimeoutError } from '../errors.js';
 import { createCache } from '../intents.js';
@@ -68,8 +68,12 @@ async function startStub(closeDelay?: number | 'never'): Promise<Stub> {
     });
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address === null || typeof address === 'string') {
+    throw new Error('memcached stub is not listening on a TCP port');
+  }
   const stub: Stub = {
-    port: (server.address() as AddressInfo).port,
+    port: address.port,
     answering: false,
     probeConnections: () => {
       for (const socket of sockets) socket.write(Buffer.from([0]));
@@ -112,6 +116,7 @@ describe('MemcachedBackend against a stalled server', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await backend.close();
     await stub.close();
   });
@@ -202,6 +207,29 @@ describe('MemcachedBackend against a stalled server', () => {
       while (stub.probeConnections() > 0 && Date.now() - start < DEADLINE) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
+      expect(stub.probeConnections()).toBe(0);
+    }
+  );
+
+  it(
+    '(f) a client discarded at the deadline never connects again',
+    { timeout: 4 * DEADLINE },
+    async () => {
+      const create = vi.spyOn(memjs.Client, 'create');
+      // memjs drops this request without ever settling it, so only the deadline ends it.
+      vi.spyOn(memjs.Server.prototype, 'write').mockImplementationOnce(() => {});
+      await expect(backend.get('lost')).rejects.toBeInstanceOf(TimeoutError);
+
+      // A memjs retry still pending on the discarded client reaches the server
+      // through the same write path as this call. Once the server answers
+      // again, a connection it opened would stay up with nothing to close it.
+      stub.answering = true;
+      const discarded = create.mock.results[0]?.value;
+      discarded?.get('late').catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, SCHEDULING_MS));
+      await backend.close();
+
+      expect(discarded).toBeDefined();
       expect(stub.probeConnections()).toBe(0);
     }
   );

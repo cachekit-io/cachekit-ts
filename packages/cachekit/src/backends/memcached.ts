@@ -1,5 +1,5 @@
-import type { Socket } from 'node:net';
-import type { Client as MemjsClient } from 'memjs';
+import { Socket } from 'node:net';
+import type { Client as MemjsClient, Server as MemjsServer } from 'memjs';
 import { Backend, MemcachedBackendConfig } from './types.js';
 import { BackendError, ConfigurationError, TimeoutError } from '../errors.js';
 
@@ -22,19 +22,22 @@ const MEMJS_RETRY_DELAY_MS = 200;
 /** Headroom over memjs's own worst case, so the deadline fires only once memjs has lost the request. */
 const DEADLINE_SLACK_MS = 500;
 
-/** The memjs 1.3.2 `Server` internals this backend reaches into (lib/memjs/server.js). */
-type MemjsServer = {
-  _socket?: Socket;
-  sock?(sasl: boolean, go: (socket: Socket) => void): void;
-};
-
 /** A client's servers, or none if memjs internals ever stop matching. */
 function memjsServers(client: MemjsClient): readonly MemjsServer[] {
-  return (client as unknown as { servers?: MemjsServer[] }).servers ?? [];
+  return Array.isArray(client.servers) ? client.servers : [];
+}
+
+/** A server's live connection, which memjs 1.3.2 keeps in the undeclared `_socket`. */
+function currentSocket(server: MemjsServer): Socket | undefined {
+  const socket = '_socket' in server ? server._socket : undefined;
+  return socket instanceof Socket ? socket : undefined;
 }
 
 /** Every socket memjs has opened for a client and not yet closed, with its server. */
 const clientSockets = new WeakMap<MemjsClient, Map<Socket, MemjsServer>>();
+
+/** Clients the backend has discarded. memjs must never connect one again. */
+const discardedClients = new WeakSet<MemjsClient>();
 
 /**
  * Record each socket memjs opens, so the ones it abandons can be destroyed.
@@ -51,9 +54,12 @@ function trackSockets(client: MemjsClient): void {
     const sock = server.sock;
     if (!sock) continue;
     server.sock = function (this: MemjsServer, sasl, go) {
-      const previous = this._socket;
+      // A memjs retry still pending on a discarded client would open a
+      // connection that nothing ever closes. Drop it: its op has already failed.
+      if (discardedClients.has(client)) return;
+      const previous = currentSocket(this);
       sock.call(this, sasl, go);
-      const socket = this._socket;
+      const socket = currentSocket(this);
       if (!socket || socket === previous) return;
       tracked.set(socket, this);
       socket.once('close', () => tracked.delete(socket));
@@ -72,7 +78,7 @@ function trackSockets(client: MemjsClient): void {
 function isAbandoned(socket: Socket, server: MemjsServer): boolean {
   return (
     socket.writableEnded &&
-    server._socket !== socket &&
+    currentSocket(server) !== socket &&
     (socket.writableFinished || socket.connecting)
   );
 }
@@ -86,8 +92,9 @@ function releaseSockets(client: MemjsClient, which: 'abandoned' | 'all'): void {
     if (which === 'abandoned' && !isAbandoned(socket, server)) continue;
     clientSockets.get(client)?.delete(socket);
     // memjs's 'close' and 'error' handlers act on the server's CURRENT socket,
-    // not their own: fired from this one, they would disarm the live
-    // request's timeout and orphan it. Strip them before destroying.
+    // not their own: fired from an abandoned one, they would disarm the live
+    // request's timeout and orphan it. A discarded client's ops are failed by
+    // the backend, not by memjs. Strip them before destroying.
     socket
       .removeAllListeners('close')
       .removeAllListeners('error')
@@ -123,8 +130,10 @@ function releaseSockets(client: MemjsClient, which: 'abandoned' | 'all'): void {
  * forever against a server that stops answering. On expiry the op rejects
  * with `TimeoutError` (retryable, so retries and the circuit breaker see a
  * bounded failure) and the memjs client is discarded, so the next op starts
- * on a fresh connection. Connections memjs gives up on are reset rather than
- * left half-open, so a stalled server cannot accumulate them.
+ * on a fresh connection. Every other op still running on that client rejects
+ * with `TimeoutError` at the same moment, and the discarded client never
+ * connects again. Connections memjs gives up on are reset rather than left
+ * half-open, so a stalled server cannot accumulate them.
  *
  * @example
  * ```typescript
@@ -142,6 +151,8 @@ export class MemcachedBackend implements Backend {
   private closed = false;
   /** Memoized lazy client — memjs is an optional peer dep, imported on first use. */
   private clientPromise: Promise<MemjsClient> | null = null;
+  /** Ops awaiting memjs, each with its client, so a discard can fail its client's ops. */
+  private readonly inFlight = new Set<{ client: MemjsClient; fail: () => void }>();
 
   /** Applied client-side to every key (like py) — exposed so interop mode
    * can fail closed; see Backend.keyPrefix for the contract. */
@@ -301,17 +312,29 @@ export class MemcachedBackend implements Backend {
     const clientPromise = this.getClient();
     const client = await clientPromise;
 
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        this.discardClient(clientPromise, client);
+    let reject!: (error: Error) => void;
+    const deadline = new Promise<never>((_, rejectDeadline) => {
+      reject = rejectDeadline;
+    });
+    const op = {
+      client,
+      fail: () =>
         reject(
           new TimeoutError(
-            `Memcached ${operation} timed out: no response within ${this.deadlineMs}ms`
+            `Memcached ${operation} timed out: its connection was reset when another ` +
+              `operation hit the ${this.deadlineMs}ms deadline`
           )
-        );
-      }, this.deadlineMs);
-    });
+        ),
+    };
+    const timer = setTimeout(() => {
+      reject(
+        new TimeoutError(
+          `Memcached ${operation} timed out: no response within ${this.deadlineMs}ms`
+        )
+      );
+      this.discardClient(clientPromise, client);
+    }, this.deadlineMs);
+    this.inFlight.add(op);
 
     try {
       return await Promise.race([call(client), deadline]);
@@ -320,13 +343,20 @@ export class MemcachedBackend implements Backend {
       throw this.wrapError(operation, error);
     } finally {
       clearTimeout(timer);
+      this.inFlight.delete(op);
     }
   }
 
   private discardClient(clientPromise: Promise<MemjsClient>, client: MemjsClient): void {
     // A concurrent op may already have replaced it; never discard the new one.
     if (this.clientPromise === clientPromise) this.clientPromise = null;
+    discardedClients.add(client);
     releaseSockets(client, 'all');
+    // Destroying a socket also clears memjs's request timer on it, so an op
+    // still on this client would otherwise wait out its own deadline.
+    for (const op of this.inFlight) {
+      if (op.client === client) op.fail();
+    }
   }
 
   private prefixedKey(key: string): string {
