@@ -432,7 +432,7 @@ jobs:
             # the block-scalar header is matched on lraw as scan() cut it.
             # A CR, NEL, LS or PS left inside a line is a YAML line break that
             # awk does not split on, so the guard would read two lines as one.
-            { gated = 0; sub(/\r$/, ""); if (index($0, "\r") || index($0, "\302\205") || index($0, "\342\200\250") || index($0, "\342\200\251")) fail(FILENAME, FNR, "line holds a CR, NEL, LS or PS, which YAML reads as a line break — use LF line ends") }
+            { gated = 0; sub(/\r$/, ""); if (index($0, "\r") || index($0, "\302\205") || index($0, "\342\200\250") || index($0, "\342\200\251")) fail(FILENAME, FNR, "line holds a CR, NEL (U+0085), LS (U+2028) or PS (U+2029) inside it, which YAML reads as a line break — delete it, or break the line with LF") }
             { lraw = tolower($0); sub(/(^|[[:space:]])#.*/, ""); $0 = tolower($0) }
             /^[[:space:]]*$/ { next }
             { match($0, /^[[:space:]]*/); if (block >= 0 && RLENGTH > block) next; block = -1; gated = gtext >= 0 && RLENGTH > gtext; if (!gated) gtext = -1 }
@@ -525,8 +525,9 @@ jobs:
             # scalar that continues past its line; | or > text read as YAML in a
             # file where a line holds a [ or { that is not a flat one-line list,
             # an empty {} or an expression's double braces (the noskip gate); a
-            # step uses: value that is an alias or is
-            # written below its key.
+            # CR, NEL, LS or PS anywhere in a line (in block text, a quoted value
+            # or a comment), even where the break hides nothing; a step uses:
+            # value that is an alias or is written below its key.
             lraw ~ /[{,][[:space:]]*["']?(runs-on|os|runner|strategy|matrix|include|uses)["']?[[:space:]]*:/ ||
             /^[[:space:]]*(-[[:space:]]*)?["']?(strategy|matrix)["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ ||
             (/^[[:space:]]*(-[[:space:]]*)?["']?include["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ && matrix_indent >= 0) ||

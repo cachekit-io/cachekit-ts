@@ -164,6 +164,7 @@ bad phantom-flow-strategy-backstop $'jobs:\n  b:\n    runs-on: ${{ matrix.os }}\
 bad flow-inversion-colon-quote $'jobs:\n  j:\n    env:\n      A: [a:"b, [c, d", e],\n  f, "x: |\n      "]\n    runs-on: self-hosted\n    steps:\n      - run: echo' "6 7"
 bad flow-inversion-hash-comma $'jobs:\n  j:\n    env:\n      A: [a,#]\n  b, "x: |\n      "]\n    runs-on: self-hosted\n    steps:\n      - run: echo' "6 7"
 bad gated-text-hint      $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    env: {CI: true}\n    steps:\n      - run: |\n          jq -r \'\n            .name\n          \' package.json' 9 'read as YAML because line 4 holds'
+bad gated-hint-outer-text $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    env: {CI: true}\n    steps:\n      - run: |\n          echo a: |\n            nested\n          \' open' 9 'read as YAML because line 4 holds'
 bad gate-flow-map-colon-quote $'jobs:\n  j:\n    env:\n      A: {a:"b, x: {c: d", e: f},\n  g: h, "x: |\n      "}\n    runs-on: self-hosted\n    steps:\n      - run: echo' "6 7"
 bad gate-anchor-quote-item $'jobs:\n  j:\n    env:\n      A: [&a,"x ]\n  y: |\n    "]\n    runs-on: self-hosted\n    steps:\n      - run: echo' "6 7"
 bad gate-same-line-header $'jobs:\n  j: {a:"b, "}, c, x: |\n       ", runs-on: self-hosted, steps: [{run: echo}]}' 3
@@ -171,6 +172,7 @@ bad gate-same-line-header $'jobs:\n  j: {a:"b, "}, c, x: |\n       ", runs-on: s
 bad mid-line-cr           $'on: push\njobs:\n  j:\r    steps:\r      - run: |\n          echo hi\n    runs-on: self-hosted' 3 'which YAML reads as a line break'
 bad mid-line-nel          $'on: push\njobs:\n  j:\xc2\x85    steps:\xc2\x85      - run: |\n          echo hi\n    runs-on: self-hosted' 3 'which YAML reads as a line break'
 bad mid-line-ls           $'on: push\njobs:\n  j:\xe2\x80\xa8    steps:\xe2\x80\xa8      - run: |\n          echo hi\n    runs-on: self-hosted' 3 'which YAML reads as a line break'
+bad mid-line-ps           $'on: push\njobs:\n  j:\xe2\x80\xa9    steps:\xe2\x80\xa9      - run: |\n          echo hi\n    runs-on: self-hosted' 3 'which YAML reads as a line break'
 bad explicit-key-block-indent $'jobs:\n  ? b\n  : x: |\n      text\n    runs-on: self-hosted' 5
 # --- must pass --------------------------------------------------------------
 good ubuntu-latest        $'jobs:\n  j:\n    runs-on: ubuntu-latest'
