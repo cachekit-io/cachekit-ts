@@ -42,10 +42,12 @@ const messageOf = (error: unknown): string =>
 /**
  * Throw now for a url that ioredis would reject when it creates the client,
  * so a bad url still fails at `redis()` and `createCache()`, not at the first
- * command. This follows ioredis 5's parseURL: a port number or a socket path
+ * command. This copies ioredis 5.11's parseURL: a port number or a socket path
  * is used as is, and anything else goes through the WHATWG URL parser, with
  * `redis://` assumed when there is no scheme, and has its credentials
- * percent-decoded. The error never echoes the url, which can carry a password.
+ * percent-decoded. ioredis 5.10 parsed with url.parse, which accepts a few
+ * more malformed urls. The 'RedisBackend url check' tests compare this with
+ * the installed ioredis. Messages are fixed text: the url can carry a password.
  */
 function assertValidUrl(url: unknown): void {
   // ioredis reads a non-string as options or a port, never as a url.
@@ -53,14 +55,21 @@ function assertValidUrl(url: unknown): void {
   const port = parseFloat(url);
   // ioredis's isInt: a 32-bit integer is a port. A path is a unix socket.
   if ((!Number.isNaN(Number(url)) && (port | 0) === port) || /^\/(?!\/)/.test(url)) return;
+  let parsed: URL;
   try {
-    const parsed = new URL(
+    parsed = new URL(
       /^rediss?:\/\//i.test(url) ? url : url.startsWith('//') ? `redis:${url}` : `redis://${url}`
     );
+  } catch {
+    throw new ConfigurationError("The Redis backend's url is not a valid URL");
+  }
+  try {
     decodeURIComponent(parsed.username);
     decodeURIComponent(parsed.password);
-  } catch (error) {
-    throw new ConfigurationError(`The Redis backend's url is not valid: ${messageOf(error)}`);
+  } catch {
+    throw new ConfigurationError(
+      "The Redis backend's url has malformed percent-encoding in its credentials"
+    );
   }
 }
 
@@ -153,9 +162,11 @@ export class RedisBackend implements LockableBackend, TTLBackend {
     let client: IoRedis;
     try {
       client = new Redis(this.config.url, redisOptions);
-    } catch (error) {
-      // No cause: ioredis's url errors carry the url, which can hold a password.
-      throw this.clientFailure(`could not create its ioredis client: ${messageOf(error)}`);
+    } catch {
+      // Fixed text, and no cause: ioredis puts the url, password included,
+      // into some of these errors' messages, and Node's URL errors carry it
+      // as `input`.
+      throw this.clientFailure('could not create its ioredis client; check its url and options');
     }
 
     // Error handling - log but don't throw (connection errors handled per-operation)

@@ -45,8 +45,8 @@ describe.each(['esm', 'cjs'] as const)('built %s entry', (format) => {
 /**
  * The native core is stubbed, so the bundle runs from a directory with no
  * node_modules: the only ioredis it can reach is the copy inside it, and a
- * bundle without one logs that it could not load ioredis. The minimal app
- * never touches the core.
+ * bundle that cannot load it logs the failure. The minimal app never touches
+ * the core.
  */
 const stubNativeCore: Plugin = {
   name: 'stub-native-core',
@@ -65,8 +65,10 @@ const stubNativeCore: Plugin = {
 const ESM_REQUIRE_BANNER =
   "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);";
 
-// Nothing listens on port 1. close() waits for ioredis to load and the
-// client to be built, then drops the connection attempt.
+// close() runs before ioredis has loaded, so it marks the backend closed and
+// waits for the load, which then builds no client: the bundled ioredis loads,
+// nothing connects, and a clean run writes nothing to stderr. The backend logs
+// every load or build failure there.
 const APP_BODY = `
   await redis({ url: 'redis://127.0.0.1:1' }).close();
   console.log(JSON.stringify({ closed: true }));
@@ -112,7 +114,7 @@ describe('bundled app (esbuild, platform node)', () => {
         cwd: outDir,
         timeout: 20_000,
       });
-      expect(stderr).not.toContain('could not load ioredis');
+      expect(stderr).toBe('');
       expect(JSON.parse(stdout)).toEqual({ closed: true });
     },
     30_000
