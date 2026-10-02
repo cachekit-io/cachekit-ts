@@ -7,3 +7,4 @@ pnpm-lock.yaml
 CHANGELOG.md
 # Vendored cachekit-io/protocol fixtures: must stay byte-identical to upstream; never reformat.
 packages/cachekit/test/protocol/fixtures/
+packages/cachekit/test/workers/fixtures/

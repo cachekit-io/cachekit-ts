@@ -7,17 +7,19 @@ import { decode } from '@msgpack/msgpack';
 import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 import { readEnvelopeHeader } from '../../src/serialization/envelope.js';
 // Single vendored copy of protocol/test-vectors/wire-format.json (see the
-// workers lane header for the re-copy rule); this lane runs the same vectors
-// through the NAPI binding so both bindings are held to identical bytes.
+// FIXTURE_SHA256 docblock below for the re-vendor rule); this lane runs the
+// same vectors through the NAPI binding so both bindings are held to identical bytes.
 import fixture from '../workers/fixtures/wire-format.json' with { type: 'json' };
 
 /**
- * sha256 of test-vectors/wire-format.json (fixture version 1.1.1).
- * Provenance: cachekit-io/protocol @ 5be35d5. Re-vendoring means copying the
- * file byte-for-byte from a named protocol revision and updating this line,
- * FIXTURE_SHA256 and the version/count guard below together.
+ * sha256 of test-vectors/wire-format.json (fixture version 1.3.0).
+ * Provenance: cachekit-io/protocol @ b90ab132. Re-vendoring means copying the
+ * file byte-for-byte from a named protocol revision, then changing three
+ * things together: the version and revision in this docblock, the
+ * FIXTURE_SHA256 value below, and the version/count guard in the
+ * "protocol wire-format.json vectors" suite.
  */
-const FIXTURE_SHA256 = 'b902db88fb9b2c4a2d0def7266f8199a858fcb921262c1eaf2c2c03412b5b56a'; // pragma: allowlist secret
+const FIXTURE_SHA256 = '5d72ca1ff27202ab46aa501f54abf77e535f275d2ea4443966ad464f3c020cd7'; // pragma: allowlist secret
 
 // Raw bytes of the same file the JSON import above parses: the pin covers
 // every byte (legacy vectors and the limits block included), not a re-serialisation.
@@ -35,9 +37,25 @@ interface WireVector {
   envelope_encoding?: string;
 }
 
+interface Segment {
+  hex: string;
+  count: number;
+}
+
+/** Too large to pin as hex: bytes are given as repeated-segment lists. */
+interface ConstructedVector {
+  name: string;
+  original_size: number;
+  compressed_size: number;
+  envelope_size: number;
+  envelope_construction: Segment[];
+  input_construction: Segment[];
+}
+
 const vectors = fixture.vectors as WireVector[];
 const binVectors = vectors.filter((v) => v.envelope_encoding === 'bin');
 const legacyVectors = vectors.filter((v) => v.envelope_encoding === undefined);
+const constructedVectors = fixture.constructed_vectors as ConstructedVector[];
 
 // The envelope is a 4-element fixarray (0x94), so byte 1 is the msgpack
 // marker of compressed_data. This returns the one marker a conforming
@@ -71,6 +89,26 @@ function expectOwnedCopy(bytes: Uint8Array): void {
   expect(bytes.constructor).toBe(Uint8Array);
   expect(bytes.byteOffset).toBe(0);
   expect(bytes.byteLength).toBe(bytes.buffer.byteLength);
+}
+
+// The fixture's construction_note: repeat each segment's hex `count` times and
+// concatenate the segments in order.
+function construct(segments: Segment[]): Uint8Array {
+  const units = segments.map((s) => [hexToBytes(s.hex), s.count] as const);
+  const out = new Uint8Array(units.reduce((n, [unit, count]) => n + unit.length * count, 0));
+  let offset = 0;
+  for (const [unit, count] of units) {
+    for (let i = 0; i < count; i++, offset += unit.length) out.set(unit, offset);
+  }
+  return out;
+}
+
+// Index of the first differing byte, or -1. A multi-MB toEqual diff is
+// unreadable; this names where the output went wrong.
+function firstMismatch(actual: Uint8Array, expected: Uint8Array): number {
+  const n = Math.min(actual.length, expected.length);
+  for (let i = 0; i < n; i++) if (actual[i] !== expected[i]) return i;
+  return actual.length === expected.length ? -1 : n;
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -237,8 +275,8 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
       ).toBe(FIXTURE_SHA256);
     });
 
-    it('vendors fixture 1.1.1: seven legacy vectors, seven bin twins, bin8 and bin16 pinned', () => {
-      expect(fixture.version).toBe('1.1.1');
+    it('vendors fixture 1.3.0: seven legacy vectors, seven bin twins, bin8 and bin16 pinned', () => {
+      expect(fixture.version).toBe('1.3.0');
       expect(legacyVectors).toHaveLength(7);
       expect(binVectors).toHaveLength(7);
       expect(new Set(binVectors.map((v) => hexToBytes(v.envelope_hex)[1]))).toEqual(
@@ -277,6 +315,26 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
         expect(bytesToHex(bs.unpack(hexToBytes(vector.envelope_hex)))).toBe(vector.input_hex);
       }
     });
+
+    it('carries the 32-bit ratio-wrap constructed vector', () => {
+      expect(constructedVectors.map((v) => v.name)).toEqual([
+        'envelope_ratio_product_wraps_32_bits',
+      ]);
+    });
+
+    // compressed_data is the first length at which 1000 * compressed_size
+    // overflows 32 bits; a reader that multiplies in 32-bit width rejects it.
+    it.each(constructedVectors.map((v) => [v.name, v] as const))(
+      'unpacks constructed envelope %s to its constructed input',
+      (_name, vector) => {
+        const envelope = construct(vector.envelope_construction);
+        const input = construct(vector.input_construction);
+        expect(envelope.length).toBe(vector.envelope_size);
+        expect(input.length).toBe(vector.original_size);
+        expect(compressedData(envelope).length).toBe(vector.compressed_size);
+        expect(firstMismatch(bs.unpack(envelope), input)).toBe(-1);
+      }
+    );
 
     it('pack marks compressed_data as msgpack bin for arbitrary payloads', () => {
       // Not in the vector set: one bin8-sized and one bin16-sized payload. The
