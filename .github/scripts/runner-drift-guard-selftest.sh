@@ -116,6 +116,7 @@ bad external-reusable-flow-job $'jobs:\n  j: {uses: other-org/tooling/.github/wo
 bad external-reusable-open-quote $'jobs:\n  j:\n    uses: "other-org/tooling/\\\n      .github/workflows/build.yml@main"' 3
 bad external-reusable-alias $'x: &w other-org/tooling/.github/workflows/build.yml@main\njobs:\n  j:\n    uses: *w' 4
 bad external-reusable-quoted-hash $'jobs:\n  j:\n    uses: "o/r/x #/.github/workflows/w.yml@v1"' 3
+bad external-reusable-single-quoted-hash $'jobs:\n  j:\n    uses: \'o/r/x #/.github/workflows/w.yml@v1\'' 3
 # --- a verdict never depends on a non-runner key: each pair differs only in
 # the sibling key, and both fail on the os line, never on the sibling's -----
 bad os-object-list-pkg    $'jobs:\n  j:\n    strategy:\n      matrix:\n        os:\n          - runner: ubuntu-latest\n            artifact: cachekit.linux-x64-gnu.node' 5
@@ -161,6 +162,10 @@ bad quote-inversion-plain-continuation $'jobs:\n  j:\n    name: foo\n      \'bar
 bad phantom-flow-strategy-backstop $'jobs:\n  b:\n    runs-on: ${{ matrix.os }}\n    name: foo\n      [x\n    steps:\n      - uses: some/action@v1\n        with:\n          strategy:\n            cfg: a\n    strategy:\n      matrix:\n        note:\n          - a]\n        os: [ubuntu-latest]\n        cfg: ${{ fromJSON(vars.CFG) }}' 16
 bad flow-inversion-colon-quote $'jobs:\n  j:\n    env:\n      A: [a:"b, [c, d", e],\n  f, "x: |\n      "]\n    runs-on: self-hosted\n    steps:\n      - run: echo' "6 7"
 bad flow-inversion-hash-comma $'jobs:\n  j:\n    env:\n      A: [a,#]\n  b, "x: |\n      "]\n    runs-on: self-hosted\n    steps:\n      - run: echo' "6 7"
+bad gated-text-hint      $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    env: {CI: true}\n    steps:\n      - run: |\n          jq -r \'\n            .name\n          \' package.json' 9 'read as YAML because line 4 holds'
+bad gate-flow-map-colon-quote $'jobs:\n  j:\n    env:\n      A: {a:"b, x: {c: d", e: f},\n  g: h, "x: |\n      "}\n    runs-on: self-hosted\n    steps:\n      - run: echo' "6 7"
+bad gate-anchor-quote-item $'jobs:\n  j:\n    env:\n      A: [&a,"x ]\n  y: |\n    "]\n    runs-on: self-hosted\n    steps:\n      - run: echo' "6 7"
+bad gate-same-line-header $'jobs:\n  j: {a:"b, "}, c, x: |\n       ", runs-on: self-hosted, steps: [{run: echo}]}' 3
 bad explicit-key-block-indent $'jobs:\n  ? b\n  : x: |\n      text\n    runs-on: self-hosted' 5
 # --- must pass --------------------------------------------------------------
 good ubuntu-latest        $'jobs:\n  j:\n    runs-on: ubuntu-latest'
@@ -189,6 +194,9 @@ bad block-scalar-in-matrix $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    strate
 good block-text-matrix-key $'jobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          echo "Matrix:" >> x\n          Matrix:\n          done'
 good block-text-uses-key  $'jobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          cat <<EOF\n          Uses:\n          EOF'
 good block-header-trailing-comment $'jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |  # note\n          runs-on: self-hosted'
+good flat-quoted-list-keeps-skip $'on:\n  push:\n    branches: [\'main\']\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          jq -r \'\n            .name\n          \' package.json'
+good empty-flow-map-keeps-skip $'on:\n  workflow_dispatch: {}\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          jq -r \'\n            .name\n          \' package.json'
+good expression-keeps-skip $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n    steps:\n      - run: |\n          jq -r \'\n            .name\n          \' package.json'
 good apostrophe-in-matrix $'jobs:\n  j:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        note: [don\'t, it\'s]\n        name: it\'s fine\n    steps:\n      - run: echo ${{ matrix.note }}'
 good static-jobs-step-alias $'jobs:\n  build:\n    if: github.event_name != \'pull_request\'\n    strategy:\n      matrix:\n        include:\n          - target: x86_64-apple-darwin\n            os: macos-latest\n    runs-on: ${{ matrix.os }}\n    steps: &build-steps\n      - run: echo ${{ matrix.target }}\n  build-pr:\n    if: github.event_name == \'pull_request\'\n    strategy:\n      matrix:\n        include:\n          - target: x86_64-unknown-linux-gnu\n            os: ubuntu-latest\n    runs-on: ${{ matrix.os }}\n    steps: *build-steps'
 
