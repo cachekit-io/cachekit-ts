@@ -366,8 +366,9 @@ jobs:
               bad = 1
             }
             # The advice fits the value: only one unknown plain label is fixed by
-            # adding it to HOSTED. self-hosted, or a runs-on list of labels (a
-            # selector a runner must match in full), picks a self-hosted runner.
+            # adding it to HOSTED. self-hosted, or a runs-on list of labels that
+            # fails (a selector a runner must match in full), is named as picking a
+            # self-hosted runner.
             function label(v, item, selector) {
               if (v == "") fail(FILENAME, FNR, "runner value is not whole on this line (written below the key, wrapped, or cut by a # inside a quote) — write it on the key's line")
               else if (item == "") fail(FILENAME, FNR, "runner value \"" v "\" is not a plain label the drift guard can check — write a hosted label, or $" "{{ matrix.os }} over a static os axis")
@@ -441,6 +442,11 @@ jobs:
                 if (strategy_indent >= 0 && indent <= strategy_indent) strategy_indent = -1
               }
               scan(lraw)
+              # A quote left open at the end of the line is refused: once the
+              # scan's quote state can disagree with YAML's, the block-scalar skip
+              # below could hide real lines. The state is kept, so the lines it
+              # spans stay held as above.
+              if (quote != "") fail(FILENAME, FNR, "quoted scalar continues past this line — keep a quoted value on one line")
               # A | or > value opens a block scalar. Under strategy: its text
               # could hold an expression no rule would read, so it is refused.
               if (!flow && quote == "" && substr(lraw, 1, cut - 1) ~ /^[[:space:]]*(-[[:space:]]+)*([^[:space:]#][^#]*:[[:space:]]+)?([&!][^[:space:]]*[[:space:]]+)*[|>][-+0-9]*[[:space:]]*$/) {
@@ -484,8 +490,9 @@ jobs:
             # whatever key holds it (fail-fast, max-parallel, a non-runner axis,
             # an include or exclude value); a trailing comment that holds a flow
             # key or, under strategy:, an expression; a block scalar (| or >)
-            # under strategy:, even a multi-line non-runner value; a step uses:
-            # value that is an alias or is written below its key.
+            # under strategy:, even a multi-line non-runner value; a quoted
+            # scalar that continues past its line; a step uses: value that is an
+            # alias or is written below its key.
             lraw ~ /[{,][[:space:]]*["']?(runs-on|os|runner|strategy|matrix|include|uses)["']?[[:space:]]*:/ ||
             /^[[:space:]]*(-[[:space:]]*)?["']?(strategy|matrix)["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ ||
             (/^[[:space:]]*(-[[:space:]]*)?["']?include["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ && matrix_indent >= 0) ||
