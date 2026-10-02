@@ -9,7 +9,7 @@
  * ByteStorage envelope is decoded in Rust (cachekit-core, reached via NAPI
  * `unpack` / wasm), not here. cachekit-io/cachekit-core#80 adds the envelope
  * pre-scan to `ByteStorage::retrieve` and runs the protocol's
- * decode-bounds.json 1.1.0 (newer than the copy vendored here) through it in
+ * decode-bounds.json 1.1.0 through it in
  * core CI. The cachekit-core 0.6.0 this repo pins has no envelope pre-scan, so
  * `unpack` gains the guard only when the pin moves to a core release that
  * carries it.
