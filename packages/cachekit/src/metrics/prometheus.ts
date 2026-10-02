@@ -12,7 +12,6 @@ interface Counter {
 
 interface Histogram {
   observe(labels: Record<string, string>, value: number): void;
-  startTimer(labels?: Record<string, string>): () => number;
 }
 
 interface Gauge {
@@ -72,7 +71,9 @@ export interface MetricsCollector {
  *
  * Requires the optional `prom-client` peer dependency; when it is missing,
  * initialization reports once through the library logger and metrics degrade
- * to no-ops.
+ * to no-ops. prom-client loads in the background from the constructor, and
+ * no operation waits for it: metrics recorded while it loads land once it
+ * has loaded.
  *
  * @example
  * ```typescript
@@ -107,17 +108,23 @@ export class CacheMetrics implements MetricsCollector {
   private l1MemoryGauge: Gauge | null = null;
   private circuitBreakerGauge: Gauge | null = null;
 
-  private initialized = false;
-  // prom-client module reference - typed loosely due to complex generics
-  private CounterClass: MetricConstructor<Counter> | null = null;
-  private HistogramClass: MetricConstructor<Histogram> | null = null;
-  private GaugeClass: MetricConstructor<Gauge> | null = null;
+  /**
+   * Settles true once prom-client has loaded and every metric is registered,
+   * false if either failed. Never rejects. Started by the constructor, so no
+   * operation waits for the import.
+   */
+  private readonly ready: Promise<boolean>;
+  /** Set with `ready` resolving true; lets a stopped timer record at once. */
+  private isReady = false;
+  /** An initialization failure that whenReady() has not reported yet. */
+  private initError: Error | null = null;
 
   constructor(config: MetricsConfig = {}) {
     this.prefix = config.prefix ?? 'cachekit';
     this.defaultLabels = config.defaultLabels ?? {};
     this.registry = config.registry;
     this.errorHandler = config.onError;
+    this.ready = this.initialize();
   }
 
   /**
@@ -129,21 +136,19 @@ export class CacheMetrics implements MetricsCollector {
   }
 
   /**
-   * Initialize metrics (lazy - only when first used).
-   * Returns false if prom-client not available.
+   * Load prom-client and register the metrics. Runs once, from the
+   * constructor. Resolves false if prom-client is missing or registration
+   * fails, keeping the error for whenReady() to report.
    */
   private async initialize(): Promise<boolean> {
-    if (this.initialized) return this.CounterClass !== null;
-    this.initialized = true;
-
     try {
       // Dynamic import - prom-client is a peer dependency
       const promClient = await import('prom-client');
 
-      // Store constructors with type assertions (prom-client has complex generics)
-      this.CounterClass = promClient.Counter as unknown as MetricConstructor<Counter>;
-      this.HistogramClass = promClient.Histogram as unknown as MetricConstructor<Histogram>;
-      this.GaugeClass = promClient.Gauge as unknown as MetricConstructor<Gauge>;
+      // Constructors with type assertions (prom-client has complex generics)
+      const CounterClass = promClient.Counter as unknown as MetricConstructor<Counter>;
+      const HistogramClass = promClient.Histogram as unknown as MetricConstructor<Histogram>;
+      const GaugeClass = promClient.Gauge as unknown as MetricConstructor<Gauge>;
 
       // Target registry: custom (config.registry) or prom-client's default.
       // Reuse an already-registered metric instead of constructing a second
@@ -157,35 +162,35 @@ export class CacheMetrics implements MetricsCollector {
       };
 
       // Operations counter
-      this.operationsCounter = getOrCreate(this.CounterClass, {
+      this.operationsCounter = getOrCreate(CounterClass, {
         name: `${this.prefix}_operations_total`,
         help: 'Total cache operations',
         labelNames: ['operation', 'status'],
       });
 
       // Hits counter
-      this.hitsCounter = getOrCreate(this.CounterClass, {
+      this.hitsCounter = getOrCreate(CounterClass, {
         name: `${this.prefix}_hits_total`,
         help: 'Cache hits',
         labelNames: ['layer'],
       });
 
       // Misses counter
-      this.missesCounter = getOrCreate(this.CounterClass, {
+      this.missesCounter = getOrCreate(CounterClass, {
         name: `${this.prefix}_misses_total`,
         help: 'Cache misses',
         labelNames: [],
       });
 
       // Errors counter
-      this.errorsCounter = getOrCreate(this.CounterClass, {
+      this.errorsCounter = getOrCreate(CounterClass, {
         name: `${this.prefix}_errors_total`,
         help: 'Cache errors',
         labelNames: ['error_type'],
       });
 
       // Duration histogram
-      this.durationHistogram = getOrCreate(this.HistogramClass, {
+      this.durationHistogram = getOrCreate(HistogramClass, {
         name: `${this.prefix}_operation_duration_seconds`,
         help: 'Operation duration in seconds',
         labelNames: ['operation'],
@@ -193,31 +198,46 @@ export class CacheMetrics implements MetricsCollector {
       });
 
       // L1 entries gauge
-      this.l1EntriesGauge = getOrCreate(this.GaugeClass, {
+      this.l1EntriesGauge = getOrCreate(GaugeClass, {
         name: `${this.prefix}_l1_entries`,
         help: 'Current L1 cache entries',
         labelNames: [],
       });
 
       // L1 memory gauge
-      this.l1MemoryGauge = getOrCreate(this.GaugeClass, {
+      this.l1MemoryGauge = getOrCreate(GaugeClass, {
         name: `${this.prefix}_l1_memory_bytes`,
         help: 'Current L1 memory usage in bytes',
         labelNames: [],
       });
 
       // Circuit breaker gauge
-      this.circuitBreakerGauge = getOrCreate(this.GaugeClass, {
+      this.circuitBreakerGauge = getOrCreate(GaugeClass, {
         name: `${this.prefix}_circuit_breaker_state`,
         help: 'Circuit breaker state (0=closed, 0.5=half-open, 1=open)',
         labelNames: [],
       });
 
+      this.isReady = true;
       return true;
     } catch (error) {
-      // m5 Fix: Log error instead of silently swallowing
-      const err = error instanceof Error ? error : new Error(String(error));
+      this.initError = error instanceof Error ? error : new Error(String(error));
+      return false;
+    }
+  }
 
+  /**
+   * Wait for initialization. A failure is reported once, at the first metric
+   * call rather than at construction — as when initialization itself ran on
+   * first use — so it reaches an onError handler registered after the
+   * collector was built.
+   */
+  private async whenReady(): Promise<boolean> {
+    if (await this.ready) return true;
+    const err = this.initError;
+    if (err) {
+      this.initError = null;
+      // m5 Fix: Log error instead of silently swallowing
       if (!this.invokeErrorHandler(err)) {
         logError(
           '[cachekit] metrics are enabled but failed to initialize — install the optional ' +
@@ -225,9 +245,8 @@ export class CacheMetrics implements MetricsCollector {
           err.message
         );
       }
-
-      return false;
     }
+    return false;
   }
 
   /**
@@ -264,7 +283,7 @@ export class CacheMetrics implements MetricsCollector {
    */
   async recordOperation(operation: string, status: 'success' | 'error'): Promise<void> {
     try {
-      if (!(await this.initialize())) return;
+      if (!(await this.whenReady())) return;
       this.operationsCounter?.inc({ operation, status, ...this.defaultLabels });
     } catch (error) {
       this.handleError(error, 'recordOperation');
@@ -276,7 +295,7 @@ export class CacheMetrics implements MetricsCollector {
    */
   async recordHit(layer: 'l1' | 'l2'): Promise<void> {
     try {
-      if (!(await this.initialize())) return;
+      if (!(await this.whenReady())) return;
       this.hitsCounter?.inc({ layer, ...this.defaultLabels });
     } catch (error) {
       this.handleError(error, 'recordHit');
@@ -288,7 +307,7 @@ export class CacheMetrics implements MetricsCollector {
    */
   async recordMiss(): Promise<void> {
     try {
-      if (!(await this.initialize())) return;
+      if (!(await this.whenReady())) return;
       this.missesCounter?.inc(this.defaultLabels);
     } catch (error) {
       this.handleError(error, 'recordMiss');
@@ -300,7 +319,7 @@ export class CacheMetrics implements MetricsCollector {
    */
   async recordError(errorType: string): Promise<void> {
     try {
-      if (!(await this.initialize())) return;
+      if (!(await this.whenReady())) return;
       this.errorsCounter?.inc({ error_type: errorType, ...this.defaultLabels });
     } catch (error) {
       this.handleError(error, 'recordError');
@@ -308,15 +327,29 @@ export class CacheMetrics implements MetricsCollector {
   }
 
   /**
-   * Start timing an operation.
+   * Start timing an operation. Never waits for prom-client to load: the
+   * clock starts now, and a timer stopped before initialization has finished
+   * records its duration once it has, so no operation's sample is dropped.
    */
   async startTimer(operation: string): Promise<() => void> {
+    const start = performance.now();
+    return () => {
+      const seconds = (performance.now() - start) / 1000;
+      if (this.isReady) {
+        this.observeDuration(operation, seconds);
+      } else {
+        void this.whenReady().then((ok) => {
+          if (ok) this.observeDuration(operation, seconds);
+        });
+      }
+    };
+  }
+
+  private observeDuration(operation: string, seconds: number): void {
     try {
-      if (!(await this.initialize())) return () => {};
-      return this.durationHistogram?.startTimer({ operation, ...this.defaultLabels }) ?? (() => {});
+      this.durationHistogram?.observe({ operation, ...this.defaultLabels }, seconds);
     } catch (error) {
       this.handleError(error, 'startTimer');
-      return () => {};
     }
   }
 
@@ -325,7 +358,7 @@ export class CacheMetrics implements MetricsCollector {
    */
   async updateL1Stats(entries: number, memoryBytes: number): Promise<void> {
     try {
-      if (!(await this.initialize())) return;
+      if (!(await this.whenReady())) return;
       this.l1EntriesGauge?.set(this.defaultLabels, entries);
       this.l1MemoryGauge?.set(this.defaultLabels, memoryBytes);
     } catch (error) {
@@ -338,7 +371,7 @@ export class CacheMetrics implements MetricsCollector {
    */
   async updateCircuitBreakerState(state: 'closed' | 'open' | 'half-open'): Promise<void> {
     try {
-      if (!(await this.initialize())) return;
+      if (!(await this.whenReady())) return;
       const value = state === 'closed' ? 0 : state === 'half-open' ? 0.5 : 1;
       this.circuitBreakerGauge?.set(this.defaultLabels, value);
     } catch (error) {
