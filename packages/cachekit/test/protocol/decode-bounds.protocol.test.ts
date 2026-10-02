@@ -30,7 +30,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
-import { MessagePackSerializer } from '../../src/serialization/serializer.js';
+import { MessagePackSerializer, assertDecodeDepth } from '../../src/serialization/serializer.js';
 import { decodeInteropValue } from '../../src/serialization/interop.js';
 import { deserializeEvent } from '../../src/invalidation/event.js';
 import {
@@ -124,7 +124,11 @@ const sites: Site[] = [
  * regex stays green when the depth check alone is removed and the structural
  * walk catches them as truncated instead. Events are size-capped ahead of the
  * pre-scan, so the 5-6 KB vectors are rejected there — earlier still, and
- * equally allocation-free.
+ * equally allocation-free. The size cap then hides the site's structural
+ * guard from those vectors, so the spec requires the test to also call that
+ * guard directly with each of them and assert its own rejection: the reject
+ * loop does so with `assertDecodeDepth` at the site's bound, expecting
+ * `expectedRejection(v, { ...site, sizeCap: undefined })`.
  */
 function expectedRejection(v: Vector, site: Site): RegExp {
   const inputLen = v.input_hex.length / 2;
@@ -147,6 +151,12 @@ describe('Protocol decode-bounds vectors (spec/interop-mode.md#decode-bounds)', 
     expect(vectors.reject_vectors).toHaveLength(17);
     expect(vectors.accept_vectors).toHaveLength(3);
     expect(vectors.accept_vectors.map((v) => v.name).sort()).toEqual(Object.keys(EXPECTED).sort());
+    // Reject vectors the event size cap stops before the event site's guard.
+    expect(
+      vectors.reject_vectors.filter(
+        (v) => v.input_hex.length / 2 > DEFAULT_MAX_INVALIDATION_EVENT_SIZE
+      )
+    ).toHaveLength(3);
   });
 
   /**
@@ -212,9 +222,17 @@ describe('Protocol decode-bounds vectors (spec/interop-mode.md#decode-bounds)', 
 
   describe.each(sites.map((s) => [s.name, s] as const))('%s', (_name, site) => {
     it.each(vectors.reject_vectors)('rejects $name at its own guard', (v) => {
+      const capped = site.sizeCap !== undefined && v.input_hex.length / 2 > site.sizeCap;
+      expect.assertions(capped ? 3 : 2);
       const run = (): unknown => site.decode(build(v));
       expect(run).toThrow(SerializationError);
       expect(run).toThrow(expectedRejection(v, site));
+      if (capped) {
+        // The size cap fired first, so prove the structural guard rejects too.
+        expect(() => assertDecodeDepth(build(v), site.maxDepth)).toThrow(
+          expectedRejection(v, { ...site, sizeCap: undefined })
+        );
+      }
     });
   });
 
