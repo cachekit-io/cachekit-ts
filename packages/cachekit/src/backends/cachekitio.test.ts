@@ -160,9 +160,11 @@ describe('CachekitIO Backend', () => {
       expect(await backend.delete('key')).toBe(true);
     });
 
-    it('returns false on 404', async () => {
-      fetchSpy.mockResolvedValueOnce(mockResponse(404));
-      expect(await backend.delete('missing')).toBe(false);
+    it('throws BackendError on 404', async () => {
+      // The server answers DELETE with 200 whether or not the key existed,
+      // so a 404 is not a miss.
+      fetchSpy.mockResolvedValueOnce(mockResponse(404, 'Not Found'));
+      await expect(backend.delete('missing')).rejects.toThrow(BackendError);
     });
 
     it('sends DELETE method', async () => {

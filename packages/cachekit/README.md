@@ -456,7 +456,7 @@ await cache.set('key', value, { ttl: 60, namespace: 'custom' });
 
 ### cache.delete(key)
 
-Delete a key. Returns `true` if existed.
+Delete a key. Returns `true` if the key existed and was deleted. CachekitIO returns `true` on every successful delete, whether or not the key existed: the server does not report existence on `DELETE`.
 
 ### cache.wrap(fn, options)
 
