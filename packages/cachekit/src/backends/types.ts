@@ -224,11 +224,27 @@ export interface MemcachedBackendConfig {
    * (NOT the Redis backend's 1-hour default).
    */
   defaultTtl?: number;
-  /** Operation timeout in milliseconds (default: 1000, matching py's 1.0s) */
+  /**
+   * Per-try response timeout in milliseconds (default: 1000, the same default
+   * as py's 1.0s). memjs applies it to each try, not to the whole operation.
+   * Every operation settles within a deadline of
+   * `tries × (connectTimeout + timeout) + (tries − 1) × 200 ms + 500 ms`,
+   * 6.7 s at the defaults. Against a server that accepts connections and never
+   * replies, one operation at the defaults takes about 2.2 s: two 1 s tries
+   * plus the 200 ms delay between them.
+   */
   timeout?: number;
-  /** Connection timeout in milliseconds (default: 2000, matching py's 2.0s) */
+  /**
+   * Connection timeout in milliseconds (default: 2000, the same default as
+   * py's 2.0s). It applies on each try that has to (re)connect, and a try that
+   * times out drops its connection, so the next try connects again.
+   */
   connectTimeout?: number;
-  /** Retries on transient failures (default: 2, matching py) */
+  /**
+   * Total number of tries per operation, not retries after the first
+   * (default: 2). memjs counts total tries: 0 and 1 both mean one try, and the
+   * default 2 means one retry, with 200 ms between tries.
+   */
   retries?: number;
   /** Key prefix for namespacing (exposed via Backend.keyPrefix for the interop guard) */
   keyPrefix?: string;
