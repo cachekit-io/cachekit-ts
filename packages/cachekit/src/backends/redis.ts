@@ -40,7 +40,7 @@ type _IoRedisIsPubSubCompatible = AssertPubSubCompatible<IoRedis>;
  * Redis backend implementation using ioredis.
  *
  * Features:
- * - Connection pooling (handled by ioredis)
+ * - One multiplexed ioredis connection per backend (no connection pool)
  * - Auto-reconnect with exponential backoff
  * - TLS support
  * - Key prefixing
