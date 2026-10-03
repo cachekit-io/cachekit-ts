@@ -123,8 +123,9 @@ export function assertDecodeDepth(data: Uint8Array, maxDepth: number): ObjectCou
   let depth = 0;
   let pos = 0;
   // Counted at each header, not at `children > 0` below: an empty container
-  // opens no level but still costs a heap object once decoded. A map's values
-  // count its entries, not its keys and values.
+  // opens no level but still costs a heap object once decoded. `values` counts
+  // slots: one per array element, and one per map entry (a key-value pair),
+  // since a decoded object keeps its keys in its shape, not in a slot.
   let objects = 0;
   let values = 0;
 
@@ -303,8 +304,8 @@ export interface ObjectCount {
    */
   objects: number;
   /**
-   * Elements of arrays and Sets plus entries of maps (objects, Maps): one
-   * slot each in the heap object that holds them. A Map or Set counts every
+   * Slots: one per element of an array or Set and one per entry (key-value
+   * pair) of a map (object, Map), in the heap object that holds them. A Map or Set counts every
    * entry the caller's value holds, including those the encoding merges.
    */
   values: number;

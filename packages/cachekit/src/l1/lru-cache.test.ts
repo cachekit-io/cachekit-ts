@@ -366,10 +366,10 @@ describe('L1Cache', () => {
       expect(c.stats).toMatchObject({ entries: 1, memoryUsed: 300 });
     });
 
-    it('is refused when the charge comes from serializedSize and objects', () => {
+    it('is refused when the value count tips the charge over', () => {
       const c = new L1Cache<unknown>({ maxEntries: 100, maxMemory: 8000 });
       c.set('a', 'x', 10000, 'test');
-      // 100 B serialized x 1.75 = 175, 24 objects x 32 = 768, 10 values x 8 = 80: 1023.
+      // 175 (100 B x 1.75) + 768 (24 objects x 32) is under the 1000 cap; 10 values x 8 = 80 more is 1023.
       c.set('rows', [{}], 10000, 'test', 100, { objects: 24, values: 10 });
       expect(c.get('rows')).toBeNull();
       expect(c.get('a')).toBe('x');
@@ -520,23 +520,30 @@ describe('L1Cache', () => {
       expect(c.stats.memoryUsed).toBe(size * 1.75 + 2001 * 32 + 2000 * 8);
     });
 
-    it('charges each value on top of the serialized size', () => {
-      // 10,000 zeros: a byte each, but a slot each in the array.
-      const value = new Array<number>(10_000).fill(0);
-      const count = { objects: 0, values: 0 };
-      const size = encodeCounted(value, resolveSerializerConfig(), count).length;
-      expect(size).toBe(10_003);
-      expect(count).toEqual({ objects: 1, values: 10_000 });
-
-      const c = new L1Cache<unknown>();
-      c.set('a', value, 10000, 'test', size, count);
-      expect(c.stats.memoryUsed).toBe(10_003 * 1.75 + 32 + 10_000 * 8);
+    it.each([NaN, -1, Infinity])('charges a count with a field of %s as no count', (bad) => {
+      for (const count of [
+        { objects: bad, values: 10 },
+        { objects: 10, values: bad },
+      ]) {
+        const counted = new L1Cache<string>();
+        counted.set('a', 'x'.repeat(100), 10000, 'test', 103, count);
+        expect(counted.stats.memoryUsed).toBe(103 * 2.5);
+      }
     });
 
-    it.each([NaN, -1, Infinity])('ignores an object or value count of %s', (bad) => {
-      const counted = new L1Cache<string>();
-      counted.set('a', 'x'.repeat(100), 10000, 'test', 103, { objects: bad, values: bad });
-      expect(counted.stats.memoryUsed).toBe(103 * 1.75);
+    it('reads each count field once', () => {
+      // A getter that turns NaN on a second read must not reach currentMemory.
+      let reads = 0;
+      const count = {
+        get objects() {
+          return reads++ === 0 ? 1 : NaN;
+        },
+        values: 0,
+      };
+      const c = new L1Cache<string>();
+      c.set('a', 'x', 10000, 'test', 10, count);
+      expect(reads).toBe(1);
+      expect(c.stats.memoryUsed).toBe(10 * 1.75 + 32);
     });
 
     it('ignores the count without a serialized size', () => {

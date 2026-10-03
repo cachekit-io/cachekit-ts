@@ -216,6 +216,28 @@ export class L1Cache<T = unknown> {
     value: T,
     ttl: number,
     versionToken: number,
+    namespace?: string
+  ): boolean;
+  /**
+   * completeRefresh with the size hints `set` takes. Package-internal: the
+   * charge's inputs are calibration, not API, so they stay off the published
+   * types.
+   * @internal
+   */
+  completeRefresh(
+    key: string,
+    value: T,
+    ttl: number,
+    versionToken: number,
+    namespace?: string,
+    serializedSize?: number,
+    count?: ObjectCount
+  ): boolean;
+  completeRefresh(
+    key: string,
+    value: T,
+    ttl: number,
+    versionToken: number,
     namespace?: string,
     serializedSize?: number,
     count?: ObjectCount
@@ -308,6 +330,11 @@ export class L1Cache<T = unknown> {
   /**
    * Set a value in cache. A value charged above an eighth of maxMemory is not
    * stored, and any entry it would replace is dropped.
+   */
+  set(key: string, value: T, ttl: number, namespace: string): void;
+  /**
+   * Set with size hints. Package-internal: the charge's inputs are
+   * calibration, not API, so they stay off the published types.
    *
    * @param serializedSize - Byte length of the value's serialized form, when
    *   the caller already holds it. The entry is then charged a fixed
@@ -315,11 +342,21 @@ export class L1Cache<T = unknown> {
    *   JSON.stringify estimate. Ignored for byte values, which are charged
    *   their byteLength, and when it is not a finite non-negative number.
    * @param count - The value's heap objects (arrays and maps, empty ones
-   *   included, bin and ext) and values (their elements and entries), when the
-   *   caller already counted them. Each adds a fixed charge on top of the
-   *   serializedSize one. Ignored without a usable serializedSize; a field
-   *   that is not a finite non-negative number adds nothing.
+   *   included, bin and ext) and the slots their elements and entries take,
+   *   when the caller already counted them. Each adds a fixed charge on top
+   *   of a lower per-byte one. Ignored without a usable serializedSize; a
+   *   count with a field that is not a finite non-negative number is charged
+   *   as if there were no count.
+   * @internal
    */
+  set(
+    key: string,
+    value: T,
+    ttl: number,
+    namespace: string,
+    serializedSize?: number,
+    count?: ObjectCount
+  ): void;
   set(
     key: string,
     value: T,
@@ -599,12 +636,12 @@ export class L1Cache<T = unknown> {
     // A cache write already holds the serialized bytes, so their length costs
     // nothing, where estimateSize stringifies the whole value.
     if (!isCount(serializedSize)) return this.estimateSize(value);
-    if (!count) return serializedSize * SERIALIZED_SIZE_FACTOR;
-    return (
-      serializedSize * COUNTED_SIZE_FACTOR +
-      (isCount(count.objects) ? count.objects * OBJECT_SIZE : 0) +
-      (isCount(count.values) ? count.values * VALUE_SIZE : 0)
-    );
+    // Read each field once: a second read of a getter could differ from the
+    // value that was checked. A count that is missing or not usable is
+    // charged as no count, never at the lower counted rate with nothing added.
+    const { objects, values } = count ?? {};
+    if (!isCount(objects) || !isCount(values)) return serializedSize * SERIALIZED_SIZE_FACTOR;
+    return serializedSize * COUNTED_SIZE_FACTOR + objects * OBJECT_SIZE + values * VALUE_SIZE;
   }
 
   private estimateSize(value: unknown): number {
