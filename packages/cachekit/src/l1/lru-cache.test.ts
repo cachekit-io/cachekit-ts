@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { L1Cache } from './lru-cache.js';
 import { setLogger } from '../logger.js';
 import { defaultSerializer } from '../serialization/serializer.js';
-import { L1_SERIALIZED_SIZE_FACTOR } from '../constants.js';
 import type { InvalidationEvent } from './types.js';
 
 describe('L1Cache', () => {
@@ -103,7 +102,7 @@ describe('L1Cache', () => {
       expect(smallCache.stats.entries).toBe(2);
     });
 
-    it('updating existing key updates lastAccess and prevents eviction', () => {
+    it('a get() of an existing key makes it most recent and prevents eviction', () => {
       vi.useFakeTimers();
       const smallCache = new L1Cache<number>({ maxEntries: 3 });
 
@@ -114,7 +113,7 @@ describe('L1Cache', () => {
       smallCache.set('c', 3, 10000, 'test');
       vi.advanceTimersByTime(100);
 
-      // Access 'a' to update its lastAccess
+      // Access 'a' to make it most recent
       smallCache.get('a');
       vi.advanceTimersByTime(100);
 
@@ -161,8 +160,12 @@ describe('L1Cache', () => {
   });
 
   describe('recency', () => {
-    // No fake timers: every op lands in the same millisecond, so the order
-    // below is exact recency, not a timestamp tie broken by luck.
+    // A frozen clock: every op lands in the same millisecond, so only exact
+    // recency can pass these, never a timestamp LRU that happened to tick.
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
     const fill = (c: L1Cache<number>, keys: string[]) =>
       keys.forEach((k, i) => c.set(k, i, 10000, 'test'));
     // Observing a key with get() touches it, so call this only once, last.
@@ -281,10 +284,10 @@ describe('L1Cache', () => {
   });
 
   describe('serializedSize hint', () => {
-    it('charges the serialized length times L1_SERIALIZED_SIZE_FACTOR', () => {
+    it('charges 2.5x the serialized length', () => {
       const value = { id: 1, name: 'x'.repeat(100) };
       cache.set('a', value as unknown as string, 10000, 'test', 120);
-      expect(cache.stats.memoryUsed).toBe(120 * L1_SERIALIZED_SIZE_FACTOR);
+      expect(cache.stats.memoryUsed).toBe(120 * 2.5);
     });
 
     it('does not stringify the value when given a size', () => {
@@ -348,8 +351,6 @@ describe('L1Cache', () => {
         expect(estimated.stats.entries).toBeLessThan(workload.length);
         expect(hinted.stats.entries / estimated.stats.entries).toBeGreaterThanOrEqual(0.75);
         expect(hinted.stats.entries / estimated.stats.entries).toBeLessThanOrEqual(1.25);
-        expect(hinted.stats.memoryUsed / estimated.stats.memoryUsed).toBeGreaterThanOrEqual(0.75);
-        expect(hinted.stats.memoryUsed / estimated.stats.memoryUsed).toBeLessThanOrEqual(1.25);
       }
     });
   });

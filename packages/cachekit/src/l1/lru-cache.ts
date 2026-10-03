@@ -7,8 +7,18 @@ import {
   SWR_JITTER_RANGE,
   SWR_REFRESH_MARKER_TTL_MS,
   DEFAULT_L1_FALLBACK_SIZE,
-  L1_SERIALIZED_SIZE_FACTOR,
 } from '../constants.js';
+
+/**
+ * What L1 charges per serialized (MessagePack) byte when the caller passes
+ * the serialized length, so maxMemory means about what the JSON.stringify
+ * estimate made it mean. That estimate charges JSON length x 2, which comes to
+ * about 2x the MessagePack length for ASCII strings and 2.2-2.9x for objects
+ * and rows of records; 2.5 sits between them. Number-heavy values ran about 4x
+ * under the estimate and CJK text about 0.7x, so those shift the most.
+ * Internal calibration, not a setting: kept off the public exports.
+ */
+const SERIALIZED_SIZE_FACTOR = 2.5;
 
 /**
  * An entry plus its links in the recency list. The list is what makes LRU
@@ -227,8 +237,8 @@ export class L1Cache<T = unknown> {
    * Set a value in cache.
    *
    * @param serializedSize - Byte length of the value's serialized form, when
-   *   the caller already holds it. The entry is then charged that length
-   *   times L1_SERIALIZED_SIZE_FACTOR against maxMemory instead of a
+   *   the caller already holds it. The entry is then charged a fixed
+   *   multiple of that length against maxMemory instead of a
    *   JSON.stringify estimate. Ignored for byte values, which are charged
    *   their byteLength, and when it is not a finite non-negative number.
    */
@@ -489,8 +499,9 @@ export class L1Cache<T = unknown> {
 
     // A cache write already holds the serialized bytes, so their length costs
     // nothing, where the estimate below stringifies the whole value.
-    if (serializedSize !== undefined && Number.isFinite(serializedSize) && serializedSize >= 0) {
-      return serializedSize * L1_SERIALIZED_SIZE_FACTOR;
+    // Finite and non-negative only: a NaN would poison currentMemory for good.
+    if (Number.isFinite(serializedSize) && serializedSize! >= 0) {
+      return serializedSize! * SERIALIZED_SIZE_FACTOR;
     }
     return this.estimateSize(value);
   }

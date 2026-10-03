@@ -31,16 +31,6 @@ export const DEFAULT_L1_MAX_CONCURRENT_REFRESHES = 10;
 /** Default estimated size for uncalculable values (bytes) */
 export const DEFAULT_L1_FALLBACK_SIZE = 100;
 
-/**
- * What L1 charges per serialized (MessagePack) byte when the caller passes
- * the serialized length, so maxMemory means about what the JSON.stringify
- * estimate made it mean. That estimate charges JSON length x 2, which comes to
- * about 2x the MessagePack length for ASCII strings and 2.2-2.9x for objects
- * and rows of records; 2.5 sits between them. Number-heavy values ran about 4x
- * under the estimate and CJK text about 0.7x, so those shift the most.
- */
-export const L1_SERIALIZED_SIZE_FACTOR = 2.5;
-
 // ============================================================================
 // Serialization Constants
 // ============================================================================
