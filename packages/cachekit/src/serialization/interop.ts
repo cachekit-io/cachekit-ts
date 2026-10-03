@@ -2,7 +2,7 @@ import { decode as msgpackDecode } from '@msgpack/msgpack';
 import { blake2b } from '@noble/hashes/blake2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { ConfigurationError, SerializationError, ValueTooLargeError } from '../errors.js';
-import { assertDecodeDepth, boundedDecodeOptions } from './serializer.js';
+import { assertDecodeDepth, boundedDecodeOptions, type ContainerCount } from './serializer.js';
 import {
   DEFAULT_MAX_ENCODED_SIZE,
   DEFAULT_MAX_DECODED_SIZE,
@@ -170,6 +170,8 @@ interface ChunkSink {
    * the Set loop, after dedupe.
    */
   bytes: number;
+  /** Arrays and maps written, for L1's memory charge (see ContainerCount). */
+  containers: number;
 }
 
 function pushChunk(sink: ChunkSink, c: Uint8Array): void {
@@ -282,6 +284,7 @@ function checkCollectionSize(n: number, kind: 'array' | 'map'): void {
 
 function encodeArrayHeader(n: number, sink: ChunkSink): void {
   checkCollectionSize(n, 'array');
+  sink.containers++;
   if (n <= 15) pushChunk(sink, Uint8Array.of(0x90 | n));
   else if (n <= 0xffff) pushChunk(sink, uintBE(0xdc, n, 2));
   else pushChunk(sink, uintBE(0xdd, n, 4));
@@ -294,6 +297,7 @@ function encodeMapHeader(n: number, sink: ChunkSink): void {
   // this line. Retained deliberately as the last guard for any future direct
   // caller; do NOT cut on coverage grounds (that reopens the DoS this fix closes).
   checkCollectionSize(n, 'map');
+  sink.containers++;
   if (n <= 15) pushChunk(sink, Uint8Array.of(0x80 | n));
   else if (n <= 0xffff) pushChunk(sink, uintBE(0xde, n, 2));
   else pushChunk(sink, uintBE(0xdf, n, 4));
@@ -483,12 +487,13 @@ function encodeCanonical(
     const seen = new Set<string>();
     let running = sink.bytes;
     for (const element of v) {
-      const sub: ChunkSink = { chunks: [], bytes: sink.bytes };
+      const sub: ChunkSink = { chunks: [], bytes: sink.bytes, containers: 0 };
       encodeCanonical(element, profile, depth + 1, sub);
       const bytes = concatChunks(sub.chunks);
       const key = bytesToHex(bytes);
       if (seen.has(key)) continue;
       seen.add(key);
+      sink.containers += sub.containers;
       checkCollectionSize(seen.size, 'array');
       running += bytes.length;
       if (running > DEFAULT_MAX_ENCODED_SIZE) {
@@ -539,8 +544,8 @@ function encodeCanonical(
   }
 }
 
-function encodeProfile(root: unknown, profile: InteropProfile): Uint8Array {
-  const sink: ChunkSink = { chunks: [], bytes: 0 };
+function encodeProfile(root: unknown, profile: InteropProfile, count?: ContainerCount): Uint8Array {
+  const sink: ChunkSink = { chunks: [], bytes: 0, containers: 0 };
   encodeCanonical(root, profile, 0, sink);
   // pushChunk's incremental budget should make this backstop unreachable.
   const out = concatChunks(sink.chunks);
@@ -549,6 +554,7 @@ function encodeProfile(root: unknown, profile: InteropProfile): Uint8Array {
       `Encoded interop ${profile} size ${out.length} exceeds max ${DEFAULT_MAX_ENCODED_SIZE}`
     );
   }
+  if (count) count.containers += sink.containers;
   return out;
 }
 
@@ -591,9 +597,11 @@ export function generateInteropKey(
  * encoding — no ByteStorage envelope, no LZ4, no checksum. Any language with
  * a MessagePack library can read it. Dates become wire-format.md sentinel
  * maps (`{"__datetime__": true, "value": "<ISO-8601>"}`).
+ *
+ * @param count - When given, gains the number of arrays and maps encoded.
  */
-export function encodeInteropValue(value: unknown): Uint8Array {
-  return encodeProfile(value, 'value');
+export function encodeInteropValue(value: unknown, count?: ContainerCount): Uint8Array {
+  return encodeProfile(value, 'value', count);
 }
 
 /**
@@ -645,10 +653,11 @@ function reviveDecoded(v: unknown, depth: number): unknown {
  * (`0x43 0x4B`, "CK") gets a targeted diagnostic — it is a
  * Python-SDK-internal auto-mode entry, not an interop value.
  *
+ * @param count - When given, gains the number of arrays and maps decoded.
  * @throws {SerializationError} on malformed input or a CK-frame payload
  * @throws {ValueTooLargeError} if input exceeds the decode size cap
  */
-export function decodeInteropValue<T>(data: Uint8Array): T {
+export function decodeInteropValue<T>(data: Uint8Array, count?: ContainerCount): T {
   if (data.length >= 2 && data[0] === CK_FRAME_MAGIC_0 && data[1] === CK_FRAME_MAGIC_1) {
     throw new SerializationError(
       'Payload starts with the CK v3 frame magic ("CK") — this is a Python-SDK-internal ' +
@@ -663,7 +672,7 @@ export function decodeInteropValue<T>(data: Uint8Array): T {
   }
   // Bound nesting depth before the decoder eagerly preallocates per-header
   // collections (LAB-2487, full rationale: assertDecodeDepth in serializer.ts).
-  assertDecodeDepth(data, DEFAULT_MAX_DEPTH);
+  const containers = assertDecodeDepth(data, DEFAULT_MAX_DEPTH);
   let decoded: unknown;
   try {
     // Backend bytes are untrusted — bound header preallocation (full
@@ -678,5 +687,7 @@ export function decodeInteropValue<T>(data: Uint8Array): T {
       { cause: error instanceof Error ? error : undefined }
     );
   }
-  return reviveDecoded(decoded, 0) as T;
+  const value = reviveDecoded(decoded, 0) as T;
+  if (count) count.containers += containers;
+  return value;
 }

@@ -382,3 +382,19 @@ describe('interop value decoding', () => {
     });
   });
 });
+
+describe('interop container count (L1 memory charge)', () => {
+  it('counts the same containers on encode as on decode', () => {
+    const value = {
+      empty: [{}, []],
+      when: new Date(0), // a sentinel map on the wire
+      tags: new Set([[], []]), // the duplicate is dropped, and not counted
+      big: Array.from({ length: 20 }, () => []), // array16
+    };
+    const encoded = { containers: 0 };
+    const decoded = { containers: 0 };
+    decodeInteropValue(encodeInteropValue(value, encoded), decoded);
+    expect(encoded.containers).toBe(28);
+    expect(decoded.containers).toBe(28);
+  });
+});

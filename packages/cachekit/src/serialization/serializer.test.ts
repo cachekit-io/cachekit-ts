@@ -529,4 +529,40 @@ describe('MessagePackSerializer', () => {
       expect(() => assertDecodeDepth(new Uint8Array(0), 100)).toThrow(/Truncated/);
     });
   });
+
+  describe('container count (L1 memory charge)', () => {
+    it('counts every array and map header, empty ones included', () => {
+      for (const bytes of [
+        [0x80], // fixmap
+        [0x90], // fixarray
+        [0xdc, 0, 0], // array16
+        [0xdd, 0, 0, 0, 0], // array32
+        [0xde, 0, 0], // map16
+        [0xdf, 0, 0, 0, 0], // map32
+      ]) {
+        expect(assertDecodeDepth(Uint8Array.from(bytes), 100)).toBe(1);
+      }
+      expect(assertDecodeDepth(Uint8Array.of(0x2a), 100)).toBe(0);
+      expect(assertDecodeDepth(msgpackEncode([{}, [], { a: [] }, 'x', 1]), 100)).toBe(5);
+    });
+
+    it('counts the same containers on encode as on decode', () => {
+      const serializer = new MessagePackSerializer();
+      const value = [
+        {},
+        [],
+        { a: [] },
+        new Map([['k', new Set([1])]]),
+        new Date(0), // a string, not a container
+        new Uint8Array(3), // bin, not a container
+        Array.from({ length: 20 }, () => ({})), // array16
+      ];
+      const encoded = { containers: 0 };
+      const decoded = { containers: 0 };
+      const bytes = serializer.encode(value, encoded);
+      serializer.decode(bytes, decoded);
+      expect(encoded.containers).toBe(28);
+      expect(decoded.containers).toBe(28);
+    });
+  });
 });

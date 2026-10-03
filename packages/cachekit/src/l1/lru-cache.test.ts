@@ -284,6 +284,31 @@ describe('L1Cache', () => {
   });
 
   describe('serializedSize hint', () => {
+    // One fixed mixed workload, inserted far past maxMemory, into a cache
+    // sized by the JSON.stringify estimate and one sized by the hint.
+    const parityWorkload = (): unknown[] => {
+      const rec = (i: number) => ({ id: i, name: `item-${i}`, score: i * 1.5, ok: i % 2 === 0 });
+      const shapes: ((i: number) => unknown)[] = [
+        (i) => `ascii-${i}-` + 'x'.repeat(100),
+        (i) => `ascii-${i}-` + 'lorem ipsum '.repeat(400),
+        (i) => `café crème ${i} `.repeat(60),
+        (i) => `缓存数据${i}`.repeat(80),
+        (i) => `🚀✨${i}`.repeat(50),
+        (i) => Array.from({ length: 200 }, (_, j) => i * 1000 + j),
+        (i) => Array.from({ length: 100 }, (_, j) => (i + j) / 7),
+        (i) => ({ rows: Array.from({ length: 30 }, (_, j) => rec(i + j)) }),
+        (i) => ({ rows: Array.from({ length: 300 }, (_, j) => rec(i + j)) }),
+        (i) => ({
+          id: i,
+          email: `u${i}@example.com`,
+          roles: ['admin', 'user'],
+          profile: { first: 'Ann', last: 'Lee', bio: 'b'.repeat(200) },
+        }),
+        (i) => ({ a: { b: { c: [i, 2, { d: 'deep', e: [true, false, null] }] } }, tags: ['x'] }),
+      ];
+      return Array.from({ length: 2200 }, (_, i) => shapes[i % shapes.length](i));
+    };
+
     it('charges 2.5x the serialized length', () => {
       const value = { id: 1, name: 'x'.repeat(100) };
       cache.set('a', value as unknown as string, 10000, 'test', 120);
@@ -315,28 +340,7 @@ describe('L1Cache', () => {
     });
 
     it('keeps eviction under maxMemory within 25% of the estimate it replaces', () => {
-      // One fixed mixed workload, inserted far past maxMemory, into a cache
-      // sized by the JSON.stringify estimate and one sized by the hint.
-      const rec = (i: number) => ({ id: i, name: `item-${i}`, score: i * 1.5, ok: i % 2 === 0 });
-      const shapes: ((i: number) => unknown)[] = [
-        (i) => `ascii-${i}-` + 'x'.repeat(100),
-        (i) => `ascii-${i}-` + 'lorem ipsum '.repeat(400),
-        (i) => `café crème ${i} `.repeat(60),
-        (i) => `缓存数据${i}`.repeat(80),
-        (i) => `🚀✨${i}`.repeat(50),
-        (i) => Array.from({ length: 200 }, (_, j) => i * 1000 + j),
-        (i) => Array.from({ length: 100 }, (_, j) => (i + j) / 7),
-        (i) => ({ rows: Array.from({ length: 30 }, (_, j) => rec(i + j)) }),
-        (i) => ({ rows: Array.from({ length: 300 }, (_, j) => rec(i + j)) }),
-        (i) => ({
-          id: i,
-          email: `u${i}@example.com`,
-          roles: ['admin', 'user'],
-          profile: { first: 'Ann', last: 'Lee', bio: 'b'.repeat(200) },
-        }),
-        (i) => ({ a: { b: { c: [i, 2, { d: 'deep', e: [true, false, null] }] } }, tags: ['x'] }),
-      ];
-      const workload = Array.from({ length: 2200 }, (_, i) => shapes[i % shapes.length](i));
+      const workload = parityWorkload();
       const sizes = workload.map((v) => defaultSerializer.encode(v).length);
 
       for (const mb of [1, 2, 5]) {
@@ -352,6 +356,58 @@ describe('L1Cache', () => {
         expect(hinted.stats.entries / estimated.stats.entries).toBeGreaterThanOrEqual(0.75);
         expect(hinted.stats.entries / estimated.stats.entries).toBeLessThanOrEqual(1.25);
       }
+    });
+
+    it('keeps that parity with each container charged too', () => {
+      const workload = parityWorkload();
+      const counts = workload.map(() => ({ containers: 0 }));
+      const sizes = workload.map((v, i) => defaultSerializer.encode(v, counts[i]).length);
+
+      for (const mb of [1, 2, 5]) {
+        const config = { maxEntries: 1_000_000, maxMemory: mb * 1024 * 1024 };
+        const estimated = new L1Cache<unknown>(config);
+        const hinted = new L1Cache<unknown>(config);
+        workload.forEach((v, i) => {
+          estimated.set(`k${i}`, v, 0, 'parity');
+          hinted.set(`k${i}`, v, 0, 'parity', sizes[i], counts[i].containers);
+        });
+        expect(estimated.stats.entries).toBeLessThan(workload.length);
+        expect(hinted.stats.entries / estimated.stats.entries).toBeGreaterThanOrEqual(0.75);
+        expect(hinted.stats.entries / estimated.stats.entries).toBeLessThanOrEqual(1.25);
+      }
+    });
+
+    it('charges each container on top of the serialized size', () => {
+      // 2,000 empty objects: three bytes of array header and one per object,
+      // but a heap object each.
+      const value = Array.from({ length: 2000 }, () => ({}));
+      const count = { containers: 0 };
+      const size = defaultSerializer.encode(value, count).length;
+      expect(count.containers).toBe(2001);
+
+      const c = new L1Cache<unknown>();
+      c.set('a', value, 10000, 'test', size, count.containers);
+      expect(c.stats.memoryUsed).toBe(size * 2.5 + 2001 * 32);
+    });
+
+    it.each([NaN, -1, Infinity])('ignores a container count of %s', (containers) => {
+      const counted = new L1Cache<string>();
+      counted.set('a', 'x'.repeat(100), 10000, 'test', 103, containers);
+      expect(counted.stats.memoryUsed).toBe(103 * 2.5);
+    });
+
+    it('ignores the container count without a serialized size', () => {
+      const counted = new L1Cache<string>();
+      const without = new L1Cache<string>();
+      counted.set('a', 'x'.repeat(100), 10000, 'test', undefined, 50);
+      without.set('a', 'x'.repeat(100), 10000, 'test');
+      expect(counted.stats.memoryUsed).toBe(without.stats.memoryUsed);
+    });
+
+    it('charges byte values their byteLength whatever the container count', () => {
+      const c = new L1Cache<Uint8Array>();
+      c.set('a', new Uint8Array(256), 10000, 'test', 9999, 500);
+      expect(c.stats.memoryUsed).toBe(256);
     });
   });
 

@@ -30,6 +30,8 @@ export interface L1Write {
   readonly l1: unknown;
   /** Byte length of the serialized value, when it was serialized (see L1Cache.set). */
   readonly serializedSize?: number;
+  /** Arrays and maps in the value, counted as it was serialized (see L1Cache.set). */
+  readonly containers?: number;
 }
 
 /**
@@ -124,7 +126,8 @@ export class BackgroundRefreshManager {
               options.ttl * 1000,
               versionToken,
               options.namespace,
-              persisted.serializedSize
+              persisted.serializedSize,
+              persisted.containers
             );
           }
         }

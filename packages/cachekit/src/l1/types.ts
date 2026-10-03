@@ -15,10 +15,12 @@ export interface L1Config {
   /**
    * Memory budget in bytes (default: 50MB). An estimate, not the heap
    * footprint: byte values (a secure cache's ciphertext) are charged their
-   * byteLength, writes through the cache a fixed multiple of the serialized
-   * length, and anything else its JSON length x 2. Values made of many small
-   * objects or arrays can occupy more than ten times their charge on the
-   * heap, so `maxEntries` is the hard bound on L1's size.
+   * byteLength; values the cache serialized or decoded, a fixed multiple of
+   * the serialized length plus a fixed amount per object or array; anything
+   * else its JSON length x 2. Values made of many tiny scalars, such as long
+   * arrays of short strings or small integers, can still occupy about four
+   * times their charge on the heap, so `maxEntries` is the hard bound on L1's
+   * size.
    */
   maxMemory: number;
 
