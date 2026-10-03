@@ -334,9 +334,9 @@ jobs:
 
   # This repo is public and forkable, so every job runs on GitHub-hosted
   # runners, never on self-hosted ones. Allow-list, not deny-list: a deny-list
-  # cannot see a label it has no name for. The program is the heredoc below;
-  # its regression fixtures, .github/scripts/runner-drift-guard-selftest.sh,
-  # fail the job whenever the program gets one wrong. This is drift protection
+  # cannot see a label it has no name for. The programs are the heredocs
+  # below; their regression fixtures, .github/scripts/runner-drift-guard-selftest.sh,
+  # fail the job whenever a program gets one wrong. This is drift protection
   # for maintainers, not a fork-PR control: a fork PR runs its own copy of this
   # workflow.
   runner-drift-guard:
@@ -345,12 +345,12 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      # The program stays in this workflow file on purpose: GITHUB_TOKEN cannot
+      # The programs stay in this workflow file on purpose: GITHUB_TOKEN cannot
       # write .github/workflows/, so a `contents: write` job (release-please) or
       # a compromised action could rewrite a script under .github/scripts/ but
-      # not this heredoc. It is written to a temp file so the self-test and the
-      # scan run the same bytes.
-      - name: Write the guard program
+      # not these heredocs. They are written to temp files so the self-test and
+      # the scan run the same bytes.
+      - name: Write the guard programs
         run: |
           cat > "$RUNNER_TEMP/runner-drift-guard.awk" <<'AWK'
             # Allow-list, fail closed: every runs-on value, and every os or
@@ -362,88 +362,132 @@ jobs:
             # ubuntu-<anything>) and not a copy of GitHub's image table (it
             # rots): adopting another hosted image is a deliberate edit to HOSTED.
             function fail(file, line, msg) {
+              if (gated) msg = msg " (if this line is | or > text, it was read as YAML because line " noskip " holds a [ or { that is not a flat one-line list, an empty {} or an expression's double braces)"
               printf "::error file=%s,line=%d::%s\n", file, line, msg
               bad = 1
             }
-            function label(v) {
-              fail(FILENAME, FNR, "runner value \"" v "\" is not an allow-listed GitHub-hosted label — this public repo runs only on GitHub-hosted runners; adopting a new hosted image means extending HOSTED in the runner-drift-guard job of ci.yml")
+            # The advice fits the value: only one unknown plain label is fixed by
+            # adding it to HOSTED. self-hosted, or a runs-on list of two or more
+            # labels (a selector a runner must match in full, which no
+            # GitHub-hosted runner does), is named as picking a self-hosted runner.
+            function label(v, item, selector) {
+              if (v == "") fail(FILENAME, FNR, "runner value is not whole on this line (written below the key, wrapped, or cut by a # inside a quote) — write it on the key's line")
+              else if (item == "") fail(FILENAME, FNR, "runner value \"" v "\" is not a plain label the drift guard can check — write a hosted label, or $" "{{ matrix.os }} over a static os axis")
+              else if (selector || item == "self-hosted") fail(FILENAME, FNR, "runner value \"" (selector ? v : item) "\" selects a self-hosted runner — this public repo runs only on GitHub-hosted runners; write one GitHub-hosted label")
+              else fail(FILENAME, FNR, "runner value \"" item "\" is not an allow-listed GitHub-hosted label — this public repo runs only on GitHub-hosted runners; adopting a new hosted image means adding its label to HOSTED in the runner-drift-guard job of ci.yml")
             }
-            # Verdict on the one dynamic matrix the guard accepts (see the
-            # build-native.yml rules below), given at the end of each file so the
-            # job order does not matter.
-            function resolve_refuse() {
-              fail(FILENAME, FNR, "the build-matrix resolve job may hold only lines the drift guard can check — write its JSON as builds='<literal>'; a new line there is a deliberate edit to resolve_yaml() or resolve_shell() in the runner-drift-guard job of ci.yml")
+            # True for a uses: line the scan cannot clear: a value not whole on
+            # the line (below the key, a block scalar, an alias, an open quote),
+            # a value holding a backslash (an escape in a double-quoted value can
+            # spell any path, and no uses: reference needs one), or a reusable
+            # workflow in another repo, whose runs-on this scan never reads.
+            # Same-repo ./.github/workflows/ and $/.github/workflows/ callees are
+            # scanned.
+            function callee(   v) {
+              if ($0 !~ /^[[:space:]]*(-[[:space:]]*)?["']?uses["']?[[:space:]]*:/) return 0
+              v = $0; sub(/^[^:]*:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
+              return v == "" || v ~ /^[>|*]/ || v ~ /\\/ || gsub(/"/, "&", v) % 2 || gsub(/'/, "&", v) % 2 ||
+                v ~ /\/\.github\/workflows\// && v !~ /^["']?[.$]\/\.github\/workflows\//
             }
-            function dynamic_matrix_verdict() {
-              if (dyn_line && !dyn_os) fail(dyn_file, dyn_line, "the build matrix comes from the resolve job, which writes no \"os\" literal the drift guard can check — write each entry as \"os\":\"<label>\"")
-              dyn_line = 0
-            }
-            # The only lines build-native.yml's resolve job may hold, besides
-            # comment lines and the content of an open builds='...' literal:
-            # resolve_yaml() for the job's YAML, resolve_shell() inside a
-            # `run: |` block. Any other line (a file read, a generated matrix,
-            # a step env, shell, container or action) could set the matrix to a
-            # value the guard cannot check, so a new line there is a deliberate
-            # edit here.
-            function resolve_yaml(s) {
-              return s ~ /^[[:space:]]*(matrix|outputs|steps):[[:space:]]*$/ ||
-                s ~ /^[[:space:]]*(-[[:space:]]+)?(name|runs-on):/ ||
-                s ~ /^[[:space:]]*builds: \$\{\{ steps\.set\.outputs\.builds \}\}[[:space:]]*$/ ||
-                s ~ /^[[:space:]]*(-[[:space:]]+)?(id: set|run: \|)[[:space:]]*$/
-            }
-            function resolve_shell(s) {
-              return s ~ /^[[:space:]]*if \[ "\$\{\{ github\.event_name \}\}" = "pull_request" \]; then[[:space:]]*$/ ||
-                s ~ /^[[:space:]]*(else|fi)[[:space:]]*$/ ||
-                s ~ /^[[:space:]]*builds='[^$'\\]*'?[[:space:]]*$/ ||
-                s ~ /^[[:space:]]*echo "builds=\$\(echo "\$builds" \| tr -d '\\n '\)" >> "\$GITHUB_OUTPUT"[[:space:]]*$/
-            }
-            # Checks one line of the resolve job. A line indented deeper than
-            # the `run: |` above it is shell, read raw because a # there may sit
-            # inside a quote; any other line is YAML, read comment-stripped, and
-            # ends the run: block. A builds='...' literal must close inside its
-            # block, or the YAML after it would be read as literal text. The
-            # JSON is single-quoted literal text (no $, so no expression; no \,
-            # so no JSON escape), and every "os" in it must be a quoted hosted
-            # label. Checked pairs are cut from the line so the flow-mapping
-            # rule below does not refuse them.
-            function resolve_line(   r, v, n, json) {
-              if (run_indent < 0 || indent <= run_indent) {
-                if (lit) fail(FILENAME, FNR, "the builds='...' literal above is not closed inside its run: block")
-                lit = 0; run_indent = -1
-                if (!resolve_yaml($0)) resolve_refuse()
-                else if (/^[[:space:]]*(-[[:space:]]+)?run: \|[[:space:]]*$/) run_indent = indent
-                return
+            # Carries a flow collection or quoted scalar left open at the end of
+            # a line onto the next: flow counts the open [ and {, quote holds the
+            # open quote character. A quote or bracket opens only where a value
+            # starts (line start, after "- ", ": ", an anchor or a tag, or inside
+            # a flow), so the ' in a plain scalar like don't opens nothing. A #
+            # after whitespace, outside a quote, starts a comment: cut holds its
+            # column, or one past the end. It reads every line but block-scalar
+            # text. Its state can be misread, so whether a | or > line opens a
+            # block scalar also rests on the quote refusal and the noskip gate.
+            function scan(s,   i, c, start) {
+              start = 1; cut = length(s) + 1
+              for (i = 1; i <= length(s); i++) {
+                c = substr(s, i, 1)
+                if (quote == "'") { if (c == "'") { if (substr(s, i + 1, 1) == "'") i++; else quote = "" } }
+                else if (quote != "") { if (c == "\\") i++; else if (c == "\"") quote = "" }
+                else if (c == " " || c == "\t") continue
+                else if (c == "#" && (i == 1 || substr(s, i - 1, 1) ~ /[ \t]/)) { cut = i; break }
+                else if (start && (c == "&" || c == "!")) { while (i < length(s) && substr(s, i + 1, 1) !~ /[ \t]/) i++ }
+                else if (start && (c == "\"" || c == "'")) { quote = c; start = 0 }
+                else if ((start || flow) && (c == "[" || c == "{")) { flow++; start = 1 }
+                else if (flow && (c == "]" || c == "}")) { flow--; start = 0 }
+                else if (flow && c == ",") start = 1
+                else if (c == ":") start = flow || i == length(s) || substr(s, i + 1, 1) ~ /[ \t]/
+                else if (!(start && (c == "-" || c == "?") && (i == length(s) || substr(s, i + 1, 1) ~ /[ \t]/))) start = 0
               }
-              r = tolower(raw)
-              n = gsub(/'/, "'", r)
-              json = lit || raw ~ /^[[:space:]]*builds='/
-              if (lit ? raw !~ /^[^$'\\]*'?[[:space:]]*$/ : !resolve_shell(raw)) resolve_refuse()
-              if (json) lit = lit ? !n : n == 1
-              while (json && match(r, /"os"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
-                v = substr(r, RSTART, RLENGTH); sub(/^[^:]*:[[:space:]]*"/, "", v); sub(/"$/, "", v)
-                if (v ~ HOSTED) dyn_os = 1; else label(v)
-                r = substr(r, 1, RSTART - 1) substr(r, RSTART + RLENGTH)
-              }
-              if (json && r ~ /(^|[^a-z0-9_-])os([^a-z0-9_-]|$)/) fail(FILENAME, FNR, "\"os\" in the build-matrix resolve job is not a literal the drift guard can check — write each entry as \"os\":\"<label>\"")
-              $0 = lraw = r
             }
-            BEGIN { HOSTED = "^(ubuntu|macos|windows)-latest$" }
-            FNR == 1 {
-              dynamic_matrix_verdict()
-              matrix_indent = strategy_indent = value_indent = run_indent = -1; in_jobs = dyn_os = lit = 0; job = ""
-              bn = (FILENAME ~ /(^|\/)build-native\.yml$/)
-            }
+            # HOSTED is a set of exact labels, one word each: add a hosted
+            # image's label to the list, never a pattern.
+            BEGIN { split("ubuntu-latest macos-latest windows-latest", h); for (i in h) HOSTED[h[i]] = 1 }
+            FNR == 1 { matrix_indent = strategy_indent = value_indent = armed = block = gtext = axis = -1; in_jobs = flow = noskip = gated = 0; quote = "" }
+            # The text of a block scalar (the lines deeper than its | or > key)
+            # is a string, never YAML: no rule reads it, so a script line that
+            # says matrix: arms nothing and a ' in it opens nothing. The skip is
+            # only as safe as knowing where that text starts, so the noskip gate
+            # below turns it off for the rest of a file once a line holds a bracket
+            # it cannot vouch for. gtext holds the key indent of a | or > seen
+            # while the skip is off, and an error on the text below it says why
+            # that text was read as YAML.
             # A # starts a YAML comment only at the start of a line or after
             # whitespace; ubuntu-latest#x is one plain scalar. The strip cannot
             # tell a quoted " #" from a comment, so the refusal rules that look
-            # for a flow key or an expression read lraw, the unstripped line.
-            { sub(/\r$/, ""); raw = $0; lraw = tolower(raw); sub(/(^|[[:space:]])#.*/, ""); $0 = tolower($0) }
-            /^[[:space:]]*$/ { if (lit) resolve_line(); next }
+            # for a flow key or an expression read lraw, the unstripped line, and
+            # the block-scalar header is matched on lraw as scan() cut it.
+            # A CR, NEL, LS or PS left inside a line is a YAML line break that
+            # awk does not split on, so the guard would read two lines as one.
+            { gated = 0; sub(/\r$/, ""); if (index($0, "\r") || index($0, "\302\205") || index($0, "\342\200\250") || index($0, "\342\200\251")) fail(FILENAME, FNR, "line holds a CR, NEL (U+0085), LS (U+2028) or PS (U+2029) inside it, which YAML reads as a line break — delete it, or break the line with LF") }
+            { lraw = tolower($0); sub(/(^|[[:space:]])#.*/, ""); $0 = tolower($0) }
+            /^[[:space:]]*$/ { next }
+            { match($0, /^[[:space:]]*/); if (block >= 0 && RLENGTH > block) next; block = -1; gated = gtext >= 0 && RLENGTH > gtext; if (!gated) gtext = -1 }
+            # A bare strategy: or matrix: key holds the block below it, so the
+            # next line must be deeper; one that is not continues a flow the key
+            # sits in, and would end the block before its first line. A line
+            # inside a flow collection or quoted scalar left open above continues
+            # that value however it is indented, so it ends no block.
             {
               match($0, /^[[:space:]]*(-[[:space:]]*)?/)
               indent = RLENGTH
-              if (matrix_indent >= 0 && indent <= matrix_indent) matrix_indent = -1
-              if (strategy_indent >= 0 && indent <= strategy_indent) strategy_indent = -1
+              if (armed >= 0 && indent <= armed) fail(FILENAME, FNR, "this line is not indented under the strategy: or matrix: key above it — keep that key bare over an indented block, not inside a flow map")
+              armed = -1
+              # The first line under a bare matrix: sets the axis column.
+              if (axis == -2) axis = indent
+              if (!flow && quote == "") {
+                if (matrix_indent >= 0 && indent <= matrix_indent) matrix_indent = -1
+                if (strategy_indent >= 0 && indent <= strategy_indent) strategy_indent = -1
+              }
+              q0 = quote
+              scan(lraw)
+              # The skip trusts no scan state for flows. A [ or { anywhere on the
+              # line (a value, a quoted string, an expression, a trailing comment)
+              # turns it off for the rest of the file, unless it is a flat one-line
+              # list, an empty {} or an expression's own double braces. Only those
+              # braces are dropped, so a [ or { inside an expression still counts.
+              # A flat list's items are plain (no quote, #, :, bracket, &, ! or *)
+              # or wholly quoted (no #, and no backslash in double quotes). noskip
+              # holds the first such line. A byte test, with no state for an input
+              # to corrupt.
+              t = lraw; gsub(/\$\{\{|\}\}/, "", t); gsub(/\{[[:space:]]*\}/, "", t)
+              gsub(/\[([^][{}"'#:,&!*]*|[[:space:]]*"[^"\\#]*"[[:space:]]*|[[:space:]]*'[^'#]*'[[:space:]]*)(,([^][{}"'#:,&!*]*|[[:space:]]*"[^"\\#]*"[[:space:]]*|[[:space:]]*'[^'#]*'[[:space:]]*))*\]/, "", t)
+              if (!noskip && t ~ /[[{]/) noskip = FNR
+              # A quote left open at the end of a line is refused, because the
+              # scan's quote state could then disagree with YAML's. It is reported
+              # where it opens; the kept state only holds the lines it spans, and
+              # changes no verdict, since this line already fails.
+              if (quote != "" && q0 == "") fail(FILENAME, FNR, "quoted scalar continues past this line — keep a quoted value on one line" (noskip ? "" : ", or, outside strategy:, write a long value as a >- block scalar"))
+              # A | or > value opens a block scalar. Under strategy: its text
+              # could hold an expression no rule would read, so it is refused
+              # while the skip is on; with the skip off, its text is read as YAML.
+              # !flow stays as a backstop: it keeps a header inside a flow the
+              # scan did see from opening a skip. block counts every "- ", "? "
+              # and ": " before the key, unlike indent, because the text has to
+              # be deeper than the key itself wherever the key sits.
+              if (!flow && quote == "" && substr(lraw, 1, cut - 1) ~ /^[[:space:]]*(-[[:space:]]+)*([^[:space:]][^#]*:[[:space:]]+)?([&!][^[:space:]]*[[:space:]]+)*[|>][-+0-9]*[[:space:]]*$/) {
+                match(lraw, /^[[:space:]]*([-?:][[:space:]]+)*/)
+                if (noskip) { if (!gated) gtext = RLENGTH }
+                else {
+                  block = RLENGTH
+                  if (strategy_indent >= 0) fail(FILENAME, FNR, "block scalar (| or >) under strategy: — write each matrix value inline, so the drift guard can read it")
+                }
+              }
             }
             # A line deeper than the runner key before it continues that value
             # (a wrapped plain scalar), so the key line held only part of it.
@@ -451,56 +495,54 @@ jobs:
               if (indent > value_indent) fail(FILENAME, FNR, "runner value continues on this line — write it on one line after the key")
               value_indent = -1
             }
-            # Job ids: build-native.yml's rules below key on them, and a job
-            # named matrix or strategy opens no block.
+            # Job ids: a job named matrix or strategy opens no block.
             /^jobs[[:space:]]*:[[:space:]]*$/ { in_jobs = 1; job_indent = -1; next }
-            in_jobs && indent == 0 { in_jobs = 0; job = "" }
+            in_jobs && indent == 0 { in_jobs = 0 }
             in_jobs && job_indent < 0 { job_indent = indent }
             { job_line = in_jobs && indent == job_indent }
-            job_line { job = $0; sub(/^[[:space:]]*/, "", job); sub(/[[:space:]]*:.*/, "", job); lit = 0; run_indent = -1 }
             # Track the strategy and matrix blocks by indentation: a bare os: or
             # runner: is validated only in a matrix, because the same key names a
             # workflow_dispatch input or an action with: parameter, which select
-            # no runner. Each tracker arms on a bare key line and does not re-arm
-            # while its block is open, so a matrix axis named matrix does not
-            # move it. Anything else on the key line (an expression, anchor,
+            # no runner. Each tracker arms on a bare key line, and re-arms only on
+            # one at or left of its key, so a matrix axis named matrix does not
+            # move it, and a key armed by a misread line gives way to the real
+            # one. Anything else on the key line (an expression, anchor,
             # alias, tag or flow map) leaves the block unread, so the refusal
             # rule below rejects the line instead.
-            !job_line && strategy_indent < 0 && /^[[:space:]]*(-[[:space:]]*)?["']?strategy["']?[[:space:]]*:[[:space:]]*$/ { strategy_indent = indent }
-            !job_line && matrix_indent < 0 && /^[[:space:]]*(-[[:space:]]*)?["']?matrix["']?[[:space:]]*:[[:space:]]*$/ { matrix_indent = indent }
-            # build-native.yml builds its matrix as JSON in its `matrix` job and
-            # reads it in its `build` job.
-            bn && job == "matrix" { resolve_line() }
-            # The build job's include of that JSON is the one dynamic matrix the
-            # guard accepts; dynamic_matrix_verdict() fails it unless the resolve
-            # job wrote at least one checked "os" literal. The same line anywhere
-            # else falls through to the refusal rule.
-            bn && job == "build" && matrix_indent >= 0 && /^[[:space:]]*include[[:space:]]*:[[:space:]]*\$\{\{[[:space:]]*fromjson\(needs\.matrix\.outputs\.builds\)[[:space:]]*\}\}[[:space:]]*$/ {
-              dyn_line = FNR; dyn_file = FILENAME; next
-            }
+            !job_line && (strategy_indent < 0 || indent <= strategy_indent) && /^[[:space:]]*(-[[:space:]]*)?["']?strategy["']?[[:space:]]*:[[:space:]]*$/ { strategy_indent = armed = indent }
+            !job_line && (matrix_indent < 0 || indent <= matrix_indent) && /^[[:space:]]*(-[[:space:]]*)?["']?matrix["']?[[:space:]]*:[[:space:]]*$/ { matrix_indent = armed = indent; axis = -2 }
             # Lines that may hide a runner label: a flow mapping carrying a
-            # runner/strategy/matrix key; strategy: or matrix: with any inline
-            # value, include: with one inside a matrix; a YAML merge key or a bare
-            # alias item; inside a strategy block, any line holding an expression,
-            # whatever precedes it (a strategy, matrix, include or axis value set
-            # by one, inline or on the line below its key, behind a quote, flow
-            # list, anchor or tag), so an expression-valued axis is a deliberate
-            # edit here; a job calling a reusable workflow in another repo (its
-            # runs-on is outside this scan; same-repo ./.github/workflows/ and
-            # $/.github/workflows/ callees are scanned). Accepted false positives,
-            # all fail-closed: an env/with key named matrix or strategy with an
-            # inline value; a flow map with an os or runner key; any expression
-            # under a bare strategy: line, whatever key holds it (fail-fast,
-            # max-parallel, a non-runner axis, an include or exclude value); a
-            # trailing comment that holds a flow key or, under strategy:, an
-            # expression.
-            lraw ~ /[{,][[:space:]]*["']?(runs-on|os|runner|strategy|matrix|include)["']?[[:space:]]*:/ ||
+            # runner/strategy/matrix/uses key; strategy: or matrix: with any
+            # inline value, include: with one inside a matrix; a YAML merge key
+            # or a bare alias item; inside a strategy block, any line holding an
+            # expression, whatever precedes it (a strategy, matrix, include or
+            # axis value set by one, inline or on the line below its key, behind
+            # a quote, flow list, anchor or tag), so an expression-valued axis is
+            # a deliberate edit here; a uses: line callee() cannot clear.
+            # Accepted false positives, all fail-closed: an env/with key named
+            # matrix or strategy with an inline value, or with no value and a
+            # sibling key on the next line; a runs-on list that repeats one
+            # hosted label; a flow map with an os, runner or uses key; any
+            # expression under a bare strategy: line,
+            # whatever key holds it (fail-fast, max-parallel, a non-runner axis,
+            # an include or exclude value); a trailing comment that holds a flow
+            # key or, under strategy:, an expression; a block scalar (| or >)
+            # under strategy:, even a multi-line non-runner value; a quoted
+            # scalar that continues past its line; | or > text read as YAML in a
+            # file where a line holds a [ or { that is not a flat one-line list,
+            # an empty {} or an expression's double braces (the noskip gate); a
+            # CR, NEL, LS or PS anywhere in a line (in block text, a quoted value
+            # or a comment), even where the break hides nothing; an os or
+            # runner list of two or more labels in an include or exclude item,
+            # or a nested list on an axis, whatever reads it; a step uses:
+            # value that is an alias or is written below its key.
+            lraw ~ /[{,][[:space:]]*["']?(runs-on|os|runner|strategy|matrix|include|uses)["']?[[:space:]]*:/ ||
             /^[[:space:]]*(-[[:space:]]*)?["']?(strategy|matrix)["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ ||
             (/^[[:space:]]*(-[[:space:]]*)?["']?include["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ && matrix_indent >= 0) ||
             /^[[:space:]]*(-[[:space:]]*)?(<<[[:space:]]*:|\*[^*[:space:]])/ ||
             (lraw ~ /\$\{\{/ && strategy_indent >= 0) ||
-            (/^[[:space:]]*uses[[:space:]]*:/ && /\/\.github\/workflows\// && !/uses[[:space:]]*:[[:space:]]*["']?[.$]\/\.github\/workflows\//) {
-              fail(FILENAME, FNR, "line may hide a runner label from the drift guard — write `runs-on: <label>` / `os: [<labels>]` inline; keep `strategy:`, `matrix:`, `include:` as bare keys over a static block (no expression anywhere under strategy:, no anchors, aliases or flow maps); call reusable workflows only from ./.github/workflows/ or $/.github/workflows/")
+            callee() {
+              fail(FILENAME, FNR, "line may hide a runner label from the drift guard — write `runs-on: <label>` / `os: [<labels>]` inline; keep `strategy:`, `matrix:`, `include:` as bare keys over a static block (no expression anywhere under strategy:, no anchors, aliases or flow maps); write each `uses:` value whole on its key's line, and call reusable workflows only from ./.github/workflows/ or $/.github/workflows/")
             }
             /^[[:space:]]*(-[[:space:]]*)?["']?runs-on["']?[[:space:]]*:/ ||
             (/^[[:space:]]*(-[[:space:]]*)?["']?(os|runner)["']?[[:space:]]*:/ && matrix_indent >= 0) {
@@ -509,33 +551,65 @@ jobs:
               if (v ~ /^["']?\$\{\{[[:space:]]*matrix\.os[[:space:]]*\}\}["']?$/) next
               # An unclosed list or quote was wrapped, or cut by a # inside it.
               if (v ~ /^\[/ && v !~ /\]$/ || gsub(/"/, "&", v) % 2 || gsub(/'/, "&", v) % 2) v = ""
+              r = v; nest = v ~ /^\[.*[[{]/
               gsub(/[][ "']/, "", v)
-              n = split(v, items, ",")
-              ok = (v != "")
-              for (i = 1; i <= n; i++) if (items[i] !~ HOSTED) ok = 0
-              if (!ok) label(v == "" ? "<value not inline on this line>" : v)
+              # Only a plain comma list is split, so an expression or a nested
+              # list is quoted whole; the advice names the first label that is
+              # not allow-listed. A list of two or more labels that a job's
+              # runs-on receives whole fails even when HOSTED holds each one:
+              # on a runs-on line, or as one matrix value, which is any os or
+              # runner line off the axis column (an include or exclude item).
+              # An axis list is fine: each job gets one of its labels.
+              n = !nest && v ~ /^[a-z0-9._-]+(,[a-z0-9._-]+)*$/ ? split(v, items, ",") : 0
+              for (i = 1; i <= n && (items[i] in HOSTED); i++) ;
+              sel = n > 1 && (/^[[:space:]]*(-[[:space:]]*)?["']?runs-on/ || indent != axis)
+              if (!n || i <= n || sel) label(nest ? r : v, n ? items[i <= n ? i : 1] : "", sel)
             }
-            END { dynamic_matrix_verdict(); exit bad }
+            END { exit bad }
           AWK
+          cat > "$RUNNER_TEMP/runner-drift-guard-scan.sh" <<'SCAN'
+            # Runs the guard program ($1) over every workflow file at HEAD,
+            # dot-prefixed ones included, from the repository root. It reads the
+            # committed bytes, not the checkout: a .gitattributes
+            # working-tree-encoding or filter rewrites the checkout, and GitHub
+            # runs the committed file. Only regular files are read.
+            set -euo pipefail
+            case $1 in /*) prog=$1 ;; *) prog=$PWD/$1 ;; esac
+            tree=$(mktemp -d)
+            mkdir -p "$tree/.github/workflows"
+            git ls-tree -z HEAD .github/workflows/ > "$tree/ls"
+            files=()
+            while IFS= read -r -d '' entry; do
+              f=${entry#*$'\t'}
+              case $f in *.y*ml) ;; *) continue ;; esac
+              read -r mode _ oid <<< "${entry%%$'\t'*}"
+              if [ "$mode" != 100644 ] && [ "$mode" != 100755 ]; then
+                echo "::error file=$f::workflow file is not a regular file (git mode $mode) — the drift guard reads only regular files"
+                exit 1
+              fi
+              git cat-file blob "$oid" > "$tree/$f"
+              files+=("$f")
+            done < "$tree/ls"
+            [ "${#files[@]}" -gt 0 ] || { echo "::error::no workflow file at HEAD"; exit 1; }
+            cd "$tree"
+            awk -f "$prog" "${files[@]}"
+          SCAN
 
-      # One awk pass, no shell pipeline: a program error exits non-zero and
-      # fails the step instead of reading as "no match". dotglob, because
-      # GitHub runs a dot-prefixed workflow file too; with no file to match,
-      # the pattern stays literal and awk fails to open it.
+      # One awk pass over the committed workflows, under set -euo pipefail: a git
+      # or program error exits non-zero and fails the step instead of reading as
+      # "no match".
       - name: Every runner value is an allow-listed GitHub-hosted label
-        run: |
-          shopt -s dotglob
-          awk -f "$RUNNER_TEMP/runner-drift-guard.awk" .github/workflows/*.y*ml
+        run: bash "$RUNNER_TEMP/runner-drift-guard-scan.sh" "$RUNNER_TEMP/runner-drift-guard.awk"
 
       # After the scan, not before: the script lives under .github/scripts/,
       # which a `contents: write` job can rewrite, so it must not run ahead of
-      # the scan with the program's path in hand. It still fails the job when
-      # the program gets any fixture wrong, and it runs when the scan fails too,
-      # so a program edit that breaks the real tree still shows which fixture
-      # broke; the scan's result is already recorded by then.
+      # the scan with the programs' paths in hand. It still fails the job when
+      # either program gets any fixture wrong, and it runs when the scan fails
+      # too, so a program edit that breaks the real tree still shows which
+      # fixture broke; the scan's result is already recorded by then.
       - name: Guard self-test (regression fixtures)
         if: ${{ !cancelled() }}
-        run: bash .github/scripts/runner-drift-guard-selftest.sh "$RUNNER_TEMP/runner-drift-guard.awk"
+        run: bash .github/scripts/runner-drift-guard-selftest.sh "$RUNNER_TEMP/runner-drift-guard.awk" "$RUNNER_TEMP/runner-drift-guard-scan.sh"
 
   ci-success:
     name: CI Success
