@@ -5,6 +5,7 @@ import { getSessionHeaders } from './session.js';
 import { buildMetricsHeaders } from './metrics-headers.js';
 import { classifyHttpError, classifyNetworkError } from './error-classifier.js';
 import { validateCachekitUrl } from './url-validator.js';
+import { USER_AGENT } from './user-agent.js';
 
 /**
  * Path segments a key may never encode to (protocol spec/saas-api.md
@@ -265,6 +266,7 @@ export class CachekitIOCore implements Backend {
     opts?: { body?: Uint8Array; headers?: Record<string, string> }
   ): Promise<Response> {
     const headers: Record<string, string> = {
+      'User-Agent': USER_AGENT,
       Authorization: `Bearer ${this.apiKey}`,
       ...getSessionHeaders(),
       ...buildMetricsHeaders(this.metricsProvider),
