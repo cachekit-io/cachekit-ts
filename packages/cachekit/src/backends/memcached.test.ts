@@ -345,6 +345,20 @@ describe('MemcachedBackend', () => {
       expect(clientCreate).not.toHaveBeenCalled();
     });
 
+    it('logs fixed text only; the load error reaches the caller, not the log', async () => {
+      memjsLoad.error = new Error('token=secret-example');
+      const reported: unknown[] = [];
+      setLogger((message, error) => reported.push(message, error));
+
+      const rejection = await backend.get('k').catch((error: unknown) => error);
+
+      expect(reported).toEqual([expect.stringMatching(/^\[cachekit\] The Memcached/), undefined]);
+      expect(JSON.stringify(reported)).not.toContain('secret-example');
+      const chain = (error: unknown): string =>
+        error instanceof Error ? `${error.message}\n${chain(error.cause)}` : '';
+      expect(chain(rejection)).toContain('token=secret-example');
+    });
+
     it('logs once on a cache with degradation on, which turns every command into a miss', async () => {
       const cache = createCache.production({
         backend,

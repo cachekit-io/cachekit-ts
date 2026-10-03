@@ -380,9 +380,11 @@ export class MemcachedBackend implements Backend {
         );
         // A cache with degradation on swallows the per-command errors, so
         // this line is the only trace; once, because every command retries.
+        // Fixed text only: the cause is whatever loading memjs threw, and a
+        // logger would print it. Callers still get it on the rejection.
         if (!this.loadFailureLogged) {
           this.loadFailureLogged = true;
-          logError(`[cachekit] ${failure.message}`, failure);
+          logError(`[cachekit] ${failure.message}`);
         }
         throw failure;
       }
