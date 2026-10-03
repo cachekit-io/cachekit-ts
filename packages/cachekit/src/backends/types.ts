@@ -229,9 +229,8 @@ export interface MemcachedBackendConfig {
    * as py's 1.0s). memjs applies it to each try, not to the whole operation.
    * Every operation settles within a deadline of
    * `tries × (connectTimeout + timeout) + (tries − 1) × 200 ms + 500 ms`,
-   * 6.7 s at the defaults. Against a server that accepts connections and never
-   * replies, one operation at the defaults takes about 2.2 s: two 1 s tries
-   * plus the 200 ms delay between them.
+   * 3.5 s at the defaults. Against a server that accepts connections and never
+   * replies, one operation at the defaults takes about 1 s: a single try.
    */
   timeout?: number;
   /**
@@ -242,8 +241,12 @@ export interface MemcachedBackendConfig {
   connectTimeout?: number;
   /**
    * Total number of tries per operation, not retries after the first
-   * (default: 2). memjs counts total tries: 0 and 1 both mean one try, and the
-   * default 2 means one retry, with 200 ms between tries.
+   * (default: 1). memjs counts total tries: 0 and 1 both mean one try, and 2
+   * means one retry, with 200 ms between tries. The default leaves retrying to
+   * the cache's retry policy (`createCache.production` and `.secure`). A cache
+   * without one (`createCache.minimal`, or no `reliability.retry`) then makes
+   * one try per operation, so a single dropped connection surfaces as an
+   * error: pass `retries: 2` there to keep memjs's own retry.
    */
   retries?: number;
   /** Key prefix for namespacing (exposed via Backend.keyPrefix for the interop guard) */

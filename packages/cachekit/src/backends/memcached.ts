@@ -126,7 +126,7 @@ function releaseSockets(client: MemjsClient, which: 'abandoned' | 'all'): void {
  * Every operation settles within a deadline of
  * `tries × (connectTimeout + timeout) + (tries − 1) × 200 ms + 500 ms`, where
  * `tries` is `retries` (memjs counts total tries; 0 or 1 means one try) —
- * 6.7 s at the defaults. memjs can lose a request's timeout when it is sent
+ * 3.5 s at the defaults. memjs can lose a request's timeout when it is sent
  * just after another request timed out, which would otherwise hang the op
  * forever against a server that stops answering. On expiry the op rejects
  * with `TimeoutError` (retryable, so retries and the circuit breaker see a
@@ -182,7 +182,7 @@ export class MemcachedBackend implements Backend {
       defaultTtl: config.defaultTtl ?? 0,
       timeout: config.timeout ?? 1000,
       connectTimeout: config.connectTimeout ?? 2000,
-      retries: config.retries ?? 2,
+      retries: config.retries ?? 1,
       keyPrefix: config.keyPrefix ?? '',
       maxItemSizeBytes: config.maxItemSizeBytes ?? DEFAULT_MAX_ITEM_SIZE_BYTES,
     };

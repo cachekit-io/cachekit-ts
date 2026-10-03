@@ -18,7 +18,7 @@ import { createCache } from '../intents.js';
 
 const TIMEOUT = 100;
 const CONNECT_TIMEOUT = 100;
-const RETRIES = 2; // the backend default: memjs counts it as total tries
+const RETRIES = 2; // memjs counts it as total tries: one retry per op
 // The documented bound, computed independently of the implementation:
 // tries × (connectTimeout + timeout) + (tries − 1) × memjs retry_delay + slack.
 const DEADLINE = RETRIES * (CONNECT_TIMEOUT + TIMEOUT) + (RETRIES - 1) * 200 + 500;
