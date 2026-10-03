@@ -106,24 +106,27 @@ export function boundedDecodeOptions(maxCollectionSize: number, maxDecodedSize: 
  * pre-scan/decoder desync can only ever *reject* (availability), never *admit*
  * bytes the decoder would then amplify.
  *
- * It also counts the values that decode to a heap object of their own:
- * arrays and maps, empty ones included, bin and ext. That count is what L1
- * charges per object on a read (see `ObjectCount`), so a decoder-native depth
- * bound, should @msgpack/msgpack grow one, would not replace this walk.
+ * It also counts what L1 charges for on a read (see `ObjectCount`): the
+ * values that decode to a heap object of their own (arrays and maps, empty
+ * ones included, bin and ext), and the elements and map entries those arrays
+ * and maps hold. So a decoder-native depth bound, should @msgpack/msgpack grow
+ * one, would not replace this walk.
  *
- * @returns the number of arrays, maps, bin and ext values in the document.
+ * @returns the document's object and value counts.
  * @throws {SerializationError} if nesting exceeds `maxDepth` or the bytes are
  *   structurally truncated/malformed.
  */
-export function assertDecodeDepth(data: Uint8Array, maxDepth: number): number {
+export function assertDecodeDepth(data: Uint8Array, maxDepth: number): ObjectCount {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   // pending[d] = child values still to consume inside the collection at depth d.
   const pending: number[] = [1]; // exactly one top-level value expected
   let depth = 0;
   let pos = 0;
   // Counted at each header, not at `children > 0` below: an empty container
-  // opens no level but still costs a heap object once decoded.
+  // opens no level but still costs a heap object once decoded. A map's values
+  // count its entries, not its keys and values.
   let objects = 0;
+  let values = 0;
 
   const need = (n: number): void => {
     if (pos + n > data.length) {
@@ -145,9 +148,11 @@ export function assertDecodeDepth(data: Uint8Array, maxDepth: number): number {
     } else if (b >= 0x80 && b <= 0x8f) {
       children = (b & 0x0f) * 2; // fixmap: N keys + N values
       objects++;
+      values += b & 0x0f;
     } else if (b >= 0x90 && b <= 0x9f) {
       children = b & 0x0f; // fixarray
       objects++;
+      values += children;
     } else if (b >= 0xa0 && b <= 0xbf) {
       pos += b & 0x1f; // fixstr
     } else {
@@ -200,24 +205,28 @@ export function assertDecodeDepth(data: Uint8Array, maxDepth: number): number {
           children = view.getUint16(pos);
           pos += 2;
           objects++;
+          values += children;
           break;
         case 0xdd: // array32
           need(4);
           children = view.getUint32(pos);
           pos += 4;
           objects++;
+          values += children;
           break;
         case 0xde: // map16
           need(2);
           children = view.getUint16(pos) * 2;
           pos += 2;
           objects++;
+          values += children / 2;
           break;
         case 0xdf: // map32
           need(4);
           children = view.getUint32(pos) * 2;
           pos += 4;
           objects++;
+          values += children / 2;
           break;
         case 0xd4: // fixext1
           objects++; // a Date (timestamp) or other object once decoded
@@ -279,17 +288,26 @@ export function assertDecodeDepth(data: Uint8Array, maxDepth: number): number {
       `Trailing bytes after MessagePack document: consumed ${pos} of ${data.length} (decode pre-scan)`
     );
   }
-  return objects;
+  return { objects, values };
 }
 
 /**
- * Receives how many values in a document decode to a heap object of their
- * own: arrays and maps (objects, Maps, Sets), empty ones too, plus binary and
- * ext values. Counted by a walk the codec already runs, for L1's per-object
- * charge (see OBJECT_SIZE in l1/lru-cache.ts). Package-internal.
+ * Receives what L1 charges for beyond a value's serialized size, counted by a
+ * walk the codec already runs (see OBJECT_SIZE and VALUE_SIZE in
+ * l1/lru-cache.ts). Package-internal.
  */
 export interface ObjectCount {
+  /**
+   * Values that decode to a heap object of their own: arrays and maps
+   * (objects, Maps, Sets), empty ones too, plus binary and ext values.
+   */
   objects: number;
+  /**
+   * Elements of arrays and Sets plus entries of maps (objects, Maps): one
+   * slot each in the heap object that holds them. A Map or Set counts every
+   * entry the caller's value holds, including those the encoding merges.
+   */
+  values: number;
 }
 
 /**
@@ -300,6 +318,7 @@ export interface ObjectCount {
 interface NormalizeWalk {
   readonly forKey: boolean;
   objects: number;
+  values: number;
 }
 
 /**
@@ -412,7 +431,8 @@ function binary(value: object): [type: string, bytes: Uint8Array] | undefined {
  * - M9 Fix: Check collection size to prevent DoS via large collections
  * - Pass Uint8Array (incl. Buffer) through as msgpack bin; reject other binary
  *   values, but hash any binary key argument (`walk.forKey`) by its bytes
- * - Count arrays, Maps, Sets, plain objects and binary values into `walk.objects`
+ * - Count arrays, Maps, Sets, plain objects and binary values into `walk.objects`,
+ *   and their elements and entries into `walk.values`
  *
  * Package-internal: key generation calls it with `walk.forKey` set.
  */
@@ -451,6 +471,7 @@ export function normalize(
       );
     }
     walk.objects++;
+    walk.values += value.length;
     return value.map((item) => normalize(item, depth + 1, maxDepth, maxCollectionSize, walk));
   }
 
@@ -466,6 +487,9 @@ export function normalize(
       );
     }
     walk.objects++;
+    // The Map's own size: String(key) can merge keys in the encoding, but L1
+    // holds the caller's Map with every entry.
+    walk.values += value.size;
     const obj: Record<string, unknown> = {};
     const sortedKeys = Array.from(value.keys()).sort();
     for (const key of sortedKeys) {
@@ -482,6 +506,7 @@ export function normalize(
       );
     }
     walk.objects++;
+    walk.values += value.size;
     return Array.from(value)
       .map((item) => normalize(item, depth + 1, maxDepth, maxCollectionSize, walk))
       .sort();
@@ -522,6 +547,7 @@ export function normalize(
   }
 
   walk.objects++;
+  walk.values += keys.length;
   const sortedKeys = keys.sort();
   const result: Record<string, unknown> = {};
   for (const key of sortedKeys) {
@@ -611,8 +637,8 @@ export function resolveSerializerConfig(config: Partial<SerializerConfig> = {}):
 }
 
 /**
- * MessagePackSerializer.encode, adding the value's object count to `count`
- * once the bytes pass the size check. Package-internal.
+ * MessagePackSerializer.encode, adding the value's object and value counts to
+ * `count` once the bytes pass the size check. Package-internal.
  */
 export function encodeCounted<T>(
   value: T,
@@ -620,7 +646,7 @@ export function encodeCounted<T>(
   count?: ObjectCount
 ): Uint8Array {
   // Normalize for deterministic output (also checks depth and collection size)
-  const walk = { forKey: false, objects: 0 };
+  const walk = { forKey: false, objects: 0, values: 0 };
   const normalized = normalize(value, 0, config.maxDepth, config.maxCollectionSize, walk);
 
   // Encode to MessagePack
@@ -633,7 +659,10 @@ export function encodeCounted<T>(
     );
   }
 
-  if (count) count.objects += walk.objects;
+  if (count) {
+    count.objects += walk.objects;
+    count.values += walk.values;
+  }
   return encoded;
 }
 
@@ -664,8 +693,8 @@ function validateDepth(value: unknown, depth: number, maxDepth: number): void {
 }
 
 /**
- * MessagePackSerializer.decode, adding the document's object count to
- * `count` once it decodes. Package-internal.
+ * MessagePackSerializer.decode, adding the document's object and value counts
+ * to `count` once it decodes. Package-internal.
  */
 export function decodeCounted<T>(
   data: Uint8Array,
@@ -680,7 +709,7 @@ export function decodeCounted<T>(
   // Bound nesting depth before the decoder eagerly preallocates per-header
   // collections (LAB-2487) — the per-collection cap alone lets nested headers
   // stack preallocations disproportionate to input size.
-  const objects = assertDecodeDepth(data, config.maxDepth);
+  const counted = assertDecodeDepth(data, config.maxDepth);
 
   try {
     const decoded = decode(
@@ -691,7 +720,10 @@ export function decodeCounted<T>(
     // Validate depth of decoded object (DoS protection)
     validateDepth(decoded, 0, config.maxDepth);
 
-    if (count) count.objects += objects;
+    if (count) {
+      count.objects += counted.objects;
+      count.values += counted.values;
+    }
     return decoded as T;
   } catch (error) {
     if (error instanceof SerializationError) {
