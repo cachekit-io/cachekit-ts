@@ -41,6 +41,8 @@ interface Node<T> extends CacheEntry<T> {
   readonly key: string;
   prev: Node<T> | null;
   next: Node<T> | null;
+  /** No refresh starts before this time (see deferRefresh). */
+  refreshHeldUntil: number;
 }
 
 /**
@@ -147,6 +149,7 @@ export class L1Cache<T = unknown> {
       this.config.swrEnabled &&
       !isFresh &&
       entry.value !== null &&
+      entry.refreshHeldUntil <= now &&
       !this.isRefreshInFlight(key, now) &&
       this.hasRefreshSlot(now); // C3 fix
 
@@ -199,6 +202,25 @@ export class L1Cache<T = unknown> {
    */
   cancelRefresh(key: string): void {
     this.refreshingKeys.delete(key);
+  }
+
+  /**
+   * End a refresh that produced nothing L1 may store, and start no other for
+   * this entry for SWR_REFRESH_MARKER_TTL_MS. Cancelling instead would leave the
+   * entry stale, so every later read would re-run the origin for the rest of
+   * the TTL.
+   *
+   * The hold is kept on the entry, not as a marker, so it takes no refresh
+   * slot: keys that keep producing unstorable values would otherwise fill all
+   * maxConcurrentRefreshes slots and stop SWR for every other key. It also
+   * goes with the entry, so nothing is kept for a key that L1 dropped, or
+   * rewrote, while the refresh ran.
+   */
+  deferRefresh(key: string, versionToken: number): void {
+    this.refreshingKeys.delete(key);
+    const entry = this.cache.get(key);
+    if (!entry || this.entryVersion.get(key) !== versionToken) return;
+    entry.refreshHeldUntil = Date.now() + SWR_REFRESH_MARKER_TTL_MS;
   }
 
   /**
@@ -304,6 +326,7 @@ export class L1Cache<T = unknown> {
       namespace,
       prev: null,
       next: null,
+      refreshHeldUntil: 0,
     };
     this.cache.set(key, node);
     this.append(node);
