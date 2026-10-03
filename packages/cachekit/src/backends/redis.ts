@@ -42,13 +42,14 @@ const messageOf = (error: unknown): string =>
 /**
  * Throw now for a url that ioredis would reject when it creates the client,
  * so a bad url still fails at `redis()` and `createCache()`, not at the first
- * command. This copies ioredis 5.11's parseURL: a port number or a socket path
- * is used as is, and anything else goes through the WHATWG URL parser, with
- * `redis://` assumed when there is no scheme, and has its credentials
- * percent-decoded. This package requires ioredis 5.11 or later, so the copy
- * matches the parser the app uses. The 'RedisBackend url check' tests compare
- * this with the installed ioredis. Messages are fixed text: the url can carry
- * a password.
+ * command. This copies ioredis 5.11.1's parseURL: a port number or a socket
+ * path is used as is, and anything else goes through the WHATWG URL parser,
+ * with `redis://` assumed when there is no scheme, and has its credentials
+ * percent-decoded. This package requires ioredis 5.11.1 or later, so the copy
+ * matches the parser the app uses; 5.11.0 has no protocol-relative (`//`)
+ * branch and reads `//host` as a socket path. The 'RedisBackend url check'
+ * tests compare this with the installed ioredis. Messages are fixed text: the
+ * url can carry a password.
  */
 function assertValidUrl(url: unknown): void {
   // ioredis reads a non-string as options or a port, never as a url.
