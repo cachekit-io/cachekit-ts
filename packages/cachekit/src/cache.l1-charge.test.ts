@@ -101,7 +101,7 @@ describe('L1 charge for container-heavy values', () => {
     const cache = makeCache(new InMemoryBackend());
     let generation = 0;
     // 2s TTL, read at 1.4s: stale for every jitter draw, not yet expired
-    // (the same timing as the LAB-238 SWR test).
+    // (the same timing as the encrypted-L1 SWR test).
     const load = cache.wrap(
       async (_id: number) => ({ generation: ++generation, items: containerHeavy() }),
       { namespace: 'users', ttl: 2 }
