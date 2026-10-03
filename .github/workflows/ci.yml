@@ -114,7 +114,7 @@ jobs:
       # id-token: write, so no stored secret. Forks never attempt OIDC and upload
       # tokenless; "Token required" on a same-repo run means OIDC did not mint.
       - name: Upload coverage
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         continue-on-error: true
         with:
           files: ./packages/cachekit/coverage/lcov.info
@@ -241,7 +241,7 @@ jobs:
           # Pinned (not `stable`) so the published wasm artifact doesn't drift
           # with the runner's toolchain; bump deliberately alongside the
           # size-budget check in scripts/build.sh.
-          toolchain: 1.97.1
+          toolchain: 1.98.1
           targets: wasm32-unknown-unknown
 
       - name: Cache Rust build artifacts

@@ -49,7 +49,7 @@ jobs:
           # Pinned (not `stable`) so the published wasm artifact doesn't drift
           # with the runner's toolchain; bump deliberately alongside the
           # size-budget check in scripts/build.sh.
-          toolchain: 1.97.1
+          toolchain: 1.98.1
           targets: wasm32-unknown-unknown
 
       - name: Install wasm-bindgen + wasm-opt (pinned prebuilts, checksummed)
