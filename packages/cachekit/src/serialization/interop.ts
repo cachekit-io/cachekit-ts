@@ -390,11 +390,10 @@ function encodeMapEntries(
   sink: ChunkSink
 ): void {
   // Cap BEFORE materialising key encodings: map keys are unique by
-  // construction, so the entry count is final up front — unlike Sets, no
-  // dedupe can shrink it. Checking here (rather than in encodeMapHeader
-  // after the map/sort below) keeps an over-cap map from forcing N
-  // Uint8Array allocations plus an O(N log N) sort that never pass through
-  // pushChunk's byte budget.
+  // construction, so the entry count is final up front. Checking here
+  // (rather than in encodeMapHeader after the map/sort below) keeps an
+  // over-cap map from forcing N Uint8Array allocations plus an O(N log N)
+  // sort that never pass through pushChunk's byte budget.
   // Shared chokepoint for every map caller: the Map/plain-object branches
   // pre-check .size/Object.keys upstream and the datetime sentinel is a fixed
   // 2-entry literal, so no current path relies on this as the effective guard
@@ -485,9 +484,13 @@ function encodeCanonical(
     // unique — duplicateness is unknowable until encoded, and charging the
     // running total during the re-encode would falsely reject a duplicate
     // bigger than the budget remainder even though the deduped output fits.
-    // Both the byte budget and the collection-size cap fail DURING iteration,
-    // counting exactly what the output retains: duplicates advance neither
-    // total. The parent's own total advances once, on the pushes below.
+    // The parent's own total advances once, on the pushes below.
+    // The collection-size cap is different: it counts the caller's Set, not
+    // the deduped output, and fires before any element is encoded, as the
+    // Map branch and auto mode cap .size. Counting retained elements would
+    // walk and encode a Set of any size whose elements collapse to no more
+    // canonical forms than the cap.
+    checkCollectionSize(v.size, 'array');
     const encoded: Uint8Array[] = [];
     const seen = new Set<string>();
     let running = sink.bytes;
@@ -501,7 +504,6 @@ function encodeCanonical(
       const key = bytesToHex(bytes);
       if (seen.has(key)) continue;
       seen.add(key);
-      checkCollectionSize(seen.size, 'array');
       running += bytes.length;
       if (running > DEFAULT_MAX_ENCODED_SIZE) {
         throw new ValueTooLargeError(

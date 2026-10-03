@@ -189,8 +189,9 @@ describe('interop Set encoding budgets (encodeCanonical, shared by both profiles
   it('accepts a duplicate-heavy Set whose deduped encoding fits the budget', () => {
     // 20 distinct-identity objects with identical canonical encodings: ~4 MiB
     // pre-dedupe, ~200 KiB deduped. Dedupe happens on insert, so duplicates
-    // advance neither the byte budget nor the count — this must encode
-    // byte-identically to the singleton, not throw at the pre-dedupe sum.
+    // do not advance the byte budget; the count cap counts the caller's Set.
+    // This must encode byte-identically to the singleton, not throw at the
+    // pre-dedupe sum.
     const dup = (): { k: string } => ({ k: 'x'.repeat(200 * 1024) });
     const many = new Set(Array.from({ length: 20 }, dup));
     expect(many.size).toBe(20);
@@ -209,20 +210,46 @@ describe('interop Set encoding budgets (encodeCanonical, shared by both profiles
     expect(encodeInteropValue(pair)).toEqual(encodeInteropValue(new Set([dup()])));
   });
 
-  it('rejects a Set with too many distinct elements during iteration', () => {
+  it('rejects a Set with too many distinct elements before encoding any', () => {
     // 10,002 tiny distinct elements: far under the byte budget, over the
-    // 10,000 collection cap. The cap fires on the 10,001st retained element,
-    // not after the full Set has been encoded and buffered.
-    const total = 10_002;
+    // 10,000 collection cap. Set.size is O(1), so the cap fires before the
+    // first element is encoded, not partway through the walk.
     let encoded = 0;
-    const elements = Array.from({ length: total }, (_, i) => ({
+    const elements = Array.from({ length: 10_002 }, (_, i) => ({
       get n(): number {
         encoded++;
         return i;
       },
     }));
     expect(() => encodeInteropValue(new Set(elements))).toThrow(ValueTooLargeError);
-    expect(encoded).toBeLessThan(total);
+    expect(encoded).toBe(0);
+  });
+
+  it('rejects an over-cap Set of canonically equal elements before iterating it', () => {
+    // 10,001 distinct objects that all encode to the same bytes: the deduped
+    // output is one element, but the cap counts the caller's Set. The
+    // own-property iterator spy shadows Set.prototype[Symbol.iterator] and
+    // counts pulls.
+    const s = new Set(Array.from({ length: 10_001 }, () => ({ a: 1 })));
+    let iterated = 0;
+    const inner = Set.prototype[Symbol.iterator].bind(s);
+    Object.defineProperty(s, Symbol.iterator, {
+      value: function* (): Generator<{ a: number }> {
+        for (const e of inner()) {
+          iterated++;
+          yield e;
+        }
+      },
+    });
+    expect(() => encodeInteropValue(s)).toThrow(ValueTooLargeError);
+    expect(iterated).toBe(0);
+  });
+
+  it('accepts a Set of exactly the cap, distinct or canonically equal', () => {
+    const distinct = new Set(Array.from({ length: 10_000 }, (_, i) => i));
+    expect(decodeInteropValue(encodeInteropValue(distinct))).toHaveLength(10_000);
+    const equal = new Set(Array.from({ length: 10_000 }, () => ({ a: 1 })));
+    expect(encodeInteropValue(equal)).toEqual(encodeInteropValue(new Set([{ a: 1 }])));
   });
 });
 
