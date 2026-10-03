@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { memcached, MemcachedBackend, MAX_MEMCACHED_TTL } from './memcached.js';
 import { BackendError, ConfigurationError, TimeoutError } from '../errors.js';
+import { createCache } from '../intents.js';
+import { setLogger } from '../logger.js';
 
 /**
  * MemcachedBackend unit tests against a mocked memjs client.
@@ -23,11 +25,17 @@ const mockClient = {
 
 const clientCreate = vi.fn((..._args: unknown[]) => mockClient);
 
-vi.mock('memjs', () => ({
-  Client: {
-    create: (...args: unknown[]) => clientCreate(...args),
-  },
-}));
+// A function declaration, so the hoisted vi.mock factory can call it and a
+// test that swaps the factory with vi.doMock can put it back.
+function mockMemjs() {
+  return {
+    Client: {
+      create: (...args: unknown[]) => clientCreate(...args),
+    },
+  };
+}
+
+vi.mock('memjs', () => mockMemjs());
 
 describe('MemcachedBackend', () => {
   let backend: MemcachedBackend;
@@ -299,6 +307,57 @@ describe('MemcachedBackend', () => {
       await expect(first).rejects.toThrow('no response within');
       expect(laterSettled).toBe(true);
       await expect(later).rejects.toBeInstanceOf(TimeoutError);
+    });
+  });
+
+  describe('memjs load failure', () => {
+    const logs: string[] = [];
+
+    beforeEach(() => {
+      logs.length = 0;
+      setLogger((message) => logs.push(message));
+      // doMock, not a flag in the factory: Vitest keeps an evaluated mock
+      // cached across vi.resetModules().
+      vi.doMock('memjs', () => {
+        throw new Error("Cannot find package 'memjs'");
+      });
+    });
+
+    afterEach(() => {
+      vi.doMock('memjs', () => mockMemjs());
+      setLogger(null);
+    });
+
+    it('rejects every command with ConfigurationError and logs the failure once', async () => {
+      await expect(backend.get('k')).rejects.toBeInstanceOf(ConfigurationError);
+      await expect(backend.set('k', new Uint8Array([1]), 60)).rejects.toBeInstanceOf(
+        ConfigurationError
+      );
+      await expect(backend.delete('k')).rejects.toThrow("optional peer dependency 'memjs'");
+
+      expect(logs).toEqual([
+        expect.stringMatching(
+          /^\[cachekit\] The Memcached backend requires the optional peer dependency 'memjs'/
+        ),
+      ]);
+      expect(clientCreate).not.toHaveBeenCalled();
+    });
+
+    it('logs once on a cache with degradation on, which turns every command into a miss', async () => {
+      const cache = createCache.production({
+        backend,
+        metrics: false,
+        l1: { enabled: false },
+        reliability: { degradation: true, retry: { baseDelay: 1 } },
+      });
+
+      for (let i = 0; i < 3; i++) {
+        await expect(cache.set(`k${i}`, 'v')).resolves.toBeUndefined();
+        await expect(cache.get(`k${i}`)).resolves.toBeNull();
+      }
+
+      expect(logs).toHaveLength(1);
+      await cache.close();
     });
   });
 
