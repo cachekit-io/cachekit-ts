@@ -694,6 +694,48 @@ describe('L1Cache', () => {
       expect(limitedCache.getWithSwr('key2').shouldRefresh).toBe(true);
       expect(limitedCache.stats.refreshing).toBe(1);
     });
+
+    it('deferRefresh frees the refresh slot and holds the key off for the marker TTL', () => {
+      vi.useFakeTimers();
+      // Stale on every jitter draw at t=120s (see the marker-expiry test) and
+      // alive until t=200s, past the 60s hold.
+      cache.set('key', 'value', 200_000, 'test');
+      vi.advanceTimersByTime(120_000);
+      const read = cache.getWithSwr('key');
+      expect(read.shouldRefresh).toBe(true);
+
+      cache.deferRefresh('key', read.versionToken);
+      expect(cache.stats.refreshing).toBe(0);
+
+      vi.advanceTimersByTime(59_999);
+      expect(cache.getWithSwr('key').shouldRefresh).toBe(false);
+      vi.advanceTimersByTime(1);
+      expect(cache.getWithSwr('key').shouldRefresh).toBe(true);
+    });
+
+    it('deferRefresh holds nothing for a key L1 dropped or rewrote while it refreshed', () => {
+      vi.useFakeTimers();
+      cache.set('deleted', 'value', 200_000, 'test');
+      cache.set('rewritten', 'value', 200_000, 'test');
+      vi.advanceTimersByTime(120_000);
+      const deleted = cache.getWithSwr('deleted');
+      const rewritten = cache.getWithSwr('rewritten');
+      expect(deleted.shouldRefresh && rewritten.shouldRefresh).toBe(true);
+
+      // The refreshes are in flight when L1 loses the entries they were for.
+      cache.delete('deleted');
+      cache.set('rewritten', 'newer', 2_000, 'test');
+      cache.deferRefresh('deleted', deleted.versionToken);
+      cache.deferRefresh('rewritten', rewritten.versionToken);
+      expect(cache.stats.refreshing).toBe(0);
+
+      // The hold is kept on the entry, so it went with it: a new entry for
+      // either key that goes stale inside the old hold window refreshes.
+      cache.set('deleted', 'again', 2_000, 'test');
+      vi.advanceTimersByTime(1_500); // 0.5s left, below the 0.9s threshold floor
+      expect(cache.getWithSwr('deleted').shouldRefresh).toBe(true);
+      expect(cache.getWithSwr('rewritten').shouldRefresh).toBe(true);
+    });
   });
 
   describe('invalidation', () => {

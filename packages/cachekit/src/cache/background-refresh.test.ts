@@ -152,22 +152,22 @@ describe('BackgroundRefreshManager', () => {
       expect(l1Cache.get('key1')).toBe(refreshedCiphertext);
     });
 
-    it('holds the refresh marker when the write returns nothing storable', async () => {
+    it('holds the key off for the marker TTL when the write returns nothing storable', async () => {
       // No ciphertext to show for the write, so L1 must keep the stale entry
-      // rather than fall back to the plaintext. Critically the marker is NOT
-      // released: cancelling frees it immediately while expiresAt stays put,
-      // so every later read would re-arm the refresh and hammer the origin.
-      // Letting it lapse via SWR_REFRESH_MARKER_TTL_MS throttles to 1/min/key.
+      // rather than fall back to the plaintext. The key must not become
+      // refreshable at once: expiresAt stays put, so every later read would
+      // re-arm the refresh and hammer the origin. It is held off for
+      // SWR_REFRESH_MARKER_TTL_MS (1/min/key), but its refresh slot is freed.
       const degraded = vi.fn(async () => null);
       const computeFn = vi.fn().mockResolvedValue({ data: 'fresh' });
 
-      // Frozen clock + pinned jitter (vi.mock at top of file): with a 4s TTL
-      // the refresh threshold is exactly 2s, so a read at t=2.4s is
-      // deterministically stale and the entry deterministically alive until
-      // t=4s. Time only moves when this test says so — no wall-clock races.
+      // Frozen clock + pinned jitter (vi.mock at top of file): with a 200s
+      // TTL the refresh threshold is exactly 100s, so a read at t=120s is
+      // deterministically stale and the entry alive until t=200s, past the
+      // 60s hold. Time only moves when this test says so — no wall-clock races.
       vi.useFakeTimers();
-      l1Cache.set('key1', { data: 'stale' }, 4000, 'test');
-      vi.advanceTimersByTime(2400);
+      l1Cache.set('key1', { data: 'stale' }, 200_000, 'test');
+      vi.advanceTimersByTime(120_000);
       const stale = l1Cache.getWithSwr('key1');
       expect(stale.shouldRefresh).toBe(true);
 
@@ -189,9 +189,48 @@ describe('BackgroundRefreshManager', () => {
       expect(degraded).toHaveBeenCalled();
 
       expect(l1Cache.get('key1')).toEqual({ data: 'stale' });
-      expect(l1Cache.stats.refreshing).toBe(1);
-      // A second read must NOT schedule another refresh while the marker holds.
+      expect(l1Cache.stats.refreshing).toBe(0);
+      // A later read must NOT schedule another refresh while the hold lasts…
+      vi.advanceTimersByTime(59_000);
       expect(l1Cache.getWithSwr('key1').shouldRefresh).toBe(false);
+      // …and once it lapses the still-stale key is refreshable again.
+      vi.advanceTimersByTime(2_000);
+      expect(l1Cache.getWithSwr('key1').shouldRefresh).toBe(true);
+    });
+
+    it('keys whose writes return nothing storable do not hold the shared refresh slots', async () => {
+      // maxConcurrentRefreshes keys that keep producing unstorable values
+      // must not stop SWR for every other key on the cache.
+      const limited = new L1Cache({ maxEntries: 100, maxConcurrentRefreshes: 2 });
+      const degraded = vi.fn(async () => null);
+      vi.useFakeTimers();
+      for (const key of ['bad0', 'bad1', 'good']) limited.set(key, key, 4000, 'test');
+      vi.advanceTimersByTime(2400); // all deterministically stale
+
+      for (const key of ['bad0', 'bad1']) {
+        const stale = limited.getWithSwr(key);
+        expect(stale.shouldRefresh).toBe(true);
+        let refreshDone!: Promise<unknown>;
+        manager.scheduleRefresh(
+          key,
+          vi.fn().mockResolvedValue('unstorable'),
+          { ttl: 3600, namespace: 'test' },
+          stale.versionToken,
+          limited,
+          degraded,
+          (promise) => {
+            refreshDone = promise;
+          }
+        );
+        await refreshDone;
+      }
+
+      expect(degraded).toHaveBeenCalledTimes(2);
+      // Both stuck keys stay throttled…
+      expect(limited.getWithSwr('bad0').shouldRefresh).toBe(false);
+      expect(limited.getWithSwr('bad1').shouldRefresh).toBe(false);
+      // …and an unrelated stale key still gets a refresh slot.
+      expect(limited.getWithSwr('good').shouldRefresh).toBe(true);
     });
 
     it('should log error and cancel L1 refresh on failure', async () => {
