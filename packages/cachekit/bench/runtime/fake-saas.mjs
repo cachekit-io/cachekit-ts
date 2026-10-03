@@ -30,8 +30,6 @@ import http2 from 'node:http2';
 import { isIP } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { parseArgs } from 'node:util';
 
 /** The name the SDK is configured with; probe.mjs routes it to the bench host. */
 export const FAKE_NAME = 'api.cachekit.test';
@@ -101,7 +99,6 @@ export async function startFake({ key, cert, headCl, host = BENCH_HOST }) {
     connections: 0,
     alpn: [],
     requests: 0,
-    byMethod: {},
     byVersion: {},
     serverIdleCloses: 0,
   });
@@ -112,7 +109,6 @@ export async function startFake({ key, cert, headCl, host = BENCH_HOST }) {
     { key, cert, allowHTTP1: true, ALPNProtocols: ['h2', 'http/1.1'] },
     (req, res) => {
       stats.requests++;
-      stats.byMethod[req.method] = (stats.byMethod[req.method] ?? 0) + 1;
       stats.byVersion[req.httpVersion] = (stats.byVersion[req.httpVersion] ?? 0) + 1;
       const path = new URL(req.url, `https://${FAKE_NAME}`).pathname;
       const match = /^\/v1\/cache\/([^/]+)$/.exec(path);
@@ -188,25 +184,4 @@ export async function startFake({ key, cert, headCl, host = BENCH_HOST }) {
       await Promise.all([server, control].map((s) => new Promise((done) => s.close(done))));
     },
   };
-}
-
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const { values: opt } = parseArgs({ options: { 'head-cl': { type: 'string', default: '1' } } });
-  const tls = mintCert();
-  const fake = await startFake({ ...tls, headCl: Number(opt['head-cl']) });
-  console.log(
-    JSON.stringify({
-      host: BENCH_HOST,
-      port: fake.port,
-      ctlPort: fake.ctlPort,
-      certPath: tls.certPath,
-    })
-  );
-  const stop = async () => {
-    await fake.close();
-    tls.cleanup();
-    process.exit(0);
-  };
-  process.on('SIGINT', stop);
-  process.on('SIGTERM', stop);
 }

@@ -1,13 +1,13 @@
 // Run probe.mjs under several JavaScript runtimes and compare them.
 //
-//   node bench/runtime/run.mjs [--runtime name=path ...] [--ref name] [--aa all|none|a,b]
+//   node bench/runtime/run.mjs [--runtime name=path ...] [--ref name]
 //                              [--gaps 2,5,30,70,130,250,400] [--rounds 5] [--import-rounds 9]
 //                              [--only counts,wall,cpu,import,load] [--json out.jsonl]
 //
 // --runtime names a runtime binary, repeatable (node, bun or deno, told apart by the file
 // name). Default: this node, plus `bun` and `deno` when they are on PATH. --ref is the
-// runtime every ratio divides by (default: the first). --aa picks the runtimes that also
-// run as their own A/A twin (default: all of them).
+// runtime every ratio divides by (default: the first). Every runtime also runs as its own
+// A/A twin.
 //
 // What it reports, and how far each number can be trusted:
 // - counts (gates). Deterministic, so the A/A floor is 0: each runtime and its twin must
@@ -55,7 +55,6 @@ const { values: opt } = parseArgs({
   options: {
     runtime: { type: 'string', multiple: true },
     ref: { type: 'string' },
-    aa: { type: 'string', default: 'all' },
     gaps: { type: 'string', default: '2,5,30,70,130,250,400' },
     rounds: { type: 'string', default: '5' },
     'import-rounds': { type: 'string', default: '9' },
@@ -88,8 +87,6 @@ if (!opt.runtime) {
 const names = Object.keys(runtimes);
 const ref = opt.ref ?? names[0];
 if (!(ref in runtimes)) throw new Error(`--ref ${ref} is not one of the runtimes: ${names}`);
-const twins = opt.aa === 'all' ? names : opt.aa === 'none' ? [] : opt.aa.split(',');
-for (const name of twins) if (!(name in runtimes)) throw new Error(`--aa names unknown ${name}`);
 const gaps = opt.gaps.split(',').map(Number);
 if (gaps.some((g) => !(g >= 0))) throw new Error('--gaps takes seconds, comma separated');
 const rounds = Number(opt.rounds);
@@ -103,7 +100,10 @@ if (!existsSync(new URL('../../dist/index.js', import.meta.url))) {
 
 // Arms: every runtime, plus its A/A twin (the same binary under another name).
 const arms = Object.fromEntries(
-  names.flatMap((n) => [[n, runtimes[n]], ...(twins.includes(n) ? [[n + TWIN, runtimes[n]]] : [])])
+  names.flatMap((n) => [
+    [n, runtimes[n]],
+    [n + TWIN, runtimes[n]],
+  ])
 );
 const armNames = Object.keys(arms);
 
@@ -247,7 +247,7 @@ if (phases.has('counts')) {
   for (const [name, headCl] of names.flatMap((n) => HEAD_CL.map((h) => [n, h]))) {
     const r = find(name, headCl);
     if (!r) continue; // failed: reported above
-    const twin = twins.includes(name) ? find(name + TWIN, headCl) : undefined;
+    const twin = find(name + TWIN, headCl);
     const agree = twin ? JSON.stringify(gate(r)) === JSON.stringify(gate(twin)) : null;
     if (agree === false) disagreements++;
     table[`${r.arm} ${r.runtime_version} head_cl=${r.head_cl}`] = {

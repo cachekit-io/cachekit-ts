@@ -638,7 +638,7 @@ With the CachekitIO backend, the `X-CacheKit-L1-*` telemetry headers are wired
 automatically from the cache's live L1/L2 hit and miss counters; pass your own
 `metricsProvider` in the backend config to override. Every CachekitIO request
 also sends `User-Agent: cachekit-ts/<version> (<runtime>)`, where the runtime is
-`node`, `bun`, `deno` or `workerd`, so the service can tell SDK releases and
+`node`, `bun`, `deno`, `workerd`, or `unknown` anywhere else, so the service can tell SDK releases and
 runtimes apart.
 
 **Is AES hardware-accelerated on this host?** `isHardwareAccelerated()` on the

@@ -29,14 +29,15 @@
 // - a PUT is sent only if its key is already in `--ledger` (appended and fsynced first)
 //   and its `X-CacheKit-TTL` is at most 900 s, so a crash leaves only keys the ledger
 //   names and the TTL removes;
-// - a 429, a 503, any other 4xx but 404, or a transport error stops the run (exit 3).
-//   Other 5xx are recorded and the run goes on, up to 5, so a server's sporadic errors
-//   are counted rather than ending it. Nothing is retried, and every op must send
-//   exactly one request;
+// - redirects are not followed, so a 3xx can never carry a request to an unchecked host;
 // - total requests, warm-ups and traces included, are capped (`--max-ops`, at most 2000)
 //   and paced under `--max-per-min`;
 // - the API key is read from CACHEKIT_API_KEY only, and never reaches argv, stdout or a
 //   row; error messages are scrubbed of it.
+// After each op its row is written, then judged: a 429, a 503, any other 4xx but 404
+// (a 3xx included), or a transport error stops the run (exit 3). Other 5xx are recorded
+// and the run goes on, up to 5, so a server's sporadic errors are counted rather than
+// ending it. Nothing is retried, and every op must send exactly one request.
 //
 // A new connection is detected from outside the HTTP stack, by diffing this process's
 // established TCP sockets to port 443 before and after each request (/proc, Linux only;
@@ -83,7 +84,7 @@ const RUNTIME = process.versions.bun ? 'bun' : 'node';
 const RUNTIME_VERSION = process.versions.bun ?? process.versions.node;
 
 const USAGE = `usage: wall-time-probe.mjs --run ID --phase NAME --out FILE --ledger FILE
-  [--env dev] [--key-prefix P] [--arms sdk,sdk] [--samples N per arm] [--block N]
+  [--key-prefix P] [--samples N per arm] [--block N]
   [--gap-ms MS] [--ops put,get,head,delete] [--size BYTES] [--ttl-s S]
   [--max-per-min N] [--max-ops N] [--user-agent UA]
 env: CACHEKIT_API_KEY, CACHEKIT_API_URL`;
@@ -100,12 +101,10 @@ function parse(argv) {
     strict: true,
     options: {
       run: str(),
-      env: str('dev'),
       phase: str(),
       out: str(),
       ledger: str(),
       'key-prefix': str(`wall-time-probe-${Math.floor(Date.now() / 1000)}`),
-      arms: str('sdk,sdk'),
       samples: str('20'),
       block: str('10'),
       'gap-ms': str('0'),
@@ -126,7 +125,6 @@ function parse(argv) {
   };
   const a = {
     run: v.run,
-    env: v.env,
     phase: v.phase,
     out: v.out,
     ledger: v.ledger,
@@ -141,9 +139,6 @@ function parse(argv) {
     maxOps: num('max-ops'),
     userAgent: v['user-agent'],
   };
-  // One arm kind: the SDK is the transport, so there is no copy to check it against.
-  if (v.arms !== 'sdk,sdk') throw new Error('--arms takes sdk,sdk only');
-  if (a.env !== 'dev') throw new Error(`--env must be dev (the only writable host); got ${a.env}`);
   if (a.ops.some((op) => !OPS.includes(op))) throw new Error(`--ops: one of ${OPS.join(',')}`);
   if (!a.block || !a.samples || a.samples % a.block) {
     throw new Error('--samples must be a positive multiple of --block');
@@ -192,7 +187,7 @@ function wire({ apiKey, ledgered, maxOps, userAgent }) {
     state.exchanges.push(ex);
     const t0 = performance.now();
     try {
-      const res = await realFetch(input, { ...init, headers });
+      const res = await realFetch(input, { ...init, headers, redirect: 'manual' });
       ex.ttfb = performance.now() - t0;
       ex.status = res.status;
       ex.names = [...res.headers.keys()].sort();
@@ -345,28 +340,21 @@ class Sink {
       path_class: label === 'trace' ? 'trace' : 'cache',
       key,
       status,
-      status_inferred: false,
       http_version: version,
       protocol: version === 'HTTP/2' ? 'h2' : version === 'HTTP/1.1' ? 'h1' : null,
-      num_connects: t.connectionNew === null ? null : Number(t.connectionNew),
       connection_new: t.connectionNew,
-      dns_resolves: null,
-      dns_ms: null,
-      tcp_ms: null,
-      tls_ms: null,
-      pretransfer_ms: null,
       ttfb_ms: ms(ex?.ttfb),
       // Request sent -> headers in, comparable to curl's `wait` only on a reused connection.
       wait_ms: reused ? ms(ex?.ttfb) : null,
       total_ms: ms(t.total),
       exitcode: errormsg ? 1 : 0,
-      errormsg: errormsg ?? ex?.error ?? null,
+      errormsg: [errormsg, ex?.error].filter(Boolean).join(': ') || null,
       headers: ex?.headers ?? {},
       header_names: ex?.names ?? [],
       ray_id: ex?.headers?.['cf-ray'] ?? null,
       user_agent: ex?.ua ?? null,
       run: this.args.run,
-      env: this.args.env,
+      env: 'dev',
       phase: this.args.phase,
       client: 'ts',
       client_version: VERSION,
@@ -377,8 +365,6 @@ class Sink {
       block,
       sample,
       size: this.args.size,
-      burst: null,
-      requests: null,
       invocation: this.invocation,
       loadavg: loadavg(),
     };
