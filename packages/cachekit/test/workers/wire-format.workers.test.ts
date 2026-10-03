@@ -2,10 +2,11 @@
  * Wire Format (ByteStorage envelope) — Workers lane (LAB-595)
  *
  * Verifies the wasm-backed ByteStorage against
- * protocol/test-vectors/wire-format.json (vendored in ./fixtures/ — re-copy
- * from the protocol repo on spec change): decodes every ground-truth
+ * protocol/test-vectors/wire-format.json (vendored in ./fixtures/ and
+ * sha256-pinned by the Node lane, test/protocol/wire-format.protocol.test.ts):
+ * decodes every ground-truth envelope and the constructed 32-bit ratio-wrap
  * envelope, round-trips, validates, and rejects corruption — inside real
- * workerd.
+ * workerd, on the wasm32 build.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -23,9 +24,25 @@ interface WireVector {
   envelope_encoding?: string;
 }
 
+interface Segment {
+  hex: string;
+  count: number;
+}
+
+/** Too large to pin as hex: bytes are given as repeated-segment lists. */
+interface ConstructedVector {
+  name: string;
+  original_size: number;
+  compressed_size: number;
+  envelope_size: number;
+  envelope_construction: Segment[];
+  input_construction: Segment[];
+}
+
 const vectors = fixture.vectors as WireVector[];
 const binVectors = vectors.filter((v) => v.envelope_encoding === 'bin');
 const legacyVectors = vectors.filter((v) => v.envelope_encoding === undefined);
+const constructedVectors = fixture.constructed_vectors as ConstructedVector[];
 
 // The envelope is a 4-element fixarray (0x94), so byte 1 is the msgpack
 // marker of compressed_data. This returns the one marker a conforming
@@ -51,6 +68,26 @@ function hexToBytes(hex: string): Uint8Array {
     bytes[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
   }
   return bytes;
+}
+
+// The fixture's construction_note: repeat each segment's hex `count` times and
+// concatenate the segments in order.
+function construct(segments: Segment[]): Uint8Array {
+  const units = segments.map((s) => [hexToBytes(s.hex), s.count] as const);
+  const out = new Uint8Array(units.reduce((n, [unit, count]) => n + unit.length * count, 0));
+  let offset = 0;
+  for (const [unit, count] of units) {
+    for (let i = 0; i < count; i++, offset += unit.length) out.set(unit, offset);
+  }
+  return out;
+}
+
+// Index of the first differing byte, or -1. A multi-MB toEqual diff is
+// unreadable; this names where the output went wrong.
+function firstMismatch(actual: Uint8Array, expected: Uint8Array): number {
+  const n = Math.min(actual.length, expected.length);
+  for (let i = 0; i < n; i++) if (actual[i] !== expected[i]) return i;
+  return actual.length === expected.length ? -1 : n;
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -125,6 +162,26 @@ describe('wire-format vectors (wasm ByteStorage)', () => {
       expect(bytesToHex(storage.unpack(hexToBytes(vector.envelope_hex)))).toBe(vector.input_hex);
     }
   });
+
+  // The wasm32 target this lane exists for: compressed_data is the first
+  // length at which 1000 * compressed_size overflows 32 bits, so a reader that
+  // multiplies in 32-bit (or pointer) width rejects this envelope as a ratio
+  // bomb. A pass on a 64-bit host proves nothing about wasm32.
+  it('carries the 32-bit ratio-wrap constructed vector', () => {
+    expect(constructedVectors.map((v) => v.name)).toEqual(['envelope_ratio_product_wraps_32_bits']);
+  });
+
+  it.each(constructedVectors.map((v) => [v.name, v] as const))(
+    'unpacks constructed envelope %s to its constructed input',
+    (_name, vector) => {
+      const envelope = construct(vector.envelope_construction);
+      const input = construct(vector.input_construction);
+      expect(envelope.length).toBe(vector.envelope_size);
+      expect(input.length).toBe(vector.original_size);
+      expect(compressedData(envelope).length).toBe(vector.compressed_size);
+      expect(firstMismatch(storage.unpack(envelope), input)).toBe(-1);
+    }
+  );
 
   it('rejects corrupted envelopes', () => {
     const packed = storage.pack(new TextEncoder().encode('integrity check payload'));
