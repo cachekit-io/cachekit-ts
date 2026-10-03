@@ -1,7 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
 import { runInNewContext } from 'node:vm';
 import { decode as msgpackDecode, encode as msgpackEncode } from '@msgpack/msgpack';
-import { MessagePackSerializer, assertDecodeDepth, boundedDecodeOptions } from './serializer.js';
+import {
+  MessagePackSerializer,
+  assertDecodeDepth,
+  boundedDecodeOptions,
+  decodeCounted,
+  encodeCounted,
+  resolveSerializerConfig,
+} from './serializer.js';
 import { ConfigurationError, ValueTooLargeError, SerializationError } from '../errors.js';
 
 const retag = <T extends object>(value: T, tag: string): T =>
@@ -527,6 +534,93 @@ describe('MessagePackSerializer', () => {
       expect(() => assertDecodeDepth(Uint8Array.of(0x91), 100)).toThrow(/Truncated/);
       // Empty buffer is not a valid single value.
       expect(() => assertDecodeDepth(new Uint8Array(0), 100)).toThrow(/Truncated/);
+    });
+  });
+
+  describe('object count (L1 memory charge)', () => {
+    const config = resolveSerializerConfig();
+
+    it('counts every array, map, bin and ext header, empty ones included', () => {
+      const zeros = (n: number) => new Array<number>(n).fill(0);
+      for (const bytes of [
+        [0x80], // fixmap
+        [0x90], // fixarray
+        [0xdc, 0, 0], // array16
+        [0xdd, 0, 0, 0, 0], // array32
+        [0xde, 0, 0], // map16
+        [0xdf, 0, 0, 0, 0], // map32
+        [0xc4, 0], // bin8
+        [0xc5, 0, 0], // bin16
+        [0xc6, 0, 0, 0, 0], // bin32
+        [0xd4, 1, ...zeros(1)], // fixext1
+        [0xd5, 1, ...zeros(2)], // fixext2
+        [0xd6, 1, ...zeros(4)], // fixext4
+        [0xd7, 1, ...zeros(8)], // fixext8
+        [0xd8, 1, ...zeros(16)], // fixext16
+        [0xc7, 0, 1], // ext8
+        [0xc8, 0, 0, 1], // ext16
+        [0xc9, 0, 0, 0, 0, 1], // ext32
+      ]) {
+        expect(assertDecodeDepth(Uint8Array.from(bytes), 100)).toBe(1);
+      }
+      expect(assertDecodeDepth(Uint8Array.of(0x2a), 100)).toBe(0);
+      expect(assertDecodeDepth(Uint8Array.of(0xa1, 0x61), 100)).toBe(0); // str
+      expect(assertDecodeDepth(msgpackEncode([{}, [], { a: [] }, 'x', 1]), 100)).toBe(5);
+    });
+
+    it('counts the same objects on encode as on decode', () => {
+      const value = [
+        {},
+        [],
+        { a: [] },
+        new Map([['k', new Set([1])]]),
+        new Date(0), // a string, not an object of its own
+        new Uint8Array(3), // bin
+        Array.from({ length: 20 }, () => ({})), // array16
+      ];
+      const encoded = { objects: 0 };
+      const decoded = { objects: 0 };
+      decodeCounted(encodeCounted(value, config, encoded), config, decoded);
+      expect(encoded.objects).toBe(29);
+      expect(decoded.objects).toBe(29);
+    });
+
+    it('counts the bin and timestamp ext values another writer stores', () => {
+      const bins = { objects: 0 };
+      decodeCounted(
+        msgpackEncode(Array.from({ length: 100 }, () => new Uint8Array(0))),
+        config,
+        bins
+      );
+      expect(bins.objects).toBe(101);
+
+      // @msgpack/msgpack writes a Date as a timestamp ext and reads it back as a Date.
+      const dates = { objects: 0 };
+      const decoded = decodeCounted<Date[]>(
+        msgpackEncode(Array.from({ length: 100 }, () => new Date(0))),
+        config,
+        dates
+      );
+      expect(decoded[0]).toBeInstanceOf(Date);
+      expect(dates.objects).toBe(101);
+    });
+
+    it('counts nothing for a value the size check rejects', () => {
+      const count = { objects: 0 };
+      const small = resolveSerializerConfig({ maxEncodedSize: 8 });
+      expect(() =>
+        encodeCounted(
+          Array.from({ length: 20 }, () => ({})),
+          small,
+          count
+        )
+      ).toThrow(ValueTooLargeError);
+      expect(count.objects).toBe(0);
+    });
+
+    it('leaves the public codec signatures as they were', () => {
+      expect(MessagePackSerializer.prototype.encode.length).toBe(1);
+      expect(MessagePackSerializer.prototype.decode.length).toBe(1);
     });
   });
 });

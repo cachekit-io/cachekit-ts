@@ -106,19 +106,24 @@ export function boundedDecodeOptions(maxCollectionSize: number, maxDecodedSize: 
  * pre-scan/decoder desync can only ever *reject* (availability), never *admit*
  * bytes the decoder would then amplify.
  *
- * ponytail: hand-rolled structural walk because @msgpack/msgpack exposes no
- * maxDepth; delete this in favour of a decoder-native bound if one lands
- * upstream (tracked alongside LAB-2487).
+ * It also counts the values that decode to a heap object of their own:
+ * arrays and maps, empty ones included, bin and ext. That count is what L1
+ * charges per object on a read (see `ObjectCount`), so a decoder-native depth
+ * bound, should @msgpack/msgpack grow one, would not replace this walk.
  *
+ * @returns the number of arrays, maps, bin and ext values in the document.
  * @throws {SerializationError} if nesting exceeds `maxDepth` or the bytes are
  *   structurally truncated/malformed.
  */
-export function assertDecodeDepth(data: Uint8Array, maxDepth: number): void {
+export function assertDecodeDepth(data: Uint8Array, maxDepth: number): number {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   // pending[d] = child values still to consume inside the collection at depth d.
   const pending: number[] = [1]; // exactly one top-level value expected
   let depth = 0;
   let pos = 0;
+  // Counted at each header, not at `children > 0` below: an empty container
+  // opens no level but still costs a heap object once decoded.
+  let objects = 0;
 
   const need = (n: number): void => {
     if (pos + n > data.length) {
@@ -139,8 +144,10 @@ export function assertDecodeDepth(data: Uint8Array, maxDepth: number): void {
       // positive/negative fixint — no payload
     } else if (b >= 0x80 && b <= 0x8f) {
       children = (b & 0x0f) * 2; // fixmap: N keys + N values
+      objects++;
     } else if (b >= 0x90 && b <= 0x9f) {
       children = b & 0x0f; // fixarray
+      objects++;
     } else if (b >= 0xa0 && b <= 0xbf) {
       pos += b & 0x1f; // fixstr
     } else {
@@ -167,18 +174,24 @@ export function assertDecodeDepth(data: Uint8Array, maxDepth: number): void {
         case 0xd3: // int64
           pos += 8;
           break;
-        case 0xd9: // str8
         case 0xc4: // bin8
+          objects++; // a Uint8Array once decoded
+        // falls through
+        case 0xd9: // str8
           need(1);
           pos += 1 + data[pos];
           break;
-        case 0xda: // str16
         case 0xc5: // bin16
+          objects++;
+        // falls through
+        case 0xda: // str16
           need(2);
           pos += 2 + view.getUint16(pos);
           break;
-        case 0xdb: // str32
         case 0xc6: // bin32
+          objects++;
+        // falls through
+        case 0xdb: // str32
           need(4);
           pos += 4 + view.getUint32(pos);
           break;
@@ -186,46 +199,58 @@ export function assertDecodeDepth(data: Uint8Array, maxDepth: number): void {
           need(2);
           children = view.getUint16(pos);
           pos += 2;
+          objects++;
           break;
         case 0xdd: // array32
           need(4);
           children = view.getUint32(pos);
           pos += 4;
+          objects++;
           break;
         case 0xde: // map16
           need(2);
           children = view.getUint16(pos) * 2;
           pos += 2;
+          objects++;
           break;
         case 0xdf: // map32
           need(4);
           children = view.getUint32(pos) * 2;
           pos += 4;
+          objects++;
           break;
         case 0xd4: // fixext1
+          objects++; // a Date (timestamp) or other object once decoded
           pos += 1 + 1;
           break;
         case 0xd5: // fixext2
+          objects++;
           pos += 1 + 2;
           break;
         case 0xd6: // fixext4
+          objects++;
           pos += 1 + 4;
           break;
         case 0xd7: // fixext8
+          objects++;
           pos += 1 + 8;
           break;
         case 0xd8: // fixext16
+          objects++;
           pos += 1 + 16;
           break;
         case 0xc7: // ext8
+          objects++;
           need(1);
           pos += 2 + data[pos];
           break;
         case 0xc8: // ext16
+          objects++;
           need(2);
           pos += 3 + view.getUint16(pos);
           break;
         case 0xc9: // ext32
+          objects++;
           need(4);
           pos += 5 + view.getUint32(pos);
           break;
@@ -254,6 +279,27 @@ export function assertDecodeDepth(data: Uint8Array, maxDepth: number): void {
       `Trailing bytes after MessagePack document: consumed ${pos} of ${data.length} (decode pre-scan)`
     );
   }
+  return objects;
+}
+
+/**
+ * Receives how many values in a document decode to a heap object of their
+ * own: arrays and maps (objects, Maps, Sets), empty ones too, plus binary and
+ * ext values. Counted by a walk the codec already runs, for L1's per-object
+ * charge (see OBJECT_SIZE in l1/lru-cache.ts). Package-internal.
+ */
+export interface ObjectCount {
+  objects: number;
+}
+
+/**
+ * State shared by one normalize() walk. The count rides in the object that
+ * already carries the mode: as a sixth recursive argument it measured
+ * costlier on a write of many empty objects.
+ */
+interface NormalizeWalk {
+  readonly forKey: boolean;
+  objects: number;
 }
 
 /**
@@ -365,16 +411,17 @@ function binary(value: object): [type: string, bytes: Uint8Array] | undefined {
  * - Track depth to prevent stack overflow
  * - M9 Fix: Check collection size to prevent DoS via large collections
  * - Pass Uint8Array (incl. Buffer) through as msgpack bin; reject other binary
- *   values, but hash any binary key argument (`forKey`) by its bytes
+ *   values, but hash any binary key argument (`walk.forKey`) by its bytes
+ * - Count arrays, Maps, Sets, plain objects and binary values into `walk.objects`
  *
- * Package-internal: key generation calls it with `forKey` set.
+ * Package-internal: key generation calls it with `walk.forKey` set.
  */
 export function normalize(
   value: unknown,
   depth: number,
   maxDepth: number,
   maxCollectionSize: number,
-  forKey: boolean
+  walk: NormalizeWalk
 ): unknown {
   if (depth > maxDepth) {
     throw new SerializationError(`Max depth of ${maxDepth} exceeded`);
@@ -403,7 +450,8 @@ export function normalize(
         `Array size ${value.length} exceeds max collection size ${maxCollectionSize}`
       );
     }
-    return value.map((item) => normalize(item, depth + 1, maxDepth, maxCollectionSize, forKey));
+    walk.objects++;
+    return value.map((item) => normalize(item, depth + 1, maxDepth, maxCollectionSize, walk));
   }
 
   if (value instanceof Date) {
@@ -417,10 +465,11 @@ export function normalize(
         `Map size ${value.size} exceeds max collection size ${maxCollectionSize}`
       );
     }
+    walk.objects++;
     const obj: Record<string, unknown> = {};
     const sortedKeys = Array.from(value.keys()).sort();
     for (const key of sortedKeys) {
-      obj[String(key)] = normalize(value.get(key), depth + 1, maxDepth, maxCollectionSize, forKey);
+      obj[String(key)] = normalize(value.get(key), depth + 1, maxDepth, maxCollectionSize, walk);
     }
     return obj;
   }
@@ -432,13 +481,15 @@ export function normalize(
         `Set size ${value.size} exceeds max collection size ${maxCollectionSize}`
       );
     }
+    walk.objects++;
     return Array.from(value)
-      .map((item) => normalize(item, depth + 1, maxDepth, maxCollectionSize, forKey))
+      .map((item) => normalize(item, depth + 1, maxDepth, maxCollectionSize, walk))
       .sort();
   }
 
   const bin = binary(value);
   if (bin) {
+    walk.objects++;
     const [type, bytes] = bin;
     // @msgpack/msgpack emits a Uint8Array as bin, bounded by the caller's
     // post-encode size check.
@@ -450,7 +501,7 @@ export function normalize(
     // 64 KiB key limit nor gets copied before it is checked. As a msgpack ext,
     // which no ordinary argument normalizes to, it cannot collide with an object
     // of that shape, e.g. { Int8Array: Uint8Array.of(255) }.
-    if (forKey) return new ExtData(0, encode([type, blake2b(bytes, { dkLen: 32 })]));
+    if (walk.forKey) return new ExtData(0, encode([type, blake2b(bytes, { dkLen: 32 })]));
     // A value would decode as a Uint8Array — a silent type change — so reject
     // it with the fix instead (LAB-4839).
     throw new SerializationError(
@@ -470,10 +521,11 @@ export function normalize(
     );
   }
 
+  walk.objects++;
   const sortedKeys = keys.sort();
   const result: Record<string, unknown> = {};
   for (const key of sortedKeys) {
-    result[key] = normalize(obj[key], depth + 1, maxDepth, maxCollectionSize, forKey);
+    result[key] = normalize(obj[key], depth + 1, maxDepth, maxCollectionSize, walk);
   }
   return result;
 }
@@ -505,21 +557,7 @@ export class MessagePackSerializer implements Serializer {
    *   (`size > NaN` is always false).
    */
   constructor(config: Partial<SerializerConfig> = {}) {
-    this.config = { ...DEFAULT_CONFIG, ...config };
-    const { maxDepth } = this.config;
-    if (!Number.isInteger(maxDepth) || maxDepth < MIN_MAX_DEPTH || maxDepth > MAX_MAX_DEPTH) {
-      throw new ConfigurationError(
-        `serializer.maxDepth must be an integer from ${MIN_MAX_DEPTH} to ${MAX_MAX_DEPTH}, got ${String(maxDepth)}`
-      );
-    }
-    for (const field of SIZE_BOUND_FIELDS) {
-      const value = this.config[field];
-      if (!Number.isSafeInteger(value) || value <= 0) {
-        throw new ConfigurationError(
-          `serializer.${field} must be a positive safe integer, got ${String(value)}`
-        );
-      }
-    }
+    this.config = resolveSerializerConfig(config);
   }
 
   /** The decoded-size ceiling, for callers that must enforce it upstream of decode(). */
@@ -534,54 +572,7 @@ export class MessagePackSerializer implements Serializer {
    * @throws {SerializationError} if depth exceeds maxDepth or collection size exceeds limit
    */
   encode<T>(value: T): Uint8Array {
-    // Normalize for deterministic output (also checks depth and collection size)
-    const normalized = normalize(
-      value,
-      0,
-      this.config.maxDepth,
-      this.config.maxCollectionSize,
-      false
-    );
-
-    // Encode to MessagePack
-    const encoded = encode(normalized);
-
-    // Check encoded size
-    if (encoded.length > this.config.maxEncodedSize) {
-      throw new ValueTooLargeError(
-        `Encoded size ${encoded.length} exceeds max ${this.config.maxEncodedSize}`
-      );
-    }
-
-    return encoded;
-  }
-
-  /**
-   * Validate decoded object depth to prevent decompression bombs.
-   *
-   * Now largely redundant with the pre-decode `assertDecodeDepth` on this path
-   * (that rejects over-depth input before `decode()` builds the graph 1:1). Kept
-   * as a cheap post-decode backstop for the freshly hand-rolled pre-scan: if the
-   * walker ever under-counts depth, this still catches it before the value is
-   * returned. Retire once the pre-scan's parity is proven in CI.
-   */
-  private validateDepth(value: unknown, depth: number): void {
-    if (depth > this.config.maxDepth) {
-      throw new SerializationError(
-        `Deserialized object exceeds max depth of ${this.config.maxDepth}`
-      );
-    }
-
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        this.validateDepth(item, depth + 1);
-      }
-    } else if (value !== null && typeof value === 'object' && !ArrayBuffer.isView(value)) {
-      // bin decodes to a Uint8Array: its elements are bytes, not children.
-      for (const v of Object.values(value)) {
-        this.validateDepth(v, depth + 1);
-      }
-    }
+    return encodeCounted(value, this.config);
   }
 
   /**
@@ -591,37 +582,125 @@ export class MessagePackSerializer implements Serializer {
    * @throws {SerializationError} if decoding fails
    */
   decode<T>(data: Uint8Array): T {
-    // Check input size
-    if (data.length > this.config.maxDecodedSize) {
-      throw new ValueTooLargeError(
-        `Input size ${data.length} exceeds max ${this.config.maxDecodedSize}`
+    return decodeCounted<T>(data, this.config);
+  }
+}
+
+/**
+ * The serializer config with defaults applied, validated as the
+ * MessagePackSerializer constructor documents. Package-internal: the cache
+ * holds the config and calls encodeCounted / decodeCounted with it.
+ */
+export function resolveSerializerConfig(config: Partial<SerializerConfig> = {}): SerializerConfig {
+  const resolved = { ...DEFAULT_CONFIG, ...config };
+  const { maxDepth } = resolved;
+  if (!Number.isInteger(maxDepth) || maxDepth < MIN_MAX_DEPTH || maxDepth > MAX_MAX_DEPTH) {
+    throw new ConfigurationError(
+      `serializer.maxDepth must be an integer from ${MIN_MAX_DEPTH} to ${MAX_MAX_DEPTH}, got ${String(maxDepth)}`
+    );
+  }
+  for (const field of SIZE_BOUND_FIELDS) {
+    const value = resolved[field];
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new ConfigurationError(
+        `serializer.${field} must be a positive safe integer, got ${String(value)}`
       );
     }
+  }
+  return resolved;
+}
 
-    // Bound nesting depth before the decoder eagerly preallocates per-header
-    // collections (LAB-2487) — the per-collection cap alone lets nested headers
-    // stack preallocations disproportionate to input size.
-    assertDecodeDepth(data, this.config.maxDepth);
+/**
+ * MessagePackSerializer.encode, adding the value's object count to `count`
+ * once the bytes pass the size check. Package-internal.
+ */
+export function encodeCounted<T>(
+  value: T,
+  config: SerializerConfig,
+  count?: ObjectCount
+): Uint8Array {
+  // Normalize for deterministic output (also checks depth and collection size)
+  const walk = { forKey: false, objects: 0 };
+  const normalized = normalize(value, 0, config.maxDepth, config.maxCollectionSize, walk);
 
-    try {
-      const decoded = decode(
-        data,
-        boundedDecodeOptions(this.config.maxCollectionSize, this.config.maxDecodedSize)
-      );
+  // Encode to MessagePack
+  const encoded = encode(normalized);
 
-      // Validate depth of decoded object (DoS protection)
-      this.validateDepth(decoded, 0);
+  // Check encoded size
+  if (encoded.length > config.maxEncodedSize) {
+    throw new ValueTooLargeError(
+      `Encoded size ${encoded.length} exceeds max ${config.maxEncodedSize}`
+    );
+  }
 
-      return decoded as T;
-    } catch (error) {
-      if (error instanceof SerializationError) {
-        throw error;
-      }
-      throw new SerializationError(
-        `Failed to decode MessagePack: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        { cause: error instanceof Error ? error : undefined }
-      );
+  if (count) count.objects += walk.objects;
+  return encoded;
+}
+
+/**
+ * Validate decoded object depth to prevent decompression bombs.
+ *
+ * Now largely redundant with the pre-decode `assertDecodeDepth` on this path
+ * (that rejects over-depth input before `decode()` builds the graph 1:1). Kept
+ * as a cheap post-decode backstop for the freshly hand-rolled pre-scan: if the
+ * walker ever under-counts depth, this still catches it before the value is
+ * returned. Retire once the pre-scan's parity is proven in CI.
+ */
+function validateDepth(value: unknown, depth: number, maxDepth: number): void {
+  if (depth > maxDepth) {
+    throw new SerializationError(`Deserialized object exceeds max depth of ${maxDepth}`);
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      validateDepth(item, depth + 1, maxDepth);
     }
+  } else if (value !== null && typeof value === 'object' && !ArrayBuffer.isView(value)) {
+    // bin decodes to a Uint8Array: its elements are bytes, not children.
+    for (const v of Object.values(value)) {
+      validateDepth(v, depth + 1, maxDepth);
+    }
+  }
+}
+
+/**
+ * MessagePackSerializer.decode, adding the document's object count to
+ * `count` once it decodes. Package-internal.
+ */
+export function decodeCounted<T>(
+  data: Uint8Array,
+  config: SerializerConfig,
+  count?: ObjectCount
+): T {
+  // Check input size
+  if (data.length > config.maxDecodedSize) {
+    throw new ValueTooLargeError(`Input size ${data.length} exceeds max ${config.maxDecodedSize}`);
+  }
+
+  // Bound nesting depth before the decoder eagerly preallocates per-header
+  // collections (LAB-2487) — the per-collection cap alone lets nested headers
+  // stack preallocations disproportionate to input size.
+  const objects = assertDecodeDepth(data, config.maxDepth);
+
+  try {
+    const decoded = decode(
+      data,
+      boundedDecodeOptions(config.maxCollectionSize, config.maxDecodedSize)
+    );
+
+    // Validate depth of decoded object (DoS protection)
+    validateDepth(decoded, 0, config.maxDepth);
+
+    if (count) count.objects += objects;
+    return decoded as T;
+  } catch (error) {
+    if (error instanceof SerializationError) {
+      throw error;
+    }
+    throw new SerializationError(
+      `Failed to decode MessagePack: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      { cause: error instanceof Error ? error : undefined }
+    );
   }
 }
 

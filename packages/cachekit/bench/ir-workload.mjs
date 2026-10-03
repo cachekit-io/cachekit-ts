@@ -138,6 +138,19 @@ export const WORKLOADS = {
   'plaintext-set-1kb': plaintextSet(32, 5_000),
   'plaintext-set-10kb': plaintextSet(320, 1_000),
   'plaintext-set-100kb': plaintextSet(3_200, 1_000),
+  // the worst case for L1's container count: 2,000 empty objects, one
+  // MessagePack byte each, so the count is a large share of the write
+  'plaintext-set-containers': {
+    n: 2_000,
+    setup: async () => {
+      const { createCache } = await load('index.js');
+      const cache = createCache({ backend: new MemoryBackend(), metrics: false });
+      const value = Array.from({ length: 2_000 }, () => ({}));
+      return async () => {
+        await cache.set(KEY, value);
+      };
+    },
+  },
   // wrap(): every call hashes its arguments before L1 is consulted
   keygen: {
     n: 20_000,

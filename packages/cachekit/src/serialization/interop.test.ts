@@ -5,6 +5,8 @@ import {
   generateInteropKey,
   encodeInteropValue,
   decodeInteropValue,
+  encodeInteropValueCounted,
+  decodeInteropValueCounted,
   validateInteropSegment,
   INTEROP_SEGMENT_PATTERN,
   InteropFloat,
@@ -380,5 +382,27 @@ describe('interop value decoding', () => {
     expect(decodeInteropValue<{ ts: number }>(encodeInteropValue({ ts: 1704112245123 }))).toEqual({
       ts: 1704112245123,
     });
+  });
+});
+
+describe('interop object count (L1 memory charge)', () => {
+  it('counts the same objects on encode as on decode', () => {
+    const value = {
+      empty: [{}, []],
+      when: new Date(0), // a sentinel map on the wire
+      tags: new Set([[], []]), // the duplicate is dropped, and not counted
+      big: Array.from({ length: 20 }, () => []), // array16
+      bin: [new Uint8Array(0), new Uint8Array(2)],
+    };
+    const encoded = { objects: 0 };
+    const decoded = { objects: 0 };
+    decodeInteropValueCounted(encodeInteropValueCounted(value, encoded), decoded);
+    expect(encoded.objects).toBe(31);
+    expect(decoded.objects).toBe(31);
+  });
+
+  it('leaves the public codec signatures as they were', () => {
+    expect(encodeInteropValue.length).toBe(1);
+    expect(decodeInteropValue.length).toBe(1);
   });
 });

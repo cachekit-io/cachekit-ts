@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { L1Cache } from './lru-cache.js';
 import { setLogger } from '../logger.js';
-import { defaultSerializer } from '../serialization/serializer.js';
+import {
+  defaultSerializer,
+  encodeCounted,
+  resolveSerializerConfig,
+} from '../serialization/serializer.js';
 import type { InvalidationEvent } from './types.js';
 
 describe('L1Cache', () => {
@@ -284,39 +288,9 @@ describe('L1Cache', () => {
   });
 
   describe('serializedSize hint', () => {
-    it('charges 2.5x the serialized length', () => {
-      const value = { id: 1, name: 'x'.repeat(100) };
-      cache.set('a', value as unknown as string, 10000, 'test', 120);
-      expect(cache.stats.memoryUsed).toBe(120 * 2.5);
-    });
-
-    it('does not stringify the value when given a size', () => {
-      const spy = vi.spyOn(JSON, 'stringify');
-      try {
-        cache.set('a', 'x'.repeat(1000), 10000, 'test', 1003);
-        expect(spy).not.toHaveBeenCalled();
-      } finally {
-        spy.mockRestore();
-      }
-    });
-
-    it('charges byte values their byteLength whatever the hint', () => {
-      const c = new L1Cache<Uint8Array>();
-      c.set('a', new Uint8Array(256), 10000, 'test', 9999);
-      expect(c.stats.memoryUsed).toBe(256);
-    });
-
-    it.each([NaN, -1, Infinity])('falls back to the estimate for a hint of %s', (hint) => {
-      const withHint = new L1Cache<string>();
-      const without = new L1Cache<string>();
-      withHint.set('a', 'x'.repeat(100), 10000, 'test', hint);
-      without.set('a', 'x'.repeat(100), 10000, 'test');
-      expect(withHint.stats.memoryUsed).toBe(without.stats.memoryUsed);
-    });
-
-    it('keeps eviction under maxMemory within 25% of the estimate it replaces', () => {
-      // One fixed mixed workload, inserted far past maxMemory, into a cache
-      // sized by the JSON.stringify estimate and one sized by the hint.
+    // One fixed mixed workload, inserted far past maxMemory, into a cache
+    // sized by the JSON.stringify estimate and one sized by the hint.
+    const parityWorkload = (): unknown[] => {
       const rec = (i: number) => ({ id: i, name: `item-${i}`, score: i * 1.5, ok: i % 2 === 0 });
       const shapes: ((i: number) => unknown)[] = [
         (i) => `ascii-${i}-` + 'x'.repeat(100),
@@ -336,7 +310,41 @@ describe('L1Cache', () => {
         }),
         (i) => ({ a: { b: { c: [i, 2, { d: 'deep', e: [true, false, null] }] } }, tags: ['x'] }),
       ];
-      const workload = Array.from({ length: 2200 }, (_, i) => shapes[i % shapes.length](i));
+      return Array.from({ length: 2200 }, (_, i) => shapes[i % shapes.length](i));
+    };
+
+    it('charges 2.5x the serialized length', () => {
+      const value = { id: 1, name: 'x'.repeat(100) };
+      cache.set('a', value as unknown as string, 10000, 'test', 120);
+      expect(cache.stats.memoryUsed).toBe(120 * 2.5);
+    });
+
+    it('does not stringify the value when given a size', () => {
+      const spy = vi.spyOn(JSON, 'stringify');
+      try {
+        cache.set('a', 'x'.repeat(1000), 10000, 'test', 1003);
+        expect(spy).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('charges byte values their byteLength whatever the hint', () => {
+      const c = new L1Cache<Uint8Array>();
+      c.set('a', new Uint8Array(256), 10000, 'test', 9999, 500);
+      expect(c.stats.memoryUsed).toBe(256);
+    });
+
+    it.each([NaN, -1, Infinity])('falls back to the estimate for a hint of %s', (hint) => {
+      const withHint = new L1Cache<string>();
+      const without = new L1Cache<string>();
+      withHint.set('a', 'x'.repeat(100), 10000, 'test', hint);
+      without.set('a', 'x'.repeat(100), 10000, 'test');
+      expect(withHint.stats.memoryUsed).toBe(without.stats.memoryUsed);
+    });
+
+    it('keeps eviction under maxMemory within 25% of the estimate it replaces', () => {
+      const workload = parityWorkload();
       const sizes = workload.map((v) => defaultSerializer.encode(v).length);
 
       for (const mb of [1, 2, 5]) {
@@ -352,6 +360,53 @@ describe('L1Cache', () => {
         expect(hinted.stats.entries / estimated.stats.entries).toBeGreaterThanOrEqual(0.75);
         expect(hinted.stats.entries / estimated.stats.entries).toBeLessThanOrEqual(1.25);
       }
+    });
+
+    it('keeps that parity with each object charged too', () => {
+      const workload = parityWorkload();
+      const config = resolveSerializerConfig();
+      const counts = workload.map(() => ({ objects: 0 }));
+      const sizes = workload.map((v, i) => encodeCounted(v, config, counts[i]).length);
+
+      for (const mb of [1, 2, 5]) {
+        const config = { maxEntries: 1_000_000, maxMemory: mb * 1024 * 1024 };
+        const estimated = new L1Cache<unknown>(config);
+        const hinted = new L1Cache<unknown>(config);
+        workload.forEach((v, i) => {
+          estimated.set(`k${i}`, v, 0, 'parity');
+          hinted.set(`k${i}`, v, 0, 'parity', sizes[i], counts[i].objects);
+        });
+        expect(estimated.stats.entries).toBeLessThan(workload.length);
+        expect(hinted.stats.entries / estimated.stats.entries).toBeGreaterThanOrEqual(0.75);
+        expect(hinted.stats.entries / estimated.stats.entries).toBeLessThanOrEqual(1.25);
+      }
+    });
+
+    it('charges each object on top of the serialized size', () => {
+      // 2,000 empty objects: three bytes of array header and one per object,
+      // but a heap object each.
+      const value = Array.from({ length: 2000 }, () => ({}));
+      const count = { objects: 0 };
+      const size = encodeCounted(value, resolveSerializerConfig(), count).length;
+      expect(count.objects).toBe(2001);
+
+      const c = new L1Cache<unknown>();
+      c.set('a', value, 10000, 'test', size, count.objects);
+      expect(c.stats.memoryUsed).toBe(size * 2.5 + 2001 * 32);
+    });
+
+    it.each([NaN, -1, Infinity])('ignores an object count of %s', (objects) => {
+      const counted = new L1Cache<string>();
+      counted.set('a', 'x'.repeat(100), 10000, 'test', 103, objects);
+      expect(counted.stats.memoryUsed).toBe(103 * 2.5);
+    });
+
+    it('ignores the object count without a serialized size', () => {
+      const counted = new L1Cache<string>();
+      const without = new L1Cache<string>();
+      counted.set('a', 'x'.repeat(100), 10000, 'test', undefined, 50);
+      without.set('a', 'x'.repeat(100), 10000, 'test');
+      expect(counted.stats.memoryUsed).toBe(without.stats.memoryUsed);
     });
   });
 
