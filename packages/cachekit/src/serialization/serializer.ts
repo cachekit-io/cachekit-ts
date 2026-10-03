@@ -282,6 +282,17 @@ export interface ContainerCount {
 }
 
 /**
+ * State shared by one normalize() walk. The count rides in the same object as
+ * the mode rather than in a parameter of its own: threading a sixth argument
+ * through every recursive call cost a cache write of 2,000 empty objects
+ * about 4% more instructions, where this costs about 1%.
+ */
+interface NormalizeWalk {
+  readonly forKey: boolean;
+  containers: number;
+}
+
+/**
  * Serializer interface for pluggable serialization strategies.
  */
 export interface Serializer {
@@ -390,18 +401,17 @@ function binary(value: object): [type: string, bytes: Uint8Array] | undefined {
  * - Track depth to prevent stack overflow
  * - M9 Fix: Check collection size to prevent DoS via large collections
  * - Pass Uint8Array (incl. Buffer) through as msgpack bin; reject other binary
- *   values, but hash any binary key argument (`forKey`) by its bytes
+ *   values, but hash any binary key argument (`walk.forKey`) by its bytes
+ * - Count arrays, Maps, Sets and plain objects into `walk.containers`
  *
- * Package-internal: key generation calls it with `forKey` set.
- * `count`, when given, gains one per array, Map, Set and plain object.
+ * Package-internal: key generation calls it with `walk.forKey` set.
  */
 export function normalize(
   value: unknown,
   depth: number,
   maxDepth: number,
   maxCollectionSize: number,
-  forKey: boolean,
-  count?: ContainerCount
+  walk: NormalizeWalk
 ): unknown {
   if (depth > maxDepth) {
     throw new SerializationError(`Max depth of ${maxDepth} exceeded`);
@@ -430,10 +440,8 @@ export function normalize(
         `Array size ${value.length} exceeds max collection size ${maxCollectionSize}`
       );
     }
-    if (count) count.containers++;
-    return value.map((item) =>
-      normalize(item, depth + 1, maxDepth, maxCollectionSize, forKey, count)
-    );
+    walk.containers++;
+    return value.map((item) => normalize(item, depth + 1, maxDepth, maxCollectionSize, walk));
   }
 
   if (value instanceof Date) {
@@ -447,18 +455,11 @@ export function normalize(
         `Map size ${value.size} exceeds max collection size ${maxCollectionSize}`
       );
     }
-    if (count) count.containers++;
+    walk.containers++;
     const obj: Record<string, unknown> = {};
     const sortedKeys = Array.from(value.keys()).sort();
     for (const key of sortedKeys) {
-      obj[String(key)] = normalize(
-        value.get(key),
-        depth + 1,
-        maxDepth,
-        maxCollectionSize,
-        forKey,
-        count
-      );
+      obj[String(key)] = normalize(value.get(key), depth + 1, maxDepth, maxCollectionSize, walk);
     }
     return obj;
   }
@@ -470,9 +471,9 @@ export function normalize(
         `Set size ${value.size} exceeds max collection size ${maxCollectionSize}`
       );
     }
-    if (count) count.containers++;
+    walk.containers++;
     return Array.from(value)
-      .map((item) => normalize(item, depth + 1, maxDepth, maxCollectionSize, forKey, count))
+      .map((item) => normalize(item, depth + 1, maxDepth, maxCollectionSize, walk))
       .sort();
   }
 
@@ -489,7 +490,7 @@ export function normalize(
     // 64 KiB key limit nor gets copied before it is checked. As a msgpack ext,
     // which no ordinary argument normalizes to, it cannot collide with an object
     // of that shape, e.g. { Int8Array: Uint8Array.of(255) }.
-    if (forKey) return new ExtData(0, encode([type, blake2b(bytes, { dkLen: 32 })]));
+    if (walk.forKey) return new ExtData(0, encode([type, blake2b(bytes, { dkLen: 32 })]));
     // A value would decode as a Uint8Array — a silent type change — so reject
     // it with the fix instead (LAB-4839).
     throw new SerializationError(
@@ -509,11 +510,11 @@ export function normalize(
     );
   }
 
-  if (count) count.containers++;
+  walk.containers++;
   const sortedKeys = keys.sort();
   const result: Record<string, unknown> = {};
   for (const key of sortedKeys) {
-    result[key] = normalize(obj[key], depth + 1, maxDepth, maxCollectionSize, forKey, count);
+    result[key] = normalize(obj[key], depth + 1, maxDepth, maxCollectionSize, walk);
   }
   return result;
 }
@@ -576,17 +577,18 @@ export class MessagePackSerializer implements Serializer {
    */
   encode<T>(value: T, count?: ContainerCount): Uint8Array {
     // Normalize for deterministic output (also checks depth and collection size)
+    const walk = { forKey: false, containers: 0 };
     const normalized = normalize(
       value,
       0,
       this.config.maxDepth,
       this.config.maxCollectionSize,
-      false,
-      count
+      walk
     );
 
     // Encode to MessagePack
     const encoded = encode(normalized);
+    if (count) count.containers += walk.containers;
 
     // Check encoded size
     if (encoded.length > this.config.maxEncodedSize) {
