@@ -113,8 +113,8 @@ try {
   build =
     git('rev-parse', '--short', 'HEAD').trim() +
     (git('status', '--porcelain').trim() ? '-dirty' : '');
-} catch {
-  // not a git checkout: the build stays "unknown"
+} catch (error) {
+  console.log(`build: git failed (${error.message.split('\n')[0]}), recording "unknown"`);
 }
 
 const tls = mintCert();

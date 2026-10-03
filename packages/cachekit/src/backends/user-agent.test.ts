@@ -20,6 +20,7 @@ describe('User-Agent', () => {
     ['Cloudflare-Workers', 'workerd'],
     ['Mozilla/5.0 (X11; Linux x86_64)', 'unknown'],
     [undefined, 'unknown'],
+    [42, 'unknown'],
   ])('maps navigator.userAgent %s to %s', (userAgent, token) => {
     expect(runtimeToken(userAgent)).toBe(token);
   });

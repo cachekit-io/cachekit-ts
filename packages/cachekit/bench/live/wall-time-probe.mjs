@@ -243,8 +243,9 @@ function tlsSockets() {
     try {
       const m = /^socket:\[(\d+)\]$/.exec(readlinkSync(`/proc/self/fd/${fd}`));
       if (m) mine.add(m[1]);
-    } catch {
-      // closed between readdir and readlink
+    } catch (error) {
+      // ENOENT: closed between readdir and readlink. Anything else would undercount silently.
+      if (error.code !== 'ENOENT') throw error;
     }
   }
   const out = new Set();

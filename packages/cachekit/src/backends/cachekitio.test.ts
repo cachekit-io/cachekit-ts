@@ -103,9 +103,14 @@ describe('CachekitIO Backend', () => {
       fetchSpy.mockResolvedValueOnce(mockResponse(404));
       await backend.get('key');
 
-      const [, opts] = fetchSpy.mock.calls[0] as [string, RequestInit];
-      const headers = opts.headers as Record<string, string>;
-      expect(headers['User-Agent']).toMatch(/^cachekit-ts\/\d+\.\d+\.\d+\S* \(node\)$/);
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            'User-Agent': expect.stringMatching(/^cachekit-ts\/\d+\.\d+\.\d+\S* \(node\)$/),
+          }),
+        })
+      );
     });
 
     it('URL-encodes keys with special characters', async () => {

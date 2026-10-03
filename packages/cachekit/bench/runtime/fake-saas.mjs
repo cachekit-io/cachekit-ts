@@ -1,6 +1,5 @@
 // Local TLS fake of the CacheKit SaaS data plane for the per-runtime probes.
-//
-//   node bench/runtime/fake-saas.mjs [--head-cl 0|1]   (standalone; run.mjs starts its own)
+// run.mjs starts one per probe.
 //
 // It answers in the shapes the CachekitIO backend reads (protocol spec/saas-api.md):
 // GET 200 octet-stream | 404, HEAD 200 | 404 (the `exists` route), PUT 200 {"success":true},
@@ -164,8 +163,10 @@ export async function startFake({ key, cert, headCl, host = BENCH_HOST }) {
     stats.alpn.push(socket.alpnProtocol || 'none');
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
-    socket.on('timeout', () => stats.serverIdleCloses++);
+    socket.on('timeout', () => stats.serverIdleCloses++); // http/1.1
   });
+  // h2 idles on the session's own timer, which never fires the socket's 'timeout'.
+  server.on('session', (session) => session.on('timeout', () => stats.serverIdleCloses++));
   const port = await listen(server, host);
 
   const control = http.createServer((req, res) => {
