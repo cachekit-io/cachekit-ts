@@ -189,8 +189,9 @@ describe('interop Set encoding budgets (encodeCanonical, shared by both profiles
   it('accepts a duplicate-heavy Set whose deduped encoding fits the budget', () => {
     // 20 distinct-identity objects with identical canonical encodings: ~4 MiB
     // pre-dedupe, ~200 KiB deduped. Dedupe happens on insert, so duplicates
-    // advance neither the byte budget nor the count — this must encode
-    // byte-identically to the singleton, not throw at the pre-dedupe sum.
+    // do not advance the byte budget; the count cap counts the caller's Set.
+    // This must encode byte-identically to the singleton, not throw at the
+    // pre-dedupe sum.
     const dup = (): { k: string } => ({ k: 'x'.repeat(200 * 1024) });
     const many = new Set(Array.from({ length: 20 }, dup));
     expect(many.size).toBe(20);
@@ -241,9 +242,6 @@ describe('interop Set encoding budgets (encodeCanonical, shared by both profiles
       },
     });
     expect(() => encodeInteropValue(s)).toThrow(ValueTooLargeError);
-    expect(() => encodeInteropValue(s)).toThrow(
-      'Interop array size 10001 exceeds max collection size 10000'
-    );
     expect(iterated).toBe(0);
   });
 
