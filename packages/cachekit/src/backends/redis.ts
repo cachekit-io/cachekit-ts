@@ -45,9 +45,10 @@ const messageOf = (error: unknown): string =>
  * command. This copies ioredis 5.11's parseURL: a port number or a socket path
  * is used as is, and anything else goes through the WHATWG URL parser, with
  * `redis://` assumed when there is no scheme, and has its credentials
- * percent-decoded. ioredis 5.10 parsed with url.parse, which accepts a few
- * more malformed urls. The 'RedisBackend url check' tests compare this with
- * the installed ioredis. Messages are fixed text: the url can carry a password.
+ * percent-decoded. This package requires ioredis 5.11 or later, so the copy
+ * matches the parser the app uses. The 'RedisBackend url check' tests compare
+ * this with the installed ioredis. Messages are fixed text: the url can carry
+ * a password.
  */
 function assertValidUrl(url: unknown): void {
   // ioredis reads a non-string as options or a port, never as a url.
