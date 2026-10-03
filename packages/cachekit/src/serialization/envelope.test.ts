@@ -40,12 +40,22 @@ describe('envelopeVerdict', () => {
     expect(envelopeVerdict(forgedEnvelope(MAX + 1), MAX + 1)).toBe('unpack');
   });
 
-  it("is 'not-envelope' where core would reject before allocating the output", () => {
-    // Plain user values can take this shape; throwing would make them
+  it('names each check core would reject on before allocating the output', () => {
+    // Plain user values can take these shapes; throwing would make them
     // unreadable on a compression-off cache for no protection.
-    expect(envelopeVerdict(forgedEnvelope(12_000_000, 3), MAX)).toBe('not-envelope'); // > 1000:1
-    expect(envelopeVerdict(forgedEnvelope(600 * MiB, 700_000), MAX)).toBe('not-envelope'); // > 512 MiB
-    expect(envelopeVerdict(forgedEnvelope(0, 0), MAX)).toBe('not-envelope'); // empty payload
+    expect(envelopeVerdict(forgedEnvelope(12_000_000, 3), MAX)).toBe('over-ratio'); // > 1000:1
+    expect(envelopeVerdict(forgedEnvelope(600 * MiB, 700_000), MAX)).toBe('over-size-cap'); // > 512 MiB
+    expect(envelopeVerdict(forgedEnvelope(0, 0), MAX)).toBe('zero-length'); // empty payload
+  });
+
+  it('checks the size cap, then zero length, then the ratio (Retrieve Flow order)', () => {
+    // Each forged envelope also fails every later check.
+    expect(envelopeVerdict(forgedEnvelope(512 * MiB + 1, 0), MAX)).toBe('over-size-cap');
+    expect(envelopeVerdict(forgedEnvelope(5, 0), MAX)).toBe('zero-length');
+    // Exactly 1000:1 and exactly 512 MiB are inside core's caps.
+    expect(envelopeVerdict(forgedEnvelope(1_000_000, 1000), MAX)).toBe('unpack');
+    expect(envelopeVerdict(forgedEnvelope(1_000_001, 1000), MAX)).toBe('over-ratio');
+    expect(() => envelopeVerdict(forgedEnvelope(512 * MiB), MAX)).toThrow(ValueTooLargeError);
   });
 
   it("is 'not-envelope' when the compressed payload exceeds lz4's worst case for the declared size", () => {

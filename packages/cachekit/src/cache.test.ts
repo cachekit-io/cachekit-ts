@@ -728,6 +728,44 @@ describe('Cache Integration', () => {
         }
       );
 
+      // Core's own pre-allocation checks, each named on a compression-on read
+      // and each a plain-decode fallback under compression-off tolerance.
+      const coreCapRejections = [
+        ['over the 512 MiB size cap', forgedEnvelope(512 * 1024 * 1024 + 1, 1000), /size cap/],
+        ['zero-length compressed_data', forgedEnvelope(0, 0), /zero-length compressed_data/],
+        ['past the 1000:1 ratio', forgedEnvelope(1_000_001, 1000), /compression ratio cap/],
+      ] as const;
+
+      it.each(coreCapRejections)(
+        'names an envelope %s on a compression-on read, never unpacking it',
+        async (_label, stored, message) => {
+          const { codec, calls } = spyCodec();
+          const reader = await readerOver(stored, true, codec);
+
+          const error = await reader.get('test:ceiling').catch((e: unknown) => e);
+          expect(error).toBeInstanceOf(SerializationError);
+          expect((error as Error).message).toMatch(message);
+          // One message per check: no other check's text leaks in.
+          for (const [, , other] of coreCapRejections) {
+            if (other !== message) expect((error as Error).message).not.toMatch(other);
+          }
+          expect(calls.unpack).toBe(0);
+          await reader.close();
+        }
+      );
+
+      it.each(coreCapRejections)(
+        'reads an envelope %s as a plain 4-tuple under compression-off tolerance',
+        async (_label, stored) => {
+          const { codec, calls } = spyCodec();
+          const reader = await readerOver(stored, false, codec);
+
+          expect((await reader.get<unknown[]>('test:ceiling'))?.length).toBe(4);
+          expect(calls.unpack).toBe(0);
+          await reader.close();
+        }
+      );
+
       it('lets maxDecodedSize raise the ceiling for envelopes that legitimately need it', async () => {
         const { codec, calls } = spyCodec();
         const reader = await readerOver(forgedEnvelope(declared), true, codec, {
