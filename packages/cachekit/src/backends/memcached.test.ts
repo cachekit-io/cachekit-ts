@@ -25,9 +25,12 @@ const mockClient = {
 
 const clientCreate = vi.fn((..._args: unknown[]) => mockClient);
 
-// A function declaration, so the hoisted vi.mock factory can call it and a
-// test that swaps the factory with vi.doMock can put it back.
+// Set to make memjs fail to load. Every registration below uses mockMemjs,
+// so the order Vitest resolves queued mocks in (in parallel) cannot matter.
+const memjsLoad = vi.hoisted(() => ({ error: null as Error | null }));
+
 function mockMemjs() {
+  if (memjsLoad.error) throw memjsLoad.error;
   return {
     Client: {
       create: (...args: unknown[]) => clientCreate(...args),
@@ -316,14 +319,13 @@ describe('MemcachedBackend', () => {
     beforeEach(() => {
       logs.length = 0;
       setLogger((message) => logs.push(message));
-      // doMock, not a flag in the factory: Vitest keeps an evaluated mock
-      // cached across vi.resetModules().
-      vi.doMock('memjs', () => {
-        throw new Error("Cannot find package 'memjs'");
-      });
+      memjsLoad.error = new Error("Cannot find package 'memjs'");
+      // Re-registering drops the evaluated mock, which vi.resetModules() keeps.
+      vi.doMock('memjs', () => mockMemjs());
     });
 
     afterEach(() => {
+      memjsLoad.error = null;
       vi.doMock('memjs', () => mockMemjs());
       setLogger(null);
     });
