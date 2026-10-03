@@ -485,9 +485,15 @@ function encodeCanonical(
     // unique — duplicateness is unknowable until encoded, and charging the
     // running total during the re-encode would falsely reject a duplicate
     // bigger than the budget remainder even though the deduped output fits.
-    // Both the byte budget and the collection-size cap fail DURING iteration,
-    // counting exactly what the output retains: duplicates advance neither
-    // total. The parent's own total advances once, on the pushes below.
+    // The byte budget fails DURING iteration, counting exactly what the
+    // output retains: duplicates do not advance it. The parent's own total
+    // advances once, on the pushes below.
+    // The collection-size cap is different: it counts the caller's Set, not
+    // the deduped output, and fires before any element is encoded, as the
+    // Map branch and auto mode cap .size. Counting retained elements would
+    // walk and encode a Set of any size whose elements collapse to no more
+    // canonical forms than the cap.
+    checkCollectionSize(v.size, 'array');
     const encoded: Uint8Array[] = [];
     const seen = new Set<string>();
     let running = sink.bytes;
@@ -501,7 +507,6 @@ function encodeCanonical(
       const key = bytesToHex(bytes);
       if (seen.has(key)) continue;
       seen.add(key);
-      checkCollectionSize(seen.size, 'array');
       running += bytes.length;
       if (running > DEFAULT_MAX_ENCODED_SIZE) {
         throw new ValueTooLargeError(
