@@ -19,7 +19,7 @@ function encodeArgs(args: unknown[]): Uint8Array {
   const encoded = encode(
     normalize(args, 0, KEY_GEN_MAX_DEPTH, DEFAULT_MAX_COLLECTION_SIZE, {
       forKey: true,
-      containers: 0,
+      objects: 0,
     })
   );
   if (encoded.length > KEY_GEN_MAX_SIZE) {

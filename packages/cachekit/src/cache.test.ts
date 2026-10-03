@@ -1579,11 +1579,18 @@ describe('Cache Integration', () => {
       setLogger(() => {});
       const backend = new InMemoryBackend();
       const backendSet = vi.spyOn(backend, 'set');
-      const encode = vi.spyOn(MessagePackSerializer.prototype, 'encode');
       const c = productionCache(backend);
+      // Each encode reads the property once, so the read count is the encode count.
+      let reads = 0;
+      const value = {
+        get big() {
+          reads++;
+          return oversized();
+        },
+      };
 
-      await expect(c.set('ns:big', oversized())).resolves.toBeUndefined();
-      expect(encode).toHaveBeenCalledTimes(1);
+      await expect(c.set('ns:big', value)).resolves.toBeUndefined();
+      expect(reads).toBe(1);
       expect(backendSet).not.toHaveBeenCalled();
 
       await c.close();
@@ -1591,12 +1598,19 @@ describe('Cache Integration', () => {
 
     it('a SerializationError encodes once and never counts toward the breaker', async () => {
       const backend = new InMemoryBackend();
-      const encode = vi.spyOn(MessagePackSerializer.prototype, 'encode');
       const c = productionCache(backend, { maxCollectionSize: 10 });
       const tooMany = Array.from({ length: 11 }, (_, i) => i);
+      // Each encode reads the property once, so the read count is the encode count.
+      let reads = 0;
+      const wide = {
+        get items() {
+          reads++;
+          return tooMany;
+        },
+      };
 
-      await expect(c.set('ns:wide0', tooMany)).resolves.toBeUndefined();
-      expect(encode).toHaveBeenCalledTimes(1);
+      await expect(c.set('ns:wide0', wide)).resolves.toBeUndefined();
+      expect(reads).toBe(1);
 
       for (let i = 1; i < 6; i++) await c.set(`ns:wide${i}`, tooMany);
       await c.set('ns:small', 'ok');

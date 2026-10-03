@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { L1Cache } from './lru-cache.js';
 import { setLogger } from '../logger.js';
-import { defaultSerializer } from '../serialization/serializer.js';
+import {
+  defaultSerializer,
+  encodeCounted,
+  resolveSerializerConfig,
+} from '../serialization/serializer.js';
 import type { InvalidationEvent } from './types.js';
 
 describe('L1Cache', () => {
@@ -327,7 +331,7 @@ describe('L1Cache', () => {
 
     it('charges byte values their byteLength whatever the hint', () => {
       const c = new L1Cache<Uint8Array>();
-      c.set('a', new Uint8Array(256), 10000, 'test', 9999);
+      c.set('a', new Uint8Array(256), 10000, 'test', 9999, 500);
       expect(c.stats.memoryUsed).toBe(256);
     });
 
@@ -358,10 +362,11 @@ describe('L1Cache', () => {
       }
     });
 
-    it('keeps that parity with each container charged too', () => {
+    it('keeps that parity with each object charged too', () => {
       const workload = parityWorkload();
-      const counts = workload.map(() => ({ containers: 0 }));
-      const sizes = workload.map((v, i) => defaultSerializer.encode(v, counts[i]).length);
+      const config = resolveSerializerConfig();
+      const counts = workload.map(() => ({ objects: 0 }));
+      const sizes = workload.map((v, i) => encodeCounted(v, config, counts[i]).length);
 
       for (const mb of [1, 2, 5]) {
         const config = { maxEntries: 1_000_000, maxMemory: mb * 1024 * 1024 };
@@ -369,7 +374,7 @@ describe('L1Cache', () => {
         const hinted = new L1Cache<unknown>(config);
         workload.forEach((v, i) => {
           estimated.set(`k${i}`, v, 0, 'parity');
-          hinted.set(`k${i}`, v, 0, 'parity', sizes[i], counts[i].containers);
+          hinted.set(`k${i}`, v, 0, 'parity', sizes[i], counts[i].objects);
         });
         expect(estimated.stats.entries).toBeLessThan(workload.length);
         expect(hinted.stats.entries / estimated.stats.entries).toBeGreaterThanOrEqual(0.75);
@@ -377,37 +382,31 @@ describe('L1Cache', () => {
       }
     });
 
-    it('charges each container on top of the serialized size', () => {
+    it('charges each object on top of the serialized size', () => {
       // 2,000 empty objects: three bytes of array header and one per object,
       // but a heap object each.
       const value = Array.from({ length: 2000 }, () => ({}));
-      const count = { containers: 0 };
-      const size = defaultSerializer.encode(value, count).length;
-      expect(count.containers).toBe(2001);
+      const count = { objects: 0 };
+      const size = encodeCounted(value, resolveSerializerConfig(), count).length;
+      expect(count.objects).toBe(2001);
 
       const c = new L1Cache<unknown>();
-      c.set('a', value, 10000, 'test', size, count.containers);
+      c.set('a', value, 10000, 'test', size, count.objects);
       expect(c.stats.memoryUsed).toBe(size * 2.5 + 2001 * 32);
     });
 
-    it.each([NaN, -1, Infinity])('ignores a container count of %s', (containers) => {
+    it.each([NaN, -1, Infinity])('ignores an object count of %s', (objects) => {
       const counted = new L1Cache<string>();
-      counted.set('a', 'x'.repeat(100), 10000, 'test', 103, containers);
+      counted.set('a', 'x'.repeat(100), 10000, 'test', 103, objects);
       expect(counted.stats.memoryUsed).toBe(103 * 2.5);
     });
 
-    it('ignores the container count without a serialized size', () => {
+    it('ignores the object count without a serialized size', () => {
       const counted = new L1Cache<string>();
       const without = new L1Cache<string>();
       counted.set('a', 'x'.repeat(100), 10000, 'test', undefined, 50);
       without.set('a', 'x'.repeat(100), 10000, 'test');
       expect(counted.stats.memoryUsed).toBe(without.stats.memoryUsed);
-    });
-
-    it('charges byte values their byteLength whatever the container count', () => {
-      const c = new L1Cache<Uint8Array>();
-      c.set('a', new Uint8Array(256), 10000, 'test', 9999, 500);
-      expect(c.stats.memoryUsed).toBe(256);
     });
   });
 

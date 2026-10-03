@@ -21,20 +21,16 @@ import {
 const SERIALIZED_SIZE_FACTOR = 2.5;
 
 /**
- * What L1 charges per array or map (object, Map, Set) when the caller passes
- * the value's container count, on top of SERIALIZED_SIZE_FACTOR. An empty
- * container serializes to one byte but is a whole heap object, so a byte
- * charge alone missed most of the cost of a value made of many small ones:
- * 2,000 empty objects held about 26x their charge. On 64-bit Node an empty
- * array measured 40 bytes of heap with its slot in the parent, an empty object
- * 64; 32 is the array without its slot, the least a container costs there.
- * With it such values hold under 2x their charge, ordinary shapes move toward
- * their real heap cost, and eviction on a mixed workload stays within about
- * 15% of the JSON.stringify estimate. Runtimes that compress pointers
- * (workerd) spend about half that, so they are charged high, never low.
+ * What L1 charges, on top of SERIALIZED_SIZE_FACTOR, per value that decodes
+ * to a heap object of its own (array, map, bin, ext) when the caller passes
+ * that count. Derivation, 64-bit Node: an empty array is 40 B of heap with
+ * its slot in the parent, 32 B without; an empty object is 64 B. 32 is the
+ * least such an object costs, and runtimes that compress pointers (workerd)
+ * spend about half, so they are charged high, never low. A Uint8Array view
+ * costs more than 32 B, so binary-heavy values are charged low.
  * Internal calibration, not a setting: kept off the public exports.
  */
-const CONTAINER_SIZE = 32;
+const OBJECT_SIZE = 32;
 
 /**
  * An entry plus its links in the recency list. The list is what makes LRU
@@ -182,7 +178,7 @@ export class L1Cache<T = unknown> {
     versionToken: number,
     namespace?: string,
     serializedSize?: number,
-    containers?: number
+    objects?: number
   ): boolean {
     this.refreshingKeys.delete(key);
 
@@ -193,7 +189,7 @@ export class L1Cache<T = unknown> {
     }
 
     // Update with new value
-    this.set(key, value, ttl, namespace ?? extractNamespace(key), serializedSize, containers);
+    this.set(key, value, ttl, namespace ?? extractNamespace(key), serializedSize, objects);
     return true;
   }
 
@@ -258,10 +254,11 @@ export class L1Cache<T = unknown> {
    *   multiple of that length against maxMemory instead of a
    *   JSON.stringify estimate. Ignored for byte values, which are charged
    *   their byteLength, and when it is not a finite non-negative number.
-   * @param containers - How many arrays and maps the value holds, empty ones
-   *   included, when the caller already counted them. Each adds a fixed
-   *   charge on top of the serializedSize one. Ignored without a usable
-   *   serializedSize, and when it is not a finite non-negative number.
+   * @param objects - How many values in the value decode to a heap object of
+   *   their own (arrays and maps, empty ones included, bin and ext), when the
+   *   caller already counted them. Each adds a fixed charge on top of the
+   *   serializedSize one. Ignored without a usable serializedSize, and when
+   *   it is not a finite non-negative number.
    */
   set(
     key: string,
@@ -269,9 +266,9 @@ export class L1Cache<T = unknown> {
     ttl: number,
     namespace: string,
     serializedSize?: number,
-    containers?: number
+    objects?: number
   ): void {
-    const size = this.sizeOf(value, serializedSize, containers);
+    const size = this.sizeOf(value, serializedSize, objects);
 
     // Take out the entry being replaced first, so it neither counts toward
     // maxEntries nor gets an unrelated entry evicted in its place.
@@ -521,7 +518,7 @@ export class L1Cache<T = unknown> {
   private sizeOf(
     value: unknown,
     serializedSize: number | undefined,
-    containers: number | undefined
+    objects: number | undefined
   ): number {
     // Secure caches store the L2 ciphertext here (LAB-238), so the common
     // entry is a Uint8Array. JSON.stringify turns one into {"0":12,"1":34,…} —
@@ -533,9 +530,8 @@ export class L1Cache<T = unknown> {
     // nothing, where the estimate below stringifies the whole value.
     // Finite and non-negative only: a NaN would poison currentMemory for good.
     if (Number.isFinite(serializedSize) && serializedSize! >= 0) {
-      const perContainer =
-        Number.isFinite(containers) && containers! >= 0 ? containers! * CONTAINER_SIZE : 0;
-      return serializedSize! * SERIALIZED_SIZE_FACTOR + perContainer;
+      const perObject = Number.isFinite(objects) && objects! >= 0 ? objects! * OBJECT_SIZE : 0;
+      return serializedSize! * SERIALIZED_SIZE_FACTOR + perObject;
     }
     return this.estimateSize(value);
   }
