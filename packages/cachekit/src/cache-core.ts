@@ -28,6 +28,7 @@ import {
 } from './serialization/serializer.js';
 import {
   envelopeVerdict,
+  ENVELOPE_REJECTIONS,
   looksLikeEnvelope,
   maxEnvelopeInputSize,
 } from './serialization/envelope.js';
@@ -469,8 +470,7 @@ export class CacheImpl implements SecureCache {
     // Only an envelope within the ceiling gets as far as unpack. One over it
     // throws rather than falling back: a real envelope served as plain data is
     // the corruption this path exists to prevent.
-    if (envelopeVerdict(bytes, this.serializerConfig.maxDecodedSize) === 'not-envelope')
-      return null;
+    if (envelopeVerdict(bytes, this.serializerConfig.maxDecodedSize) !== 'unpack') return null;
 
     // Codec construction stays OUTSIDE the try: a broken binding must fail
     // loudly (through getEntry's decode-failure path: counted, then a miss or
@@ -755,9 +755,10 @@ export class CacheImpl implements SecureCache {
       plaintext = await this.encryption.decrypt(plaintext, key, useEnvelope);
     }
     if (useEnvelope) {
-      if (envelopeVerdict(plaintext, this.serializerConfig.maxDecodedSize) === 'not-envelope') {
+      const verdict = envelopeVerdict(plaintext, this.serializerConfig.maxDecodedSize);
+      if (verdict !== 'unpack') {
         throw new SerializationError(
-          `Stored bytes (${plaintext.length} B) are not an envelope core would accept; refused before unpack`
+          `Stored bytes (${plaintext.length} B) ${ENVELOPE_REJECTIONS[verdict]}; refused before unpack`
         );
       }
       plaintext = this.withEnvelopeCodec((codec) => codec.unpack(plaintext));

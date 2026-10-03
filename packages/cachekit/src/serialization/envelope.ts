@@ -160,6 +160,21 @@ export function readEnvelopeHeader(
   return { compressedLength, declaredSize };
 }
 
+export type EnvelopeVerdict =
+  | 'unpack'
+  | 'not-envelope'
+  | 'over-size-cap'
+  | 'zero-length'
+  | 'over-ratio';
+
+/** What a compression-on read reports for each verdict it refuses before unpack. */
+export const ENVELOPE_REJECTIONS: Record<Exclude<EnvelopeVerdict, 'unpack'>, string> = {
+  'not-envelope': 'are not an envelope core would accept',
+  'over-size-cap': `are an envelope whose original_size exceeds the ${CORE_MAX_UNCOMPRESSED_SIZE} B size cap`,
+  'zero-length': 'are an envelope with zero-length compressed_data',
+  'over-ratio': `are an envelope whose original_size exceeds ${CORE_MAX_COMPRESSION_RATIO}x its compressed_data (compression ratio cap)`,
+};
+
 /**
  * Whether untrusted bytes may be handed to the core codec's unpack, under a
  * `maxDecodedSize` ceiling:
@@ -169,20 +184,24 @@ export function readEnvelopeHeader(
  *   compressed payload (at most lz4's worst case for the declared size; a
  *   legacy array-of-ints payload is decoded into a buffer grown by doubling,
  *   so up to about twice that), and the output (at most maxDecodedSize).
- * - `'not-envelope'` — no envelope core would accept: the bytes are not in a
- *   shape readEnvelopeHeader admits, core's own caps would reject them, or the
- *   compressed length exceeds what any LZ4 writer emits for the declared
- *   size. Never unpack these.
+ * - `'not-envelope'` — the bytes are not in a shape readEnvelopeHeader
+ *   admits, or the compressed length exceeds what any LZ4 writer emits for
+ *   the declared size.
+ * - `'over-size-cap'`, `'zero-length'`, `'over-ratio'` — an envelope core
+ *   would reject before allocating its output: `original_size` over the
+ *   512 MiB cap, empty `compressed_data`, or `original_size` past 1000x the
+ *   compressed length. Checked in that order, the protocol's Retrieve Flow
+ *   order. Kept apart so a compression-on read names which check failed:
+ *   core 0.6.0 reports a zero-length payload as a ratio error.
+ *
+ * Never unpack anything but `'unpack'`.
  *
  * @throws {ValueTooLargeError} for an envelope core would accept that
  *   declares more than `maxDecodedSize`, or bytes longer than
  *   maxEnvelopeInputSize. Such bytes are over maxDecodedSize either way, so a
  *   plain decode would reject them too.
  */
-export function envelopeVerdict(
-  bytes: Uint8Array,
-  maxDecodedSize: number
-): 'unpack' | 'not-envelope' {
+export function envelopeVerdict(bytes: Uint8Array, maxDecodedSize: number): EnvelopeVerdict {
   const maxInput = maxEnvelopeInputSize(maxDecodedSize);
   if (bytes.length > maxInput) {
     throw new ValueTooLargeError(
@@ -193,14 +212,10 @@ export function envelopeVerdict(
   const header = readEnvelopeHeader(bytes);
   if (header === null) return 'not-envelope';
   const { compressedLength, declaredSize } = header;
-  if (
-    compressedLength === 0 ||
-    declaredSize > CORE_MAX_UNCOMPRESSED_SIZE ||
-    declaredSize > CORE_MAX_COMPRESSION_RATIO * compressedLength ||
-    compressedLength > lz4MaxCompressedSize(declaredSize)
-  ) {
-    return 'not-envelope';
-  }
+  if (declaredSize > CORE_MAX_UNCOMPRESSED_SIZE) return 'over-size-cap';
+  if (compressedLength === 0) return 'zero-length';
+  if (declaredSize > CORE_MAX_COMPRESSION_RATIO * compressedLength) return 'over-ratio';
+  if (compressedLength > lz4MaxCompressedSize(declaredSize)) return 'not-envelope';
 
   if (declaredSize > maxDecodedSize) {
     throw new ValueTooLargeError(
