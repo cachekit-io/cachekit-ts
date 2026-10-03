@@ -418,7 +418,7 @@ jobs:
             # HOSTED is a set of exact labels, one word each: add a hosted
             # image's label to the list, never a pattern.
             BEGIN { split("ubuntu-latest macos-latest windows-latest", h); for (i in h) HOSTED[h[i]] = 1 }
-            FNR == 1 { matrix_indent = strategy_indent = value_indent = armed = block = gtext = -1; in_jobs = flow = noskip = gated = 0; quote = "" }
+            FNR == 1 { matrix_indent = strategy_indent = value_indent = armed = block = gtext = axis = -1; in_jobs = flow = noskip = gated = 0; quote = "" }
             # The text of a block scalar (the lines deeper than its | or > key)
             # is a string, never YAML: no rule reads it, so a script line that
             # says matrix: arms nothing and a ' in it opens nothing. The skip is
@@ -448,6 +448,8 @@ jobs:
               indent = RLENGTH
               if (armed >= 0 && indent <= armed) fail(FILENAME, FNR, "this line is not indented under the strategy: or matrix: key above it — keep that key bare over an indented block, not inside a flow map")
               armed = -1
+              # The first line under a bare matrix: sets the axis column.
+              if (axis == -2) axis = indent
               if (!flow && quote == "") {
                 if (matrix_indent >= 0 && indent <= matrix_indent) matrix_indent = -1
                 if (strategy_indent >= 0 && indent <= strategy_indent) strategy_indent = -1
@@ -508,7 +510,7 @@ jobs:
             # alias, tag or flow map) leaves the block unread, so the refusal
             # rule below rejects the line instead.
             !job_line && (strategy_indent < 0 || indent <= strategy_indent) && /^[[:space:]]*(-[[:space:]]*)?["']?strategy["']?[[:space:]]*:[[:space:]]*$/ { strategy_indent = armed = indent }
-            !job_line && (matrix_indent < 0 || indent <= matrix_indent) && /^[[:space:]]*(-[[:space:]]*)?["']?matrix["']?[[:space:]]*:[[:space:]]*$/ { matrix_indent = armed = indent }
+            !job_line && (matrix_indent < 0 || indent <= matrix_indent) && /^[[:space:]]*(-[[:space:]]*)?["']?matrix["']?[[:space:]]*:[[:space:]]*$/ { matrix_indent = armed = indent; axis = -2 }
             # Lines that may hide a runner label: a flow mapping carrying a
             # runner/strategy/matrix/uses key; strategy: or matrix: with any
             # inline value, include: with one inside a matrix; a YAML merge key
@@ -530,7 +532,9 @@ jobs:
             # file where a line holds a [ or { that is not a flat one-line list,
             # an empty {} or an expression's double braces (the noskip gate); a
             # CR, NEL, LS or PS anywhere in a line (in block text, a quoted value
-            # or a comment), even where the break hides nothing; a step uses:
+            # or a comment), even where the break hides nothing; an os or
+            # runner list of two or more labels in an include or exclude item,
+            # or a nested list on an axis, whatever reads it; a step uses:
             # value that is an alias or is written below its key.
             lraw ~ /[{,][[:space:]]*["']?(runs-on|os|runner|strategy|matrix|include|uses)["']?[[:space:]]*:/ ||
             /^[[:space:]]*(-[[:space:]]*)?["']?(strategy|matrix)["']?[[:space:]]*:[[:space:]]*[^[:space:]]/ ||
@@ -547,15 +551,19 @@ jobs:
               if (v ~ /^["']?\$\{\{[[:space:]]*matrix\.os[[:space:]]*\}\}["']?$/) next
               # An unclosed list or quote was wrapped, or cut by a # inside it.
               if (v ~ /^\[/ && v !~ /\]$/ || gsub(/"/, "&", v) % 2 || gsub(/'/, "&", v) % 2) v = ""
+              r = v; nest = v ~ /^\[.*[[{]/
               gsub(/[][ "']/, "", v)
-              # Only a plain comma list is split, so an expression is quoted
-              # whole; the advice names the first label that is not allow-listed.
-              # A runs-on list of two or more labels fails even when HOSTED holds
-              # each one.
-              n = v ~ /^[a-z0-9._-]+(,[a-z0-9._-]+)*$/ ? split(v, items, ",") : 0
+              # Only a plain comma list is split, so an expression or a nested
+              # list is quoted whole; the advice names the first label that is
+              # not allow-listed. A list of two or more labels that a job's
+              # runs-on receives whole fails even when HOSTED holds each one:
+              # on a runs-on line, or as one matrix value, which is any os or
+              # runner line off the axis column (an include or exclude item).
+              # An axis list is fine: each job gets one of its labels.
+              n = !nest && v ~ /^[a-z0-9._-]+(,[a-z0-9._-]+)*$/ ? split(v, items, ",") : 0
               for (i = 1; i <= n && (items[i] in HOSTED); i++) ;
-              sel = n > 1 && /^[[:space:]]*(-[[:space:]]*)?["']?runs-on/
-              if (!n || i <= n || sel) label(v, n ? items[i <= n ? i : 1] : "", sel)
+              sel = n > 1 && (/^[[:space:]]*(-[[:space:]]*)?["']?runs-on/ || indent != axis)
+              if (!n || i <= n || sel) label(nest ? r : v, n ? items[i <= n ? i : 1] : "", sel)
             }
             END { exit bad }
           AWK
