@@ -276,7 +276,16 @@ describe('Intent-based Cache API', () => {
 
       expect(capturedOptions!.reliability?.circuitBreaker?.failureThreshold).toBe(5);
       expect(capturedOptions!.reliability?.retry?.maxAttempts).toBe(3);
+      expect(capturedOptions!.reliability?.retry?.deadline).toBe(5000);
       expect(capturedOptions!.reliability?.degradation).toBe(true);
+    });
+
+    it('keeps the shared retry deadline when retry is partly overridden, and lets it be overridden', () => {
+      createCache.io({ apiKey: 'ck_live_test123', reliability: { retry: { maxAttempts: 5 } } });
+      expect(capturedOptions!.reliability?.retry?.deadline).toBe(5000);
+
+      createCache.io({ apiKey: 'ck_live_test123', reliability: { retry: { deadline: 15_000 } } });
+      expect(capturedOptions!.reliability?.retry?.deadline).toBe(15_000);
     });
 
     it('resolves apiKey from env var', () => {

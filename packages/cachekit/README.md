@@ -135,6 +135,7 @@ const cache = createCache({
     retry: {
       maxAttempts: 3,
       baseDelay: 100,
+      deadline: 5000, // optional: one budget in ms for all attempts
     },
   },
 
@@ -591,6 +592,22 @@ fix: `new BackendError(message, 'permanent')`. The classification defaults to
 `'transient'`, so an error with an unknown cause still trips the breaker during
 a real outage. `retry.retryOn` can narrow which errors are retried, but it
 cannot make a `permanent` or `authentication` error retry.
+
+### Timeouts and the retry deadline
+
+A cachekit.io request times out after 5 s per attempt by default, the
+protocol's `CACHEKIT_TIMEOUT` default and the same as cachekit-py. Change it
+with `timeout` on `createCache.io()` or `cachekitio()`. Under `production`,
+`secure` and `io`, all attempts of one operation also share a 5 s
+`retry.deadline`: no attempt starts once the next one would begin past it. A
+request that is accepted and never answered therefore degrades after one 5 s
+attempt instead of three, and a caller issuing operations one after another
+fills the breaker's 60 s window fast enough to open it. Fast failures (a 503, a
+dropped connection) still get all three attempts. The deadline bounds when an
+attempt may start, not how long it runs, so the worst case is the deadline plus
+one per-attempt timeout. Override it with `reliability: { retry: { deadline } }`;
+a retry policy you configure through `createCache()` has no deadline unless you
+set one.
 
 ## Observability
 

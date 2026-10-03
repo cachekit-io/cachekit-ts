@@ -20,6 +20,12 @@ export interface RetryConfig {
   /** Add random jitter to delays (default: true) */
   jitter: boolean;
   /**
+   * Overall budget in ms shared by every attempt (default: none). No attempt
+   * starts, and no backoff sleep begins, once the next attempt could not start
+   * inside it, so an op that timed out at the budget is not retried.
+   */
+  deadline?: number;
+  /**
    * Error types to retry (default: all retryable errors). Narrows, never
    * widens: a `BackendError` classified `permanent` or `authentication` is
    * never retried, whatever this returns.
@@ -66,6 +72,8 @@ export class RetryPolicy {
   async execute<T>(fn: () => Promise<T>, options?: ExecuteOptions): Promise<T> {
     let lastError: Error | undefined;
     const signal = options?.signal;
+    const deadlineAt =
+      this.config.deadline === undefined ? Infinity : Date.now() + this.config.deadline;
 
     for (let attempt = 0; attempt < this.config.maxAttempts; attempt++) {
       // m3 Fix: Check if aborted before each attempt
@@ -85,8 +93,13 @@ export class RetryPolicy {
 
         // Don't sleep on last attempt
         if (attempt < this.config.maxAttempts - 1) {
+          const delay = this.calculateDelay(attempt);
+          // The next attempt would start at or past the deadline: give up now
+          if (Date.now() + delay >= deadlineAt) {
+            throw lastError;
+          }
           // m3 Fix: Pass signal to sleep for cancellable delays
-          await this.sleep(this.calculateDelay(attempt), signal);
+          await this.sleep(delay, signal);
         }
       }
     }
