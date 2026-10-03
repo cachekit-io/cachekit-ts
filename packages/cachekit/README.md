@@ -570,8 +570,12 @@ open breaker skips still fills L1 there, with ciphertext. On an encrypted
 cache, a value that fails to serialize, compress or encrypt is never stored in
 L1. A compress or encrypt failure is not a backend failure: it is attempted
 once, never retried or counted toward the breaker, sends nothing to L2, is
-counted in `cachekit_errors_total`, and rejects with degradation off. An
-`authentication` failure is logged through the error logger, at most once a
+counted in `cachekit_errors_total`, and rejects with degradation off. With
+degradation on it is logged instead, at most once a minute per cache, as
+`[cachekit] set failed to encrypt or compress, value NOT written to L2 (keyHash=…): <reason>`.
+The reason is fixed per error class, and for an exhausted nonce budget it says
+to rotate forward to a new master key. The line never carries the key or the
+error text. An `authentication` failure is logged through the error logger, at most once a
 minute per cache, as
 `[cachekit] backend rejected <op> as an authentication failure (keyHash=…)`. The
 line carries a digest of the key, never the key, the API key or the response
