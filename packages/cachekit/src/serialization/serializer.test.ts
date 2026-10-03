@@ -537,7 +537,7 @@ describe('MessagePackSerializer', () => {
     });
   });
 
-  describe('object count (L1 memory charge)', () => {
+  describe('object and value count (L1 memory charge)', () => {
     const config = resolveSerializerConfig();
 
     it('counts every array, map, bin and ext header, empty ones included', () => {
@@ -561,11 +561,26 @@ describe('MessagePackSerializer', () => {
         [0xc8, 0, 0, 1], // ext16
         [0xc9, 0, 0, 0, 0, 1], // ext32
       ]) {
-        expect(assertDecodeDepth(Uint8Array.from(bytes), 100)).toBe(1);
+        expect(assertDecodeDepth(Uint8Array.from(bytes), 100).objects).toBe(1);
       }
-      expect(assertDecodeDepth(Uint8Array.of(0x2a), 100)).toBe(0);
-      expect(assertDecodeDepth(Uint8Array.of(0xa1, 0x61), 100)).toBe(0); // str
-      expect(assertDecodeDepth(msgpackEncode([{}, [], { a: [] }, 'x', 1]), 100)).toBe(5);
+      expect(assertDecodeDepth(Uint8Array.of(0x2a), 100).objects).toBe(0);
+      expect(assertDecodeDepth(Uint8Array.of(0xa1, 0x61), 100).objects).toBe(0); // str
+      expect(assertDecodeDepth(msgpackEncode([{}, [], { a: [] }, 'x', 1]), 100).objects).toBe(5);
+    });
+
+    it('counts every array element and map entry, at every header width', () => {
+      const values = (bytes: number[]) => assertDecodeDepth(Uint8Array.from(bytes), 100).values;
+      expect(values([0x92, 1, 2])).toBe(2); // fixarray
+      expect(values([0xdc, 0, 3, 1, 2, 3])).toBe(3); // array16
+      expect(values([0xdd, 0, 0, 0, 1, 1])).toBe(1); // array32
+      // A map counts its entries, not its keys and values.
+      expect(values([0x82, 0xa1, 0x61, 1, 0xa1, 0x62, 2])).toBe(2); // fixmap
+      expect(values([0xde, 0, 1, 0xa1, 0x61, 1])).toBe(1); // map16
+      expect(values([0xdf, 0, 0, 0, 1, 0xa1, 0x61, 1])).toBe(1); // map32
+      expect(values([0x2a])).toBe(0);
+      expect(values([0xc4, 3, 1, 2, 3])).toBe(0); // a bin's bytes are not values
+      // [[0, 0], {a: [0]}]: 2 + 2 + 1 + 1
+      expect(values([0x92, 0x92, 0, 0, 0x81, 0xa1, 0x61, 0x91, 0])).toBe(6);
     });
 
     it('counts the same objects on encode as on decode', () => {
@@ -578,15 +593,27 @@ describe('MessagePackSerializer', () => {
         new Uint8Array(3), // bin
         Array.from({ length: 20 }, () => ({})), // array16
       ];
-      const encoded = { objects: 0 };
-      const decoded = { objects: 0 };
+      const encoded = { objects: 0, values: 0 };
+      const decoded = { objects: 0, values: 0 };
       decodeCounted(encodeCounted(value, config, encoded), config, decoded);
-      expect(encoded.objects).toBe(29);
-      expect(decoded.objects).toBe(29);
+      expect(encoded).toEqual({ objects: 29, values: 30 });
+      expect(decoded).toEqual({ objects: 29, values: 30 });
+    });
+
+    it("counts a Map's own entries when String(key) merges them", () => {
+      // L1 keeps the caller's Map, every entry of it, though the encoding has one.
+      const value = new Map(Array.from({ length: 100 }, () => [{}, 0] as const));
+      const count = { objects: 0, values: 0 };
+      const decoded = decodeCounted<Record<string, number>>(
+        encodeCounted(value, config, count),
+        config
+      );
+      expect(Object.keys(decoded)).toEqual(['[object Object]']);
+      expect(count.values).toBe(100);
     });
 
     it('counts the bin and timestamp ext values another writer stores', () => {
-      const bins = { objects: 0 };
+      const bins = { objects: 0, values: 0 };
       decodeCounted(
         msgpackEncode(Array.from({ length: 100 }, () => new Uint8Array(0))),
         config,
@@ -595,7 +622,7 @@ describe('MessagePackSerializer', () => {
       expect(bins.objects).toBe(101);
 
       // @msgpack/msgpack writes a Date as a timestamp ext and reads it back as a Date.
-      const dates = { objects: 0 };
+      const dates = { objects: 0, values: 0 };
       const decoded = decodeCounted<Date[]>(
         msgpackEncode(Array.from({ length: 100 }, () => new Date(0))),
         config,
@@ -606,7 +633,7 @@ describe('MessagePackSerializer', () => {
     });
 
     it('counts nothing for a value the size check rejects', () => {
-      const count = { objects: 0 };
+      const count = { objects: 0, values: 0 };
       const small = resolveSerializerConfig({ maxEncodedSize: 8 });
       expect(() =>
         encodeCounted(
@@ -615,7 +642,7 @@ describe('MessagePackSerializer', () => {
           count
         )
       ).toThrow(ValueTooLargeError);
-      expect(count.objects).toBe(0);
+      expect(count).toEqual({ objects: 0, values: 0 });
     });
 
     it('leaves the public codec signatures as they were', () => {

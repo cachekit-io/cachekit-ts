@@ -366,11 +366,11 @@ describe('L1Cache', () => {
       expect(c.stats).toMatchObject({ entries: 1, memoryUsed: 300 });
     });
 
-    it('is refused when the charge comes from serializedSize and objects', () => {
+    it('is refused when the value count tips the charge over', () => {
       const c = new L1Cache<unknown>({ maxEntries: 100, maxMemory: 8000 });
       c.set('a', 'x', 10000, 'test');
-      // 100 B serialized x 2.5 = 250, plus 24 objects x 32 = 768: 1018.
-      c.set('rows', [{}], 10000, 'test', 100, 24);
+      // 175 (100 B x 1.75) + 768 (24 objects x 32) is under the 1000 cap; 10 values x 8 = 80 more is 1023.
+      c.set('rows', [{}], 10000, 'test', 100, { objects: 24, values: 10 });
       expect(c.get('rows')).toBeNull();
       expect(c.get('a')).toBe('x');
     });
@@ -456,7 +456,7 @@ describe('L1Cache', () => {
 
     it('charges byte values their byteLength whatever the hint', () => {
       const c = new L1Cache<Uint8Array>();
-      c.set('a', new Uint8Array(256), 10000, 'test', 9999, 500);
+      c.set('a', new Uint8Array(256), 10000, 'test', 9999, { objects: 500, values: 500 });
       expect(c.stats.memoryUsed).toBe(256);
     });
 
@@ -487,10 +487,10 @@ describe('L1Cache', () => {
       }
     });
 
-    it('keeps that parity with each object charged too', () => {
+    it('keeps that parity with each object and value charged too', () => {
       const workload = parityWorkload();
       const config = resolveSerializerConfig();
-      const counts = workload.map(() => ({ objects: 0 }));
+      const counts = workload.map(() => ({ objects: 0, values: 0 }));
       const sizes = workload.map((v, i) => encodeCounted(v, config, counts[i]).length);
 
       for (const mb of [1, 2, 5]) {
@@ -499,7 +499,7 @@ describe('L1Cache', () => {
         const hinted = new L1Cache<unknown>(config);
         workload.forEach((v, i) => {
           estimated.set(`k${i}`, v, 0, 'parity');
-          hinted.set(`k${i}`, v, 0, 'parity', sizes[i], counts[i].objects);
+          hinted.set(`k${i}`, v, 0, 'parity', sizes[i], counts[i]);
         });
         expect(estimated.stats.entries).toBeLessThan(workload.length);
         expect(hinted.stats.entries / estimated.stats.entries).toBeGreaterThanOrEqual(0.75);
@@ -511,25 +511,45 @@ describe('L1Cache', () => {
       // 2,000 empty objects: three bytes of array header and one per object,
       // but a heap object each.
       const value = Array.from({ length: 2000 }, () => ({}));
-      const count = { objects: 0 };
+      const count = { objects: 0, values: 0 };
       const size = encodeCounted(value, resolveSerializerConfig(), count).length;
-      expect(count.objects).toBe(2001);
+      expect(count).toEqual({ objects: 2001, values: 2000 });
 
       const c = new L1Cache<unknown>();
-      c.set('a', value, 10000, 'test', size, count.objects);
-      expect(c.stats.memoryUsed).toBe(size * 2.5 + 2001 * 32);
+      c.set('a', value, 10000, 'test', size, count);
+      expect(c.stats.memoryUsed).toBe(size * 1.75 + 2001 * 32 + 2000 * 8);
     });
 
-    it.each([NaN, -1, Infinity])('ignores an object count of %s', (objects) => {
-      const counted = new L1Cache<string>();
-      counted.set('a', 'x'.repeat(100), 10000, 'test', 103, objects);
-      expect(counted.stats.memoryUsed).toBe(103 * 2.5);
+    it.each([NaN, -1, Infinity])('charges a count with a field of %s as no count', (bad) => {
+      for (const count of [
+        { objects: bad, values: 10 },
+        { objects: 10, values: bad },
+      ]) {
+        const counted = new L1Cache<string>();
+        counted.set('a', 'x'.repeat(100), 10000, 'test', 103, count);
+        expect(counted.stats.memoryUsed).toBe(103 * 2.5);
+      }
     });
 
-    it('ignores the object count without a serialized size', () => {
+    it('reads each count field once', () => {
+      // A getter that turns NaN on a second read must not reach currentMemory.
+      let reads = 0;
+      const count = {
+        get objects() {
+          return reads++ === 0 ? 1 : NaN;
+        },
+        values: 0,
+      };
+      const c = new L1Cache<string>();
+      c.set('a', 'x', 10000, 'test', 10, count);
+      expect(reads).toBe(1);
+      expect(c.stats.memoryUsed).toBe(10 * 1.75 + 32);
+    });
+
+    it('ignores the count without a serialized size', () => {
       const counted = new L1Cache<string>();
       const without = new L1Cache<string>();
-      counted.set('a', 'x'.repeat(100), 10000, 'test', undefined, 50);
+      counted.set('a', 'x'.repeat(100), 10000, 'test', undefined, { objects: 50, values: 50 });
       without.set('a', 'x'.repeat(100), 10000, 'test');
       expect(counted.stats.memoryUsed).toBe(without.stats.memoryUsed);
     });

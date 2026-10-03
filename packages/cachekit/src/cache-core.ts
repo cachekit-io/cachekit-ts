@@ -28,6 +28,7 @@ import {
 } from './serialization/serializer.js';
 import {
   envelopeVerdict,
+  ENVELOPE_REJECTIONS,
   looksLikeEnvelope,
   maxEnvelopeInputSize,
 } from './serialization/envelope.js';
@@ -469,8 +470,7 @@ export class CacheImpl implements SecureCache {
     // Only an envelope within the ceiling gets as far as unpack. One over it
     // throws rather than falling back: a real envelope served as plain data is
     // the corruption this path exists to prevent.
-    if (envelopeVerdict(bytes, this.serializerConfig.maxDecodedSize) === 'not-envelope')
-      return null;
+    if (envelopeVerdict(bytes, this.serializerConfig.maxDecodedSize) !== 'unpack') return null;
 
     // Codec construction stays OUTSIDE the try: a broken binding must fail
     // loudly (through getEntry's decode-failure path: counted, then a miss or
@@ -732,7 +732,7 @@ export class CacheImpl implements SecureCache {
     bytes: Uint8Array,
     key: string,
     interop: boolean
-  ): Promise<{ value: T; serializedSize: number; objects: number }> {
+  ): Promise<{ value: T; serializedSize: number; count: ObjectCount }> {
     const useEnvelope = this.useEnvelope(interop);
 
     let plaintext = bytes;
@@ -755,9 +755,10 @@ export class CacheImpl implements SecureCache {
       plaintext = await this.encryption.decrypt(plaintext, key, useEnvelope);
     }
     if (useEnvelope) {
-      if (envelopeVerdict(plaintext, this.serializerConfig.maxDecodedSize) === 'not-envelope') {
+      const verdict = envelopeVerdict(plaintext, this.serializerConfig.maxDecodedSize);
+      if (verdict !== 'unpack') {
         throw new SerializationError(
-          `Stored bytes (${plaintext.length} B) are not an envelope core would accept; refused before unpack`
+          `Stored bytes (${plaintext.length} B) ${ENVELOPE_REJECTIONS[verdict]}; refused before unpack`
         );
       }
       plaintext = this.withEnvelopeCodec((codec) => codec.unpack(plaintext));
@@ -793,16 +794,16 @@ export class CacheImpl implements SecureCache {
       // mode ambiguity the AAD binding exists to rule out.
       plaintext = this.tryUnwrapEnvelope(plaintext, key) ?? plaintext;
     }
-    // The decode's depth pre-scan counts the heap objects on the way, so L1
-    // can charge for them without another walk (see L1Cache.set).
-    const count: ObjectCount = { objects: 0 };
+    // The decode's depth pre-scan counts the heap objects and values on the
+    // way, so L1 can charge for them without another walk (see L1Cache.set).
+    const count: ObjectCount = { objects: 0, values: 0 };
     const value = interop
       ? decodeInteropValueCounted<T>(plaintext, count)
       : decodeCounted<T>(plaintext, this.serializerConfig, count);
     // The serialized length, not bytes.byteLength: that is the compressed
     // (and maybe encrypted) envelope, several times smaller, and charging L1
     // for it would let L1 grow well past maxMemory.
-    return { value, serializedSize: plaintext.length, objects: count.objects };
+    return { value, serializedSize: plaintext.length, count };
   }
 
   /**
@@ -923,9 +924,9 @@ export class CacheImpl implements SecureCache {
     // counted, then thrown with degradation off, a miss with it on.
     let value: T;
     let serializedSize: number;
-    let objects: number;
+    let count: ObjectCount;
     try {
-      ({ value, serializedSize, objects } = await this.decodeEntry<T>(data, key, interop));
+      ({ value, serializedSize, count } = await this.decodeEntry<T>(data, key, interop));
     } catch (error) {
       // Its own operation label, like 'l1_decrypt': the fetch already
       // recorded a successful 'get', so counting this under 'get' too would
@@ -961,7 +962,7 @@ export class CacheImpl implements SecureCache {
         // arming a spurious background refresh per marker window, forever
         // (LAB-1768).
         const l1TtlMs = Number.isFinite(l1TtlSeconds) ? l1TtlSeconds * 1000 : 0;
-        this.l1.set(key, this.l1Payload(value, data), l1TtlMs, namespace, serializedSize, objects);
+        this.l1.set(key, this.l1Payload(value, data), l1TtlMs, namespace, serializedSize, count);
         this.publishL1Stats();
       }
     }
@@ -1032,8 +1033,9 @@ export class CacheImpl implements SecureCache {
     // rejection, or an interop size rejection, emits one rate-limited warning
     // either way (LAB-1388, LAB-4845).
     // Normalizing (auto mode) and the header encoders (interop) count the
-    // heap objects on the way, so L1 can charge for them without another walk.
-    const count: ObjectCount = { objects: 0 };
+    // heap objects and values on the way, so L1 can charge for them without
+    // another walk.
+    const count: ObjectCount = { objects: 0, values: 0 };
     let serialized: Uint8Array;
     try {
       serialized = interop
@@ -1071,9 +1073,7 @@ export class CacheImpl implements SecureCache {
       // degraded backend write. Only the SWR refresh path stores this; a
       // direct write returns before its L1 update. An encrypted cache's L1
       // holds only ciphertext, so it gets nothing.
-      return this.encryption
-        ? null
-        : { l1: value, serializedSize: serialized.length, objects: count.objects };
+      return this.encryption ? null : { l1: value, serializedSize: serialized.length, count };
     }
     // Exists before the backend write, so a write that the breaker skips or
     // degradation absorbs still yields it. Otherwise an encrypted cache's SWR
@@ -1082,7 +1082,7 @@ export class CacheImpl implements SecureCache {
     const l1Write: L1Write = {
       l1: this.l1Payload(value, data),
       serializedSize: serialized.length,
-      objects: count.objects,
+      count,
     };
 
     // Only the backend write runs under retry, the breaker and degradation.
@@ -1102,7 +1102,7 @@ export class CacheImpl implements SecureCache {
     // expires or refreshes (a conditional L2 write would need CAS the Backend
     // contract doesn't have).
     if (updateL1 && this.l1) {
-      this.l1.set(key, l1Write.l1, ttl * 1000, namespace, l1Write.serializedSize, l1Write.objects);
+      this.l1.set(key, l1Write.l1, ttl * 1000, namespace, l1Write.serializedSize, l1Write.count);
       this.publishL1Stats();
     }
 

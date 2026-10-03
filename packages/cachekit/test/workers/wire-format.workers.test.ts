@@ -5,96 +5,31 @@
  * protocol/test-vectors/wire-format.json (vendored in ./fixtures/ and
  * sha256-pinned by the Node lane, test/protocol/wire-format.protocol.test.ts):
  * decodes every ground-truth envelope and the constructed 32-bit ratio-wrap
- * envelope, round-trips, validates, and rejects corruption — inside real
- * workerd, on the wasm32 build.
+ * envelope, round-trips, validates, rejects corruption, and refuses every
+ * reject vector on the envelope read path — inside real workerd, on the
+ * wasm32 build.
  */
 
 import { describe, it, expect } from 'vitest';
 import { decode } from '@msgpack/msgpack';
+import { createCache } from '../../src/workers/index.js';
 import { ByteStorage } from '../../src/workers/runtime.js';
-import fixture from './fixtures/wire-format.json' with { type: 'json' };
-
-interface WireVector {
-  name: string;
-  description: string;
-  input_hex: string;
-  envelope_hex: string;
-  format: string;
-  /** "bin" on protocol 1.1 vectors; absent on legacy array-of-integers vectors. */
-  envelope_encoding?: string;
-}
-
-interface Segment {
-  hex: string;
-  count: number;
-}
-
-/** Too large to pin as hex: bytes are given as repeated-segment lists. */
-interface ConstructedVector {
-  name: string;
-  original_size: number;
-  compressed_size: number;
-  envelope_size: number;
-  envelope_construction: Segment[];
-  input_construction: Segment[];
-}
-
-const vectors = fixture.vectors as WireVector[];
-const binVectors = vectors.filter((v) => v.envelope_encoding === 'bin');
-const legacyVectors = vectors.filter((v) => v.envelope_encoding === undefined);
-const constructedVectors = fixture.constructed_vectors as ConstructedVector[];
-
-// The envelope is a 4-element fixarray (0x94), so byte 1 is the msgpack
-// marker of compressed_data. This returns the one marker a conforming
-// (shortest-form) writer emits for that length — bin8 / bin16 / bin32 —
-// derived, never a tolerated set, so a wider-than-needed header fails.
-function expectedBinMarker(compressedLength: number): number {
-  if (compressedLength <= 0xff) return 0xc4;
-  if (compressedLength <= 0xffff) return 0xc5;
-  return 0xc6;
-}
-
-// Envelope element [0]. bin decodes to Uint8Array; a legacy array-of-integers
-// envelope would decode to number[] and is rejected here.
-function compressedData(envelope: Uint8Array): Uint8Array {
-  const [compressed] = decode(envelope) as unknown[];
-  if (!(compressed instanceof Uint8Array)) throw new Error('compressed_data is not msgpack bin');
-  return compressed;
-}
-
-function hexToBytes(hex: string): Uint8Array {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
-
-// The fixture's construction_note: repeat each segment's hex `count` times and
-// concatenate the segments in order.
-function construct(segments: Segment[]): Uint8Array {
-  const units = segments.map((s) => [hexToBytes(s.hex), s.count] as const);
-  const out = new Uint8Array(units.reduce((n, [unit, count]) => n + unit.length * count, 0));
-  let offset = 0;
-  for (const [unit, count] of units) {
-    for (let i = 0; i < count; i++, offset += unit.length) out.set(unit, offset);
-  }
-  return out;
-}
-
-// Index of the first differing byte, or -1. A multi-MB toEqual diff is
-// unreadable; this names where the output went wrong.
-function firstMismatch(actual: Uint8Array, expected: Uint8Array): number {
-  const n = Math.min(actual.length, expected.length);
-  for (let i = 0; i < n; i++) if (actual[i] !== expected[i]) return i;
-  return actual.length === expected.length ? -1 : n;
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
+import {
+  REJECT_EXPECTATIONS,
+  binVectors,
+  bytesToHex,
+  compressedData,
+  construct,
+  constructedVectors,
+  expectRejectedOnRead,
+  expectedBinMarker,
+  firstMismatch,
+  hexToBytes,
+  legacyVectors,
+  rejectReadConfig,
+  rejectVectors,
+  vectors,
+} from '../fixtures/wire-vectors.js';
 
 describe('wire-format vectors (wasm ByteStorage)', () => {
   const storage = new ByteStorage();
@@ -163,14 +98,14 @@ describe('wire-format vectors (wasm ByteStorage)', () => {
     }
   });
 
-  // The wasm32 target this lane exists for: compressed_data is the first
-  // length at which 1000 * compressed_size overflows 32 bits, so a reader that
-  // multiplies in 32-bit (or pointer) width rejects this envelope as a ratio
-  // bomb. A pass on a 64-bit host proves nothing about wasm32.
   it('carries the 32-bit ratio-wrap constructed vector', () => {
     expect(constructedVectors.map((v) => v.name)).toEqual(['envelope_ratio_product_wraps_32_bits']);
   });
 
+  // The wasm32 target this lane exists for: compressed_data is the first
+  // length at which 1000 * compressed_size overflows 32 bits, so a reader that
+  // multiplies in 32-bit (or pointer) width rejects this envelope as a ratio
+  // bomb. A pass on a 64-bit host proves nothing about wasm32.
   it.each(constructedVectors.map((v) => [v.name, v] as const))(
     'unpacks constructed envelope %s to its constructed input',
     (_name, vector) => {
@@ -180,6 +115,20 @@ describe('wire-format vectors (wasm ByteStorage)', () => {
       expect(input.length).toBe(vector.original_size);
       expect(compressedData(envelope).length).toBe(vector.compressed_size);
       expect(firstMismatch(storage.unpack(envelope), input)).toBe(-1);
+    }
+  );
+
+  it('carries the six reject vectors', () => {
+    expect(rejectVectors.map((v) => v.name)).toEqual(Object.keys(REJECT_EXPECTATIONS));
+  });
+
+  // Through the Workers entry's compression-on read, as a stored entry: the
+  // header checks in envelopeVerdict, then the wasm unpack.
+  it.each(rejectVectors.map((v) => [v.name, v] as const))(
+    'refuses reject vector %s on the envelope read path with the error the spec names',
+    async (name, vector) => {
+      const cache = createCache(rejectReadConfig(hexToBytes(vector.envelope_hex)));
+      await expectRejectedOnRead(cache, name);
     }
   );
 

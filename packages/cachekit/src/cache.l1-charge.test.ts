@@ -2,8 +2,9 @@
  * What L1 charges a plaintext entry against maxMemory, through createCache on
  * every path that fills L1: set, an L2 hit, and the SWR refresh, in auto and
  * interop mode. Each charge must count the value's heap objects (arrays,
- * maps, bins), which the codec counts on its own walk, so a value of many
- * empty objects is not charged as the handful of bytes it serializes to.
+ * maps, bins) and values (their elements and entries), which the codec counts
+ * on its own walk, so a value of many empty objects or small scalars is not
+ * charged as the handful of bytes it serializes to.
  */
 
 import { createHash } from 'node:crypto';
@@ -24,16 +25,19 @@ const memoryUsed = (cache: SecureCache): number =>
 /** 2,001 heap objects in 2,003 bytes of MessagePack. */
 const containerHeavy = () => Array.from({ length: 2000 }, () => ({}));
 
-/** The charge for one entry, from the serialized length and the object count. */
+/** 10,000 slots in 10,003 bytes of MessagePack. */
+const scalarHeavy = () => new Array<number>(10_000).fill(0);
+
+/** The charge for one entry, from the serialized length and the counts. */
 function chargeFor(value: unknown, interop = false): number {
-  const count = { objects: 0 };
+  const count = { objects: 0, values: 0 };
   const bytes = interop
     ? encodeInteropValueCounted(value, count)
     : encodeCounted(value, resolveSerializerConfig(), count);
-  // An object-heavy value must count, or these tests prove nothing.
-  expect(count.objects).toBeGreaterThan(bytes.length / 3);
+  // An object- or value-heavy value must count, or these tests prove nothing.
+  expect(count.objects + count.values).toBeGreaterThan(bytes.length / 3);
   const l1 = new L1Cache();
-  l1.set('k', value, 0, 'ns', bytes.length, count.objects);
+  l1.set('k', value, 0, 'ns', bytes.length, count);
   expect(l1.stats.memoryUsed).toBeGreaterThan(bytes.length * 2.5);
   return l1.stats.memoryUsed;
 }
@@ -102,6 +106,17 @@ describe('L1 charge for object-heavy values', () => {
     await vi.waitFor(async () => expect((await load(1)).generation).toBe(2));
 
     expect(memoryUsed(cache)).toBe(chargeFor({ generation: 2, items: containerHeavy() }));
+  });
+
+  it('set() and an L2 hit charge each small scalar', async () => {
+    const backend = new InMemoryBackend();
+    const writer = makeCache(backend);
+    await writer.set('users:1', scalarHeavy());
+    expect(memoryUsed(writer)).toBe(chargeFor(scalarHeavy()));
+
+    const reader = makeCache(backend);
+    expect(await reader.get('users:1')).toEqual(scalarHeavy());
+    expect(memoryUsed(reader)).toBe(chargeFor(scalarHeavy()));
   });
 
   it('an L2 hit charges the bin values it decoded', async () => {

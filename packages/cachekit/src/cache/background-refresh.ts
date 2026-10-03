@@ -1,4 +1,5 @@
 import type { L1Cache } from '../l1/lru-cache.js';
+import type { ObjectCount } from '../serialization/serializer.js';
 import { logError } from '../logger.js';
 
 /**
@@ -30,8 +31,8 @@ export interface L1Write {
   readonly l1: unknown;
   /** Byte length of the serialized value, when it was serialized (see L1Cache.set). */
   readonly serializedSize?: number;
-  /** Heap objects in the value, counted as it was serialized (see L1Cache.set). */
-  readonly objects?: number;
+  /** Heap objects and values in the value, counted as it was serialized (see L1Cache.set). */
+  readonly count?: ObjectCount;
 }
 
 /**
@@ -127,7 +128,7 @@ export class BackgroundRefreshManager {
               versionToken,
               options.namespace,
               persisted.serializedSize,
-              persisted.objects
+              persisted.count
             );
           }
         }
