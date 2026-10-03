@@ -11,7 +11,12 @@ import { createHash } from 'node:crypto';
 import { assert, describe, it, expect, afterEach, vi } from 'vitest';
 import { createCache } from './cache.js';
 import { CacheImpl } from './cache-core.js';
-import { BackendError } from './errors.js';
+import {
+  BackendError,
+  ConfigurationError,
+  EncryptionError,
+  NonceExhaustedError,
+} from './errors.js';
 import { setLogger } from './logger.js';
 import { generateKey } from './serialization/key-generator.js';
 import type { ErrorClassification } from './backends/error-classifier.js';
@@ -267,6 +272,7 @@ describe('a failed L2 write still fills L1 (LAB-7157)', () => {
   ] as const)(
     'a $step failure (degradation: $degradation) runs once, leaves the breaker closed and stores nothing',
     async ({ step, degradation }) => {
+      setLogger(() => {});
       const { backend, calls } = rejectingBackend('transient');
       // Pack is the only step a plaintext cache has; encrypt needs an encrypted one.
       const cache = makeCache(backend, {
@@ -296,6 +302,72 @@ describe('a failed L2 write still fills L1 (LAB-7157)', () => {
       expect(breakerOf(cache)).toBe('closed');
       expect(calls.set).toBe(0);
       expect(l1Of(cache).stats.entries).toBe(0);
+    }
+  );
+
+  // Degradation absorbs a pack or encrypt failure before the breaker sees it,
+  // and metrics are off by default, so this line is its only trace.
+  it('logs an absorbed encrypt failure at most once per window, without the key or the error text', async () => {
+    const logs: unknown[][] = [];
+    setLogger((message, error) => logs.push([message, error]));
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const { backend } = rejectingBackend('transient');
+    const cache = makeCache(backend, { encrypted: true });
+    failStep(cache, 'encrypt', new NonceExhaustedError(`exhausted ${CANARY}`));
+
+    for (let i = 0; i < 5; i++) await cache.set(`user:alice${i}@example.com`, 'v');
+    expect(logs).toHaveLength(1);
+    const [message, error] = logs[0]!;
+    expect(message).toMatch(
+      /^\[cachekit\] set failed to encrypt or compress, value NOT cached \(keyHash=[0-9a-f]{32}\): /
+    );
+    expect(message).toContain('rotate forward to a NEW master key');
+    expect(message).not.toContain('alice');
+    expect(message).not.toContain(CANARY);
+    expect(error).toBeUndefined();
+
+    now.mockReturnValue(1_000_000 + 60_000);
+    await cache.set('user:bob@example.com', 'v');
+    expect(logs).toHaveLength(2);
+  });
+
+  it.each([
+    { step: 'encrypt', error: new EncryptionError(`boom ${CANARY}`), reason: 'encryption failed' },
+    {
+      step: 'encrypt',
+      error: new ConfigurationError(`skew ${CANARY}`),
+      reason: 'encryption is misconfigured',
+    },
+    { step: 'pack', error: new Error(`pack ${CANARY}`), reason: 'could not be packed' },
+  ] as const)(
+    'names a $step failure ($error.name) by its class only',
+    async ({ step, error, reason }) => {
+      const logError = vi.fn();
+      setLogger(logError);
+      const { backend } = rejectingBackend('transient');
+      const cache = makeCache(backend, { encrypted: step === 'encrypt' });
+      failStep(cache, step, error);
+
+      await cache.set('users:1', 'v');
+      expect(logError).toHaveBeenCalledOnce();
+      const [message] = logError.mock.calls[0]!;
+      expect(message).toContain(reason);
+      expect(message).not.toContain(CANARY);
+    }
+  );
+
+  it.each(['pack', 'encrypt'] as const)(
+    'with degradation off, a %s failure is thrown and not logged',
+    async (step) => {
+      const logError = vi.fn();
+      setLogger(logError);
+      const { backend } = rejectingBackend('transient');
+      const cache = makeCache(backend, { degradation: false, encrypted: step === 'encrypt' });
+      const failure = new NonceExhaustedError();
+      failStep(cache, step, failure);
+
+      await expect(cache.set('users:1', 'v')).rejects.toBe(failure);
+      expect(logError).not.toHaveBeenCalled();
     }
   );
 

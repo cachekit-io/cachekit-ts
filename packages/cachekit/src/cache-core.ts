@@ -41,6 +41,8 @@ import { createInvalidationEvent } from './invalidation/event.js';
 import {
   BackendError,
   ConfigurationError,
+  EncryptionError,
+  NonceExhaustedError,
   SerializationError,
   ValueTooLargeError,
 } from './errors.js';
@@ -439,6 +441,9 @@ export class CacheImpl implements SecureCache {
   /** Timestamp of the last authentication-rejected warning (rate limiting). */
   private lastAuthRejectWarnAt = 0;
 
+  /** Timestamp of the last pack-or-encrypt-failed warning (rate limiting). */
+  private lastSetEncryptFailedWarnAt = 0;
+
   /**
    * Verified unpack of a suspected legacy/foreign ByteStorage envelope on a
    * compression-off cache. Returns null when the bytes aren't treated as an
@@ -587,6 +592,33 @@ export class CacheImpl implements SecureCache {
     this.lastAuthRejectWarnAt = now;
     logError(
       `[cachekit] backend rejected ${operation} as an authentication failure (keyHash=${blake2b16Hex(key)}). Check the API key; with degradation on, L2 is being skipped.`
+    );
+  }
+
+  /**
+   * Rate-limited report of a set() whose pack or encrypt step failed while
+   * degradation absorbed the error. The failure runs before the reliability
+   * executor, so the breaker never sees it, and with metrics off nothing else
+   * records it: an exhausted nonce budget would otherwise drop every write on
+   * the cache without a trace. With degradation off the caller gets the error,
+   * so there is nothing to report. The error text is left out, and the key is
+   * digested, for the reasons warnSetRejected gives. NonceExhaustedError is an
+   * EncryptionError, so it is matched first.
+   */
+  private warnSetEncryptFailed(key: string, error: unknown): void {
+    const now = Date.now();
+    if (now - this.lastSetEncryptFailedWarnAt < WARN_INTERVAL_MS) return;
+    this.lastSetEncryptFailedWarnAt = now;
+    const reason =
+      error instanceof NonceExhaustedError
+        ? 'the encryption key exhausted its nonce budget; rotate forward to a NEW master key (runbook: https://docs.cachekit.io/concepts/key-rotation/)'
+        : error instanceof ConfigurationError
+          ? 'encryption is misconfigured (native bindings that do not match previousMasterKeys: reinstall dependencies)'
+          : error instanceof EncryptionError
+            ? 'encryption failed (the native bindings did not load, the cache was closed, or the encryptor errored)'
+            : 'the value could not be packed into its compressed envelope';
+    logError(
+      `[cachekit] set failed to encrypt or compress, value NOT cached (keyHash=${blake2b16Hex(key)}): ${reason}.`
     );
   }
 
@@ -998,9 +1030,9 @@ export class CacheImpl implements SecureCache {
     // so the bytes L1 keeps must exist before `run`. A pack or encrypt failure
     // is not a backend failure either — a retry repeats the same local work,
     // and the breaker would count it as an outage — so it is counted, then
-    // thrown with degradation off and absorbed with it on, and never written
-    // to L2. Interop entries get the same handling: the spec's always-throw
-    // covers encoding, not encryption.
+    // thrown with degradation off and absorbed with it on (with one
+    // rate-limited warning), and never written to L2. Interop entries get the
+    // same handling: the spec's always-throw covers encoding, not encryption.
     let data: Uint8Array;
     try {
       data = useEnvelope ? this.withEnvelopeCodec((codec) => codec.pack(serialized)) : serialized;
@@ -1008,6 +1040,7 @@ export class CacheImpl implements SecureCache {
     } catch (error) {
       this.recordFailure('set', error);
       if (!this.degradationEnabled) throw error;
+      this.warnSetEncryptFailed(key, error);
       return unencoded;
     }
     // Exists before the backend write, so a write that the breaker skips or
