@@ -33,6 +33,16 @@ const SERIALIZED_SIZE_FACTOR = 2.5;
 const OBJECT_SIZE = 32;
 
 /**
+ * The largest share of maxMemory one entry may be charged. Storing an entry
+ * first evicts as much as it is charged, and an entry read back from L2 is
+ * stored again each time it falls out, so a near-budget entry would empty most
+ * of L1 on every read. An eighth caps that at an eighth of L1 per store, far
+ * above what ordinary values are charged.
+ * Internal calibration, not a setting: kept off the public exports.
+ */
+const MAX_ENTRY_SHARE = 1 / 8;
+
+/**
  * An entry plus its links in the recency list. The list is what makes LRU
  * O(1): a hit moves its node to the tail, eviction takes the head, and
  * neither scans the Map.
@@ -164,7 +174,7 @@ export class L1Cache<T = unknown> {
 
   /**
    * Complete a SWR refresh, updating the cache if version matches (a value
-   * charged above maxMemory drops the entry instead; see `set`).
+   * charged above an eighth of maxMemory drops the entry instead; see `set`).
    * Returns false if version changed (stale refresh result).
    *
    * Pass `namespace` when the caller knows it (wrap options) — deriving it
@@ -248,8 +258,8 @@ export class L1Cache<T = unknown> {
   }
 
   /**
-   * Set a value in cache. A value charged above maxMemory is not stored, and
-   * any entry it would replace is dropped.
+   * Set a value in cache. A value charged above an eighth of maxMemory is not
+   * stored, and any entry it would replace is dropped.
    *
    * @param serializedSize - Byte length of the value's serialized form, when
    *   the caller already holds it. The entry is then charged a fixed
@@ -272,8 +282,8 @@ export class L1Cache<T = unknown> {
   ): void {
     const size = this.sizeOf(value, serializedSize, objects);
 
-    // Over budget: admitting it would evict every other entry first, so drop the old entry instead.
-    if (size > this.config.maxMemory) {
+    // Over the per-entry share: admitting it would evict that much of L1 first, so drop the old entry instead.
+    if (size > this.config.maxMemory * MAX_ENTRY_SHARE) {
       this.delete(key);
       return;
     }
