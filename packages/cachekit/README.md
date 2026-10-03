@@ -388,7 +388,7 @@ Four backends implement the same `Backend` interface (raw bytes in/out) and plug
 | Memcached         | `memcached` from `@cachekit-io/cachekit/backends/memcached` | Node          | memjs (binary protocol, multi-server); requires the optional `memjs` peer dependency                                                                                                  |
 | File              | `file` from `@cachekit-io/cachekit/backends/file`           | Node          | local disk, on-disk format shared with cachekit-py                                                                                                                                    |
 
-The Memcached and File backends are **Node-runtime only** and live behind subpath exports, so the root entry never loads `memjs` or the File backend. The root entry is itself **Node-only**: it loads ioredis, `node:crypto` and the NAPI core, whose loader requires `node:fs`. Edge code uses the `workerd` export condition or the `@cachekit-io/cachekit/workers` subpath. Bun resolves the root to the Node entry and runs it, NAPI core included (checked on Bun 1.3.8); the `/workers` subpath does not load on Bun. No entry targets Deno, Deno Deploy or Vercel/Next edge.
+The Memcached and File backends are **Node-runtime only** and live behind subpath exports, so the root entry never loads `memjs` or the File backend. The root entry is itself **Node-only**: it loads `node:crypto` and the NAPI core, whose loader requires `node:fs`. ioredis loads when the app creates a Redis backend, not when it imports the package, so an app that never uses Redis never loads it; commands issued before the load finishes wait for it. Bundlers follow that load, so a bundle that uses Redis carries ioredis. ioredis is CommonJS and requires Node builtins, so an esbuild ESM bundle for Node needs `require` defined (the usual `createRequire` banner). Edge code uses the `workerd` export condition or the `@cachekit-io/cachekit/workers` subpath. Bun resolves the root to the Node entry and runs it, NAPI core included (checked on Bun 1.3.8); the `/workers` subpath does not load on Bun. No entry targets Deno, Deno Deploy or Vercel/Next edge.
 
 **L1 freshness across processes.** When a plain `get()` hits L2, the value is
 re-populated into this process's L1. On backends that surface the entry's
@@ -603,6 +603,11 @@ const cache = createCache({
 // Histogram:  cachekit_operation_duration_seconds{operation}
 // Gauges:     cachekit_l1_entries, cachekit_l1_memory_bytes, cachekit_circuit_breaker_state
 ```
+
+prom-client loads in the background, starting on the event-loop turn after the
+cache is created, and no cache operation waits for it. Metrics recorded while it
+loads, including the first operations' durations, are recorded once it has
+loaded.
 
 If `metrics` is enabled but `prom-client` is not installed, the SDK reports the
 failure once through the library logger and metrics degrade to no-ops — never
