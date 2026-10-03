@@ -321,6 +321,14 @@ describe('L1Cache', () => {
       expect(c.get('a')).toBeNull();
     });
 
+    it('leaves no version behind for a key that was never stored', () => {
+      // Each distinct over-budget key read from L2 must not grow the version map for good.
+      const c = new L1Cache<Uint8Array>({ maxEntries: 100, maxMemory: 1000 });
+      for (let i = 0; i < 50; i++) c.set(`big${i}`, new Uint8Array(1001), 10000, 'test');
+      const versions = (c as unknown as { entryVersion: Map<string, number> }).entryVersion;
+      expect(versions.size).toBe(0);
+    });
+
     it('is not stored by completeRefresh either', () => {
       const c = filled();
       const { versionToken } = c.getWithSwr('a');

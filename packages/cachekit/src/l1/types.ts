@@ -23,7 +23,8 @@ export interface L1Config {
    * times their charge on the heap, so `maxEntries` is the hard bound on L1's
    * size. A value charged above `maxMemory` is not stored in L1 at all (it
    * would evict every other entry first), and the write drops any older entry
-   * under its key; reads of it go to L2.
+   * under its key; reads of it always miss L1: they are served from L2, or
+   * recomputed when L2 cannot serve them.
    */
   maxMemory: number;
 
