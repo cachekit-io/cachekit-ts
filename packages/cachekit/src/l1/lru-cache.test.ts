@@ -152,16 +152,15 @@ describe('L1Cache', () => {
     });
 
     it('evicts when maxMemory exceeded', () => {
-      const smallCache = new L1Cache<string>({ maxEntries: 100, maxMemory: 400 });
+      const smallCache = new L1Cache<string>({ maxEntries: 100, maxMemory: 2000 });
 
-      // Each entry roughly 200+ bytes (100 chars * 2 for UTF-16)
-      smallCache.set('a', 'x'.repeat(100), 10000, 'test');
-      smallCache.set('b', 'y'.repeat(100), 10000, 'test');
-      smallCache.set('c', 'z'.repeat(100), 10000, 'test'); // Should trigger eviction
+      // Each entry is charged 204 (102 JSON chars * 2 for UTF-16), under the
+      // 250 per-entry share, so ten of them overrun 2000 by one entry.
+      for (let i = 0; i < 10; i++) smallCache.set(`k${i}`, 'x'.repeat(100), 10000, 'test');
 
-      // At least one should be evicted
-      expect(smallCache.stats.entries).toBeLessThan(3);
-      expect(smallCache.stats.memoryUsed).toBeLessThanOrEqual(400);
+      expect(smallCache.get('k0')).toBeNull();
+      expect(smallCache.stats.entries).toBe(9);
+      expect(smallCache.stats.memoryUsed).toBeLessThanOrEqual(2000);
     });
 
     it('sizes byte payloads by their buffer, not their JSON form (LAB-238)', () => {
@@ -230,26 +229,25 @@ describe('L1Cache', () => {
     });
 
     it('an overwrite that no longer fits in maxMemory evicts others, never itself', () => {
-      const c = new L1Cache<Uint8Array>({ maxEntries: 100, maxMemory: 1000 });
-      c.set('a', new Uint8Array(300), 10000, 'test');
-      c.set('b', new Uint8Array(300), 10000, 'test');
-      c.set('c', new Uint8Array(300), 10000, 'test');
-      // b grows to 600: 300 + 300 + 600 > 1000, so the oldest other entry goes.
-      c.set('b', new Uint8Array(600), 10000, 'test');
-      expect(c.get('a')).toBeNull();
-      expect(c.get('b')?.byteLength).toBe(600);
-      expect(c.get('c') !== null).toBe(true);
-      expect(c.stats.memoryUsed).toBe(900);
+      const c = new L1Cache<Uint8Array>({ maxEntries: 100, maxMemory: 8000 });
+      const keys = Array.from({ length: 10 }, (_, i) => `k${i}`);
+      for (const k of keys) c.set(k, new Uint8Array(800), 10000, 'test');
+      // k1 grows to 1000: 9 x 800 + 1000 > 8000, so the oldest other entry goes.
+      c.set('k1', new Uint8Array(1000), 10000, 'test');
+      expect(keysOf(c, keys)).toEqual(keys.slice(1));
+      expect(c.get('k1')?.byteLength).toBe(1000);
+      expect(c.stats.memoryUsed).toBe(7400);
     });
 
     it('evicts in LRU order when maxMemory binds', () => {
       const c = new L1Cache<Uint8Array>({ maxEntries: 100, maxMemory: 1000 });
-      for (const k of ['a', 'b', 'c', 'd']) c.set(k, new Uint8Array(250), 10000, 'test');
-      c.get('a');
-      // 600 more bytes: b and c are the two least recent and must go.
-      c.set('e', new Uint8Array(500), 10000, 'test');
-      expect(keysOf(c, ['a', 'b', 'c', 'd', 'e'])).toEqual(['a', 'd', 'e']);
-      expect(c.stats.memoryUsed).toBe(1000);
+      const keys = Array.from({ length: 16 }, (_, i) => `k${i}`);
+      for (const k of keys) c.set(k, new Uint8Array(60), 10000, 'test');
+      c.get('k0');
+      // 125 more bytes on 960: k1 and k2 are the two least recent and must go.
+      c.set('new', new Uint8Array(125), 10000, 'test');
+      expect(keysOf(c, [...keys, 'new'])).toEqual(['k0', ...keys.slice(3), 'new']);
+      expect(c.stats.memoryUsed).toBe(965);
     });
 
     it('eviction clears the namespace index and refresh marker of the evicted key', () => {
@@ -308,10 +306,10 @@ describe('L1Cache', () => {
     });
   });
 
-  describe('a value charged above maxMemory', () => {
+  describe('a value charged above an eighth of maxMemory', () => {
     // Byte values are charged exactly their byteLength, so the charges here are exact.
     const filled = () => {
-      const c = new L1Cache<Uint8Array>({ maxEntries: 100, maxMemory: 1000 });
+      const c = new L1Cache<Uint8Array>({ maxEntries: 100, maxMemory: 8000 });
       c.set('a', new Uint8Array(300), 10000, 'test');
       c.set('b', new Uint8Array(300), 10000, 'test');
       return c;
@@ -344,7 +342,7 @@ describe('L1Cache', () => {
 
     it('leaves no version behind for a key that was never stored', () => {
       // Each distinct over-budget key read from L2 must not grow the version map for good.
-      const c = new L1Cache<Uint8Array>({ maxEntries: 100, maxMemory: 1000 });
+      const c = new L1Cache<Uint8Array>({ maxEntries: 100, maxMemory: 8000 });
       for (let i = 0; i < 50; i++) c.set(`big${i}`, new Uint8Array(1001), 10000, 'test');
       const versions = (c as unknown as { entryVersion: Map<string, number> }).entryVersion;
       expect(versions.size).toBe(0);
@@ -369,7 +367,7 @@ describe('L1Cache', () => {
     });
 
     it('is refused when the charge comes from serializedSize and objects', () => {
-      const c = new L1Cache<unknown>({ maxEntries: 100, maxMemory: 1000 });
+      const c = new L1Cache<unknown>({ maxEntries: 100, maxMemory: 8000 });
       c.set('a', 'x', 10000, 'test');
       // 100 B serialized x 2.5 = 250, plus 24 objects x 32 = 768: 1018.
       c.set('rows', [{}], 10000, 'test', 100, 24);
@@ -377,11 +375,40 @@ describe('L1Cache', () => {
       expect(c.get('a')).toBe('x');
     });
 
-    it('a charge of exactly maxMemory is still stored', () => {
+    it('a charge of exactly an eighth of maxMemory is stored; one byte more drops the older entry', () => {
       const c = filled();
-      c.set('full', new Uint8Array(1000), 10000, 'test');
-      expect(c.get('full')?.byteLength).toBe(1000);
-      expect(c.stats).toMatchObject({ entries: 1, memoryUsed: 1000 });
+      c.set('a', new Uint8Array(1000), 10000, 'test');
+      expect(c.get('a')?.byteLength).toBe(1000);
+      expect(c.stats).toMatchObject({ entries: 2, memoryUsed: 1300 });
+
+      c.set('a', new Uint8Array(1001), 10000, 'test');
+      expect(c.get('a')).toBeNull();
+      expect(c.stats).toMatchObject({ entries: 1, memoryUsed: 300 });
+    });
+
+    it('refuses a charge under maxMemory that would still evict most of L1', () => {
+      const c = filled();
+      c.set('a', new Uint8Array(7999), 10000, 'test');
+      expect(c.get('a')).toBeNull();
+      expect(c.get('b')?.byteLength).toBe(300);
+    });
+
+    it('keeps the small entries when a near-budget key is read over and over', () => {
+      // A full L1 of small entries and one large key that every read misses
+      // in L1 and refills from L2. Stored, the large entry would evict most
+      // of L1 on each refill, and the next small fill would evict it in turn.
+      const c = new L1Cache<Uint8Array>({ maxEntries: 1000, maxMemory: 100_000 });
+      const small = Array.from({ length: 49 }, (_, i) => `s${i}`);
+      for (const k of small) c.set(k, new Uint8Array(2000), 10000, 'test');
+
+      for (let read = 0; read < 20; read++) {
+        if (c.get('large') === null) c.set('large', new Uint8Array(99_000), 10000, 'test');
+        const k = small[read % small.length];
+        if (c.get(k) === null) c.set(k, new Uint8Array(2000), 10000, 'test');
+      }
+
+      expect(small.filter((k) => c.get(k) === null)).toEqual([]);
+      expect(c.get('large')).toBeNull();
     });
   });
 
