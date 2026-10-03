@@ -323,8 +323,11 @@ export class L1Cache<T = unknown> {
 
     this.remove(entry);
 
-    // Bump version to invalidate any pending refreshes
-    this.entryVersion.set(key, this.incrementVersion());
+    // Drop the version rather than bump it: a missing version reads as 0 and
+    // every live token is at least 1, so this invalidates any pending refresh
+    // just as a bump would, without keeping a version for a key L1 no longer
+    // holds. The counter never goes back, so a later set() gets a fresh one.
+    this.entryVersion.delete(key);
 
     return true;
   }

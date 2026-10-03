@@ -57,6 +57,27 @@ describe('L1Cache', () => {
       expect(cache.delete('missing')).toBe(false);
     });
 
+    it('a deleted or expired key leaves no version behind', () => {
+      // Per-entity keys in a long-running process must not grow the version map for good.
+      vi.useFakeTimers();
+      cache.set('deleted', 'v', 10000, 'test');
+      cache.set('expired', 'v', 1000, 'test');
+      cache.delete('deleted');
+      vi.advanceTimersByTime(1001);
+      expect(cache.get('expired')).toBeNull();
+      const versions = (cache as unknown as { entryVersion: Map<string, number> }).entryVersion;
+      expect(versions.size).toBe(0);
+    });
+
+    it('a refresh begun before a delete is rejected after the key is set again', () => {
+      cache.set('key', 'v1', 10000, 'test');
+      const { versionToken } = cache.getWithSwr('key');
+      cache.delete('key');
+      cache.set('key', 'v2', 10000, 'test');
+      expect(cache.completeRefresh('key', 'stale', 10000, versionToken)).toBe(false);
+      expect(cache.get('key')).toBe('v2');
+    });
+
     it('clear removes all entries', () => {
       cache.set('a', '1', 10000, 'test');
       cache.set('b', '2', 10000, 'test');
@@ -313,7 +334,7 @@ describe('L1Cache', () => {
       expect(c.stats).toMatchObject({ entries: 1, memoryUsed: 300, namespaces: 1 });
     });
 
-    it('bumps the version, so an earlier refresh cannot restore the old value', () => {
+    it('invalidates the version, so an earlier refresh cannot restore the old value', () => {
       const c = filled();
       const { versionToken } = c.getWithSwr('a');
       c.set('a', new Uint8Array(1001), 10000, 'test');
@@ -326,6 +347,15 @@ describe('L1Cache', () => {
       const c = new L1Cache<Uint8Array>({ maxEntries: 100, maxMemory: 1000 });
       for (let i = 0; i < 50; i++) c.set(`big${i}`, new Uint8Array(1001), 10000, 'test');
       const versions = (c as unknown as { entryVersion: Map<string, number> }).entryVersion;
+      expect(versions.size).toBe(0);
+    });
+
+    it('leaves no version behind for a key it replaces', () => {
+      const c = filled();
+      c.set('a', new Uint8Array(1001), 10000, 'test');
+      c.set('b', new Uint8Array(1001), 10000, 'test');
+      const versions = (c as unknown as { entryVersion: Map<string, number> }).entryVersion;
+      expect(c.stats.entries).toBe(0);
       expect(versions.size).toBe(0);
     });
 
