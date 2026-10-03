@@ -158,10 +158,20 @@ describe('RetryPolicy', () => {
     });
 
     it('still retries fast failures inside the deadline', async () => {
-      const policy = new RetryPolicy({ maxAttempts: 3, baseDelay: 1, deadline: 5000 });
-      const fn = vi.fn().mockRejectedValue(new Error('fail'));
+      vi.useFakeTimers();
+      const policy = new RetryPolicy({
+        maxAttempts: 3,
+        baseDelay: 1,
+        jitter: false,
+        deadline: 5000,
+      });
+      const err = new Error('fail');
+      const fn = vi.fn().mockRejectedValue(err);
 
-      await expect(policy.execute(fn)).rejects.toThrow('fail');
+      const result = policy.execute(fn).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(await result).toBe(err);
       expect(fn).toHaveBeenCalledTimes(3);
     });
 

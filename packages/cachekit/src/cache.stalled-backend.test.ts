@@ -34,12 +34,23 @@ function stubStalledFetch() {
 async function timed<T>(op: Promise<T>): Promise<{ result: T; elapsed: number }> {
   const start = Date.now();
   let settled = false;
+  let failed = false;
   let result!: T;
-  void op.then((r) => {
-    settled = true;
-    result = r;
-  });
+  let error: unknown;
+  void op.then(
+    (r) => {
+      settled = true;
+      result = r;
+    },
+    // A rejected op must fail the test with its error, not spin the loop until the runner times out
+    (e: unknown) => {
+      settled = true;
+      failed = true;
+      error = e;
+    }
+  );
   while (!settled) await vi.advanceTimersByTimeAsync(100);
+  if (failed) throw error;
   return { result, elapsed: Date.now() - start };
 }
 
