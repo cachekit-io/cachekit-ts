@@ -10,10 +10,32 @@ import {
 } from '../constants.js';
 
 /**
+ * What L1 charges per serialized (MessagePack) byte when the caller passes
+ * the serialized length, so maxMemory means about what the JSON.stringify
+ * estimate made it mean. That estimate charges JSON length x 2, which comes to
+ * about 2x the MessagePack length for ASCII strings and 2.2-2.9x for objects
+ * and rows of records; 2.5 sits between them. Number-heavy values ran about 4x
+ * under the estimate and CJK text about 0.7x, so those shift the most.
+ * Internal calibration, not a setting: kept off the public exports.
+ */
+const SERIALIZED_SIZE_FACTOR = 2.5;
+
+/**
+ * An entry plus its links in the recency list. The list is what makes LRU
+ * O(1): a hit moves its node to the tail, eviction takes the head, and
+ * neither scans the Map.
+ */
+interface Node<T> extends CacheEntry<T> {
+  readonly key: string;
+  prev: Node<T> | null;
+  next: Node<T> | null;
+}
+
+/**
  * L1 in-memory cache with LRU eviction, SWR, and multi-level invalidation.
  *
  * Features:
- * - LRU eviction when maxEntries or maxMemory exceeded
+ * - O(1) LRU eviction when maxEntries or maxMemory exceeded
  * - Stale-while-revalidate (SWR) with jitter
  * - Version tokens to prevent stale data resurrection
  * - Namespace-level invalidation (O(n) with namespace index)
@@ -24,7 +46,10 @@ export class L1Cache<T = unknown> {
   private readonly config: L1Config;
 
   // Core data structures
-  private readonly cache = new Map<string, CacheEntry<T>>();
+  private readonly cache = new Map<string, Node<T>>();
+  // Recency list: head is the least recently used entry, tail the most.
+  private head: Node<T> | null = null;
+  private tail: Node<T> | null = null;
   private readonly namespaceIndex = new Map<string, Set<string>>();
 
   // SWR tracking: key → marker expiry timestamp. Markers expire
@@ -61,8 +86,7 @@ export class L1Cache<T = unknown> {
       return null;
     }
 
-    // Update last access for LRU
-    entry.lastAccess = Date.now();
+    this.touch(entry);
 
     return entry.value;
   }
@@ -97,8 +121,7 @@ export class L1Cache<T = unknown> {
       };
     }
 
-    // Update last access
-    entry.lastAccess = now;
+    this.touch(entry);
 
     // Calculate SWR threshold with jitter (±10%)
     // m7 Fix: Use crypto PRNG instead of Math.random for unpredictable timing
@@ -141,7 +164,8 @@ export class L1Cache<T = unknown> {
     value: T,
     ttl: number,
     versionToken: number,
-    namespace?: string
+    namespace?: string,
+    serializedSize?: number
   ): boolean {
     this.refreshingKeys.delete(key);
 
@@ -152,7 +176,7 @@ export class L1Cache<T = unknown> {
     }
 
     // Update with new value
-    this.set(key, value, ttl, namespace ?? extractNamespace(key));
+    this.set(key, value, ttl, namespace ?? extractNamespace(key), serializedSize);
     return true;
   }
 
@@ -211,42 +235,45 @@ export class L1Cache<T = unknown> {
 
   /**
    * Set a value in cache.
+   *
+   * @param serializedSize - Byte length of the value's serialized form, when
+   *   the caller already holds it. The entry is then charged a fixed
+   *   multiple of that length against maxMemory instead of a
+   *   JSON.stringify estimate. Ignored for byte values, which are charged
+   *   their byteLength, and when it is not a finite non-negative number.
    */
-  set(key: string, value: T, ttl: number, namespace: string): void {
-    // Estimate size (rough approximation)
-    const size = this.estimateSize(value);
+  set(key: string, value: T, ttl: number, namespace: string, serializedSize?: number): void {
+    const size = this.sizeOf(value, serializedSize);
+
+    // Take out the entry being replaced first, so it neither counts toward
+    // maxEntries nor gets an unrelated entry evicted in its place.
+    const oldEntry = this.cache.get(key);
+    if (oldEntry) this.remove(oldEntry);
 
     // Evict if necessary
     while (
       (this.cache.size >= this.config.maxEntries ||
         this.currentMemory + size > this.config.maxMemory) &&
-      this.cache.size > 0
+      this.head !== null
     ) {
       this.evictLRU();
     }
 
-    const now = Date.now();
-    const entry: CacheEntry<T> = {
+    const node: Node<T> = {
+      key,
       value,
       // ttl <= 0 means "no expiry" (ts-wide Backend contract, LAB-1388) —
       // without this guard `now + 0` expires the entry on the very next
       // millisecond instead of caching it forever.
-      expiresAt: ttl > 0 ? now + ttl : Infinity,
+      expiresAt: ttl > 0 ? Date.now() + ttl : Infinity,
       originalTtl: ttl,
       size,
       namespace,
-      lastAccess: now,
+      prev: null,
+      next: null,
     };
-
-    // Remove old entry memory tracking
-    const oldEntry = this.cache.get(key);
-    if (oldEntry) {
-      this.currentMemory -= oldEntry.size;
-      this.removeFromNamespaceIndex(key, oldEntry.namespace);
-    }
-
-    // Add new entry
-    this.cache.set(key, entry);
+    this.cache.set(key, node);
+    this.append(node);
     this.currentMemory += size;
     this.addToNamespaceIndex(key, namespace);
 
@@ -261,9 +288,7 @@ export class L1Cache<T = unknown> {
     const entry = this.cache.get(key);
     if (!entry) return false;
 
-    this.cache.delete(key);
-    this.currentMemory -= entry.size;
-    this.removeFromNamespaceIndex(key, entry.namespace);
+    this.remove(entry);
 
     // Bump version to invalidate any pending refreshes
     this.entryVersion.set(key, this.incrementVersion());
@@ -276,6 +301,8 @@ export class L1Cache<T = unknown> {
    */
   clear(): void {
     this.cache.clear();
+    this.head = null;
+    this.tail = null;
     this.namespaceIndex.clear();
     this.refreshingKeys.clear();
     this.entryVersion.clear();
@@ -398,26 +425,46 @@ export class L1Cache<T = unknown> {
    * C1 FIX: Also cleans up entryVersion to prevent memory leak.
    */
   private evictLRU(): void {
-    let oldestKey: string | null = null;
-    let oldestAccess = Infinity;
+    const oldest = this.head;
+    if (!oldest) return;
 
-    for (const [key, entry] of this.cache) {
-      if (entry.lastAccess < oldestAccess) {
-        oldestAccess = entry.lastAccess;
-        oldestKey = key;
-      }
-    }
+    this.remove(oldest);
 
-    if (oldestKey) {
-      const entry = this.cache.get(oldestKey)!;
-      this.cache.delete(oldestKey);
-      this.currentMemory -= entry.size;
-      this.removeFromNamespaceIndex(oldestKey, entry.namespace);
+    // C1 FIX: Clean up entryVersion - safe because no in-flight refresh for evicted entry
+    this.entryVersion.delete(oldest.key);
+    this.refreshingKeys.delete(oldest.key);
+  }
 
-      // C1 FIX: Clean up entryVersion - safe because no in-flight refresh for evicted entry
-      this.entryVersion.delete(oldestKey);
-      this.refreshingKeys.delete(oldestKey);
-    }
+  /** Drop an entry from the Map, the recency list, the memory total and the namespace index. */
+  private remove(node: Node<T>): void {
+    this.cache.delete(node.key);
+    this.unlink(node);
+    this.currentMemory -= node.size;
+    this.removeFromNamespaceIndex(node.key, node.namespace);
+  }
+
+  /** Mark an entry most recently used. */
+  private touch(node: Node<T>): void {
+    if (node === this.tail) return;
+    this.unlink(node);
+    this.append(node);
+  }
+
+  private append(node: Node<T>): void {
+    node.prev = this.tail;
+    node.next = null;
+    if (this.tail) this.tail.next = node;
+    else this.head = node;
+    this.tail = node;
+  }
+
+  private unlink(node: Node<T>): void {
+    if (node.prev) node.prev.next = node.next;
+    else this.head = node.next;
+    if (node.next) node.next.prev = node.prev;
+    else this.tail = node.prev;
+    node.prev = null;
+    node.next = null;
   }
 
   private addToNamespaceIndex(key: string, namespace: string): void {
@@ -443,13 +490,23 @@ export class L1Cache<T = unknown> {
     }
   }
 
-  private estimateSize(value: unknown): number {
+  private sizeOf(value: unknown, serializedSize: number | undefined): number {
     // Secure caches store the L2 ciphertext here (LAB-238), so the common
     // entry is a Uint8Array. JSON.stringify turns one into {"0":12,"1":34,…} —
     // roughly 14x its real size — which would blow the memory budget and evict
     // most of L1 on the first encrypted entry. Count the buffer instead.
     if (ArrayBuffer.isView(value)) return value.byteLength;
 
+    // A cache write already holds the serialized bytes, so their length costs
+    // nothing, where the estimate below stringifies the whole value.
+    // Finite and non-negative only: a NaN would poison currentMemory for good.
+    if (Number.isFinite(serializedSize) && serializedSize! >= 0) {
+      return serializedSize! * SERIALIZED_SIZE_FACTOR;
+    }
+    return this.estimateSize(value);
+  }
+
+  private estimateSize(value: unknown): number {
     // Rough estimation - JSON stringify length as proxy
     // m2 Fix: Track visited objects to prevent infinite recursion on circular refs
     const visited = new WeakSet<object>();

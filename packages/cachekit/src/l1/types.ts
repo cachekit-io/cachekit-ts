@@ -12,7 +12,14 @@ export interface L1Config {
   /** Maximum number of entries in the cache (default: 1000) */
   maxEntries: number;
 
-  /** Maximum memory usage in bytes (default: 50MB) */
+  /**
+   * Memory budget in bytes (default: 50MB). An estimate, not the heap
+   * footprint: byte values (a secure cache's ciphertext) are charged their
+   * byteLength, writes through the cache a fixed multiple of the serialized
+   * length, and anything else its JSON length x 2. Values made of many small
+   * objects or arrays can occupy more than ten times their charge on the
+   * heap, so `maxEntries` is the hard bound on L1's size.
+   */
   maxMemory: number;
 
   /** Enable stale-while-revalidate (default: true) */
@@ -67,9 +74,6 @@ export interface CacheEntry<T = unknown> {
 
   /** Namespace this entry belongs to (for namespace-level invalidation) */
   namespace: string;
-
-  /** Last access time (Unix timestamp in ms) for LRU ordering */
-  lastAccess: number;
 }
 
 /**

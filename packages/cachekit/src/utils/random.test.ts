@@ -14,11 +14,39 @@ describe('secureRandomFloat', () => {
     }
   });
 
-  it('uses crypto.getRandomValues internally', () => {
-    // Spy on crypto.getRandomValues
+  it('draws from crypto.getRandomValues, one call per 256 draws', () => {
     const spy = vi.spyOn(crypto, 'getRandomValues');
-    secureRandomFloat();
-    expect(spy).toHaveBeenCalled();
+    // Earlier tests leave the pool part-spent; 1024 draws from any point in it
+    // still take exactly four refills.
+    for (let i = 0; i < 1024; i++) secureRandomFloat();
+    expect(spy).toHaveBeenCalledTimes(4);
+  });
+
+  it('serves each pooled value once, in order, as value / 2^32', async () => {
+    vi.resetModules();
+    const { secureRandomFloat: fresh } = await import('./random.js');
+    let counter = 0;
+    vi.spyOn(crypto, 'getRandomValues').mockImplementation(
+      <T extends ArrayBufferView | null>(array: T): T => {
+        const words = array as unknown as Uint32Array;
+        for (let i = 0; i < words.length; i++) words[i] = counter++;
+        return array;
+      }
+    );
+    const draws = Array.from({ length: 512 }, () => fresh() * 0x100000000);
+    expect(draws).toEqual(Array.from({ length: 512 }, (_, i) => i));
+  });
+
+  it('stays below 1 for the largest word', async () => {
+    vi.resetModules();
+    const { secureRandomFloat: fresh } = await import('./random.js');
+    vi.spyOn(crypto, 'getRandomValues').mockImplementation(
+      <T extends ArrayBufferView | null>(array: T): T => {
+        (array as unknown as Uint32Array).fill(0xffffffff);
+        return array;
+      }
+    );
+    expect(fresh()).toBeLessThan(1);
   });
 
   it('produces different values (not constant)', () => {

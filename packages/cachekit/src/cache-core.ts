@@ -721,7 +721,11 @@ export class CacheImpl implements SecureCache {
    * never drift into decoding the same entry differently — a real hazard once
    * both paths handle AAD (protocol#12 freezes the v0x03 component set).
    */
-  private async decodeEntry<T>(bytes: Uint8Array, key: string, interop: boolean): Promise<T> {
+  private async decodeEntry<T>(
+    bytes: Uint8Array,
+    key: string,
+    interop: boolean
+  ): Promise<{ value: T; serializedSize: number }> {
     const useEnvelope = this.useEnvelope(interop);
 
     let plaintext = bytes;
@@ -782,7 +786,11 @@ export class CacheImpl implements SecureCache {
       // mode ambiguity the AAD binding exists to rule out.
       plaintext = this.tryUnwrapEnvelope(plaintext, key) ?? plaintext;
     }
-    return interop ? decodeInteropValue<T>(plaintext) : this.serializer.decode<T>(plaintext);
+    const value = interop ? decodeInteropValue<T>(plaintext) : this.serializer.decode<T>(plaintext);
+    // The serialized length, not bytes.byteLength: that is the compressed
+    // (and maybe encrypted) envelope, several times smaller, and charging L1
+    // for it would let L1 grow well past maxMemory.
+    return { value, serializedSize: plaintext.length };
   }
 
   /**
@@ -819,7 +827,7 @@ export class CacheImpl implements SecureCache {
           `L1 entry for a secure cache is not ciphertext bytes (got ${typeof stored})`
         );
       }
-      return { value: await this.decodeEntry<T>(stored, key, interop) };
+      return { value: (await this.decodeEntry<T>(stored, key, interop)).value };
     } catch (error) {
       this.l1?.invalidateByKey(key);
       this.recordFailure('l1_decrypt', error);
@@ -902,8 +910,9 @@ export class CacheImpl implements SecureCache {
     // failure keeps the degradation contract it had inside the executor:
     // counted, then thrown with degradation off, a miss with it on.
     let value: T;
+    let serializedSize: number;
     try {
-      value = await this.decodeEntry<T>(data, key, interop);
+      ({ value, serializedSize } = await this.decodeEntry<T>(data, key, interop));
     } catch (error) {
       // Its own operation label, like 'l1_decrypt': the fetch already
       // recorded a successful 'get', so counting this under 'get' too would
@@ -939,7 +948,7 @@ export class CacheImpl implements SecureCache {
         // arming a spurious background refresh per marker window, forever
         // (LAB-1768).
         const l1TtlMs = Number.isFinite(l1TtlSeconds) ? l1TtlSeconds * 1000 : 0;
-        this.l1.set(key, this.l1Payload(value, data), l1TtlMs, namespace);
+        this.l1.set(key, this.l1Payload(value, data), l1TtlMs, namespace, serializedSize);
         this.publishL1Stats();
       }
     }
@@ -1049,7 +1058,10 @@ export class CacheImpl implements SecureCache {
     // degradation absorbs still yields it. Otherwise an encrypted cache's SWR
     // refresh gets nothing to store, the stale entry stays, and the refresh
     // re-runs the origin once per refresh-marker window.
-    const l1Write: L1Write = { l1: this.l1Payload(value, data) };
+    const l1Write: L1Write = {
+      l1: this.l1Payload(value, data),
+      serializedSize: serialized.length,
+    };
 
     // Only the backend write runs under retry, the breaker and degradation.
     await this.run('set', key, undefined, () => this.backend.set(key, data, ttl));
@@ -1068,7 +1080,7 @@ export class CacheImpl implements SecureCache {
     // expires or refreshes (a conditional L2 write would need CAS the Backend
     // contract doesn't have).
     if (updateL1 && this.l1) {
-      this.l1.set(key, l1Write.l1, ttl * 1000, namespace);
+      this.l1.set(key, l1Write.l1, ttl * 1000, namespace, l1Write.serializedSize);
       this.publishL1Stats();
     }
 
