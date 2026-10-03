@@ -570,7 +570,7 @@ L1. A compress or encrypt failure is not a backend failure: it is attempted
 once, never retried or counted toward the breaker, sends nothing to L2, is
 counted in `cachekit_errors_total`, and rejects with degradation off. With
 degradation on it is logged instead, at most once a minute per cache, as
-`[cachekit] set failed to encrypt or compress, value NOT cached (keyHash=…): <reason>`.
+`[cachekit] set failed to encrypt or compress, value NOT written to L2 (keyHash=…): <reason>`.
 The reason is fixed per error class, and for an exhausted nonce budget it says
 to rotate forward to a new master key. The line never carries the key or the
 error text. An `authentication` failure is logged through the error logger, at most once a

@@ -263,7 +263,9 @@ describe('a failed L2 write still fills L1 (LAB-7157)', () => {
   // Compressing and encrypting the value runs before the executor, like
   // serialization: a failure there is not a backend failure, so it is neither
   // retried nor counted by the breaker. It is recorded as a set failure,
-  // stores nothing in L2 or L1, and throws with degradation off.
+  // stores nothing in L2 or L1, and throws with degradation off. With
+  // degradation on it is logged, once per window; with it off the caller gets
+  // the error and nothing is logged.
   it.each([
     { step: 'pack', degradation: true },
     { step: 'pack', degradation: false },
@@ -272,7 +274,8 @@ describe('a failed L2 write still fills L1 (LAB-7157)', () => {
   ] as const)(
     'a $step failure (degradation: $degradation) runs once, leaves the breaker closed and stores nothing',
     async ({ step, degradation }) => {
-      setLogger(() => {});
+      const logError = vi.fn();
+      setLogger(logError);
       const { backend, calls } = rejectingBackend('transient');
       // Pack is the only step a plaintext cache has; encrypt needs an encrypted one.
       const cache = makeCache(backend, {
@@ -302,6 +305,7 @@ describe('a failed L2 write still fills L1 (LAB-7157)', () => {
       expect(breakerOf(cache)).toBe('closed');
       expect(calls.set).toBe(0);
       expect(l1Of(cache).stats.entries).toBe(0);
+      expect(logError).toHaveBeenCalledTimes(degradation ? 1 : 0);
     }
   );
 
@@ -319,7 +323,7 @@ describe('a failed L2 write still fills L1 (LAB-7157)', () => {
     expect(logs).toHaveLength(1);
     const [message, error] = logs[0]!;
     expect(message).toMatch(
-      /^\[cachekit\] set failed to encrypt or compress, value NOT cached \(keyHash=[0-9a-f]{32}\): /
+      /^\[cachekit\] set failed to encrypt or compress, value NOT written to L2 \(keyHash=[0-9a-f]{32}\): /
     );
     expect(message).toContain('rotate forward to a NEW master key');
     expect(message).not.toContain('alice');
@@ -336,7 +340,7 @@ describe('a failed L2 write still fills L1 (LAB-7157)', () => {
     {
       step: 'encrypt',
       error: new ConfigurationError(`skew ${CANARY}`),
-      reason: 'encryption is misconfigured',
+      reason: 'native bindings are out of step',
     },
     { step: 'pack', error: new Error(`pack ${CANARY}`), reason: 'could not be packed' },
   ] as const)(
@@ -353,21 +357,6 @@ describe('a failed L2 write still fills L1 (LAB-7157)', () => {
       const [message] = logError.mock.calls[0]!;
       expect(message).toContain(reason);
       expect(message).not.toContain(CANARY);
-    }
-  );
-
-  it.each(['pack', 'encrypt'] as const)(
-    'with degradation off, a %s failure is thrown and not logged',
-    async (step) => {
-      const logError = vi.fn();
-      setLogger(logError);
-      const { backend } = rejectingBackend('transient');
-      const cache = makeCache(backend, { degradation: false, encrypted: step === 'encrypt' });
-      const failure = new NonceExhaustedError();
-      failStep(cache, step, failure);
-
-      await expect(cache.set('users:1', 'v')).rejects.toBe(failure);
-      expect(logError).not.toHaveBeenCalled();
     }
   );
 

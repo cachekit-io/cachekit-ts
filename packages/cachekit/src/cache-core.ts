@@ -600,9 +600,11 @@ export class CacheImpl implements SecureCache {
    * degradation absorbed the error. The failure runs before the reliability
    * executor, so the breaker never sees it, and with metrics off nothing else
    * records it: an exhausted nonce budget would otherwise drop every write on
-   * the cache without a trace. With degradation off the caller gets the error,
-   * so there is nothing to report. The error text is left out, and the key is
-   * digested, for the reasons warnSetRejected gives. NonceExhaustedError is an
+   * the cache without a trace. The line claims only that L2 was skipped: a
+   * plaintext SWR refresh still keeps the value in L1. The error text is left
+   * out because EncryptionError wraps native error text, and native text can
+   * carry the plaintext it was handed (as warnEnvelopeRejected notes). The key
+   * is digested for the reason warnSetRejected gives. NonceExhaustedError is an
    * EncryptionError, so it is matched first.
    */
   private warnSetEncryptFailed(key: string, error: unknown): void {
@@ -613,12 +615,12 @@ export class CacheImpl implements SecureCache {
       error instanceof NonceExhaustedError
         ? 'the encryption key exhausted its nonce budget; rotate forward to a NEW master key (runbook: https://docs.cachekit.io/concepts/key-rotation/)'
         : error instanceof ConfigurationError
-          ? 'encryption is misconfigured (native bindings that do not match previousMasterKeys: reinstall dependencies)'
+          ? 'the native bindings are out of step with the SDK version and dropped previousMasterKeys; reinstall dependencies'
           : error instanceof EncryptionError
             ? 'encryption failed (the native bindings did not load, the cache was closed, or the encryptor errored)'
             : 'the value could not be packed into its compressed envelope';
     logError(
-      `[cachekit] set failed to encrypt or compress, value NOT cached (keyHash=${blake2b16Hex(key)}): ${reason}.`
+      `[cachekit] set failed to encrypt or compress, value NOT written to L2 (keyHash=${blake2b16Hex(key)}): ${reason}.`
     );
   }
 
