@@ -99,6 +99,20 @@ describe('CachekitIO Backend', () => {
       expect(headers['Authorization']).toBe('Bearer ck_test_abc123');
     });
 
+    it('sends the cachekit-ts User-Agent', async () => {
+      fetchSpy.mockResolvedValueOnce(mockResponse(404));
+      await backend.get('key');
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            'User-Agent': expect.stringMatching(/^cachekit-ts\/\d+\.\d+\.\d+\S* \(node\)$/),
+          }),
+        })
+      );
+    });
+
     it('URL-encodes keys with special characters', async () => {
       fetchSpy.mockResolvedValueOnce(mockResponse(404));
       await backend.get('namespace:user/123');

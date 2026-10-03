@@ -22,7 +22,8 @@
       "package-name": "@cachekit-io/cachekit",
       "changelog-path": "CHANGELOG.md",
       "component": "cachekit",
-      "include-component-in-tag": true
+      "include-component-in-tag": true,
+      "extra-files": ["src/version.ts"]
     },
     "packages/cachekit-core-ts": {
       "package-name": "@cachekit-io/cachekit-core-ts",

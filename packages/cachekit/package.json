@@ -65,7 +65,9 @@
     "test:workers": "vitest run --config vitest.workers.config.ts",
     "check:workers-bundle": "node scripts/check-workers-bundle.mjs",
     "bench:ir": "node bench/ir.mjs",
-    "bench:cold-start": "node bench/cold-start.mjs"
+    "bench:cold-start": "node bench/cold-start.mjs",
+    "bench:runtime": "node bench/runtime/run.mjs",
+    "bench:live": "node bench/live/wall-time-probe.mjs"
   },
   "keywords": [
     "cache",

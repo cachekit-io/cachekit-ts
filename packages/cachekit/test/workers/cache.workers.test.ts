@@ -19,6 +19,7 @@ import {
   type Backend,
 } from '../../src/workers/index.js';
 import { forgedEnvelope } from '../fixtures/forged-envelope.js';
+import { USER_AGENT } from '../../src/backends/user-agent.js';
 
 const MASTER_KEY_HEX = '61'.repeat(32); // 32 bytes of 0x61, same as the vector fixture
 
@@ -44,6 +45,10 @@ function memoryBackend(): Backend & { store: Map<string, Uint8Array> } {
 }
 
 describe('CachekitIO backend inside workerd (mocked upstream)', () => {
+  it('names the workerd runtime in its User-Agent', () => {
+    expect(USER_AGENT).toMatch(/^cachekit-ts\/\S+ \(workerd\)$/);
+  });
+
   it('round-trips binary bytes through set/get and maps 404 to null', async () => {
     const backend = new CachekitIOCore({ apiKey: 'ck_test_smoke' }); // pragma: allowlist secret
     const payload = new Uint8Array([0x00, 0x01, 0xfe, 0xff, 0x80, 0x7f]);
