@@ -287,6 +287,66 @@ describe('L1Cache', () => {
     });
   });
 
+  describe('a value charged above maxMemory', () => {
+    // Byte values are charged exactly their byteLength, so the charges here are exact.
+    const filled = () => {
+      const c = new L1Cache<Uint8Array>({ maxEntries: 100, maxMemory: 1000 });
+      c.set('a', new Uint8Array(300), 10000, 'test');
+      c.set('b', new Uint8Array(300), 10000, 'test');
+      return c;
+    };
+
+    it('is not stored, and evicts nothing', () => {
+      const c = filled();
+      c.set('big', new Uint8Array(1001), 10000, 'test');
+      expect(c.get('big')).toBeNull();
+      expect(c.get('a')?.byteLength).toBe(300);
+      expect(c.get('b')?.byteLength).toBe(300);
+      expect(c.stats).toMatchObject({ entries: 2, memoryUsed: 600 });
+    });
+
+    it('drops the older entry under the same key', () => {
+      const c = filled();
+      c.set('a', new Uint8Array(1001), 10000, 'test');
+      expect(c.get('a')).toBeNull();
+      expect(c.get('b')?.byteLength).toBe(300);
+      expect(c.stats).toMatchObject({ entries: 1, memoryUsed: 300, namespaces: 1 });
+    });
+
+    it('bumps the version, so an earlier refresh cannot restore the old value', () => {
+      const c = filled();
+      const { versionToken } = c.getWithSwr('a');
+      c.set('a', new Uint8Array(1001), 10000, 'test');
+      expect(c.completeRefresh('a', new Uint8Array(300), 10000, versionToken)).toBe(false);
+      expect(c.get('a')).toBeNull();
+    });
+
+    it('is not stored by completeRefresh either', () => {
+      const c = filled();
+      const { versionToken } = c.getWithSwr('a');
+      c.completeRefresh('a', new Uint8Array(1001), 10000, versionToken);
+      expect(c.get('a')).toBeNull();
+      expect(c.get('b')?.byteLength).toBe(300);
+      expect(c.stats).toMatchObject({ entries: 1, memoryUsed: 300 });
+    });
+
+    it('is refused when the charge comes from serializedSize and objects', () => {
+      const c = new L1Cache<unknown>({ maxEntries: 100, maxMemory: 1000 });
+      c.set('a', 'x', 10000, 'test');
+      // 100 B serialized x 2.5 = 250, plus 24 objects x 32 = 768: 1018.
+      c.set('rows', [{}], 10000, 'test', 100, 24);
+      expect(c.get('rows')).toBeNull();
+      expect(c.get('a')).toBe('x');
+    });
+
+    it('a charge of exactly maxMemory is still stored', () => {
+      const c = filled();
+      c.set('full', new Uint8Array(1000), 10000, 'test');
+      expect(c.get('full')?.byteLength).toBe(1000);
+      expect(c.stats).toMatchObject({ entries: 1, memoryUsed: 1000 });
+    });
+  });
+
   describe('serializedSize hint', () => {
     // One fixed mixed workload, inserted far past maxMemory, into a cache
     // sized by the JSON.stringify estimate and one sized by the hint.

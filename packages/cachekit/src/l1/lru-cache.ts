@@ -247,7 +247,8 @@ export class L1Cache<T = unknown> {
   }
 
   /**
-   * Set a value in cache.
+   * Set a value in cache. A value charged above maxMemory is not stored, and
+   * any entry it would replace is dropped.
    *
    * @param serializedSize - Byte length of the value's serialized form, when
    *   the caller already holds it. The entry is then charged a fixed
@@ -274,6 +275,17 @@ export class L1Cache<T = unknown> {
     // maxEntries nor gets an unrelated entry evicted in its place.
     const oldEntry = this.cache.get(key);
     if (oldEntry) this.remove(oldEntry);
+
+    // An entry charged above maxMemory cannot fit even in an empty cache, and
+    // admitting it would evict every other entry first: one such value, read
+    // from L2 over and over, would flush L1 on every read. Store nothing. The
+    // replaced entry stays dropped, so the old value does not outlive this
+    // write, and the version bumps as delete() bumps it, so an in-flight
+    // refresh cannot restore it either.
+    if (size > this.config.maxMemory) {
+      this.entryVersion.set(key, this.incrementVersion());
+      return;
+    }
 
     // Evict if necessary
     while (

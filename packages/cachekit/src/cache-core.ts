@@ -982,8 +982,8 @@ export class CacheImpl implements SecureCache {
    * Returns the payload L1 should hold for this entry, so the SWR refresh
    * path (which defers its L1 write to completeRefresh's version check) can
    * store the ciphertext this produced instead of the caller's plaintext.
-   * Null only when an encrypted cache produced no ciphertext — see
-   * `unencoded`.
+   * Null when the value failed to encode, and when an encrypted cache
+   * produced no ciphertext.
    */
   private async setEntry<T>(
     key: string,
@@ -1016,12 +1016,6 @@ export class CacheImpl implements SecureCache {
     // reason (see EncryptionManagerCore.validateKey).
     this.encryption?.validateKey(key, useEnvelope);
 
-    // What L1 may hold when the value never becomes bytes (an encode, pack or
-    // encrypt failure): the value itself on a plaintext cache, nothing on an
-    // encrypted one, whose L1 holds only ciphertext. Only the SWR refresh path
-    // stores it; a direct write returns before its L1 update.
-    const unencoded: L1Write | null = this.encryption ? null : { l1: value };
-
     // Serialize before the reliability executor. An encode rejection is a
     // deterministic caller error: retrying it re-encodes the same value for
     // nothing, and the circuit breaker would count it as a backend failure —
@@ -1030,8 +1024,11 @@ export class CacheImpl implements SecureCache {
     // (spec: values outside the data model MUST error). Auto-mode rejection
     // keeps the degradation contract it had inside the executor: counted,
     // then thrown with degradation off, absorbed with it on — never written
-    // to L2, though an SWR refresh on a plaintext cache still repopulates L1
-    // from `unencoded`, as a degraded backend write does. An auto-mode
+    // to L2, nor to L1: the refresh path gets null, as a direct write and a
+    // cold miss store nothing for this value either. L1 could only charge it
+    // the JSON estimate, which under-counts the object-heavy values an encode
+    // most often rejects (too many entries, too deep), and a refill would keep
+    // renewing it for as long as reads keep it stale. An auto-mode
     // rejection, or an interop size rejection, emits one rate-limited warning
     // either way (LAB-1388, LAB-4845).
     // Normalizing (auto mode) and the header encoders (interop) count the
@@ -1051,7 +1048,7 @@ export class CacheImpl implements SecureCache {
       if (interop) throw error;
       this.recordFailure('set', error);
       if (!this.degradationEnabled) throw error;
-      return unencoded;
+      return null;
     }
 
     // Compress (ByteStorage envelope, before encryption) and encrypt before
@@ -1070,10 +1067,13 @@ export class CacheImpl implements SecureCache {
       this.recordFailure('set', error);
       if (!this.degradationEnabled) throw error;
       this.warnSetEncryptFailed(key, error);
-      // The value did serialize, so its size and count are known.
-      return (
-        unencoded && { ...unencoded, serializedSize: serialized.length, objects: count.objects }
-      );
+      // The value did serialize, so L1 can charge it honestly, as it charges a
+      // degraded backend write. Only the SWR refresh path stores this; a
+      // direct write returns before its L1 update. An encrypted cache's L1
+      // holds only ciphertext, so it gets nothing.
+      return this.encryption
+        ? null
+        : { l1: value, serializedSize: serialized.length, objects: count.objects };
     }
     // Exists before the backend write, so a write that the breaker skips or
     // degradation absorbs still yields it. Otherwise an encrypted cache's SWR

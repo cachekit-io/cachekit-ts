@@ -21,7 +21,9 @@ export interface L1Config {
    * scalars or tiny binary values, such as long arrays of short strings,
    * small integers or empty byte arrays, can still occupy up to about six
    * times their charge on the heap, so `maxEntries` is the hard bound on L1's
-   * size.
+   * size. A value charged above `maxMemory` is not stored in L1 at all (it
+   * would evict every other entry first), and the write drops any older entry
+   * under its key; reads of it go to L2.
    */
   maxMemory: number;
 
