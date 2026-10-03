@@ -48,6 +48,8 @@ const encoded = async () =>
   (await load('serialization/serializer.js')).defaultSerializer.encode(VALUE);
 
 let sink = 0;
+// Ops run before the window opens, past V8's tier-up.
+const WARMUP = 2000;
 
 async function encryptedOp(manager, storage) {
   const packed = storage.pack(await encoded());
@@ -75,11 +77,67 @@ class MemoryBackend {
   async close() {}
 }
 
+// An L1 already full, so every set evicts: the cost of picking the victim at
+// this capacity.
+const l1AtCapacity = (entries, n) => ({
+  n,
+  setup: async () => {
+    const { L1Cache } = await load('l1/lru-cache.js');
+    const l1 = new L1Cache({ maxEntries: entries });
+    // Keys made up front (warm-up and window included), so the op allocates
+    // only what L1 itself does.
+    const keys = Array.from({ length: entries + WARMUP + n }, (_, k) => `k${k}`);
+    let i = 0;
+    for (; i < entries; i++) l1.set(keys[i], i, 3_600_000, 'bench');
+    return () => {
+      l1.set(keys[i], i, 3_600_000, 'bench');
+      i++;
+    };
+  },
+});
+
+// A plaintext set(): L1 is handed the decoded value, so its size accounting is
+// part of the write. Rows as in VALUE, ~33 B of msgpack each.
+const plaintextSet = (rows, n) => ({
+  n,
+  setup: async () => {
+    const { createCache } = await load('index.js');
+    const cache = createCache({ backend: new MemoryBackend(), metrics: false });
+    const value = { rows: Array.from({ length: rows }, (_, i) => VALUE.rows[i % 32]) };
+    return async () => {
+      await cache.set(KEY, value);
+    };
+  },
+});
+
 /**
  * Each workload's setup returns its op: one call on the path its name gives.
- * n is sized so n x Ir/op dwarfs the noise of the fixed part.
+ * n is sized so n x Ir/op dwarfs the noise of the fixed part, and of a GC
+ * cycle that lands in one run's window and not another's: cheap ops that
+ * allocate need a larger n.
  */
 export const WORKLOADS = {
+  // what keeping recency costs a hit: round-robin over a full 1k L1, so each
+  // get() reads an entry that is not already the most recent
+  'l1-get-hit': {
+    n: 2_000_000,
+    setup: async () => {
+      const { L1Cache } = await load('l1/lru-cache.js');
+      const l1 = new L1Cache();
+      const keys = Array.from({ length: 1_000 }, (_, i) => `k${i}`);
+      keys.forEach((k, i) => l1.set(k, i, 3_600_000, 'bench'));
+      let i = 0;
+      return () => {
+        sink += l1.get(keys[i++ % 1_000]);
+      };
+    },
+  },
+  'l1-set-at-capacity-1k': l1AtCapacity(1_000, 200_000),
+  'l1-set-at-capacity-10k': l1AtCapacity(10_000, 4_000),
+  'l1-set-at-capacity-100k': l1AtCapacity(100_000, 2_000),
+  'plaintext-set-1kb': plaintextSet(32, 5_000),
+  'plaintext-set-10kb': plaintextSet(320, 1_000),
+  'plaintext-set-100kb': plaintextSet(3_200, 1_000),
   // wrap(): every call hashes its arguments before L1 is consulted
   keygen: {
     n: 20_000,
@@ -171,8 +229,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     throw new Error(`n must be a non-negative integer, got "${nArg}"`);
 
   const op = await WORKLOADS[name].setup();
-  // Past V8's tier-up, so the n ops measure optimized code.
-  for (let i = 0; i < 2000; i++) await op();
+  for (let i = 0; i < WARMUP; i++) await op();
   process.cpuUsage(); // window start: callgrind dump 1
   const t0 = process.hrtime.bigint();
   for (let i = 0; i < n; i++) await op();

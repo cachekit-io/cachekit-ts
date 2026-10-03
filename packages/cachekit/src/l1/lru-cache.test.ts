@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { L1Cache } from './lru-cache.js';
 import { setLogger } from '../logger.js';
+import { defaultSerializer } from '../serialization/serializer.js';
+import { L1_SERIALIZED_SIZE_FACTOR } from '../constants.js';
 import type { InvalidationEvent } from './types.js';
 
 describe('L1Cache', () => {
@@ -155,6 +157,200 @@ describe('L1Cache', () => {
         bytesCache.set(`k${i}`, new Uint8Array(256).fill(i), 10000, 'test');
       }
       expect(bytesCache.stats.entries).toBe(16);
+    });
+  });
+
+  describe('recency', () => {
+    // No fake timers: every op lands in the same millisecond, so the order
+    // below is exact recency, not a timestamp tie broken by luck.
+    const fill = (c: L1Cache<number>, keys: string[]) =>
+      keys.forEach((k, i) => c.set(k, i, 10000, 'test'));
+    // Observing a key with get() touches it, so call this only once, last.
+    const keysOf = (c: L1Cache<unknown>, keys: string[]) => keys.filter((k) => c.get(k) !== null);
+
+    it('a get() hit makes the key most recent', () => {
+      const c = new L1Cache<number>({ maxEntries: 3 });
+      fill(c, ['a', 'b', 'c']);
+      c.get('a');
+      c.set('d', 4, 10000, 'test');
+      expect(keysOf(c, ['a', 'b', 'c', 'd'])).toEqual(['a', 'c', 'd']);
+    });
+
+    it('a getWithSwr() hit makes the key most recent', () => {
+      const c = new L1Cache<number>({ maxEntries: 3 });
+      fill(c, ['a', 'b', 'c']);
+      c.getWithSwr('a');
+      c.set('d', 4, 10000, 'test');
+      expect(keysOf(c, ['a', 'b', 'c', 'd'])).toEqual(['a', 'c', 'd']);
+    });
+
+    it('set() of an existing key makes it most recent', () => {
+      const c = new L1Cache<number>({ maxEntries: 3 });
+      fill(c, ['a', 'b', 'c']);
+      c.set('a', 10, 10000, 'test');
+      c.set('d', 4, 10000, 'test');
+      expect(keysOf(c, ['a', 'b', 'c', 'd'])).toEqual(['a', 'c', 'd']);
+    });
+
+    it('set() of an existing key at capacity evicts no other entry', () => {
+      const c = new L1Cache<number>({ maxEntries: 3 });
+      fill(c, ['a', 'b', 'c']);
+      c.set('b', 20, 10000, 'test');
+      expect(keysOf(c, ['a', 'b', 'c'])).toEqual(['a', 'b', 'c']);
+      expect(c.get('b')).toBe(20);
+      expect(c.stats.entries).toBe(3);
+    });
+
+    it('an overwrite that no longer fits in maxMemory evicts others, never itself', () => {
+      const c = new L1Cache<Uint8Array>({ maxEntries: 100, maxMemory: 1000 });
+      c.set('a', new Uint8Array(300), 10000, 'test');
+      c.set('b', new Uint8Array(300), 10000, 'test');
+      c.set('c', new Uint8Array(300), 10000, 'test');
+      // b grows to 600: 300 + 300 + 600 > 1000, so the oldest other entry goes.
+      c.set('b', new Uint8Array(600), 10000, 'test');
+      expect(c.get('a')).toBeNull();
+      expect(c.get('b')?.byteLength).toBe(600);
+      expect(c.get('c') !== null).toBe(true);
+      expect(c.stats.memoryUsed).toBe(900);
+    });
+
+    it('evicts in LRU order when maxMemory binds', () => {
+      const c = new L1Cache<Uint8Array>({ maxEntries: 100, maxMemory: 1000 });
+      for (const k of ['a', 'b', 'c', 'd']) c.set(k, new Uint8Array(250), 10000, 'test');
+      c.get('a');
+      // 600 more bytes: b and c are the two least recent and must go.
+      c.set('e', new Uint8Array(500), 10000, 'test');
+      expect(keysOf(c, ['a', 'b', 'c', 'd', 'e'])).toEqual(['a', 'd', 'e']);
+      expect(c.stats.memoryUsed).toBe(1000);
+    });
+
+    it('eviction clears the namespace index and refresh marker of the evicted key', () => {
+      vi.useFakeTimers();
+      const c = new L1Cache<number>({ maxEntries: 2, swrThresholdRatio: 2 });
+      c.set('a', 1, 10000, 'ns-a');
+      c.set('b', 2, 10000, 'ns-b');
+      expect(c.getWithSwr('a').shouldRefresh).toBe(true);
+      c.get('b'); // a is now least recent
+      c.set('c', 3, 10000, 'ns-c');
+      expect(c.get('a')).toBeNull();
+      expect(c.stats).toMatchObject({ entries: 2, namespaces: 2, refreshing: 0 });
+    });
+
+    it('matches a reference LRU over a long random op sequence', () => {
+      // Reference: an array ordered least to most recent. Any slip in the
+      // linked list (a lost link, a stale head or tail) shows up as a
+      // divergence in which keys survive.
+      const maxEntries = 8;
+      const c = new L1Cache<number>({ maxEntries });
+      const ref: string[] = [];
+      const bump = (k: string) => {
+        ref.splice(ref.indexOf(k), 1);
+        ref.push(k);
+      };
+      let seed = 12345;
+      const rand = (n: number) => {
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        return seed % n;
+      };
+      for (let i = 0; i < 5000; i++) {
+        const k = `k${rand(14)}`;
+        const op = rand(10);
+        if (op < 4) {
+          c.set(k, i, 0, `ns${rand(3)}`);
+          if (ref.includes(k)) bump(k);
+          else {
+            if (ref.length >= maxEntries) ref.shift();
+            ref.push(k);
+          }
+        } else if (op < 7) {
+          const hit = op === 4 ? c.getWithSwr(k).value !== null : c.get(k) !== null;
+          expect(hit).toBe(ref.includes(k));
+          if (hit) bump(k);
+        } else if (op < 9) {
+          expect(c.delete(k)).toBe(ref.includes(k));
+          if (ref.includes(k)) ref.splice(ref.indexOf(k), 1);
+        } else if (rand(50) === 0) {
+          c.clear();
+          ref.length = 0;
+        }
+        expect(c.stats.entries).toBe(ref.length);
+      }
+      const all = Array.from({ length: 14 }, (_, j) => `k${j}`);
+      expect(keysOf(c, all)).toEqual(all.filter((k) => ref.includes(k)));
+    });
+  });
+
+  describe('serializedSize hint', () => {
+    it('charges the serialized length times L1_SERIALIZED_SIZE_FACTOR', () => {
+      const value = { id: 1, name: 'x'.repeat(100) };
+      cache.set('a', value as unknown as string, 10000, 'test', 120);
+      expect(cache.stats.memoryUsed).toBe(120 * L1_SERIALIZED_SIZE_FACTOR);
+    });
+
+    it('does not stringify the value when given a size', () => {
+      const spy = vi.spyOn(JSON, 'stringify');
+      try {
+        cache.set('a', 'x'.repeat(1000), 10000, 'test', 1003);
+        expect(spy).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('charges byte values their byteLength whatever the hint', () => {
+      const c = new L1Cache<Uint8Array>();
+      c.set('a', new Uint8Array(256), 10000, 'test', 9999);
+      expect(c.stats.memoryUsed).toBe(256);
+    });
+
+    it.each([NaN, -1, Infinity])('falls back to the estimate for a hint of %s', (hint) => {
+      const withHint = new L1Cache<string>();
+      const without = new L1Cache<string>();
+      withHint.set('a', 'x'.repeat(100), 10000, 'test', hint);
+      without.set('a', 'x'.repeat(100), 10000, 'test');
+      expect(withHint.stats.memoryUsed).toBe(without.stats.memoryUsed);
+    });
+
+    it('keeps eviction under maxMemory within 25% of the estimate it replaces', () => {
+      // One fixed mixed workload, inserted far past maxMemory, into a cache
+      // sized by the JSON.stringify estimate and one sized by the hint.
+      const rec = (i: number) => ({ id: i, name: `item-${i}`, score: i * 1.5, ok: i % 2 === 0 });
+      const shapes: ((i: number) => unknown)[] = [
+        (i) => `ascii-${i}-` + 'x'.repeat(100),
+        (i) => `ascii-${i}-` + 'lorem ipsum '.repeat(400),
+        (i) => `café crème ${i} `.repeat(60),
+        (i) => `缓存数据${i}`.repeat(80),
+        (i) => `🚀✨${i}`.repeat(50),
+        (i) => Array.from({ length: 200 }, (_, j) => i * 1000 + j),
+        (i) => Array.from({ length: 100 }, (_, j) => (i + j) / 7),
+        (i) => ({ rows: Array.from({ length: 30 }, (_, j) => rec(i + j)) }),
+        (i) => ({ rows: Array.from({ length: 300 }, (_, j) => rec(i + j)) }),
+        (i) => ({
+          id: i,
+          email: `u${i}@example.com`,
+          roles: ['admin', 'user'],
+          profile: { first: 'Ann', last: 'Lee', bio: 'b'.repeat(200) },
+        }),
+        (i) => ({ a: { b: { c: [i, 2, { d: 'deep', e: [true, false, null] }] } }, tags: ['x'] }),
+      ];
+      const workload = Array.from({ length: 2200 }, (_, i) => shapes[i % shapes.length](i));
+      const sizes = workload.map((v) => defaultSerializer.encode(v).length);
+
+      for (const mb of [1, 2, 5]) {
+        const config = { maxEntries: 1_000_000, maxMemory: mb * 1024 * 1024 };
+        const estimated = new L1Cache<unknown>(config);
+        const hinted = new L1Cache<unknown>(config);
+        workload.forEach((v, i) => {
+          estimated.set(`k${i}`, v, 0, 'parity');
+          hinted.set(`k${i}`, v, 0, 'parity', sizes[i]);
+        });
+        // maxMemory must actually bind, or the comparison proves nothing.
+        expect(estimated.stats.entries).toBeLessThan(workload.length);
+        expect(hinted.stats.entries / estimated.stats.entries).toBeGreaterThanOrEqual(0.75);
+        expect(hinted.stats.entries / estimated.stats.entries).toBeLessThanOrEqual(1.25);
+        expect(hinted.stats.memoryUsed / estimated.stats.memoryUsed).toBeGreaterThanOrEqual(0.75);
+        expect(hinted.stats.memoryUsed / estimated.stats.memoryUsed).toBeLessThanOrEqual(1.25);
+      }
     });
   });
 

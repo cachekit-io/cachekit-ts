@@ -21,6 +21,7 @@ import { EncryptionManagerCore } from './encryption/manager-core.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
 import { CacheImpl, type ByteStorageLike } from './cache-core.js';
+import { L1Cache } from './l1/lru-cache.js';
 
 /**
  * Simple in-memory backend for testing cache integration.
@@ -1044,6 +1045,53 @@ describe('Cache Integration', () => {
       await expect(cache.get('test')).rejects.toThrow('Cache has been closed');
       await expect(cache.set('test', 'value')).rejects.toThrow('Cache has been closed');
       await expect(cache.delete('test')).rejects.toThrow('Cache has been closed');
+    });
+  });
+
+  describe('L1 size hint (serialized length, never the envelope)', () => {
+    // Compressible, so the stored envelope is much smaller than the msgpack
+    // it carries: a hint taken from the stored bytes would show up here.
+    const value = { text: 'compressible '.repeat(500), n: 7 };
+    const serializedLength = new MessagePackSerializer().encode(value).length;
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('a plaintext set() hands L1 the serialized length', async () => {
+      const spy = vi.spyOn(L1Cache.prototype, 'set');
+      await cache.set('hint:write', value);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0][4]).toBe(serializedLength);
+    });
+
+    it('a plaintext L2-hit get() hands L1 the decoded msgpack length, not the stored bytes', async () => {
+      await cache.set('hint:read', value);
+      const stored = await backend.get('hint:read');
+      expect(stored!.byteLength).toBeLessThan(serializedLength / 4);
+
+      // A second cache on the same backend: its L1 is empty, so the read is an L2 hit.
+      const reader = createCache({ backend, defaultTtl: 3600, l1: { enabled: true } });
+      const spy = vi.spyOn(L1Cache.prototype, 'set');
+      expect(await reader.get('hint:read')).toEqual(value);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0][4]).toBe(serializedLength);
+      await reader.close();
+    });
+
+    it('an SWR refresh hands completeRefresh the serialized length', async () => {
+      const swrCache = createCache({
+        backend: new InMemoryBackend(),
+        defaultTtl: 60,
+        l1: { swrEnabled: true, swrThresholdRatio: 2 },
+      });
+      const spy = vi.spyOn(L1Cache.prototype, 'completeRefresh');
+      const fn = swrCache.wrap(async () => value, { namespace: 'hint:swr', ttl: 60 });
+      await fn(); // cold miss
+      await fn(); // stale hit, schedules the refresh
+      await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+      expect(spy.mock.calls[0][5]).toBe(serializedLength);
+      await swrCache.close();
     });
   });
 

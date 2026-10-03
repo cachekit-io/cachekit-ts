@@ -28,6 +28,8 @@ export interface RefreshOptions {
  */
 export interface L1Write {
   readonly l1: unknown;
+  /** Byte length of the serialized value, when it was serialized (see L1Cache.set). */
+  readonly serializedSize?: number;
 }
 
 /**
@@ -121,7 +123,8 @@ export class BackgroundRefreshManager {
               persisted.l1,
               options.ttl * 1000,
               versionToken,
-              options.namespace
+              options.namespace,
+              persisted.serializedSize
             );
           }
         }
