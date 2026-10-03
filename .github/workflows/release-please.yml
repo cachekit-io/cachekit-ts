@@ -129,7 +129,7 @@ jobs:
           fi
           echo "CI Success verified for $SHA"
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.release-please.outputs.cachekit--tag_name || github.sha }}
           persist-credentials: false
@@ -183,7 +183,7 @@ jobs:
     # test. Checkout is for the packageManager pin and the manifest to verify
     # against; pnpm publishes the prebuilt tarball, running no lifecycle scripts.
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.release-please.outputs.cachekit--tag_name || github.sha }}
           persist-credentials: false
@@ -230,7 +230,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.release-please.outputs.core-wasm--tag_name || github.event.inputs.wasm_tag }}
           persist-credentials: false
@@ -305,14 +305,14 @@ jobs:
 
     # Same shape as publish-cachekit: no dependency code runs beside the token.
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.release-please.outputs.core-wasm--tag_name || github.event.inputs.wasm_tag }}
           persist-credentials: false
 
       # The verifier comes from this workflow's own commit, not the tag: a
       # recovery `wasm_tag` can predate verify-tarball.sh.
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           path: .release-scripts
