@@ -172,6 +172,8 @@ interface ChunkSink {
   bytes: number;
   /** Arrays, maps and bins written, for L1's memory charge (see ObjectCount). */
   objects: number;
+  /** Their elements and entries, for the same charge (see ObjectCount). */
+  values: number;
 }
 
 function pushChunk(sink: ChunkSink, c: Uint8Array): void {
@@ -286,6 +288,7 @@ function checkCollectionSize(n: number, kind: 'array' | 'map'): void {
 function encodeArrayHeader(n: number, sink: ChunkSink): void {
   checkCollectionSize(n, 'array');
   sink.objects++;
+  sink.values += n;
   if (n <= 15) pushChunk(sink, Uint8Array.of(0x90 | n));
   else if (n <= 0xffff) pushChunk(sink, uintBE(0xdc, n, 2));
   else pushChunk(sink, uintBE(0xdd, n, 4));
@@ -299,6 +302,7 @@ function encodeMapHeader(n: number, sink: ChunkSink): void {
   // caller; do NOT cut on coverage grounds (that reopens the DoS this fix closes).
   checkCollectionSize(n, 'map');
   sink.objects++;
+  sink.values += n;
   if (n <= 15) pushChunk(sink, Uint8Array.of(0x80 | n));
   else if (n <= 0xffff) pushChunk(sink, uintBE(0xde, n, 2));
   else pushChunk(sink, uintBE(0xdf, n, 4));
@@ -488,13 +492,15 @@ function encodeCanonical(
     const seen = new Set<string>();
     let running = sink.bytes;
     for (const element of v) {
-      const sub: ChunkSink = { chunks: [], bytes: sink.bytes, objects: 0 };
+      const sub: ChunkSink = { chunks: [], bytes: sink.bytes, objects: 0, values: 0 };
       encodeCanonical(element, profile, depth + 1, sub);
+      // L1 holds the caller's Set, duplicates and all, so they are charged.
+      sink.objects += sub.objects;
+      sink.values += sub.values;
       const bytes = concatChunks(sub.chunks);
       const key = bytesToHex(bytes);
       if (seen.has(key)) continue;
       seen.add(key);
-      sink.objects += sub.objects;
       checkCollectionSize(seen.size, 'array');
       running += bytes.length;
       if (running > DEFAULT_MAX_ENCODED_SIZE) {
@@ -505,6 +511,8 @@ function encodeCanonical(
       encoded.push(bytes);
     }
     encoded.sort(compareBytes);
+    // The header counts the elements kept; the Set holds the rest too.
+    sink.values += v.size - encoded.length;
     encodeArrayHeader(encoded.length, sink);
     for (const b of encoded) pushChunk(sink, b);
   } else if (Array.isArray(v)) {
@@ -546,7 +554,7 @@ function encodeCanonical(
 }
 
 function encodeProfile(root: unknown, profile: InteropProfile, count?: ObjectCount): Uint8Array {
-  const sink: ChunkSink = { chunks: [], bytes: 0, objects: 0 };
+  const sink: ChunkSink = { chunks: [], bytes: 0, objects: 0, values: 0 };
   encodeCanonical(root, profile, 0, sink);
   // pushChunk's incremental budget should make this backstop unreachable.
   const out = concatChunks(sink.chunks);
@@ -555,7 +563,10 @@ function encodeProfile(root: unknown, profile: InteropProfile, count?: ObjectCou
       `Encoded interop ${profile} size ${out.length} exceeds max ${DEFAULT_MAX_ENCODED_SIZE}`
     );
   }
-  if (count) count.objects += sink.objects;
+  if (count) {
+    count.objects += sink.objects;
+    count.values += sink.values;
+  }
   return out;
 }
 
@@ -604,7 +615,7 @@ export function encodeInteropValue(value: unknown): Uint8Array {
 }
 
 /**
- * encodeInteropValue, adding the value's object count to `count` (see
+ * encodeInteropValue, adding the value's object and value counts to `count` (see
  * ObjectCount). Package-internal.
  */
 export function encodeInteropValueCounted(value: unknown, count: ObjectCount): Uint8Array {
@@ -668,7 +679,7 @@ export function decodeInteropValue<T>(data: Uint8Array): T {
 }
 
 /**
- * decodeInteropValue, adding the document's object count to `count` (see
+ * decodeInteropValue, adding the document's object and value counts to `count` (see
  * ObjectCount). Package-internal.
  */
 export function decodeInteropValueCounted<T>(data: Uint8Array, count?: ObjectCount): T {
@@ -686,7 +697,7 @@ export function decodeInteropValueCounted<T>(data: Uint8Array, count?: ObjectCou
   }
   // Bound nesting depth before the decoder eagerly preallocates per-header
   // collections (LAB-2487, full rationale: assertDecodeDepth in serializer.ts).
-  const objects = assertDecodeDepth(data, DEFAULT_MAX_DEPTH);
+  const counted = assertDecodeDepth(data, DEFAULT_MAX_DEPTH);
   let decoded: unknown;
   try {
     // Backend bytes are untrusted — bound header preallocation (full
@@ -702,6 +713,9 @@ export function decodeInteropValueCounted<T>(data: Uint8Array, count?: ObjectCou
     );
   }
   const value = reviveDecoded(decoded, 0) as T;
-  if (count) count.objects += objects;
+  if (count) {
+    count.objects += counted.objects;
+    count.values += counted.values;
+  }
   return value;
 }

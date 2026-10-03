@@ -2,6 +2,7 @@ import { L1Config, DEFAULT_L1_CONFIG, CacheEntry, SwrResult, InvalidationEvent }
 import { secureRandomFloat } from '../utils/random.js';
 import { logError } from '../logger.js';
 import { extractNamespace } from '../serialization/key-generator.js';
+import type { ObjectCount } from '../serialization/serializer.js';
 import {
   SWR_JITTER_MIN,
   SWR_JITTER_RANGE,
@@ -11,17 +12,27 @@ import {
 
 /**
  * What L1 charges per serialized (MessagePack) byte when the caller passes
- * the serialized length, so maxMemory means about what the JSON.stringify
- * estimate made it mean. That estimate charges JSON length x 2, which comes to
- * about 2x the MessagePack length for ASCII strings and 2.2-2.9x for objects
- * and rows of records; 2.5 sits between them. Number-heavy values ran about 4x
- * under the estimate and CJK text about 0.7x, so those shift the most.
+ * the serialized length but no count, so maxMemory means about what the
+ * JSON.stringify estimate made it mean. That estimate charges JSON length x 2,
+ * which comes to about 2x the MessagePack length for ASCII strings and
+ * 2.2-2.9x for objects and rows of records; 2.5 sits between them.
+ * Number-heavy values ran about 4x under the estimate and CJK text about
+ * 0.7x, so those shift the most.
  * Internal calibration, not a setting: kept off the public exports.
  */
 const SERIALIZED_SIZE_FACTOR = 2.5;
 
 /**
- * What L1 charges, on top of SERIALIZED_SIZE_FACTOR, per value that decodes
+ * SERIALIZED_SIZE_FACTOR for a caller that also passes the count, which
+ * OBJECT_SIZE and VALUE_SIZE then charge on top. 1.75 keeps the mixed
+ * workload the 2.5 was fitted on (strings, number arrays, records) at about
+ * the same share of the entries the estimate held.
+ * Internal calibration, not a setting: kept off the public exports.
+ */
+const COUNTED_SIZE_FACTOR = 1.75;
+
+/**
+ * What L1 charges, on top of COUNTED_SIZE_FACTOR, per value that decodes
  * to a heap object of its own (array, map, bin, ext) when the caller passes
  * that count. Derivation, 64-bit Node: an empty array is 40 B of heap with
  * its slot in the parent, 32 B without; an empty object is 64 B. 32 is the
@@ -33,6 +44,16 @@ const SERIALIZED_SIZE_FACTOR = 2.5;
 const OBJECT_SIZE = 32;
 
 /**
+ * What L1 charges, on top of the two above, per element of an array or Set
+ * and per entry of a map when the caller passes that count. Each is a slot of
+ * its own in the heap object that holds it, 8 B on 64-bit Node, however few
+ * bytes it serializes to: a small integer is one MessagePack byte. Runtimes
+ * that compress pointers (workerd) spend 4 B, so they are charged high.
+ * Internal calibration, not a setting: kept off the public exports.
+ */
+const VALUE_SIZE = 8;
+
+/**
  * The largest share of maxMemory one entry may be charged. Storing an entry
  * first evicts as much as it is charged, and an entry read back from L2 is
  * stored again each time it falls out, so a near-budget entry would empty most
@@ -41,6 +62,11 @@ const OBJECT_SIZE = 32;
  * Internal calibration, not a setting: kept off the public exports.
  */
 const MAX_ENTRY_SHARE = 1 / 8;
+
+/** A size or count L1 can charge: finite and non-negative, so a NaN never poisons currentMemory. */
+function isCount(n: number | undefined): n is number {
+  return Number.isFinite(n) && n! >= 0;
+}
 
 /**
  * An entry plus its links in the recency list. The list is what makes LRU
@@ -190,9 +216,31 @@ export class L1Cache<T = unknown> {
     value: T,
     ttl: number,
     versionToken: number,
+    namespace?: string
+  ): boolean;
+  /**
+   * completeRefresh with the size hints `set` takes. Package-internal: the
+   * charge's inputs are calibration, not API, so they stay off the published
+   * types.
+   * @internal
+   */
+  completeRefresh(
+    key: string,
+    value: T,
+    ttl: number,
+    versionToken: number,
     namespace?: string,
     serializedSize?: number,
-    objects?: number
+    count?: ObjectCount
+  ): boolean;
+  completeRefresh(
+    key: string,
+    value: T,
+    ttl: number,
+    versionToken: number,
+    namespace?: string,
+    serializedSize?: number,
+    count?: ObjectCount
   ): boolean {
     this.refreshingKeys.delete(key);
 
@@ -203,7 +251,7 @@ export class L1Cache<T = unknown> {
     }
 
     // Update with new value
-    this.set(key, value, ttl, namespace ?? extractNamespace(key), serializedSize, objects);
+    this.set(key, value, ttl, namespace ?? extractNamespace(key), serializedSize, count);
     return true;
   }
 
@@ -282,17 +330,24 @@ export class L1Cache<T = unknown> {
   /**
    * Set a value in cache. A value charged above an eighth of maxMemory is not
    * stored, and any entry it would replace is dropped.
+   */
+  set(key: string, value: T, ttl: number, namespace: string): void;
+  /**
+   * Set with size hints. Package-internal: the charge's inputs are
+   * calibration, not API, so they stay off the published types.
    *
    * @param serializedSize - Byte length of the value's serialized form, when
    *   the caller already holds it. The entry is then charged a fixed
    *   multiple of that length against maxMemory instead of a
    *   JSON.stringify estimate. Ignored for byte values, which are charged
    *   their byteLength, and when it is not a finite non-negative number.
-   * @param objects - How many values in the value decode to a heap object of
-   *   their own (arrays and maps, empty ones included, bin and ext), when the
-   *   caller already counted them. Each adds a fixed charge on top of the
-   *   serializedSize one. Ignored without a usable serializedSize, and when
-   *   it is not a finite non-negative number.
+   * @param count - The value's heap objects (arrays and maps, empty ones
+   *   included, bin and ext) and the slots their elements and entries take,
+   *   when the caller already counted them. Each adds a fixed charge on top
+   *   of a lower per-byte one. Ignored without a usable serializedSize; a
+   *   count with a field that is not a finite non-negative number is charged
+   *   as if there were no count.
+   * @internal
    */
   set(
     key: string,
@@ -300,9 +355,17 @@ export class L1Cache<T = unknown> {
     ttl: number,
     namespace: string,
     serializedSize?: number,
-    objects?: number
+    count?: ObjectCount
+  ): void;
+  set(
+    key: string,
+    value: T,
+    ttl: number,
+    namespace: string,
+    serializedSize?: number,
+    count?: ObjectCount
   ): void {
-    const size = this.sizeOf(value, serializedSize, objects);
+    const size = this.sizeOf(value, serializedSize, count);
 
     // Over the per-entry share: admitting it would evict that much of L1 first, so drop the old entry instead.
     if (size > this.config.maxMemory * MAX_ENTRY_SHARE) {
@@ -562,7 +625,7 @@ export class L1Cache<T = unknown> {
   private sizeOf(
     value: unknown,
     serializedSize: number | undefined,
-    objects: number | undefined
+    count: ObjectCount | undefined
   ): number {
     // Secure caches store the L2 ciphertext here (LAB-238), so the common
     // entry is a Uint8Array. JSON.stringify turns one into {"0":12,"1":34,…} —
@@ -571,13 +634,14 @@ export class L1Cache<T = unknown> {
     if (ArrayBuffer.isView(value)) return value.byteLength;
 
     // A cache write already holds the serialized bytes, so their length costs
-    // nothing, where the estimate below stringifies the whole value.
-    // Finite and non-negative only: a NaN would poison currentMemory for good.
-    if (Number.isFinite(serializedSize) && serializedSize! >= 0) {
-      const perObject = Number.isFinite(objects) && objects! >= 0 ? objects! * OBJECT_SIZE : 0;
-      return serializedSize! * SERIALIZED_SIZE_FACTOR + perObject;
-    }
-    return this.estimateSize(value);
+    // nothing, where estimateSize stringifies the whole value.
+    if (!isCount(serializedSize)) return this.estimateSize(value);
+    // Read each field once: a second read of a getter could differ from the
+    // value that was checked. A count that is missing or not usable is
+    // charged as no count, never at the lower counted rate with nothing added.
+    const { objects, values } = count ?? {};
+    if (!isCount(objects) || !isCount(values)) return serializedSize * SERIALIZED_SIZE_FACTOR;
+    return serializedSize * COUNTED_SIZE_FACTOR + objects * OBJECT_SIZE + values * VALUE_SIZE;
   }
 
   private estimateSize(value: unknown): number {

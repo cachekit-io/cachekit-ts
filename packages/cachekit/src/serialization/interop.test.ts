@@ -385,20 +385,33 @@ describe('interop value decoding', () => {
   });
 });
 
-describe('interop object count (L1 memory charge)', () => {
-  it('counts the same objects on encode as on decode', () => {
+describe('interop object and value count (L1 memory charge)', () => {
+  it('counts the same objects and values on encode as on decode', () => {
     const value = {
       empty: [{}, []],
       when: new Date(0), // a sentinel map on the wire
-      tags: new Set([[], []]), // the duplicate is dropped, and not counted
+      tags: new Set([[1], ['x']]),
       big: Array.from({ length: 20 }, () => []), // array16
       bin: [new Uint8Array(0), new Uint8Array(2)],
     };
-    const encoded = { objects: 0 };
-    const decoded = { objects: 0 };
+    const encoded = { objects: 0, values: 0 };
+    const decoded = { objects: 0, values: 0 };
     decodeInteropValueCounted(encodeInteropValueCounted(value, encoded), decoded);
-    expect(encoded.objects).toBe(31);
-    expect(decoded.objects).toBe(31);
+    // values: 5 entries + 2 + 2 (sentinel) + 2 + 1 + 1 + 20 + 2
+    expect(encoded).toEqual({ objects: 32, values: 35 });
+    expect(decoded).toEqual({ objects: 32, values: 35 });
+  });
+
+  it("counts a Set's duplicates on encode: L1 keeps the caller's Set", () => {
+    // 100 canonically equal elements encode as one.
+    const value = new Set(Array.from({ length: 100 }, () => ({ a: [] })));
+    const encoded = { objects: 0, values: 0 };
+    const decoded = { objects: 0, values: 0 };
+    const bytes = encodeInteropValueCounted(value, encoded);
+    expect(decodeInteropValueCounted(bytes, decoded)).toEqual([{ a: [] }]);
+    // The Set, then a map and an array per element; one entry per map.
+    expect(encoded).toEqual({ objects: 201, values: 200 });
+    expect(decoded).toEqual({ objects: 3, values: 2 });
   });
 
   it('leaves the public codec signatures as they were', () => {
