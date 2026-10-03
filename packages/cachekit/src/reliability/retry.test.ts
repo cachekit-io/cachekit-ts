@@ -135,6 +135,28 @@ describe('RetryPolicy', () => {
       expect(fn).toHaveBeenCalledTimes(1);
     });
 
+    it('starts no attempt when the backoff timer resumes past the deadline', async () => {
+      vi.useFakeTimers();
+      const policy = new RetryPolicy({
+        maxAttempts: 3,
+        baseDelay: 100,
+        jitter: false,
+        deadline: 5000,
+      });
+      const err = new Error('fail');
+      const fn = vi.fn(() => {
+        // A paused event loop: the wall clock jumps 6 s during the 100 ms backoff
+        setTimeout(() => vi.setSystemTime(Date.now() + 6000), 50);
+        return Promise.reject(err);
+      });
+
+      const result = policy.execute(fn).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect(await result).toBe(err);
+      expect(fn).toHaveBeenCalledTimes(1);
+    });
+
     it('still retries fast failures inside the deadline', async () => {
       const policy = new RetryPolicy({ maxAttempts: 3, baseDelay: 1, deadline: 5000 });
       const fn = vi.fn().mockRejectedValue(new Error('fail'));

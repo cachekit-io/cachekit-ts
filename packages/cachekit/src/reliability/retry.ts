@@ -81,6 +81,11 @@ export class RetryPolicy {
         throw new DOMException('Retry aborted', 'AbortError');
       }
 
+      // Recheck after the backoff: a timer that resumes late must not start an attempt
+      if (lastError && Date.now() >= deadlineAt) {
+        throw lastError;
+      }
+
       try {
         return await fn();
       } catch (error) {
