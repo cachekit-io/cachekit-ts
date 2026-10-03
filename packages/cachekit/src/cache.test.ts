@@ -1199,6 +1199,40 @@ describe('Cache Integration', () => {
 
       await swrCache.close();
     });
+
+    it('a refresh whose value fails to encode leaves L1 alone on a plaintext cache', async () => {
+      // A direct write and a cold miss store nothing for a value the encoder
+      // rejects; the refresh must not be the one path that puts it in L1.
+      const logs: string[] = [];
+      setLogger((message) => logs.push(message));
+      const completeRefresh = vi.spyOn(L1Cache.prototype, 'completeRefresh');
+      const swrCache = createCache({
+        backend: new InMemoryBackend(),
+        defaultTtl: 60,
+        l1: { swrEnabled: true, swrThresholdRatio: 2 },
+        serializer: { maxCollectionSize: 10 },
+      });
+      try {
+        let calls = 0;
+        const fn = swrCache.wrap(
+          async () => (++calls === 1 ? [1] : Array.from({ length: 11 }, (_, i) => i)),
+          { namespace: 'swr:unencodable', ttl: 60 }
+        );
+
+        expect(await fn()).toEqual([1]); // cold miss
+        expect(await fn()).toEqual([1]); // stale hit, refresh computes 11 items
+        await vi.waitFor(() => expect(logs.length).toBeGreaterThan(0)); // the rejection warning
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        expect(calls).toBe(2);
+        expect(completeRefresh).not.toHaveBeenCalled();
+        expect(await swrCache.get(generateKey('swr:unencodable', []))).toEqual([1]);
+      } finally {
+        setLogger(null);
+        completeRefresh.mockRestore();
+        await swrCache.close();
+      }
+    });
   });
 
   // ── LAB-1388 dogfooding fixes ─────────────────────────────────────────

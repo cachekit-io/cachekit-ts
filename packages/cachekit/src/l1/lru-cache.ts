@@ -163,7 +163,8 @@ export class L1Cache<T = unknown> {
   }
 
   /**
-   * Complete a SWR refresh, updating the cache if version matches.
+   * Complete a SWR refresh, updating the cache if version matches (a value
+   * charged above maxMemory drops the entry instead; see `set`).
    * Returns false if version changed (stale refresh result).
    *
    * Pass `namespace` when the caller knows it (wrap options) — deriving it
@@ -247,7 +248,8 @@ export class L1Cache<T = unknown> {
   }
 
   /**
-   * Set a value in cache.
+   * Set a value in cache. A value charged above maxMemory is not stored, and
+   * any entry it would replace is dropped.
    *
    * @param serializedSize - Byte length of the value's serialized form, when
    *   the caller already holds it. The entry is then charged a fixed
@@ -269,6 +271,12 @@ export class L1Cache<T = unknown> {
     objects?: number
   ): void {
     const size = this.sizeOf(value, serializedSize, objects);
+
+    // Over budget: admitting it would evict every other entry first, so drop the old entry instead.
+    if (size > this.config.maxMemory) {
+      this.delete(key);
+      return;
+    }
 
     // Take out the entry being replaced first, so it neither counts toward
     // maxEntries nor gets an unrelated entry evicted in its place.
@@ -315,8 +323,11 @@ export class L1Cache<T = unknown> {
 
     this.remove(entry);
 
-    // Bump version to invalidate any pending refreshes
-    this.entryVersion.set(key, this.incrementVersion());
+    // Drop the version rather than bump it: a missing version reads as 0 and
+    // every live token is at least 1, so this invalidates any pending refresh
+    // just as a bump would, without keeping a version for a key L1 no longer
+    // holds. The counter never goes back, so a later set() gets a fresh one.
+    this.entryVersion.delete(key);
 
     return true;
   }
