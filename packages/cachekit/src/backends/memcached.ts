@@ -2,6 +2,7 @@ import { Socket } from 'node:net';
 import type { Client as MemjsClient, Server as MemjsServer } from 'memjs';
 import { Backend, MemcachedBackendConfig } from './types.js';
 import { BackendError, ConfigurationError, TimeoutError } from '../errors.js';
+import { logError } from '../logger.js';
 
 /**
  * Memcached maximum relative TTL: 30 days in seconds. The protocol treats any
@@ -151,6 +152,8 @@ export class MemcachedBackend implements Backend {
   private closed = false;
   /** Memoized lazy client — memjs is an optional peer dep, imported on first use. */
   private clientPromise: Promise<MemjsClient> | null = null;
+  /** Set once a failed memjs load has been logged; every command retries the load. */
+  private loadFailureLogged = false;
   /** Ops awaiting memjs, each with its client, so a discard can fail its client's ops. */
   private readonly inFlight = new Set<{ client: MemjsClient; fail: () => void }>();
 
@@ -370,11 +373,20 @@ export class MemcachedBackend implements Backend {
         memjs = await import('memjs');
       } catch (error) {
         this.clientPromise = null; // don't cache the failure
-        throw new ConfigurationError(
+        const failure = new ConfigurationError(
           "The Memcached backend requires the optional peer dependency 'memjs'. " +
             'Install it alongside @cachekit-io/cachekit: pnpm add memjs (or npm install memjs).',
           { cause: error }
         );
+        // A cache with degradation on swallows the per-command errors, so
+        // this line is the only trace; once, because every command retries.
+        // Fixed text only: the cause is whatever loading memjs threw, and a
+        // logger would print it. Callers still get it on the rejection.
+        if (!this.loadFailureLogged) {
+          this.loadFailureLogged = true;
+          logError(`[cachekit] ${failure.message}`);
+        }
+        throw failure;
       }
       // memjs timeouts are in (fractional) seconds; cachekit config is ms.
       const client = memjs.Client.create(this.config.servers.join(','), {

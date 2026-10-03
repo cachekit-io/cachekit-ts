@@ -421,6 +421,8 @@ Every operation settles within a deadline of `tries × (connectTimeout + timeout
 
 Keys are limited to 250 bytes of UTF-8, key prefix included, which is the memcached protocol limit. A longer key throws `BackendError` (classification `permanent`) before anything is sent and before the reliability stack runs, so it is never retried and never counts toward the circuit breaker. It is thrown to the caller even with graceful degradation on (`production`, `secure`, `io`), because it is a fault in the key rather than an outage: shorten or hash long keys.
 
+If `memjs` is missing or fails to load, the backend reports it once through the library logger (see [Observability](#observability)) and every command rejects with `ConfigurationError`. Each command tries the load again, and with graceful degradation on those rejections become cache misses, so the log line is the only sign of the problem.
+
 ### File
 
 ```typescript
