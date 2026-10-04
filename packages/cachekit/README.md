@@ -604,10 +604,14 @@ request that is accepted and never answered therefore degrades after one 5 s
 attempt instead of three, and a caller issuing operations one after another
 fills the breaker's 60 s window fast enough to open it. Fast failures (a 503, a
 dropped connection) still get all three attempts. The deadline bounds when an
-attempt may start, not how long it runs, so the worst case is the deadline plus
-one per-attempt timeout. Override it with `reliability: { retry: { deadline } }`;
-a retry policy you configure through `createCache()` has no deadline unless you
-set one.
+attempt may start, not how long it runs, and it cannot cancel an attempt in
+flight. The worst case is the deadline plus one per-attempt timeout, a bound
+that holds only when the backend enforces a per-attempt timeout. The
+cachekit.io, Redis and Memcached backends do. The `Backend` interface does not
+require one, so a custom backend must time out its own operations: one that
+never settles holds the caller indefinitely, whatever the deadline. Override
+the deadline with `reliability: { retry: { deadline } }`; a retry policy you
+configure through `createCache()` has no deadline unless you set one.
 
 ## Observability
 
