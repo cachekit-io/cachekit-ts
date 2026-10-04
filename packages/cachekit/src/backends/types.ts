@@ -145,7 +145,7 @@ export interface Backend {
    *   reads it, and a request-scoped prefix cannot be made safe.
    * - Delegating wrappers (metrics, logging, fallback decorators) MUST
    *   forward the inner backend's `keyPrefix`, or they hide the transform
-   *   from the guard.
+   *   from the interop guard and from the AAD.
    * - Backends applying any non-prefix key transformation (suffixing,
    *   hashing, re-encoding) cannot express it here; they declare
    *   {@link transformsKeys} instead and are incompatible with interop
@@ -271,7 +271,7 @@ export interface MemcachedBackendConfig {
    * error: pass `retries: 2` there to keep memjs's own retry.
    */
   retries?: number;
-  /** Key prefix for namespacing (exposed via Backend.keyPrefix for the interop guard) */
+  /** Key prefix for namespacing (exposed via Backend.keyPrefix: AAD binding and interop guard) */
   keyPrefix?: string;
   /**
    * Reject values larger than this BEFORE sending to Memcached
