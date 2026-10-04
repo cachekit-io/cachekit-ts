@@ -93,9 +93,9 @@ describe('CachekitIO L1 backfill bound', () => {
   });
 
   /** A reader in a second process: its own empty L1 over the shared store. */
-  async function seed(backend: () => Backend, ttl = 3600) {
+  async function seed(backend: () => Backend) {
     const writer = createCache({ backend: backend(), defaultTtl: 3600 });
-    await writer.set('ns:k', 'v1', { ttl });
+    await writer.set('ns:k', 'v1', { ttl: 3600 });
     await writer.close();
     return createCache({ backend: backend(), defaultTtl: 3600 });
   }
@@ -116,31 +116,17 @@ describe('CachekitIO L1 backfill bound', () => {
     });
   }
 
-  it('never backfills a stale read, even with a positive Fresh-For', async () => {
+  // Each shape fails differently: the label check, the unknown-label default, the 0 bound.
+  it.each([
+    [
+      'stale with a positive Fresh-For',
+      { 'X-CacheKit-Freshness': 'stale', 'X-CacheKit-Fresh-For': '600' },
+    ],
+    ['an unknown label', { 'X-CacheKit-Freshness': 'stale-ish' }],
+    ['fresh with Fresh-For: 0', { 'X-CacheKit-Freshness': 'fresh', 'X-CacheKit-Fresh-For': '0' }],
+  ])('never backfills %s', async (_name, sent) => {
     const reader = await seed(() => cachekitio(config));
-    headers = { 'X-CacheKit-Freshness': 'stale', 'X-CacheKit-Fresh-For': '600' };
-
-    await reader.get('ns:k');
-    await reader.get('ns:k');
-    expect(gets).toBe(2);
-
-    await reader.close();
-  });
-
-  it('treats an unknown label as stale', async () => {
-    const reader = await seed(() => cachekitio(config));
-    headers = { 'X-CacheKit-Freshness': 'stale-ish' };
-
-    await reader.get('ns:k');
-    await reader.get('ns:k');
-    expect(gets).toBe(2);
-
-    await reader.close();
-  });
-
-  it('never backfills Fresh-For: 0', async () => {
-    const reader = await seed(() => cachekitio(config));
-    headers = { 'X-CacheKit-Freshness': 'fresh', 'X-CacheKit-Fresh-For': '0' };
+    headers = sent;
 
     expect(await reader.get('ns:k')).toBe('v1');
     expect(await reader.get('ns:k')).toBe('v1');

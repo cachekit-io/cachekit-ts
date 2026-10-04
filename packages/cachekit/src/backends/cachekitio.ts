@@ -55,11 +55,12 @@ export function encodeKey(key: string): string {
 
 /**
  * Read the server's freshness headers off a `GET 200` (protocol spec/saas-api.md
- * § Remaining Freshness). Fails closed, mirroring cachekit-rs's
- * `freshness_from_headers`:
+ * § Remaining Freshness). Fails closed:
  * - `X-CacheKit-Freshness` absent means fresh (pre-SWR servers omit it); any
  *   value other than exactly `fresh` is stale. Repeated copies arrive
- *   comma-joined from `Headers.get`, so they are never exactly `fresh`.
+ *   comma-joined from `Headers.get`, so `fresh, fresh` is stale too. That is
+ *   deliberately stricter than cachekit-rs, which accepts it: the spec
+ *   licenses a backfill only for exactly `fresh`, so do not relax this.
  * - `X-CacheKit-Fresh-For` must be 1–7 ASCII digits and at most 2,592,000;
  *   anything else is `0`. Length is checked first and the digits are summed by
  *   hand: `Number()` and `parseInt` accept `+5`, `0x10`, `1e3` and `1_0`-style

@@ -1,4 +1,4 @@
-import type { LockableBackend } from './types.js';
+import type { Backend, LockableBackend } from './types.js';
 import { CachekitIOCore, encodeKey } from './cachekitio.js';
 import { BackendError, TimeoutError } from '../errors.js';
 import { classifyHttpError, classifyNetworkError } from './error-classifier.js';
@@ -11,7 +11,8 @@ import { classifyHttpError, classifyNetworkError } from './error-classifier.js';
  */
 const LOCK_ID_HEADER = 'X-CacheKit-Lock-Id';
 
-export class LockableCachekitIO implements LockableBackend {
+// Required<…getWithTtl>: tsc, not only tests, enforces the forward.
+export class LockableCachekitIO implements LockableBackend, Required<Pick<Backend, 'getWithTtl'>> {
   constructor(private readonly inner: CachekitIOCore) {}
 
   // Delegating wrappers MUST forward keyPrefix / transformsKeys — see Backend.keyPrefix.
@@ -25,8 +26,7 @@ export class LockableCachekitIO implements LockableBackend {
   get(key: string) {
     return this.inner.get(key);
   }
-  // Forwarded like keyPrefix — hiding it would drop the server's freshness
-  // headers and let L1 outlive the bound they set. See Backend.getWithTtl.
+  // MUST forward: see Backend.getWithTtl.
   getWithTtl(key: string) {
     return this.inner.getWithTtl(key);
   }

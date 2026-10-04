@@ -15,7 +15,8 @@ export function cachekitioWithTTL(config: CachekitIOBackendConfig): TTLBackend {
   return new TTLCachekitIO(new CachekitIOCore(config));
 }
 
-class CachekitIO implements LockableBackend, TTLBackend {
+// Required<…getWithTtl>: tsc, not only tests, enforces the forward.
+class CachekitIO implements LockableBackend, TTLBackend, Required<Pick<Backend, 'getWithTtl'>> {
   private readonly lockable: LockableCachekitIO;
   private readonly ttl: TTLCachekitIO;
 
@@ -35,8 +36,7 @@ class CachekitIO implements LockableBackend, TTLBackend {
   get(key: string) {
     return this.lockable.get(key);
   }
-  // Forwarded like keyPrefix — hiding it would drop the server's freshness
-  // headers and let L1 outlive the bound they set. See Backend.getWithTtl.
+  // MUST forward: see Backend.getWithTtl.
   getWithTtl(key: string) {
     return this.lockable.getWithTtl(key);
   }

@@ -899,9 +899,8 @@ export class CacheImpl implements SecureCache {
     // retried either; it self-heals on the next read (initPromise resets).
     const fetched = await this.run('get', key, null, async () => {
       // When L1 will be re-populated, prefer the TTL-carrying read (same
-      // storage round trip — see Backend.getWithTtl) so the L1 copy can be
-      // capped at the entry's remaining lifetime below (LAB-1388), and at the
-      // server's remaining freshness, a hard local service bound (LAB-7883).
+      // storage round trip — see Backend.getWithTtl); the bounds it returns
+      // cap the L1 copy below.
       let data: Uint8Array | null;
       let l1Bound = Infinity;
       let isStale = false;
