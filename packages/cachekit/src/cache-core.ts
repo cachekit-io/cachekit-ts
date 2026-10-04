@@ -1478,9 +1478,19 @@ export class CacheImpl implements SecureCache {
           // and a failed release must not mask the compute result. On
           // Workers an unregistered fetch can be cancelled when the response
           // returns, stranding the lease for lockTimeoutMs while followers
-          // spin to lockWaitMs, so register it when a handle is bound.
+          // spin to lockWaitMs, so register it when a handle is bound. The
+          // registration is guarded like the SWR one (background-refresh.ts):
+          // a stale ExecutionContext makes waitUntil throw synchronously, and
+          // a throw here would replace the result we are returning.
           const release = lockable.releaseLock(cacheKey, lockId).catch(() => {});
-          waitUntil?.(release);
+          try {
+            waitUntil?.(release);
+          } catch (error) {
+            logError(
+              '[cachekit] Failed to register lock release with waitUntil:',
+              error instanceof Error ? error.message : 'Unknown error'
+            );
+          }
         }
       }
 

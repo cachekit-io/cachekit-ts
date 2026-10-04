@@ -416,6 +416,25 @@ describe('Cold-miss single-flight (LAB-519)', () => {
         expect(backend.releases).toBe(1);
         expect(backend.heldLocks()).toBe(0);
       });
+
+      it('still returns the result when waitUntil throws (stale ExecutionContext)', async () => {
+        const backend = new CountingLockableBackend();
+        const cache = make({ backend, l1: { enabled: false }, stampede: lockOptions });
+        if (!(cache instanceof CacheImpl)) throw new Error('expected CacheImpl');
+        const view = cache.withExecutionContext({
+          waitUntil: () => {
+            throw new Error('request context has ended');
+          },
+        });
+        const wrapped = view.wrap(async (id: number) => `v-${id}`, {
+          namespace: 'sf:wu-stale',
+          ttl: 60,
+        });
+
+        await expect(wrapped(8)).resolves.toBe('v-8');
+        await sleep(0);
+        expect(backend.releases).toBe(1); // the release was still sent
+      });
     });
 
     it('rejects distributedLock on a backend without lock capability', () => {
