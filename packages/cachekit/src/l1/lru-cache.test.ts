@@ -1,12 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { L1Cache } from './lru-cache.js';
 import { setLogger } from '../logger.js';
+import { ConfigurationError } from '../errors.js';
+import {
+  DEFAULT_L1_MAX_CONCURRENT_REFRESHES,
+  DEFAULT_L1_MAX_ENTRIES,
+  DEFAULT_L1_MAX_MEMORY,
+} from '../constants.js';
 import {
   defaultSerializer,
   encodeCounted,
   resolveSerializerConfig,
 } from '../serialization/serializer.js';
-import type { InvalidationEvent } from './types.js';
+import { DEFAULT_L1_CONFIG } from './types.js';
+import type { InvalidationEvent, L1Config } from './types.js';
 
 describe('L1Cache', () => {
   let cache: L1Cache<string>;
@@ -19,6 +26,49 @@ describe('L1Cache', () => {
     // Fake timers are process-global; a failing assertion before a trailing
     // vi.useRealTimers() would otherwise freeze the clock for every later test.
     vi.useRealTimers();
+  });
+
+  describe('config', () => {
+    it.each([Infinity, -Infinity, NaN, 0, -1])('rejects maxMemory of %s', (maxMemory) => {
+      const build = () => new L1Cache({ maxMemory });
+      expect(build).toThrow(ConfigurationError);
+      expect(build).toThrow(`l1.maxMemory must be a finite number > 0, got ${maxMemory}`);
+    });
+
+    it('treats an explicit undefined maxMemory as the default bound', () => {
+      const c = new L1Cache<Uint8Array>({ maxMemory: undefined });
+      c.set('fits', new Uint8Array(DEFAULT_L1_MAX_MEMORY / 8), 10000, 'test');
+      c.set('over', new Uint8Array(DEFAULT_L1_MAX_MEMORY / 8 + 1), 10000, 'test');
+      expect(c.get('fits')).not.toBeNull();
+      expect(c.get('over')).toBeNull();
+    });
+
+    it.each([undefined, null])('treats every field set to %s as not set', (unset) => {
+      // Spread over the defaults, an undefined maxEntries would remove the entry
+      // bound and a null one would keep a single entry; either one in
+      // maxConcurrentRefreshes would stop every refresh.
+      vi.useFakeTimers();
+      const fields = Object.keys(DEFAULT_L1_CONFIG);
+      const c = new L1Cache<number>(Object.fromEntries(fields.map((f) => [f, unset])));
+      for (let i = 0; i <= DEFAULT_L1_MAX_ENTRIES; i++) c.set(`k${i}`, i, 1000, 'ns');
+      expect(c.stats).toMatchObject({ entries: DEFAULT_L1_MAX_ENTRIES, namespaces: 1 });
+      expect(c.getWithSwr('k1').isFresh).toBe(true);
+      vi.advanceTimersByTime(600); // past the stale threshold: half the TTL, plus at most 10% jitter
+      const refreshes = Array.from(
+        { length: DEFAULT_L1_MAX_CONCURRENT_REFRESHES + 1 },
+        (_, i) => c.getWithSwr(`k${i + 1}`).shouldRefresh
+      );
+      expect(refreshes).toEqual([
+        ...Array<boolean>(DEFAULT_L1_MAX_CONCURRENT_REFRESHES).fill(true),
+        false,
+      ]);
+    });
+
+    it('treats a null config as not set', () => {
+      const c = new L1Cache<number>(null as unknown as Partial<L1Config>);
+      for (let i = 0; i <= DEFAULT_L1_MAX_ENTRIES; i++) c.set(`k${i}`, i, 1000, 'ns');
+      expect(c.stats.entries).toBe(DEFAULT_L1_MAX_ENTRIES);
+    });
   });
 
   describe('basic operations', () => {
@@ -487,12 +537,16 @@ describe('L1Cache', () => {
       expect(counted.stats.memoryUsed).toBe(without.stats.memoryUsed);
     });
 
-    it('keeps memoryUsed finite through an eviction with no memory bound', () => {
-      const c = new L1Cache<string>({ maxEntries: 1, maxMemory: Infinity });
-      c.set('a', 'x', 10000, 'test', Number.MAX_VALUE);
-      c.set('b', 'y', 10000, 'test');
-      expect(c.get('b')).toBe('y');
+    it('keeps memoryUsed finite under the largest memory bound', () => {
+      // Each charge (2.5 x 7e307) is finite but two sum past Number.MAX_VALUE;
+      // the per-entry cap refuses both.
+      const c = new L1Cache<string>({ maxEntries: 2, maxMemory: Number.MAX_VALUE });
+      c.set('a', 'x', 10000, 'test', 7e307);
+      c.set('b', 'y', 10000, 'test', 7e307);
       expect(Number.isFinite(c.stats.memoryUsed)).toBe(true);
+      expect(c.stats.memoryUsed).toBe(0);
+      expect(c.get('a')).toBeNull();
+      expect(c.get('b')).toBeNull();
     });
 
     it('keeps eviction under maxMemory within 25% of the estimate it replaces', () => {

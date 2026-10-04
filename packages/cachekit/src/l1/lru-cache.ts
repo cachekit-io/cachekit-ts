@@ -1,6 +1,7 @@
 import { L1Config, DEFAULT_L1_CONFIG, CacheEntry, SwrResult, InvalidationEvent } from './types.js';
 import { secureRandomFloat } from '../utils/random.js';
 import { logError } from '../logger.js';
+import { ConfigurationError } from '../errors.js';
 import { extractNamespace } from '../serialization/key-generator.js';
 import type { ObjectCount } from '../serialization/serializer.js';
 import {
@@ -119,7 +120,23 @@ export class L1Cache<T = unknown> {
   private readonly instanceId = crypto.randomUUID();
 
   constructor(config: Partial<L1Config> = {}) {
-    this.config = { ...DEFAULT_L1_CONFIG, ...config };
+    // An explicit undefined or null field means "not set". Spread over the
+    // defaults it would replace the default: an undefined maxEntries would
+    // remove the entry bound and a null one would keep a single entry, and
+    // either one in maxConcurrentRefreshes would stop every refresh. A
+    // JavaScript caller can pass a null config too (`createCache({ l1: null })`);
+    // the default parameter covers only undefined.
+    const set = Object.fromEntries(
+      Object.entries(config ?? {}).filter(([, v]) => v !== undefined && v !== null)
+    ) as Partial<L1Config>;
+    this.config = { ...DEFAULT_L1_CONFIG, ...set };
+    // A non-finite bound would let the running total overflow to Infinity:
+    // the per-entry cap and eviction keep it finite only under a finite one.
+    if (!Number.isFinite(this.config.maxMemory) || this.config.maxMemory <= 0) {
+      throw new ConfigurationError(
+        `l1.maxMemory must be a finite number > 0, got ${this.config.maxMemory}`
+      );
+    }
   }
 
   /**
