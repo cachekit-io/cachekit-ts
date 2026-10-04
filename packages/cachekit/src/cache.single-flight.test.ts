@@ -66,6 +66,31 @@ class CountingLockableBackend extends CountingBackend implements LockableBackend
   }
 }
 
+/**
+ * Lock that is never granted: another process holds the lease past every
+ * wait. `onFirstAcquire` runs inside the first acquire (a holder filling the
+ * key while we wait); from acquire `throwFromAcquire` on, the lock endpoint
+ * throws instead of refusing.
+ */
+class ContestedBackend extends CountingBackend implements LockableBackend {
+  acquires = 0;
+  onFirstAcquire: (() => Promise<unknown>) | null = null;
+  throwFromAcquire = Infinity;
+
+  async acquireLock(): Promise<string | null> {
+    this.acquires++;
+    const fill = this.onFirstAcquire;
+    this.onFirstAcquire = null;
+    if (fill) await fill();
+    if (this.acquires >= this.throwFromAcquire) throw new Error('lock endpoint unreachable');
+    return null;
+  }
+
+  async releaseLock(): Promise<boolean> {
+    return false;
+  }
+}
+
 describe('Cold-miss single-flight (LAB-519)', () => {
   const caches: SecureCache[] = [];
 
@@ -199,16 +224,7 @@ describe('Cold-miss single-flight (LAB-519)', () => {
     });
 
     it('computes anyway when the holder never fills the cache (stampede fallthrough)', async () => {
-      class NeverGrantsBackend extends CountingBackend implements LockableBackend {
-        async acquireLock(): Promise<string | null> {
-          return null; // permanently contested (e.g. holder crashed, lease outlives our wait)
-        }
-        async releaseLock(): Promise<boolean> {
-          return false;
-        }
-      }
-
-      const backend = new NeverGrantsBackend();
+      const backend = new ContestedBackend(); // e.g. holder crashed, lease outlives our wait
       const cache = make({
         backend,
         l1: { enabled: false },
@@ -229,16 +245,8 @@ describe('Cold-miss single-flight (LAB-519)', () => {
     });
 
     it('degrades to computing without the lock when acquireLock throws', async () => {
-      class BrokenLockBackend extends CountingBackend implements LockableBackend {
-        async acquireLock(): Promise<string | null> {
-          throw new Error('lock endpoint unreachable');
-        }
-        async releaseLock(): Promise<boolean> {
-          return false;
-        }
-      }
-
-      const backend = new BrokenLockBackend();
+      const backend = new ContestedBackend();
+      backend.throwFromAcquire = 1;
       const cache = make({ backend, l1: { enabled: false }, stampede: lockOptions });
 
       let calls = 0;
@@ -253,6 +261,7 @@ describe('Cold-miss single-flight (LAB-519)', () => {
       await expect(wrapped()).resolves.toBe('still-works');
       expect(calls).toBe(1);
       expect(backend.sets).toBe(1);
+      expect(backend.gets).toBe(1); // straight after our own miss: no re-read (LAB-7119)
     });
 
     it('releases the lock even when the compute throws', async () => {
@@ -351,21 +360,8 @@ describe('Cold-miss single-flight (LAB-519)', () => {
       });
 
       it('re-reads L2 on the contested-deadline exit and serves the holder’s write', async () => {
-        // Another process holds the lease past our wait, and writes while we spin:
-        // the holder's fill runs inside our first contested acquire, so the order
-        // does not depend on timers.
-        class ContestedBackend extends CountingBackend implements LockableBackend {
-          onFirstAcquire: (() => Promise<unknown>) | null = null;
-          async acquireLock(): Promise<string | null> {
-            const fill = this.onFirstAcquire;
-            this.onFirstAcquire = null;
-            if (fill) await fill();
-            return null;
-          }
-          async releaseLock(): Promise<boolean> {
-            return false;
-          }
-        }
+        // The holder's fill runs inside our first contested acquire, so the
+        // order does not depend on timers.
         const backend = new ContestedBackend();
         const holder = make({ backend, l1: { enabled: false } });
         const h = wrapCounting(holder, 'sf:deadline');
@@ -384,22 +380,20 @@ describe('Cold-miss single-flight (LAB-519)', () => {
         expect(backend.sets).toBe(1); // the holder's only
       });
 
-      it('does not re-read L2 on the acquire-error exit', async () => {
-        class BrokenLockBackend extends CountingBackend implements LockableBackend {
-          async acquireLock(): Promise<string | null> {
-            throw new Error('lock endpoint unreachable');
-          }
-          async releaseLock(): Promise<boolean> {
-            return false;
-          }
-        }
-        const backend = new BrokenLockBackend();
+      it('re-reads L2 when the acquire throws after a contested attempt', async () => {
+        const backend = new ContestedBackend();
+        backend.throwFromAcquire = 2;
+        const holder = make({ backend, l1: { enabled: false } });
+        const h = wrapCounting(holder, 'sf:contested-throw');
         const cache = make({ backend, l1: { enabled: false }, stampede: lockOptions });
-        const { wrapped } = wrapCounting(cache, 'sf:acquire-error');
+        const { wrapped, counter } = wrapCounting(cache, 'sf:contested-throw');
+        backend.onFirstAcquire = () => h.wrapped(5);
 
-        await wrapped(5);
-        expect(backend.gets).toBe(1);
-        expect(backend.sets).toBe(1);
+        await expect(wrapped(5)).resolves.toBe('result-5');
+        // Our miss, the holder's miss, then the re-check after the throw, which hits.
+        expect(backend.gets).toBe(3);
+        expect(counter.calls).toBe(0);
+        expect(backend.sets).toBe(1); // the holder's only
       });
 
       it('registers the release with waitUntil under withExecutionContext', async () => {
@@ -432,7 +426,6 @@ describe('Cold-miss single-flight (LAB-519)', () => {
         });
 
         await expect(wrapped(8)).resolves.toBe('v-8');
-        await sleep(0);
         expect(backend.releases).toBe(1); // the release was still sent
       });
     });

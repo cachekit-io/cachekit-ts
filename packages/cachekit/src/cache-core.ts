@@ -1185,8 +1185,9 @@ export class CacheImpl implements SecureCache {
   /**
    * The optional `waitUntil` is not part of the public Cache interface — it
    * is threaded in by withExecutionContext()'s request-scoped view so SWR
-   * refreshes triggered by the wrapped function ride the platform's
-   * background-work registration instead of firing fire-and-forget.
+   * refreshes triggered by the wrapped function, and the distributed lock's
+   * release, ride the platform's background-work registration instead of
+   * firing fire-and-forget.
    */
   wrap<TArgs extends unknown[], TResult>(
     fn: (...args: TArgs) => Promise<TResult>,
@@ -1419,11 +1420,12 @@ export class CacheImpl implements SecureCache {
    * Cross-process miss arbitration, mirroring cachekit-py's miss path
    * (wrapper.py): acquire → double-check L2 → compute → write → release.
    * The double-check is skipped when the first acquire won after a clean
-   * miss: no holder ran before us, so the GET would almost always miss
-   * again, and be billed as one. A fill that landed between our miss and
-   * our grant is recomputed; last write wins (spec saas-api.md: duplicate
-   * fills are benign). After a waited grant or a failed first read the
-   * double-check stays. acquireLock never blocks on contention (LAB-240), so
+   * miss: nobody held the lock when we asked, so the GET would almost always
+   * miss again, and be billed as one. A fill that landed between our miss
+   * and our grant is recomputed; last write wins (spec saas-api.md:
+   * duplicate fills are benign). After a waited grant or a failed first read
+   * the double-check stays. cachekit-py skips it on CachekitIO only; ts skips
+   * it on every lockable backend, Redis included. acquireLock never blocks on contention (LAB-240), so
    * "waiting" is retrying the lock on an interval bounded by lockWaitMs —
    * deliberately NOT polling get(), because on a metered-misses backend
    * every poll GET against a still-cold key is itself a billed miss,
@@ -1432,10 +1434,12 @@ export class CacheImpl implements SecureCache {
    * Returns LOCK_FALLTHROUGH when the lock never resolved the miss
    * (acquire error, or contested past the wait budget): the lease is
    * best-effort stampede mitigation, never a correctness gate, so lock
-   * failure degrades to computing without it. The contested exit reads L2
-   * once more first, as cachekit-py does after its lock wait times out: the
-   * holder has usually written by then. The acquire-error exit does not;
-   * it comes straight after our own miss.
+   * failure degrades to computing without it. Once we have waited on a
+   * holder (the deadline exit, or an acquire error after a contested
+   * attempt), L2 is read once more first, as cachekit-py does after its lock
+   * wait times out: the holder has usually written by then. An acquire error
+   * on the first attempt comes straight after our own miss, so it does not
+   * re-read.
    */
   private async resolveUnderLock<TResult>(
     cacheKey: string,
@@ -1448,6 +1452,10 @@ export class CacheImpl implements SecureCache {
     const lockable = this.lockable!;
     const { lockTimeoutMs, lockWaitMs, lockPollMs } = this.stampede;
     const deadline = Date.now() + lockWaitMs;
+    const recheck = async (): Promise<TResult | typeof LOCK_FALLTHROUGH> => {
+      const filled = await this.getEntry<TResult>(cacheKey, interop, options.ttl);
+      return filled !== null ? filled : LOCK_FALLTHROUGH;
+    };
 
     for (let attempt = 0; ; attempt++) {
       let lockId: string | null;
@@ -1457,7 +1465,7 @@ export class CacheImpl implements SecureCache {
         // against the circuit breaker could open it for data operations.
         lockId = await lockable.acquireLock(cacheKey, lockTimeoutMs);
       } catch {
-        return LOCK_FALLTHROUGH;
+        return attempt === 0 ? LOCK_FALLTHROUGH : recheck();
       }
 
       if (lockId !== null) {
@@ -1474,14 +1482,9 @@ export class CacheImpl implements SecureCache {
           }
           return await this.computeAndStore(cacheKey, interop, compute, options);
         } finally {
-          // Best-effort and off the caller's path: the lease auto-expires,
-          // and a failed release must not mask the compute result. On
-          // Workers an unregistered fetch can be cancelled when the response
-          // returns, stranding the lease for lockTimeoutMs while followers
-          // spin to lockWaitMs, so register it when a handle is bound. The
-          // registration is guarded like the SWR one (background-refresh.ts):
-          // a stale ExecutionContext makes waitUntil throw synchronously, and
-          // a throw here would replace the result we are returning.
+          // Best-effort; the lease auto-expires. On Workers an unregistered
+          // release can be cancelled at response return, so register it. A
+          // stale ctx makes waitUntil throw, which must not replace the result.
           const release = lockable.releaseLock(cacheKey, lockId).catch(() => {});
           try {
             waitUntil?.(release);
@@ -1495,8 +1498,7 @@ export class CacheImpl implements SecureCache {
       }
 
       if (Date.now() + lockPollMs > deadline) {
-        const filled = await this.getEntry<TResult>(cacheKey, interop, options.ttl);
-        return filled !== null ? filled : LOCK_FALLTHROUGH;
+        return recheck();
       }
       await sleep(lockPollMs);
     }
@@ -1555,8 +1557,9 @@ export class CacheImpl implements SecureCache {
 
   /**
    * Bind a request's execution context, returning a request-scoped view of
-   * this cache whose SWR background refreshes are registered with the
-   * platform (`ctx.waitUntil`) instead of fired fire-and-forget.
+   * this cache whose SWR background refreshes and distributed-lock releases
+   * are registered with the platform (`ctx.waitUntil`) instead of fired
+   * fire-and-forget.
    *
    * All state — L1, backend, encryption, refresh tracking — is shared with
    * this cache; the view only carries the handle. Create one per request
@@ -1568,8 +1571,10 @@ export class CacheImpl implements SecureCache {
    * mutable "current context" slot on the singleton would not be.
    *
    * Functions wrapped on the base cache keep working on Workers, just
-   * without SWR (fail-safe plain L1 reads). On Node this is unnecessary:
-   * fire-and-forget refreshes are never cancelled.
+   * without SWR (fail-safe plain L1 reads), and with stampede.distributedLock
+   * their lock release can be cancelled at response return, leaving the
+   * lease held for lockTimeoutMs while other callers wait out lockWaitMs.
+   * On Node this is unnecessary: fire-and-forget work is never cancelled.
    */
   withExecutionContext(ctx: ExecutionContextLike): SecureCache {
     const waitUntil: WaitUntil = (promise) => ctx.waitUntil(promise);

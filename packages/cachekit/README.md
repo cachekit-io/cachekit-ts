@@ -332,12 +332,14 @@ still empty; the lock is best-effort mitigation, never a correctness gate, so
 lock-endpoint failures degrade to an unlocked compute.
 
 An uncontended miss skips the double-check: when the first lock request wins
-right after a clean L2 miss, no other holder ran first, so the read would
-almost always miss again (and be billed as a miss). On CachekitIO that cuts a
+right after a clean L2 miss, nobody held the lock when we asked, so the read
+would almost always miss again (and be billed as a miss). On CachekitIO that cuts a
 locked miss to `GET`, lock `POST`, `PUT` on the caller's path. A fill that
 lands between the miss and the lock grant is recomputed and written again;
 last write wins. After a waited grant, or a first read that failed rather
-than missed, the double-check still runs. The release is sent in the
+than missed, the double-check still runs. cachekit-py makes the same skip on
+its CachekitIO backend only, so on a Redis lock shared by Python and
+TypeScript processes only the TypeScript side skips it. The release is sent in the
 background; under `withExecutionContext()` on Workers it is registered with
 `ctx.waitUntil`, so the platform does not cancel it when the response returns.
 
@@ -828,7 +830,10 @@ concurrent writers.
   via `ctx.waitUntil` and run to completion). Wrap functions through the
   bound view inside the fetch handler, as above; functions wrapped on the
   base cache still work but fall back to plain (no-SWR) L1 reads — entries
-  expire and recompute in the request path instead.
+  expire and recompute in the request path instead. The bound view also
+  registers the `stampede.distributedLock` release; from the base cache that
+  release can be cancelled, leaving the lease held for `lockTimeoutMs` while
+  other callers wait out `lockWaitMs`.
 - **No Prometheus metrics.**
 - **Key material semantics**: keys are derived and held in wasm linear
   memory, which is a host-readable `ArrayBuffer` — weaker isolation than the
