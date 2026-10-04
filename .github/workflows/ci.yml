@@ -131,52 +131,100 @@ jobs:
       # Holds where renovate.json's approval gate cannot: vulnerability-
       # remediation updates bypass that gate (why: CONTRIBUTING.md). Runs before
       # `pnpm install` so no install script can rewrite the file first.
-      - name: Verify bounded floor-pins stay in-major
+      - name: Verify overrides match the declared set
         run: |
           set -euo pipefail
-          # Declared bounds, "<package> <upper-bound major>". Adding or removing
-          # a bounded pin means editing this list — that edit IS the human
-          # decision the bound represents.
-          expected='brace-expansion@2 3
-          js-yaml 5
-          protobufjs 8
-          uuid 12'
-          expected=$(printf '%s\n' "${expected}" | sort)
+          # Reads `pnpm config get overrides --json` on stdin. Fails unless every
+          # override key is declared below with the shape pnpm reports for it.
+          guard() (
+            # Every override, "<package> <shape>": "<N" for a bounded pin
+            # (`>=floor <N`, the upper-bound major), "floor" for an unbounded
+            # `>=floor`. Adding, removing or reshaping an override means editing
+            # this list: that edit IS the human decision the entry represents.
+            expected='brace-expansion@2 <3
+          brace-expansion@5 floor
+          flatted floor
+          js-yaml <5
+          lodash floor
+          picomatch floor
+          postcss floor
+          protobufjs <8
+          sharp floor
+          uuid <12
+          vite floor
+          yaml floor'
+            expected=$(printf '%s\n' "${expected}" | sort)
 
-          # Read the overrides through pnpm's own parser — exactly what install
-          # applies, however the YAML is spelled; a file pnpm cannot read fails
-          # the step. Keep ONLY a plain `>=floor <N` value, floor and bound at
-          # most three parts, the bound written <N, <N.0 or <N.0.0. Anything
-          # else — `<12.1` (admits 12.0.x), `<12.0.0.0` (invalid, so semver drops
-          # it), a `||` union, a missing bound — drops out of `found` and fails
-          # the comparison. A key with whitespace could forge extra lines, so fail.
+            # Every key is reported. A bounded value counts only as a plain
+            # `>=floor <N`, floor and bound at most three parts, the bound written
+            # <N, <N.0 or <N.0.0. Anything else — an exact pin, `<12.1` (admits
+            # 12.0.x), `<12.0.0.0` (invalid, so semver drops it), a `||` union —
+            # reports as unparsed and fails the comparison. A key with whitespace
+            # could forge extra lines, and bash drops a NUL byte from $(…), so a
+            # key with anything but printable ASCII fails. Explicit `||`: set -e does not
+            # hold inside the self-test's `if guard` below.
+            found=$(node -e '
+              const o = JSON.parse(require("fs").readFileSync(0, "utf8").trim() || "{}") ?? {};
+              for (const [k, v] of Object.entries(o)) {
+                if (/[^\x21-\x7e]/.test(k)) throw new Error("override key is not printable ASCII: " + JSON.stringify(k));
+                // A non-string (String(["x"]) is "x") matches neither shape.
+                const s = typeof v === "string" ? v : "";
+                const m = /^>=\d+(?:\.\d+){0,2}\s+<(\d+)(?:\.0){0,2}$/.exec(s);
+                const shape = m ? "<" + m[1] : /^>=\d+(?:\.\d+){0,2}$/.test(s) ? "floor" : "unparsed " + JSON.stringify(v);
+                console.log(k + " " + shape);
+              }' | sort) || { echo "::error::Could not read the overrides pnpm reports; failing closed."; exit 1; }
+
+            if [ "${found}" != "${expected}" ]; then
+              echo "::error::Overrides in pnpm-workspace.yaml no longer match the set this check declares. Every override is a deliberate constraint, not drift (see the notes beside each pin, and CONTRIBUTING.md). To add, remove, reshape or cross a major on one, edit it in a hand-written commit that says why and update the expected list in this step."
+              echo "--- expected ---"; printf '%s\n' "${expected}"
+              echo "--- found ---";    printf '%s\n' "${found:-(none — pnpm reports no overrides)}" | sed 's/^/  /'
+              exit 1
+            fi
+            echo "Overrides verified (package shape):"
+            printf '%s\n' "${found}" | sed 's/^/  /'
+          )
+
           overrides=$(pnpm config get overrides --json)
-          found=$(printf '%s' "${overrides}" | node -e '
-            const o = JSON.parse(require("fs").readFileSync(0, "utf8") || "{}") ?? {};
-            for (const [k, v] of Object.entries(o)) {
-              if (/\s/.test(k)) throw new Error("override key contains whitespace: " + JSON.stringify(k));
-              const m = /^>=\d+(?:\.\d+){0,2}\s+<(\d+)(?:\.0){0,2}$/.exec(String(v));
-              if (m) console.log(k + " " + m[1]);
-            }' | sort)
+          guard <<<"${overrides}"
 
-          if [ "${found}" != "${expected}" ]; then
-            echo "::error::Bounded floor-pins in pnpm-workspace.yaml no longer match the set this check declares. A bound is a deliberate constraint, not drift (see the notes beside each pin, and CONTRIBUTING.md). If crossing a major is genuinely required, remove the bound in a hand-written commit that says why and update the expected list in this step."
-            echo "--- expected ---"; printf '%s\n' "${expected}"
-            echo "--- found ---";    printf '%s\n' "${found:-(none — pnpm reports no bounded overrides)}" | sed 's/^/  /'
-            exit 1
-          fi
-          echo "Bounded floor-pins verified (package upper-bound-major):"
-          printf '%s\n' "${found}" | sed 's/^/  /'
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+          # Self-test: each fixture is one edit to the real overrides (which just
+          # passed) that the guard must fail. Add the shape here when you close a hole.
+          # Fixtures target entries with no planned change (protobufjs, vite).
+          fail=0
+          while IFS= read -r edit; do
+            [ -n "${edit}" ] || continue
+            fixture=$(jq -c "${edit}" <<<"${overrides}")
+            if guard <<<"${fixture}" >/dev/null 2>&1; then
+              echo "::error::Override guard self-test: the guard passed a fixture it must fail: ${edit}. If the fixture targets an override you just changed, retarget it."
+              fail=1
+            fi
+          done <<'FIXTURES'
+          . + {"minimatch>brace-expansion": "5.0.8"}
+          . + {"left-pad": ">=1.3.0"}
+          . + {"left pad": ">=1.3.0"}
+          del(.protobufjs) + {"protobufjs\u0000": ">=7.6.5 <8"}
+          del(.protobufjs)
+          .protobufjs = ">=7.6.5 <9"
+          .protobufjs = ">=7.6.5"
+          .protobufjs = ">=7.6.5 <8.1"
+          .protobufjs = ">=7.6.5 <8.0.0.0"
+          .protobufjs = ">=7.6.5 <8 || >=9"
+          .protobufjs = [">=7.6.5 <8"]
+          .vite = "8.0.5"
+          .vite = "^8.0.5"
+          .vite = ">=8.0.5 <9"
+          FIXTURES
+          [ "${fail}" -eq 0 ] || exit 1
+          echo "Override guard self-test: every fixture failed as it must."
 
       # pnpm-workspace.yaml ignores GHSA-mh99-v99m-4gvg graph-wide (advisory
       # metadata lags the 2.x backport). That is only sound while every resolved
       # brace-expansion sits on a floor-pinned line — 2.x or 5.x. A third major
       # would be silently un-audited by the step below, so fail here instead of
       # letting the ignore suppress a real advisory. Enforces the SAFETY
-      # INVARIANT documented beside the ignore; delete both together.
+      # INVARIANT documented beside the ignore; delete both together. Reads only
+      # the committed lockfile, so it runs before `pnpm install` for the same
+      # reason as the step above.
       - name: Verify brace-expansion advisory-ignore invariant
         run: |
           set -euo pipefail
@@ -195,6 +243,9 @@ jobs:
             exit 1
           fi
           echo "brace-expansion majors resolved: $(printf '%s' "${majors}" | tr '\n' ' ')— invariant holds"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Audit production dependencies (blocking)
         run: pnpm audit --prod --audit-level=high
