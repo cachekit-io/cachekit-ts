@@ -123,9 +123,9 @@ export function assertDecodeDepth(data: Uint8Array, maxDepth: number): ObjectCou
   let depth = 0;
   let pos = 0;
   // Counted at each header, not at `children > 0` below: an empty container
-  // opens no level but still costs a heap object once decoded. `values` counts
-  // slots: one per array element, and one per map entry (a key-value pair),
-  // since a decoded object keeps its keys in its shape, not in a slot.
+  // opens no level but still costs a heap object once decoded. `values` is
+  // charged one unit per array element and one per map entry (a key-value
+  // pair); key bytes are covered by the per-byte charge.
   let objects = 0;
   let values = 0;
 
@@ -304,9 +304,10 @@ export interface ObjectCount {
    */
   objects: number;
   /**
-   * Slots: one per element of an array or Set and one per entry (key-value
-   * pair) of a map (object, Map), in the heap object that holds them. A Map or Set counts every
-   * entry the caller's value holds, including those the encoding merges.
+   * One unit per element of an array or Set and one per entry (key-value pair)
+   * of a map (object, Map); key bytes are covered by the per-byte charge. A Map
+   * or Set counts every entry the caller's value holds, including those the
+   * encoding merges.
    */
   values: number;
 }
@@ -672,9 +673,9 @@ export function encodeCounted<T>(
  *
  * Now largely redundant with the pre-decode `assertDecodeDepth` on this path
  * (that rejects over-depth input before `decode()` builds the graph 1:1). Kept
- * as a cheap post-decode backstop for the freshly hand-rolled pre-scan: if the
+ * for good as a cheap post-decode backstop for the hand-rolled pre-scan: if the
  * walker ever under-counts depth, this still catches it before the value is
- * returned. Retire once the pre-scan's parity is proven in CI.
+ * returned.
  */
 function validateDepth(value: unknown, depth: number, maxDepth: number): void {
   if (depth > maxDepth) {

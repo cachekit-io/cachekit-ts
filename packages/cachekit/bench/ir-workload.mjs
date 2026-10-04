@@ -81,12 +81,13 @@ class MemoryBackend {
 // this capacity.
 const l1AtCapacity = (entries, n) => ({
   n,
-  setup: async () => {
+  // runs: the n this run executes, which may differ from the default above.
+  setup: async (runs) => {
     const { L1Cache } = await load('l1/lru-cache.js');
     const l1 = new L1Cache({ maxEntries: entries });
     // Keys made up front (warm-up and window included), so the op allocates
     // only what L1 itself does.
-    const keys = Array.from({ length: entries + WARMUP + n }, (_, k) => `k${k}`);
+    const keys = Array.from({ length: entries + WARMUP + runs }, (_, k) => `k${k}`);
     let i = 0;
     for (; i < entries; i++) l1.set(keys[i], i, 3_600_000, 'bench');
     return () => {
@@ -111,10 +112,10 @@ const plaintextSet = (rows, n) => ({
 });
 
 /**
- * Each workload's setup returns its op: one call on the path its name gives.
- * n is sized so n x Ir/op dwarfs the noise of the fixed part, and of a GC
- * cycle that lands in one run's window and not another's: cheap ops that
- * allocate need a larger n.
+ * Each workload's setup(n) gets the n the run executes and returns its op: one
+ * call on the path its name gives. The default n is sized so n x Ir/op dwarfs
+ * the noise of the fixed part, and of a GC cycle that lands in one run's
+ * window and not another's: cheap ops that allocate need a larger n.
  */
 export const WORKLOADS = {
   // what keeping recency costs a hit: round-robin over a full 1k L1, so each
@@ -241,7 +242,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (!Number.isInteger(n) || n < 0)
     throw new Error(`n must be a non-negative integer, got "${nArg}"`);
 
-  const op = await WORKLOADS[name].setup();
+  const op = await WORKLOADS[name].setup(n);
   for (let i = 0; i < WARMUP; i++) await op();
   process.cpuUsage(); // window start: callgrind dump 1
   const t0 = process.hrtime.bigint();

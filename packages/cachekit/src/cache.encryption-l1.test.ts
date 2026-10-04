@@ -91,6 +91,7 @@ describe('L1 zero-knowledge for encrypted caches (LAB-238)', () => {
   }
 
   afterEach(async () => {
+    vi.useRealTimers();
     await Promise.all(caches.splice(0).map((c) => c.close()));
   });
 
@@ -125,6 +126,7 @@ describe('L1 zero-knowledge for encrypted caches (LAB-238)', () => {
   });
 
   it('the SWR background refresh writes ciphertext to L1, not the factory result', async () => {
+    vi.useFakeTimers();
     const backend = new InMemoryBackend();
     const cache = makeCache(backend);
 
@@ -133,8 +135,8 @@ describe('L1 zero-knowledge for encrypted caches (LAB-238)', () => {
       async (_id: number) => ({ ssn: LEAK_CANARY, generation: ++generation }),
       // 2s TTL, read at 1.4s: 600ms remaining against a 0.5 threshold of
       // 900-1100ms (±10% jitter), so the read is stale for every jitter draw
-      // and still has 600ms of headroom before the entry expires outright —
-      // a loaded CI box takes the stale path, not the cold path.
+      // and still has 600ms of headroom before the entry expires outright. The
+      // clock is fake, so a loaded CI box cannot overrun that into the cold path.
       { namespace: 'users', ttl: 2 }
     );
 
@@ -143,7 +145,7 @@ describe('L1 zero-knowledge for encrypted caches (LAB-238)', () => {
     expect(generation).toBe(1);
     const firstCiphertext = l1Entry(cache, key);
 
-    await new Promise((r) => setTimeout(r, 1400));
+    await vi.advanceTimersByTimeAsync(1400);
 
     // Stale hit: served from L1, refresh scheduled in the background.
     expect(await load(3)).toEqual({ ssn: LEAK_CANARY, generation: 1 });

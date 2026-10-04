@@ -373,6 +373,9 @@ describe('L1Cache', () => {
       c.set('rows', [{}], 10000, 'test', 100, { objects: 24, values: 10 });
       expect(c.get('rows')).toBeNull();
       expect(c.get('a')).toBe('x');
+
+      c.set('rows', [{}], 10000, 'test', 100, { objects: 24, values: 0 });
+      expect(c.get('rows')).toEqual([{}]);
     });
 
     it('a charge of exactly an eighth of maxMemory is stored; one byte more drops the older entry', () => {
@@ -460,12 +463,36 @@ describe('L1Cache', () => {
       expect(c.stats.memoryUsed).toBe(256);
     });
 
-    it.each([NaN, -1, Infinity])('falls back to the estimate for a hint of %s', (hint) => {
-      const withHint = new L1Cache<string>();
+    it.each([NaN, -1, Infinity, Number.MAX_VALUE])(
+      'falls back to the estimate for a hint of %s',
+      (hint) => {
+        const withHint = new L1Cache<string>();
+        const without = new L1Cache<string>();
+        withHint.set('a', 'x'.repeat(100), 10000, 'test', hint);
+        without.set('a', 'x'.repeat(100), 10000, 'test');
+        expect(withHint.get('a')).toBe('x'.repeat(100));
+        expect(withHint.stats.memoryUsed).toBe(without.stats.memoryUsed);
+      }
+    );
+
+    it.each([
+      { objects: Number.MAX_VALUE, values: 0 },
+      { objects: 0, values: Number.MAX_VALUE },
+    ])('falls back to the estimate for a count that overflows the charge: %o', (count) => {
+      const counted = new L1Cache<string>();
       const without = new L1Cache<string>();
-      withHint.set('a', 'x'.repeat(100), 10000, 'test', hint);
+      counted.set('a', 'x'.repeat(100), 10000, 'test', 1, count);
       without.set('a', 'x'.repeat(100), 10000, 'test');
-      expect(withHint.stats.memoryUsed).toBe(without.stats.memoryUsed);
+      expect(counted.get('a')).toBe('x'.repeat(100));
+      expect(counted.stats.memoryUsed).toBe(without.stats.memoryUsed);
+    });
+
+    it('keeps memoryUsed finite through an eviction with no memory bound', () => {
+      const c = new L1Cache<string>({ maxEntries: 1, maxMemory: Infinity });
+      c.set('a', 'x', 10000, 'test', Number.MAX_VALUE);
+      c.set('b', 'y', 10000, 'test');
+      expect(c.get('b')).toBe('y');
+      expect(Number.isFinite(c.stats.memoryUsed)).toBe(true);
     });
 
     it('keeps eviction under maxMemory within 25% of the estimate it replaces', () => {
@@ -489,9 +516,9 @@ describe('L1Cache', () => {
 
     it('keeps that parity with each object and value charged too', () => {
       const workload = parityWorkload();
-      const config = resolveSerializerConfig();
+      const serializerConfig = resolveSerializerConfig();
       const counts = workload.map(() => ({ objects: 0, values: 0 }));
-      const sizes = workload.map((v, i) => encodeCounted(v, config, counts[i]).length);
+      const sizes = workload.map((v, i) => encodeCounted(v, serializerConfig, counts[i]).length);
 
       for (const mb of [1, 2, 5]) {
         const config = { maxEntries: 1_000_000, maxMemory: mb * 1024 * 1024 };
@@ -533,17 +560,19 @@ describe('L1Cache', () => {
 
     it('reads each count field once', () => {
       // A getter that turns NaN on a second read must not reach currentMemory.
-      let reads = 0;
+      const reads = { objects: 0, values: 0 };
       const count = {
         get objects() {
-          return reads++ === 0 ? 1 : NaN;
+          return reads.objects++ === 0 ? 1 : NaN;
         },
-        values: 0,
+        get values() {
+          return reads.values++ === 0 ? 1 : NaN;
+        },
       };
       const c = new L1Cache<string>();
       c.set('a', 'x', 10000, 'test', 10, count);
-      expect(reads).toBe(1);
-      expect(c.stats.memoryUsed).toBe(10 * 1.75 + 32);
+      expect(reads).toEqual({ objects: 1, values: 1 });
+      expect(c.stats.memoryUsed).toBe(10 * 1.75 + 32 + 8);
     });
 
     it('ignores the count without a serialized size', () => {

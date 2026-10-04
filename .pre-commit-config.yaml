@@ -82,7 +82,7 @@ repos:
         exclude: ^packages/cachekit/test/(protocol|workers)/fixtures/.*$
       - id: check-yaml
       - id: check-json
-        exclude: ^(\.vscode/|tsconfig.*\.json$) # tsconfig allows comments
+        exclude: ^(\.vscode/|(.*/)?tsconfig[^/]*\.json$) # tsconfig allows comments, at any depth
       - id: check-toml
       - id: check-added-large-files
         args: [--maxkb=1000]
