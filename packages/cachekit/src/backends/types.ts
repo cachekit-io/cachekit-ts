@@ -313,7 +313,7 @@ export interface CachekitIOBackendConfig {
    * `0` does NOT mean "never expire" here; the protocol rejects it.
    */
   defaultTtl?: number;
-  /** Request timeout in milliseconds (default: 30000) */
+  /** Per-attempt request timeout in milliseconds (default: 5000, the protocol's CACHEKIT_TIMEOUT default) */
   timeout?: number;
   /** Allow non-standard API hostnames (custom proxies, etc.) */
   allowCustomHost?: boolean;

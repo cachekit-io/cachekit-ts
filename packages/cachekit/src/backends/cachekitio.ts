@@ -54,7 +54,7 @@ export function encodeKey(key: string): string {
 }
 
 const DEFAULT_API_URL = 'https://api.cachekit.io';
-const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_TIMEOUT_MS = 5_000;
 
 /** Protocol TTL ceiling: 30 days in seconds (protocol/spec/saas-api.md, TTL Validation Rules). */
 const MAX_TTL_SECONDS = 2_592_000;

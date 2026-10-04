@@ -111,4 +111,90 @@ describe('RetryPolicy', () => {
       expect(fn).toHaveBeenCalledTimes(3);
     });
   });
+
+  describe('deadline', () => {
+    it('starts no attempt once the next one would begin past the deadline', async () => {
+      vi.useFakeTimers();
+      const policy = new RetryPolicy({
+        maxAttempts: 3,
+        baseDelay: 100,
+        jitter: false,
+        deadline: 5000,
+      });
+      const err = new Error('stalled');
+      const fn = vi.fn(async () => {
+        await new Promise((r) => setTimeout(r, 4950));
+        throw err;
+      });
+
+      const result = policy.execute(fn).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(6000);
+
+      // 4950 ms + 100 ms backoff lands past 5000 ms: give up after one attempt
+      expect(await result).toBe(err);
+      expect(fn).toHaveBeenCalledTimes(1);
+    });
+
+    it('starts no attempt when the backoff timer resumes past the deadline', async () => {
+      vi.useFakeTimers();
+      const policy = new RetryPolicy({
+        maxAttempts: 3,
+        baseDelay: 100,
+        jitter: false,
+        deadline: 5000,
+      });
+      const err = new Error('fail');
+      const fn = vi.fn(() => {
+        // A paused event loop: the wall clock jumps 6 s during the 100 ms backoff
+        setTimeout(() => vi.setSystemTime(Date.now() + 6000), 50);
+        return Promise.reject(err);
+      });
+
+      const result = policy.execute(fn).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect(await result).toBe(err);
+      expect(fn).toHaveBeenCalledTimes(1);
+    });
+
+    it('still retries fast failures inside the deadline', async () => {
+      vi.useFakeTimers();
+      const policy = new RetryPolicy({
+        maxAttempts: 3,
+        baseDelay: 1,
+        jitter: false,
+        deadline: 5000,
+      });
+      const err = new Error('fail');
+      const fn = vi.fn().mockRejectedValue(err);
+
+      const result = policy.execute(fn).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(await result).toBe(err);
+      expect(fn).toHaveBeenCalledTimes(3);
+    });
+
+    it('shares one budget across attempts', async () => {
+      vi.useFakeTimers();
+      const policy = new RetryPolicy({
+        maxAttempts: 5,
+        baseDelay: 100,
+        jitter: false,
+        deadline: 5000,
+      });
+      const fn = vi.fn(async () => {
+        await new Promise((r) => setTimeout(r, 2000));
+        throw new Error('slow');
+      });
+
+      const result = policy.execute(fn).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(20_000);
+      await result;
+
+      // Attempts start at 0, 2100 and 4300 ms; the fourth would start at
+      // 6700 ms, past the deadline, so 3 of the 5 allowed attempts run.
+      expect(fn).toHaveBeenCalledTimes(3);
+    });
+  });
 });

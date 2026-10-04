@@ -143,7 +143,7 @@ export interface IOOptions extends BaseIntentOptions {
   apiKey?: string;
   /** Custom API endpoint (default: "https://api.cachekit.io") */
   apiUrl?: string;
-  /** Request timeout in milliseconds (default: 30000) */
+  /** Per-attempt request timeout in milliseconds (default: 5000) */
   timeout?: number;
   /** Optional encryption config for zero-knowledge mode */
   encryption?: EncryptionConfig;
@@ -200,6 +200,9 @@ const PRODUCTION_RELIABILITY: ReliabilityConfig = {
     maxAttempts: 3,
     baseDelay: 100,
     maxDelay: 5000,
+    // One budget for all attempts, equal to the cachekit.io per-attempt
+    // timeout: a stalled op degrades after ~5 s instead of 3 x timeout.
+    deadline: 5000,
   },
   degradation: true,
 };
