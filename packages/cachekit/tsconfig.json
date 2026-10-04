@@ -4,6 +4,10 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "tsBuildInfoFile": "./dist/.tsbuildinfo",
+    // Drops @internal declarations from the published .d.ts, among them the
+    // size-hint overloads of L1Cache.set and completeRefresh: without it they
+    // become public API. Tag @internal only on a declaration no emitted one
+    // refers to, or the .d.ts keeps a reference to a type it no longer declares.
     "stripInternal": true
   },
   "include": ["src/**/*"],

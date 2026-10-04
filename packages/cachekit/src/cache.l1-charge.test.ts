@@ -56,6 +56,7 @@ describe('L1 charge for object-heavy values', () => {
   }
 
   afterEach(async () => {
+    vi.useRealTimers();
     await Promise.all(caches.splice(0).map((c) => c.close()));
   });
 
@@ -74,7 +75,7 @@ describe('L1 charge for object-heavy values', () => {
     expect(memoryUsed(reader)).toBe(chargeFor(containerHeavy()));
   });
 
-  it('interop writes and L2 hits charge the containers', async () => {
+  it('interop writes and L2 hits charge the objects', async () => {
     const backend = new InMemoryBackend();
     const options = { namespace: 'users', interop: 'list', interopArity: 1, ttl: 300 };
     const writer = makeCache(backend);
@@ -88,6 +89,7 @@ describe('L1 charge for object-heavy values', () => {
   });
 
   it('the SWR refresh charges the objects', async () => {
+    vi.useFakeTimers();
     const cache = makeCache(new InMemoryBackend());
     let generation = 0;
     // 2s TTL, read at 1.4s: stale for every jitter draw, not yet expired
@@ -100,7 +102,7 @@ describe('L1 charge for object-heavy values', () => {
     // Charged on set first; the refresh below must keep charging the count.
     expect(memoryUsed(cache)).toBe(chargeFor({ generation: 1, items: containerHeavy() }));
 
-    await new Promise((r) => setTimeout(r, 1400));
+    await vi.advanceTimersByTimeAsync(1400);
     expect((await load(1)).generation).toBe(1); // stale hit, refresh scheduled
     await vi.waitFor(async () => expect(generation).toBe(2));
     await vi.waitFor(async () => expect((await load(1)).generation).toBe(2));

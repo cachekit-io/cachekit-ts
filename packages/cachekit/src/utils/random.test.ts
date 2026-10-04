@@ -28,8 +28,8 @@ describe('secureRandomFloat', () => {
     let counter = 0;
     vi.spyOn(crypto, 'getRandomValues').mockImplementation(
       <T extends ArrayBufferView | null>(array: T): T => {
-        const words = array as unknown as Uint32Array;
-        for (let i = 0; i < words.length; i++) words[i] = counter++;
+        if (!(array instanceof Uint32Array)) throw new TypeError('expected the Uint32Array pool');
+        for (let i = 0; i < array.length; i++) array[i] = counter++;
         return array;
       }
     );
@@ -42,7 +42,8 @@ describe('secureRandomFloat', () => {
     const { secureRandomFloat: fresh } = await import('./random.js');
     vi.spyOn(crypto, 'getRandomValues').mockImplementation(
       <T extends ArrayBufferView | null>(array: T): T => {
-        (array as unknown as Uint32Array).fill(0xffffffff);
+        if (!(array instanceof Uint32Array)) throw new TypeError('expected the Uint32Array pool');
+        array.fill(0xffffffff);
         return array;
       }
     );

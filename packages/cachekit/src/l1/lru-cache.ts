@@ -35,10 +35,9 @@ const COUNTED_SIZE_FACTOR = 1.75;
  * What L1 charges, on top of COUNTED_SIZE_FACTOR, per value that decodes
  * to a heap object of its own (array, map, bin, ext) when the caller passes
  * that count. Derivation, 64-bit Node: an empty array is 40 B of heap with
- * its slot in the parent, 32 B without; an empty object is 64 B. 32 is the
- * least such an object costs, and runtimes that compress pointers (workerd)
- * spend about half, so they are charged high, never low. A Uint8Array view
- * costs more than 32 B, so binary-heavy values are charged low.
+ * its slot in the parent, 32 B without. 32 B is a floor: an empty object
+ * (64 B) and a Uint8Array view cost more, so values heavy in either are
+ * charged low. Runtimes that compress pointers (workerd) spend about half.
  * Internal calibration, not a setting: kept off the public exports.
  */
 const OBJECT_SIZE = 32;
@@ -334,7 +333,8 @@ export class L1Cache<T = unknown> {
   set(key: string, value: T, ttl: number, namespace: string): void;
   /**
    * Set with size hints. Package-internal: the charge's inputs are
-   * calibration, not API, so they stay off the published types.
+   * calibration, not API, so they stay off the published types. Hints whose
+   * charge would not be finite are ignored, as if the value had none.
    *
    * @param serializedSize - Byte length of the value's serialized form, when
    *   the caller already holds it. The entry is then charged a fixed
@@ -640,8 +640,13 @@ export class L1Cache<T = unknown> {
     // value that was checked. A count that is missing or not usable is
     // charged as no count, never at the lower counted rate with nothing added.
     const { objects, values } = count ?? {};
-    if (!isCount(objects) || !isCount(values)) return serializedSize * SERIALIZED_SIZE_FACTOR;
-    return serializedSize * COUNTED_SIZE_FACTOR + objects * OBJECT_SIZE + values * VALUE_SIZE;
+    const charge =
+      isCount(objects) && isCount(values)
+        ? serializedSize * COUNTED_SIZE_FACTOR + objects * OBJECT_SIZE + values * VALUE_SIZE
+        : serializedSize * SERIALIZED_SIZE_FACTOR;
+    // A finite size or count can still overflow the product to Infinity, so
+    // check the charge itself and charge what no hint would.
+    return Number.isFinite(charge) ? charge : this.estimateSize(value);
   }
 
   private estimateSize(value: unknown): number {
