@@ -512,6 +512,9 @@ describe('L1Cache', () => {
       c.set('a', 'x', 10000, 'test', 7e307);
       c.set('b', 'y', 10000, 'test', 7e307);
       expect(Number.isFinite(c.stats.memoryUsed)).toBe(true);
+      expect(c.stats.memoryUsed).toBe(0);
+      expect(c.get('a')).toBeNull();
+      expect(c.get('b')).toBeNull();
     });
 
     it('keeps eviction under maxMemory within 25% of the estimate it replaces', () => {

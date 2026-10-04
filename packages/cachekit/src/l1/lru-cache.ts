@@ -123,7 +123,7 @@ export class L1Cache<T = unknown> {
     this.config = {
       ...DEFAULT_L1_CONFIG,
       ...config,
-      // An explicit undefined means "not set", not "no bound".
+      // An explicit undefined or null means "not set", not "no bound".
       maxMemory: config.maxMemory ?? DEFAULT_L1_CONFIG.maxMemory,
     };
     // A non-finite bound would let the running total overflow to Infinity:
