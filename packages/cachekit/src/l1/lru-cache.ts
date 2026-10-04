@@ -122,9 +122,11 @@ export class L1Cache<T = unknown> {
   constructor(config: Partial<L1Config> = {}) {
     // An explicit undefined or null field means "not set", not "no bound": spread
     // over the defaults, it would leave maxEntries or maxConcurrentRefreshes
-    // comparing against undefined, which no size ever reaches.
+    // comparing against undefined, which no size ever reaches. A JavaScript
+    // caller can pass a null config too (`createCache({ l1: null })`); the
+    // default parameter covers only undefined.
     const set = Object.fromEntries(
-      Object.entries(config).filter(([, v]) => v !== undefined && v !== null)
+      Object.entries(config ?? {}).filter(([, v]) => v !== undefined && v !== null)
     ) as Partial<L1Config>;
     this.config = { ...DEFAULT_L1_CONFIG, ...set };
     // A non-finite bound would let the running total overflow to Infinity:

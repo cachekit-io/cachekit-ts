@@ -12,7 +12,7 @@ import {
   encodeCounted,
   resolveSerializerConfig,
 } from '../serialization/serializer.js';
-import type { InvalidationEvent } from './types.js';
+import type { InvalidationEvent, L1Config } from './types.js';
 
 describe('L1Cache', () => {
   let cache: L1Cache<string>;
@@ -67,6 +67,12 @@ describe('L1Cache', () => {
         ...Array<boolean>(DEFAULT_L1_MAX_CONCURRENT_REFRESHES).fill(true),
         false,
       ]);
+    });
+
+    it('treats a null config as not set', () => {
+      const c = new L1Cache<number>(null as unknown as Partial<L1Config>);
+      for (let i = 0; i <= DEFAULT_L1_MAX_ENTRIES; i++) c.set(`k${i}`, i, 1000, 'ns');
+      expect(c.stats.entries).toBe(DEFAULT_L1_MAX_ENTRIES);
     });
   });
 
