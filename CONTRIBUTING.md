@@ -24,6 +24,13 @@ Hooks run on every commit (ESLint + Prettier + actionlint + secret-scan + standa
 
 Of these hooks, CI re-runs only ESLint and the type-check (alongside its own build, test, audit and smoke-test jobs). Every other hook — Prettier, actionlint, secret-scan, cargo fmt/clippy and the file checks (whitespace, yaml/json/toml, large files, merge/case conflicts) — runs only locally, so install them.
 
+## Documentation scope
+
+User-facing docs (the READMEs and `docs/`) follow CacheKit's shared rule on what belongs in them:
+[What belongs in these docs](https://docs.cachekit.io/contributing/#what-belongs-in-these-docs).
+`prek install` (or `pre-commit install`) sets up hooks that reject internal references in README
+files, `docs/` and commit messages.
+
 ## How to send a change
 
 1. **Open an issue first** for non-trivial work (anything beyond a typo or one-line fix). Saves both of us time if the direction is wrong.

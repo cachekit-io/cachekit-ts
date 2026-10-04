@@ -186,7 +186,7 @@ const cache = createCache.minimal({
 decoding materialises them into objects that cost several times their wire size
 in heap (a legal payload can inflate ~40×). Nested forged collection headers
 can no longer amplify unbounded — reads are structurally depth-bounded before
-the decoder allocates (LAB-2487) — but `maxDecodedSize` still sets the ceiling
+the decoder allocates — but `maxDecodedSize` still sets the ceiling
 on a single untrusted decode's transient memory. It also bounds decompression:
 an envelope that declares more than `maxDecodedSize`, or carries a payload too
 large for what it declares, is never unpacked, so the core codec never
