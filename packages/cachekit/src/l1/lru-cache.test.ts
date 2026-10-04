@@ -12,6 +12,7 @@ import {
   encodeCounted,
   resolveSerializerConfig,
 } from '../serialization/serializer.js';
+import { DEFAULT_L1_CONFIG } from './types.js';
 import type { InvalidationEvent, L1Config } from './types.js';
 
 describe('L1Cache', () => {
@@ -43,17 +44,11 @@ describe('L1Cache', () => {
     });
 
     it.each([undefined, null])('treats every field set to %s as not set', (unset) => {
-      // Spread over the defaults, an unset maxEntries would let L1 grow without
-      // bound, and an unset maxConcurrentRefreshes would stop every refresh.
+      // Spread over the defaults, an undefined maxEntries would remove the entry
+      // bound and a null one would keep a single entry; either one in
+      // maxConcurrentRefreshes would stop every refresh.
       vi.useFakeTimers();
-      const fields = [
-        'maxEntries',
-        'maxMemory',
-        'swrEnabled',
-        'swrThresholdRatio',
-        'maxConcurrentRefreshes',
-        'namespaceIndex',
-      ];
+      const fields = Object.keys(DEFAULT_L1_CONFIG);
       const c = new L1Cache<number>(Object.fromEntries(fields.map((f) => [f, unset])));
       for (let i = 0; i <= DEFAULT_L1_MAX_ENTRIES; i++) c.set(`k${i}`, i, 1000, 'ns');
       expect(c.stats).toMatchObject({ entries: DEFAULT_L1_MAX_ENTRIES, namespaces: 1 });

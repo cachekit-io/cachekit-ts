@@ -120,11 +120,12 @@ export class L1Cache<T = unknown> {
   private readonly instanceId = crypto.randomUUID();
 
   constructor(config: Partial<L1Config> = {}) {
-    // An explicit undefined or null field means "not set", not "no bound": spread
-    // over the defaults, it would leave maxEntries or maxConcurrentRefreshes
-    // comparing against undefined, which no size ever reaches. A JavaScript
-    // caller can pass a null config too (`createCache({ l1: null })`); the
-    // default parameter covers only undefined.
+    // An explicit undefined or null field means "not set". Spread over the
+    // defaults it would replace the default: an undefined maxEntries would
+    // remove the entry bound and a null one would keep a single entry, and
+    // either one in maxConcurrentRefreshes would stop every refresh. A
+    // JavaScript caller can pass a null config too (`createCache({ l1: null })`);
+    // the default parameter covers only undefined.
     const set = Object.fromEntries(
       Object.entries(config ?? {}).filter(([, v]) => v !== undefined && v !== null)
     ) as Partial<L1Config>;
