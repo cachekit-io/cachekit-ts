@@ -8,6 +8,7 @@ import {
 } from './cachekitio-factory.js';
 import type { Backend, CachekitIOBackendConfig } from './types.js';
 import { createCache } from '../cache.js';
+import { CacheImpl } from '../cache-core.js';
 
 // LAB-7883: the L1 backfill honours X-CacheKit-Freshness and X-CacheKit-Fresh-For
 // (protocol spec/saas-api.md § Remaining Freshness, § Reading a stale entry).
@@ -90,6 +91,7 @@ describe('CachekitIO L1 backfill bound', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   /** A reader in a second process: its own empty L1 over the shared store. */
@@ -172,6 +174,61 @@ describe('CachekitIO L1 backfill bound', () => {
 
     await reader.close();
     await fresh.close();
+  });
+
+  it('stops serving the L1 copy at exactly the bound', async () => {
+    const reader = await seed(() => cachekitio(config));
+    headers = { 'X-CacheKit-Freshness': 'fresh', 'X-CacheKit-Fresh-For': '1' };
+
+    await reader.get('ns:k');
+    vi.advanceTimersByTime(1_000);
+    await reader.get('ns:k');
+    expect(gets).toBe(2);
+
+    await reader.close();
+  });
+
+  /** Make the next L2 decode take `ms` on the faked clock (a cold native load, a decrypt). */
+  function slowNextDecode(ms: number) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const proto = CacheImpl.prototype as any;
+    const decode = proto.decodeEntry;
+    vi.spyOn(proto, 'decodeEntry').mockImplementationOnce(async function (
+      this: unknown,
+      ...args: unknown[]
+    ) {
+      vi.advanceTimersByTime(ms);
+      return decode.apply(this, args);
+    });
+  }
+
+  it('counts the bound from receipt, not from after a slow decode', async () => {
+    const reader = await seed(() => cachekitio(config));
+    headers = { 'X-CacheKit-Freshness': 'fresh', 'X-CacheKit-Fresh-For': '2' };
+    slowNextDecode(1_500);
+
+    expect(await reader.get('ns:k')).toBe('v1'); // received at 0, written to L1 at 1.5 s
+    vi.advanceTimersByTime(400);
+    await reader.get('ns:k');
+    expect(gets).toBe(1); // 1.9 s after receipt: inside the bound
+
+    vi.advanceTimersByTime(200);
+    await reader.get('ns:k');
+    expect(gets).toBe(2); // 2.1 s after receipt: past it, though only 0.6 s after the L1 write
+
+    await reader.close();
+  });
+
+  it('never backfills when the decode outlasts the bound', async () => {
+    const reader = await seed(() => cachekitio(config));
+    headers = { 'X-CacheKit-Freshness': 'fresh', 'X-CacheKit-Fresh-For': '1' };
+    slowNextDecode(1_500);
+
+    expect(await reader.get('ns:k')).toBe('v1');
+    await reader.get('ns:k');
+    expect(gets).toBe(2);
+
+    await reader.close();
   });
 
   it('keeps the declared lifetime when no freshness header is sent', async () => {

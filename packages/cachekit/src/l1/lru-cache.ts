@@ -130,7 +130,8 @@ export class L1Cache<T = unknown> {
     if (!entry) return null;
 
     // Check expiration
-    if (Date.now() > entry.expiresAt) {
+    // The bound is exclusive: at expiresAt the entry is already expired.
+    if (Date.now() >= entry.expiresAt) {
       this.delete(key);
       return null;
     }
@@ -160,7 +161,7 @@ export class L1Cache<T = unknown> {
     const now = Date.now();
 
     // Fully expired - don't return value
-    if (now > entry.expiresAt) {
+    if (now >= entry.expiresAt) {
       this.delete(key);
       return {
         value: null,

@@ -912,15 +912,17 @@ export class CacheImpl implements SecureCache {
       } else {
         data = await this.backend.get(key);
       }
+      // The bounds count from receipt, not from the L1 write after decode.
+      const receivedAt = Date.now();
       if (data === null) {
         this.recordMiss();
         return null;
       }
-      return { data, l1Bound, isStale };
+      return { data, l1Bound, isStale, receivedAt };
     });
     // A miss (counted above) or a backend failure degradation absorbed.
     if (fetched === null) return null;
-    const { data, l1Bound, isStale } = fetched;
+    const { data, l1Bound, isStale, receivedAt } = fetched;
 
     // Decrypt, unpack, deserialize — the same sequence an L1 hit runs. The
     // failure keeps the degradation contract it had inside the executor:
@@ -950,6 +952,8 @@ export class CacheImpl implements SecureCache {
     // or a zero bound is never backfilled: the spec forbids local service of
     // it in any form, and L1's hard expiry is what keeps getWithSwr inside the
     // bound too (protocol spec/saas-api.md § Remaining Freshness, LAB-7883).
+    // The bound decays by the time spent since receipt: a slow decode (a cold
+    // native load, a decrypt) must not restart the server's clock.
     if (this.l1 && !isStale) {
       const namespace = interop ? key.slice(0, key.indexOf(':')) : extractNamespace(key);
       const capSeconds = ttlSeconds ?? this.defaultTtl;
@@ -959,7 +963,7 @@ export class CacheImpl implements SecureCache {
       // tripping the skip-guard below for an entry that should never
       // expire in L1 (LAB-1388).
       const capOrForever = capSeconds > 0 ? capSeconds : Infinity;
-      const l1TtlSeconds = Math.min(capOrForever, l1Bound);
+      const l1TtlSeconds = Math.min(capOrForever, l1Bound - (Date.now() - receivedAt) / 1000);
       if (l1TtlSeconds > 0) {
         // Hand L1 its own canonical no-expiry encoding (ttl <= 0), never
         // Infinity ms: an Infinity originalTtl turns getWithSwr's
