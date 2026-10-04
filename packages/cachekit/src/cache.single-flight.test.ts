@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { createCache } from './cache.js';
+import { CacheImpl } from './cache-core.js';
 import { ConfigurationError } from './errors.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend, LockableBackend } from './backends/types.js';
@@ -267,6 +268,154 @@ describe('Cold-miss single-flight (LAB-519)', () => {
 
       await expect(wrapped()).rejects.toThrow('compute failed');
       expect(backend.heldLocks()).toBe(0);
+    });
+
+    describe('post-grant double-check and fall-through re-check (LAB-7119)', () => {
+      const wrapCounting = (cache: SecureCache, namespace: string) => {
+        const counter = { calls: 0 };
+        const wrapped = cache.wrap(
+          async (id: number) => {
+            counter.calls++;
+            return `result-${id}`;
+          },
+          { namespace, ttl: 60 }
+        );
+        return { wrapped, counter };
+      };
+
+      it('skips the double-check after a clean miss and a first-attempt grant', async () => {
+        const backend = new CountingLockableBackend();
+        const cache = make({ backend, l1: { enabled: false }, stampede: lockOptions });
+        const { wrapped, counter } = wrapCounting(cache, 'sf:uncontended');
+
+        await expect(wrapped(1)).resolves.toBe('result-1');
+        expect(backend.gets).toBe(1); // the miss only; no double-check GET
+        expect(backend.acquires).toBe(1);
+        expect(counter.calls).toBe(1);
+        expect(backend.sets).toBe(1);
+      });
+
+      it('accepted race: a fill between our miss and our first-attempt grant is recomputed', async () => {
+        // B misses; A fills and releases before B's lock request lands. B's grant is
+        // uncontended, so it skips the double-check and writes again. Pinned on purpose:
+        // duplicate fills are benign (protocol spec saas-api.md), last write wins.
+        const backend = new CountingLockableBackend();
+        const cacheA = make({ backend, l1: { enabled: false }, stampede: lockOptions });
+        const cacheB = make({ backend, l1: { enabled: false }, stampede: lockOptions });
+        const a = wrapCounting(cacheA, 'sf:race');
+        const b = wrapCounting(cacheB, 'sf:race');
+
+        const originalAcquire = backend.acquireLock.bind(backend);
+        let raced = false;
+        backend.acquireLock = async (key, timeoutMs) => {
+          if (!raced) {
+            raced = true;
+            await a.wrapped(9); // A runs to completion inside B's miss→grant window
+          }
+          return originalAcquire(key, timeoutMs);
+        };
+
+        await expect(b.wrapped(9)).resolves.toBe('result-9');
+        expect(a.counter.calls).toBe(1);
+        expect(b.counter.calls).toBe(1);
+        expect(backend.sets).toBe(2);
+        expect(backend.heldLocks()).toBe(0);
+      });
+
+      it('keeps the double-check when the first read failed, and serves the live entry', async () => {
+        class FlakyFirstReadBackend extends CountingLockableBackend {
+          failNext = false;
+          async get(key: string): Promise<Uint8Array | null> {
+            if (this.failNext) {
+              this.failNext = false;
+              this.gets++;
+              throw new Error('transient read failure');
+            }
+            return super.get(key);
+          }
+        }
+        const backend = new FlakyFirstReadBackend();
+        const writer = make({ backend, l1: { enabled: false } });
+        const w = wrapCounting(writer, 'sf:flaky');
+        await w.wrapped(3); // entry is live in L2
+        backend.failNext = true;
+        const before = backend.gets;
+
+        const cache = make({ backend, l1: { enabled: false }, stampede: lockOptions });
+        const { wrapped, counter } = wrapCounting(cache, 'sf:flaky');
+
+        await expect(wrapped(3)).resolves.toBe('result-3');
+        expect(backend.gets - before).toBe(2); // failed read, then the double-check hit
+        expect(counter.calls).toBe(0);
+        expect(backend.sets).toBe(1); // the writer's only
+      });
+
+      it('re-reads L2 on the contested-deadline exit and serves the holder’s write', async () => {
+        // Another process holds the lease past our wait, and writes while we spin:
+        // the holder's fill runs inside our first contested acquire, so the order
+        // does not depend on timers.
+        class ContestedBackend extends CountingBackend implements LockableBackend {
+          onFirstAcquire: (() => Promise<unknown>) | null = null;
+          async acquireLock(): Promise<string | null> {
+            const fill = this.onFirstAcquire;
+            this.onFirstAcquire = null;
+            if (fill) await fill();
+            return null;
+          }
+          async releaseLock(): Promise<boolean> {
+            return false;
+          }
+        }
+        const backend = new ContestedBackend();
+        const holder = make({ backend, l1: { enabled: false } });
+        const h = wrapCounting(holder, 'sf:deadline');
+        const cache = make({
+          backend,
+          l1: { enabled: false },
+          stampede: { distributedLock: true, lockWaitMs: 100, lockPollMs: 20 },
+        });
+        const { wrapped, counter } = wrapCounting(cache, 'sf:deadline');
+        backend.onFirstAcquire = () => h.wrapped(4);
+
+        await expect(wrapped(4)).resolves.toBe('result-4');
+        // Our miss, the holder's miss, then our deadline re-check, which hits.
+        expect(backend.gets).toBe(3);
+        expect(counter.calls).toBe(0);
+        expect(backend.sets).toBe(1); // the holder's only
+      });
+
+      it('does not re-read L2 on the acquire-error exit', async () => {
+        class BrokenLockBackend extends CountingBackend implements LockableBackend {
+          async acquireLock(): Promise<string | null> {
+            throw new Error('lock endpoint unreachable');
+          }
+          async releaseLock(): Promise<boolean> {
+            return false;
+          }
+        }
+        const backend = new BrokenLockBackend();
+        const cache = make({ backend, l1: { enabled: false }, stampede: lockOptions });
+        const { wrapped } = wrapCounting(cache, 'sf:acquire-error');
+
+        await wrapped(5);
+        expect(backend.gets).toBe(1);
+        expect(backend.sets).toBe(1);
+      });
+
+      it('registers the release with waitUntil under withExecutionContext', async () => {
+        const backend = new CountingLockableBackend();
+        const cache = make({ backend, l1: { enabled: false }, stampede: lockOptions });
+        const registered: Promise<unknown>[] = [];
+        if (!(cache instanceof CacheImpl)) throw new Error('expected CacheImpl');
+        const view = cache.withExecutionContext({ waitUntil: (p) => registered.push(p) });
+        const wrapped = view.wrap(async (id: number) => `v-${id}`, { namespace: 'sf:wu', ttl: 60 });
+
+        await wrapped(6);
+        expect(registered).toHaveLength(1);
+        await registered[0];
+        expect(backend.releases).toBe(1);
+        expect(backend.heldLocks()).toBe(0);
+      });
     });
 
     it('rejects distributedLock on a backend without lock capability', () => {

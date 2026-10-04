@@ -327,9 +327,19 @@ where many processes can go cold on the same key simultaneously. It mirrors
 cachekit-py's flow: acquire the backend lock, double-check L2, compute, write,
 release. Contested processes retry the lock on an interval (never polling
 `get()` — on metered-misses backends a poll against a still-cold key is itself
-a billed miss) and fall through to computing after `lockWaitMs`; the lock is
-best-effort mitigation, never a correctness gate, so lock-endpoint failures
-degrade to an unlocked compute.
+a billed miss), read L2 once more after `lockWaitMs`, and compute if it is
+still empty; the lock is best-effort mitigation, never a correctness gate, so
+lock-endpoint failures degrade to an unlocked compute.
+
+An uncontended miss skips the double-check: when the first lock request wins
+right after a clean L2 miss, no other holder ran first, so the read would
+almost always miss again (and be billed as a miss). On CachekitIO that cuts a
+locked miss to `GET`, lock `POST`, `PUT` on the caller's path. A fill that
+lands between the miss and the lock grant is recomputed and written again;
+last write wins. After a waited grant, or a first read that failed rather
+than missed, the double-check still runs. The release is sent in the
+background; under `withExecutionContext()` on Workers it is registered with
+`ctx.waitUntil`, so the platform does not cancel it when the response returns.
 
 ```typescript
 const cache = createCache({

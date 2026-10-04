@@ -160,10 +160,13 @@ export interface EncryptionConfig {
 export interface StampedeConfig {
   /**
    * Hold a backend distributed lock around cold-miss compute, mirroring
-   * cachekit-py's acquire_lock flow: acquire → double-check L2 → compute →
-   * write → release. When contested, re-try the lock on an interval up to
-   * `lockWaitMs` (acquireLock never blocks — LAB-240), then compute anyway:
-   * the lease is best-effort stampede mitigation, never a correctness gate.
+   * cachekit-py's miss path: acquire → double-check L2 → compute → write →
+   * release. The double-check is skipped when the first acquire wins right
+   * after a clean L2 miss (no holder ran first; a fill racing the grant is
+   * recomputed, last write wins). When contested, re-try the lock on an
+   * interval up to `lockWaitMs` (acquireLock never blocks — LAB-240), read
+   * L2 once more, then compute anyway: the lease is best-effort stampede
+   * mitigation, never a correctness gate.
    *
    * Contested waiters deliberately retry the LOCK rather than polling
    * get(): on a metered-misses backend every poll GET against a still-cold
