@@ -113,9 +113,11 @@ export interface WorkersCache extends SecureCache {
   /**
    * Bind the current request's ExecutionContext, returning a request-scoped
    * view (shared state, same nonce counters) whose SWR refreshes are kept
-   * alive past response return via `ctx.waitUntil`. Wrap functions through
-   * the view inside the fetch handler; without it, reads are plain L1 gets
-   * (no SWR, fail-safe).
+   * alive past response return via `ctx.waitUntil`, as are its
+   * distributed-lock releases. Wrap functions through the view inside the
+   * fetch handler; without it, reads are plain L1 gets (no SWR, fail-safe)
+   * and a lock release can be cancelled, holding the lease for
+   * lockTimeoutMs.
    */
   withExecutionContext(ctx: ExecutionContextLike): SecureCache;
 }

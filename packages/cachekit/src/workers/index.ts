@@ -22,7 +22,9 @@
  *   (`cache.withExecutionContext(ctx)`, as below) so refreshes ride
  *   `ctx.waitUntil` — workerd cancels fire-and-forget work at response
  *   return. Without a bound context, reads fail safe to plain (no-SWR) L1
- *   gets.
+ *   gets. The same binding keeps a stampede.distributedLock release alive;
+ *   without it the release can be cancelled and the lease held for
+ *   lockTimeoutMs.
  *
  * Create the cache ONCE per isolate and reuse it across requests (lazy
  * singleton, as below). Per-request creation derives a fresh encryptor per

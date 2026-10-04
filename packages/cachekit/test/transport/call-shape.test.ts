@@ -66,7 +66,7 @@ const compute = async (id: number) => ({ id, name: `user-${id}` });
 const SHAPES: Record<string, string[]> = {
   'wrap miss': ['GET cache', 'PUT cache'],
   'wrap L2 hit': ['GET cache'],
-  'locked wrap miss': ['GET cache', 'POST lock', 'GET cache', 'PUT cache', 'DELETE lock'],
+  'locked wrap miss': ['GET cache', 'POST lock', 'PUT cache', 'DELETE lock'],
 };
 
 beforeEach(async () => {
@@ -104,7 +104,9 @@ describe('CachekitIO call shape: requests per op', () => {
     expect(seen).toEqual(Array.from({ length: N }, () => SHAPES['wrap L2 hit']));
   });
 
-  it('locked wrap miss is GET, lock, double-check GET, PUT, unlock', async () => {
+  // An uncontended grant after a clean miss skips the double-check GET (LAB-7119):
+  // 5 requests to 4. The unlock is sent in the background, off the caller's path.
+  it('locked wrap miss is GET, lock, PUT, unlock', async () => {
     const cache = cacheFor({ stampede: { distributedLock: true } });
     const getUser = cache.wrap(compute, { namespace: 'shape', ttl: 60 });
     const seen = await shapes(N, (i) => getUser(i));
