@@ -396,8 +396,15 @@ re-populated into this process's L1. On backends that surface the entry's
 remaining TTL in the same read (`Backend.getWithTtl` — Redis via a pipelined
 `GET`+`TTL`, the Workers Cache API via response freshness headers), that L1
 copy is capped at the entry's **remaining lifetime**, so it can never outlive
-the L2 entry it came from. On backends without the capability (KV, CachekitIO,
-Memcached, File, custom backends that only implement `get`), the L1 copy is
+the L2 entry it came from. CachekitIO reads the server's freshness headers
+from the same `GET`: a read whose `X-CacheKit-Freshness` is anything other
+than exactly `fresh`, or one with `X-CacheKit-Fresh-For: 0`, is returned to the caller but never re-populates L1,
+and any other L1 copy expires after `min(declared TTL or defaultTtl,
+X-CacheKit-Fresh-For)` seconds and is not served after that, SWR included.
+The cost is deliberate: reads of stale or nearly expired keys go to L2 instead
+of L1. A CachekitIO response without the header keeps the declared lifetime.
+On backends without the capability (KV, Memcached, File, custom backends that
+only implement `get`), the L1 copy is
 bounded by `defaultTtl` — if you rely on TTLs for correctness across processes
 there, set a small `defaultTtl`, disable L1 (`l1: { enabled: false }`), or
 implement `getWithTtl` on your custom backend.
