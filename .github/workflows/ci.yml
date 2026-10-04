@@ -167,7 +167,8 @@ jobs:
               const o = JSON.parse(require("fs").readFileSync(0, "utf8").trim() || "{}") ?? {};
               for (const [k, v] of Object.entries(o)) {
                 if (/[^\x21-\x7e]/.test(k)) throw new Error("override key is not printable ASCII: " + JSON.stringify(k));
-                const s = String(v);
+                // A non-string (String(["x"]) is "x") matches neither shape.
+                const s = typeof v === "string" ? v : "";
                 const m = /^>=\d+(?:\.\d+){0,2}\s+<(\d+)(?:\.0){0,2}$/.exec(s);
                 const shape = m ? "<" + m[1] : /^>=\d+(?:\.\d+){0,2}$/.test(s) ? "floor" : "unparsed " + JSON.stringify(v);
                 console.log(k + " " + shape);
@@ -208,6 +209,7 @@ jobs:
           .protobufjs = ">=7.6.5 <8.1"
           .protobufjs = ">=7.6.5 <8.0.0.0"
           .protobufjs = ">=7.6.5 <8 || >=9"
+          .protobufjs = [">=7.6.5 <8"]
           .vite = "8.0.5"
           .vite = "^8.0.5"
           .vite = ">=8.0.5 <9"
