@@ -39,6 +39,11 @@ export interface Backend {
    * entry's remaining lifetime, so an L1 copy never outlives the L2 entry it
    * was read from. Backends without this capability fall back to `get()`,
    * where L1 re-population is bounded only by the cache's default TTL.
+   * CachekitIO implements it to surface the server's freshness headers
+   * (`isStale`, `freshFor`) from the same GET.
+   *
+   * Delegating wrappers MUST forward the inner backend's implementation, or
+   * they hide the bound from CacheImpl.
    *
    * @returns The stored bytes plus remaining TTL in seconds (`null` TTL =
    *   unknown or no expiry), or `null` when the key is missing
@@ -185,6 +190,21 @@ export interface GetWithTtlResult {
    * {@link TTLBackend.getTTL}'s collapse of Redis's -1).
    */
   ttlSeconds: number | null;
+  /**
+   * `true` when the store served the entry from its stale window
+   * (CachekitIO `X-CacheKit-Freshness` other than exactly `fresh`). The bytes
+   * still reach the caller, but CacheImpl never re-populates L1 from a stale
+   * read (protocol spec/saas-api.md § Reading a stale entry). Omitted = fresh.
+   */
+  isStale?: boolean;
+  /**
+   * The store's remaining freshness in whole seconds (CachekitIO
+   * `X-CacheKit-Fresh-For`). A hard bound on the L1 copy's lifetime,
+   * separate from `ttlSeconds` because the store keeps entries past their
+   * freshness (stale window); `0` forbids re-populating L1 at all (protocol
+   * spec/saas-api.md § Remaining Freshness). Omitted = no bound signalled.
+   */
+  freshFor?: number;
 }
 
 /**

@@ -862,7 +862,8 @@ export class CacheImpl implements SecureCache {
    * On backends that surface the remaining TTL on read (getWithTtl), the
    * bound tightens to the entry's actual remaining lifetime — a plain get()
    * at t=29s of a 30s entry re-populates L1 for 1s, not defaultTtl
-   * (LAB-1388).
+   * (LAB-1388). On CachekitIO the server's freshness headers bound it the
+   * same way, and a stale read never re-populates L1 (LAB-7883).
    */
   private async getEntry<T>(key: string, interop: boolean, ttlSeconds?: number): Promise<T | null> {
     this.ensureNotClosed();
@@ -899,13 +900,16 @@ export class CacheImpl implements SecureCache {
     const fetched = await this.run('get', key, null, async () => {
       // When L1 will be re-populated, prefer the TTL-carrying read (same
       // storage round trip — see Backend.getWithTtl) so the L1 copy can be
-      // capped at the entry's remaining lifetime below (LAB-1388).
+      // capped at the entry's remaining lifetime below (LAB-1388), and at the
+      // server's remaining freshness, a hard local service bound (LAB-7883).
       let data: Uint8Array | null;
-      let remainingTtl: number | null = null;
+      let l1Bound = Infinity;
+      let isStale = false;
       if (this.l1 && this.backend.getWithTtl) {
         const result = await this.backend.getWithTtl(key);
         data = result?.value ?? null;
-        remainingTtl = result?.ttlSeconds ?? null;
+        l1Bound = Math.min(result?.ttlSeconds ?? Infinity, result?.freshFor ?? Infinity);
+        isStale = result?.isStale === true;
       } else {
         data = await this.backend.get(key);
       }
@@ -913,11 +917,11 @@ export class CacheImpl implements SecureCache {
         this.recordMiss();
         return null;
       }
-      return { data, remainingTtl };
+      return { data, l1Bound, isStale };
     });
     // A miss (counted above) or a backend failure degradation absorbed.
     if (fetched === null) return null;
-    const { data, remainingTtl } = fetched;
+    const { data, l1Bound, isStale } = fetched;
 
     // Decrypt, unpack, deserialize — the same sequence an L1 hit runs. The
     // failure keeps the degradation contract it had inside the executor:
@@ -943,18 +947,20 @@ export class CacheImpl implements SecureCache {
     // through wrap(). The lifetime is the declared TTL (or defaultTtl on a
     // plain get), capped at the L2 entry's remaining TTL when the backend
     // surfaced it — so the L1 copy never outlives the entry it was read
-    // from (LAB-1388).
-    if (this.l1) {
+    // from (LAB-1388) — and at the server's remaining freshness. A stale read
+    // or a zero bound is never backfilled: the spec forbids local service of
+    // it in any form, and L1's hard expiry is what keeps getWithSwr inside the
+    // bound too (protocol spec/saas-api.md § Remaining Freshness, LAB-7883).
+    if (this.l1 && !isStale) {
       const namespace = interop ? key.slice(0, key.indexOf(':')) : extractNamespace(key);
       const capSeconds = ttlSeconds ?? this.defaultTtl;
       // ttl <= 0 means "no expiry" (ts-wide Backend contract) — treat it
-      // as infinite here so Math.min still caps to a real remainingTtl
+      // as infinite here so Math.min still caps to a real l1Bound
       // when the backend reports one, instead of collapsing to 0 and
       // tripping the skip-guard below for an entry that should never
       // expire in L1 (LAB-1388).
       const capOrForever = capSeconds > 0 ? capSeconds : Infinity;
-      const l1TtlSeconds =
-        remainingTtl !== null ? Math.min(capOrForever, remainingTtl) : capOrForever;
+      const l1TtlSeconds = Math.min(capOrForever, l1Bound);
       if (l1TtlSeconds > 0) {
         // Hand L1 its own canonical no-expiry encoding (ttl <= 0), never
         // Infinity ms: an Infinity originalTtl turns getWithSwr's

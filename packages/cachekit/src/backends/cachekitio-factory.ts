@@ -35,6 +35,11 @@ class CachekitIO implements LockableBackend, TTLBackend {
   get(key: string) {
     return this.lockable.get(key);
   }
+  // Forwarded like keyPrefix — hiding it would drop the server's freshness
+  // headers and let L1 outlive the bound they set. See Backend.getWithTtl.
+  getWithTtl(key: string) {
+    return this.lockable.getWithTtl(key);
+  }
   set(key: string, value: Uint8Array, ttl?: number) {
     return this.lockable.set(key, value, ttl);
   }

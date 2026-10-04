@@ -1,4 +1,4 @@
-import { Backend, CachekitIOBackendConfig } from './types.js';
+import { Backend, CachekitIOBackendConfig, GetWithTtlResult } from './types.js';
 import { BackendError, ConfigurationError, TimeoutError } from '../errors.js';
 import { DEFAULT_TTL_SECONDS } from '../constants.js';
 import { getSessionHeaders } from './session.js';
@@ -51,6 +51,42 @@ export function encodeKey(key: string): string {
     );
   }
   return encoded;
+}
+
+/**
+ * Read the server's freshness headers off a `GET 200` (protocol spec/saas-api.md
+ * § Remaining Freshness). Fails closed, mirroring cachekit-rs's
+ * `freshness_from_headers`:
+ * - `X-CacheKit-Freshness` absent means fresh (pre-SWR servers omit it); any
+ *   value other than exactly `fresh` is stale. Repeated copies arrive
+ *   comma-joined from `Headers.get`, so they are never exactly `fresh`.
+ * - `X-CacheKit-Fresh-For` must be 1–7 ASCII digits and at most 2,592,000;
+ *   anything else is `0`. Length is checked first and the digits are summed by
+ *   hand: `Number()` and `parseInt` accept `+5`, `0x10`, `1e3` and `1_0`-style
+ *   shapes the spec maps to `0`.
+ *
+ * Exported for tests; not part of the public API.
+ */
+export function freshnessFromHeaders(
+  headers: Headers
+): Pick<GetWithTtlResult, 'isStale' | 'freshFor'> {
+  const label = headers.get('X-CacheKit-Freshness');
+  const raw = headers.get('X-CacheKit-Fresh-For');
+  return {
+    isStale: label !== null && label !== 'fresh',
+    ...(raw !== null && { freshFor: parseFreshFor(raw) }),
+  };
+}
+
+function parseFreshFor(raw: string): number {
+  if (raw.length < 1 || raw.length > 7) return 0;
+  let seconds = 0;
+  for (let i = 0; i < raw.length; i++) {
+    const digit = raw.charCodeAt(i) - 48; // '0'
+    if (digit < 0 || digit > 9) return 0;
+    seconds = seconds * 10 + digit;
+  }
+  return seconds > MAX_TTL_SECONDS ? 0 : seconds;
 }
 
 const DEFAULT_API_URL = 'https://api.cachekit.io';
@@ -122,6 +158,16 @@ export class CachekitIOCore implements Backend {
   }
 
   async get(key: string): Promise<Uint8Array | null> {
+    return (await this.getWithTtl(key))?.value ?? null;
+  }
+
+  /**
+   * Backend.getWithTtl capability: the same single GET as `get`, plus the
+   * server's freshness headers, so CacheImpl can refuse or bound the L1
+   * backfill (protocol spec/saas-api.md § Remaining Freshness). `ttlSeconds`
+   * stays `null`: a GET carries no remaining-eviction signal.
+   */
+  async getWithTtl(key: string): Promise<GetWithTtlResult | null> {
     this.ensureNotClosed();
     const url = this.cacheUrl(key);
 
@@ -136,7 +182,11 @@ export class CachekitIOCore implements Backend {
         throw await this.httpError('get', response);
       }
 
-      return new Uint8Array(await response.arrayBuffer());
+      return {
+        value: new Uint8Array(await response.arrayBuffer()),
+        ttlSeconds: null,
+        ...freshnessFromHeaders(response.headers),
+      };
     } catch (error) {
       if (error instanceof BackendError || error instanceof TimeoutError) throw error;
       throw this.wrapError('get', error);
