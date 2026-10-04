@@ -115,13 +115,17 @@ repos:
       - id: no-internal-references
         name: No internal references in docs
         language: pygrep
-        entry: 'LAB-[0-9]+|op://|\.ts\.net|(?i:k3s cluster)|dev\.cachekit\.io|\bStage [0-9]|\bAC-[0-9]|github\.com/cachekit(?![\w-])'
+        entry: 'LAB-[0-9]+|op://|\.ts\.net|(?i:\bk3s[\s_-]*cluster\b)|dev\.cachekit\.io|\bStage [0-9]|\bAC-[0-9]|github\.com/cachekit(?![\w-])'
+        # Whole-file match, so a phrase wrapped across two lines is still caught.
+        args: [--multiline]
         files: ^((packages|crates)/[^/]+/)?README[^/]*$|^docs/
         types: [text]
         stages: [pre-commit]
       - id: no-internal-references-commit-msg
         name: No internal references in commit message
         language: pygrep
-        # Same patterns, skipping git's "#" comment lines and "Merge" subjects, which quote branch names.
-        entry: '^(?!#|Merge ).*?(?:LAB-[0-9]+|op://|\.ts\.net|(?i:k3s cluster)|dev\.cachekit\.io|\bStage [0-9]|\bAC-[0-9]|github\.com/cachekit(?![\w-]))'
+        # Same patterns, skipping git's "#" comment lines and "Merge" subjects, which quote branch names,
+        # and stopping at the "# --- >8 ---" line, below which `git commit -v` appends the staged diff.
+        entry: '\A(?:(?!# -+ >8 )[^\n]*\n)*?(?!#|Merge )[^\n]*?(?:LAB-[0-9]+|op://|\.ts\.net|(?i:\bk3s[\s_-]*cluster\b)|dev\.cachekit\.io|\bStage [0-9]|\bAC-[0-9]|github\.com/cachekit(?![\w-]))'
+        args: [--multiline]
         stages: [commit-msg]
