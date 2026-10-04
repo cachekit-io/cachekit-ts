@@ -256,8 +256,8 @@ only `Uint8Array` arguments.
 
 ### Key size limit on secure caches
 
-A secure cache binds the full cache key, exactly as the backend stores it
-(backend `keyPrefix` included), into the AES-GCM additional authenticated data
+A secure cache binds the full cache key it passes to the backend, the
+backend's `keyPrefix` included, into the AES-GCM additional authenticated data
 (AAD), so ciphertext copied to another key or prefix fails authentication. The
 encryption core rejects an AAD over **64 KiB** (`MAX_AAD_SIZE`, 65 536 bytes).
 The AAD adds 28 bytes (29 with compression off) plus your tenant id (`default`,

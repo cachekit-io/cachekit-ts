@@ -131,7 +131,7 @@ export interface Backend {
    * Prefix the backend transparently prepends to every key on the wire
    * (e.g. ioredis `keyPrefix`). A backend that prefixes keys MUST expose it
    * here, for two reasons. An encrypted cache binds `keyPrefix + key`, the
-   * key as stored, into the AAD, so ciphertext copied between two prefixes
+   * key passed to the backend with its prefix, into the AAD, so ciphertext copied between two prefixes
    * fails authentication; a hidden prefix stays outside the AAD. And interop
    * mode fails closed when a prefix is present, because interop keys have to
    * reach the store byte-identical to the Python and Rust SDKs' bare

@@ -1934,7 +1934,7 @@ describe('Cache Integration', () => {
     });
   });
 
-  describe('the encryption AAD binds the key as stored, backend keyPrefix included', () => {
+  describe('the encryption AAD binds the key passed to the backend, keyPrefix included', () => {
     afterEach(() => {
       vi.restoreAllMocks();
     });

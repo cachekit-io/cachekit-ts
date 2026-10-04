@@ -695,9 +695,9 @@ export class CacheImpl implements SecureCache {
   }
 
   /**
-   * The cache key the encryption AAD binds: the key exactly as the backend
-   * stores it, Backend.keyPrefix included, so ciphertext copied between two
-   * prefixes on one store fails authentication. Interop caches reject any
+   * The cache key the encryption AAD binds: the key passed to the backend,
+   * Backend.keyPrefix included, so ciphertext copied between two prefixes on
+   * one store fails authentication. Interop caches reject any
    * prefix, so their AAD key stays the bare cross-SDK key.
    */
   private aadKey(key: string): string {
