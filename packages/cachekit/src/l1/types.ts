@@ -24,7 +24,8 @@ export interface L1Config {
    * charged above an eighth of `maxMemory` is not stored in L1 at all
    * (storing it would evict that much of L1 first), and the write drops any
    * older entry under its key; reads of it always miss L1: they are served
-   * from L2, or recomputed when L2 cannot serve them.
+   * from L2, or recomputed when L2 cannot serve them. Must be finite and
+   * greater than 0; anything else throws `ConfigurationError`.
    */
   maxMemory: number;
 

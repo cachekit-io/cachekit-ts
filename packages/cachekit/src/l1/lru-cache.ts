@@ -1,6 +1,7 @@
 import { L1Config, DEFAULT_L1_CONFIG, CacheEntry, SwrResult, InvalidationEvent } from './types.js';
 import { secureRandomFloat } from '../utils/random.js';
 import { logError } from '../logger.js';
+import { ConfigurationError } from '../errors.js';
 import { extractNamespace } from '../serialization/key-generator.js';
 import type { ObjectCount } from '../serialization/serializer.js';
 import {
@@ -120,6 +121,13 @@ export class L1Cache<T = unknown> {
 
   constructor(config: Partial<L1Config> = {}) {
     this.config = { ...DEFAULT_L1_CONFIG, ...config };
+    // A non-finite bound would let the running total overflow to Infinity:
+    // the per-entry cap and eviction keep it finite only under a finite one.
+    if (!Number.isFinite(this.config.maxMemory) || this.config.maxMemory <= 0) {
+      throw new ConfigurationError(
+        `l1.maxMemory must be a finite number > 0, got ${this.config.maxMemory}`
+      );
+    }
   }
 
   /**

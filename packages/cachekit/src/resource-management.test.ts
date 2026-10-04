@@ -99,6 +99,11 @@ describe('config errors throw before the backend is resolved', () => {
       /stampede\.lockTimeoutMs must be > 0/,
     ],
     [
+      'l1.maxMemory',
+      { l1: { maxMemory: Infinity } },
+      /l1\.maxMemory must be a finite number > 0, got Infinity/,
+    ],
+    [
       'encryption masterKey',
       { encryption: { masterKey: 'not-hex' } },
       /Master key must be hex-encoded/,

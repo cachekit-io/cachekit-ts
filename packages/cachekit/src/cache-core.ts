@@ -319,6 +319,9 @@ export class CacheImpl implements SecureCache {
     // Initialize serializer (its bound checks throw ConfigurationError)
     this.serializerConfig = resolveSerializerConfig(options.serializer);
 
+    // Initialize L1 cache (its maxMemory check throws ConfigurationError)
+    this.l1 = options.l1?.enabled !== false ? new L1Cache(options.l1) : null;
+
     // Initialize backend. The telemetry getter reads `this` lazily (per
     // request), so constructor field order is safe.
     this.backend = runtime.resolveBackend(options.backend, options.stampede, () => ({
@@ -352,13 +355,6 @@ export class CacheImpl implements SecureCache {
           '(Redis, cachekitioWithLocking, or cachekitioFull) — the configured backend ' +
           'has no acquireLock/releaseLock'
       );
-    }
-
-    // Initialize L1 cache
-    if (options.l1?.enabled !== false) {
-      this.l1 = new L1Cache(options.l1);
-    } else {
-      this.l1 = null;
     }
 
     // Initialize reliability executor (composes circuit breaker + retry + degradation)
