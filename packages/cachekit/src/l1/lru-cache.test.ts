@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { L1Cache } from './lru-cache.js';
 import { setLogger } from '../logger.js';
 import { ConfigurationError } from '../errors.js';
+import { DEFAULT_L1_MAX_MEMORY } from '../constants.js';
 import {
   defaultSerializer,
   encodeCounted,
@@ -27,6 +28,14 @@ describe('L1Cache', () => {
       const build = () => new L1Cache({ maxMemory });
       expect(build).toThrow(ConfigurationError);
       expect(build).toThrow(`l1.maxMemory must be a finite number > 0, got ${maxMemory}`);
+    });
+
+    it('treats an explicit undefined maxMemory as the default bound', () => {
+      const c = new L1Cache<Uint8Array>({ maxMemory: undefined });
+      c.set('fits', new Uint8Array(DEFAULT_L1_MAX_MEMORY / 8), 10000, 'test');
+      c.set('over', new Uint8Array(DEFAULT_L1_MAX_MEMORY / 8 + 1), 10000, 'test');
+      expect(c.get('fits')).not.toBeNull();
+      expect(c.get('over')).toBeNull();
     });
   });
 

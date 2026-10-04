@@ -120,7 +120,12 @@ export class L1Cache<T = unknown> {
   private readonly instanceId = crypto.randomUUID();
 
   constructor(config: Partial<L1Config> = {}) {
-    this.config = { ...DEFAULT_L1_CONFIG, ...config };
+    this.config = {
+      ...DEFAULT_L1_CONFIG,
+      ...config,
+      // An explicit undefined means "not set", not "no bound".
+      maxMemory: config.maxMemory ?? DEFAULT_L1_CONFIG.maxMemory,
+    };
     // A non-finite bound would let the running total overflow to Infinity:
     // the per-entry cap and eviction keep it finite only under a finite one.
     if (!Number.isFinite(this.config.maxMemory) || this.config.maxMemory <= 0) {
