@@ -120,12 +120,13 @@ export class L1Cache<T = unknown> {
   private readonly instanceId = crypto.randomUUID();
 
   constructor(config: Partial<L1Config> = {}) {
-    this.config = {
-      ...DEFAULT_L1_CONFIG,
-      ...config,
-      // An explicit undefined or null means "not set", not "no bound".
-      maxMemory: config.maxMemory ?? DEFAULT_L1_CONFIG.maxMemory,
-    };
+    // An explicit undefined or null field means "not set", not "no bound": spread
+    // over the defaults, it would leave maxEntries or maxConcurrentRefreshes
+    // comparing against undefined, which no size ever reaches.
+    const set = Object.fromEntries(
+      Object.entries(config).filter(([, v]) => v !== undefined && v !== null)
+    ) as Partial<L1Config>;
+    this.config = { ...DEFAULT_L1_CONFIG, ...set };
     // A non-finite bound would let the running total overflow to Infinity:
     // the per-entry cap and eviction keep it finite only under a finite one.
     if (!Number.isFinite(this.config.maxMemory) || this.config.maxMemory <= 0) {

@@ -6,7 +6,8 @@ import {
 } from '../constants.js';
 
 /**
- * L1 cache configuration.
+ * L1 cache configuration. A field left out, or set to `undefined` or `null`,
+ * takes its default.
  */
 export interface L1Config {
   /** Maximum number of entries in the cache (default: 1000) */

@@ -2,7 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { L1Cache } from './lru-cache.js';
 import { setLogger } from '../logger.js';
 import { ConfigurationError } from '../errors.js';
-import { DEFAULT_L1_MAX_MEMORY } from '../constants.js';
+import {
+  DEFAULT_L1_MAX_CONCURRENT_REFRESHES,
+  DEFAULT_L1_MAX_ENTRIES,
+  DEFAULT_L1_MAX_MEMORY,
+} from '../constants.js';
 import {
   defaultSerializer,
   encodeCounted,
@@ -36,6 +40,33 @@ describe('L1Cache', () => {
       c.set('over', new Uint8Array(DEFAULT_L1_MAX_MEMORY / 8 + 1), 10000, 'test');
       expect(c.get('fits')).not.toBeNull();
       expect(c.get('over')).toBeNull();
+    });
+
+    it.each([undefined, null])('treats every field set to %s as not set', (unset) => {
+      // Spread over the defaults, an unset maxEntries would let L1 grow without
+      // bound, and an unset maxConcurrentRefreshes would stop every refresh.
+      vi.useFakeTimers();
+      const fields = [
+        'maxEntries',
+        'maxMemory',
+        'swrEnabled',
+        'swrThresholdRatio',
+        'maxConcurrentRefreshes',
+        'namespaceIndex',
+      ];
+      const c = new L1Cache<number>(Object.fromEntries(fields.map((f) => [f, unset])));
+      for (let i = 0; i <= DEFAULT_L1_MAX_ENTRIES; i++) c.set(`k${i}`, i, 1000, 'ns');
+      expect(c.stats).toMatchObject({ entries: DEFAULT_L1_MAX_ENTRIES, namespaces: 1 });
+      expect(c.getWithSwr('k1').isFresh).toBe(true);
+      vi.advanceTimersByTime(600); // past the stale threshold: half the TTL, plus at most 10% jitter
+      const refreshes = Array.from(
+        { length: DEFAULT_L1_MAX_CONCURRENT_REFRESHES + 1 },
+        (_, i) => c.getWithSwr(`k${i + 1}`).shouldRefresh
+      );
+      expect(refreshes).toEqual([
+        ...Array<boolean>(DEFAULT_L1_MAX_CONCURRENT_REFRESHES).fill(true),
+        false,
+      ]);
     });
   });
 
