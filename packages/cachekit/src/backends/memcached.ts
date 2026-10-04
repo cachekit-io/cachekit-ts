@@ -157,8 +157,9 @@ export class MemcachedBackend implements Backend {
   /** Ops awaiting memjs, each with its client, so a discard can fail its client's ops. */
   private readonly inFlight = new Set<{ client: MemjsClient; fail: () => void }>();
 
-  /** Applied client-side to every key (like py) — exposed so interop mode
-   * can fail closed; see Backend.keyPrefix for the contract. */
+  /** Applied client-side to every key (like py) — exposed so secure caches
+   * bind it into the AAD and interop mode can fail closed; see
+   * Backend.keyPrefix for the contract. */
   get keyPrefix(): string {
     return this.config.keyPrefix;
   }

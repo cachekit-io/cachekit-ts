@@ -401,8 +401,9 @@ export class EncryptionManagerCore {
     if (aadAtLeast <= MAX_AAD_SIZE) return;
     throw new ConfigurationError(
       `Cache key too long for an encrypted cache: its AAD is at least ${aadAtLeast} bytes, over ` +
-        `the ${MAX_AAD_SIZE}-byte limit. The AAD carries the full key (counted in UTF-8 bytes) ` +
-        'plus the tenant id; shorten or hash the key (for wrap(), shorten the namespace).'
+        `the ${MAX_AAD_SIZE}-byte limit. The AAD carries the full key passed to the ` +
+        'backend, its keyPrefix included (counted in UTF-8 bytes), plus the tenant id; shorten or hash the ' +
+        'key (for wrap(), shorten the namespace).'
     );
   }
 

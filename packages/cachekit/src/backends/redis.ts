@@ -107,8 +107,9 @@ export class RedisBackend implements LockableBackend, TTLBackend {
   private readonly config: Required<RedisBackendConfig>;
   private closed = false;
 
-  /** ioredis prepends this to every key on the wire — exposed so interop
-   * mode can fail closed; see Backend.keyPrefix for the contract. */
+  /** ioredis prepends this to every key on the wire — exposed so secure
+   * caches bind it into the AAD and interop mode can fail closed; see
+   * Backend.keyPrefix for the contract. */
   get keyPrefix(): string {
     return this.config.keyPrefix;
   }

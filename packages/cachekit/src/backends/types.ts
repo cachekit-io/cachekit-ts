@@ -130,20 +130,22 @@ export interface Backend {
   /**
    * Prefix the backend transparently prepends to every key on the wire
    * (e.g. ioredis `keyPrefix`). A backend that prefixes keys MUST expose it
-   * here: interop mode fails closed when a prefix is present, because
-   * interop keys have to reach the store byte-identical to the Python and
-   * Rust SDKs' bare `{namespace}:{operation}:{hash}` — a hidden prefix
-   * means every cross-SDK read silently misses while the encryption AAD
-   * stays bound to the un-prefixed key. Omit (or return '') when keys are
-   * stored verbatim.
+   * here, for two reasons. An encrypted cache binds `keyPrefix + key`, the
+   * key passed to the backend with its prefix, into the AAD, so ciphertext copied between two prefixes
+   * fails authentication; a hidden prefix stays outside the AAD. And interop
+   * mode fails closed when a prefix is present, because interop keys have to
+   * reach the store byte-identical to the Python and Rust SDKs' bare
+   * `{namespace}:{operation}:{hash}` — a hidden prefix means every
+   * cross-SDK read silently misses. Omit (or return '') when keys are stored
+   * verbatim.
    *
    * Contract details:
    * - The value MUST be constant from construction onward — interop guards
-   *   read it at wrap time and on every call, and a request-scoped prefix
-   *   cannot be made safe.
+   *   read it at wrap time and on every call, every encrypt and decrypt
+   *   reads it, and a request-scoped prefix cannot be made safe.
    * - Delegating wrappers (metrics, logging, fallback decorators) MUST
    *   forward the inner backend's `keyPrefix`, or they hide the transform
-   *   from the guard.
+   *   from the interop guard and from the AAD.
    * - Backends applying any non-prefix key transformation (suffixing,
    *   hashing, re-encoding) cannot express it here; they declare
    *   {@link transformsKeys} instead and are incompatible with interop
@@ -269,7 +271,7 @@ export interface MemcachedBackendConfig {
    * error: pass `retries: 2` there to keep memjs's own retry.
    */
   retries?: number;
-  /** Key prefix for namespacing (exposed via Backend.keyPrefix for the interop guard) */
+  /** Key prefix for namespacing (exposed via Backend.keyPrefix: AAD binding and interop guard) */
   keyPrefix?: string;
   /**
    * Reject values larger than this BEFORE sending to Memcached
