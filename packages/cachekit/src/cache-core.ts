@@ -695,6 +695,16 @@ export class CacheImpl implements SecureCache {
   }
 
   /**
+   * The cache key the encryption AAD binds: the key exactly as the backend
+   * stores it, Backend.keyPrefix included, so ciphertext copied between two
+   * prefixes on one store fails authentication. Interop caches reject any
+   * prefix, so their AAD key stays the bare cross-SDK key.
+   */
+  private aadKey(key: string): string {
+    return (this.backend.keyPrefix ?? '') + key;
+  }
+
+  /**
    * What L1 should hold for an entry: the same ciphertext L2 holds when the
    * cache is encrypted, the decoded value otherwise.
    *
@@ -752,7 +762,7 @@ export class CacheImpl implements SecureCache {
           `Ciphertext size ${plaintext.length} exceeds max ${maxPlaintext + AEAD_OVERHEAD_BYTES}`
         );
       }
-      plaintext = await this.encryption.decrypt(plaintext, key, useEnvelope);
+      plaintext = await this.encryption.decrypt(plaintext, this.aadKey(key), useEnvelope);
     }
     if (useEnvelope) {
       const verdict = envelopeVerdict(plaintext, this.serializerConfig.maxDecodedSize);
@@ -885,7 +895,7 @@ export class CacheImpl implements SecureCache {
     // Reserved-key and key-size pre-flight — see Backend.validateKey and
     // EncryptionManagerCore.validateKey.
     this.backend.validateKey?.(key);
-    this.encryption?.validateKey(key, this.useEnvelope(interop));
+    this.encryption?.validateKey(this.aadKey(key), this.useEnvelope(interop));
 
     // Fetch from L2 (backend). Only the round trip runs inside the reliability
     // executor; decode runs after it. A decode or decrypt failure is a
@@ -1024,7 +1034,7 @@ export class CacheImpl implements SecureCache {
     const useEnvelope = this.useEnvelope(interop);
     // A key too long for the encryption AAD fails the same way, for the same
     // reason (see EncryptionManagerCore.validateKey).
-    this.encryption?.validateKey(key, useEnvelope);
+    this.encryption?.validateKey(this.aadKey(key), useEnvelope);
 
     // Serialize before the reliability executor. An encode rejection is a
     // deterministic caller error: retrying it re-encodes the same value for
@@ -1073,7 +1083,8 @@ export class CacheImpl implements SecureCache {
     let data: Uint8Array;
     try {
       data = useEnvelope ? this.withEnvelopeCodec((codec) => codec.pack(serialized)) : serialized;
-      if (this.encryption) data = await this.encryption.encrypt(data, key, useEnvelope);
+      if (this.encryption)
+        data = await this.encryption.encrypt(data, this.aadKey(key), useEnvelope);
     } catch (error) {
       this.recordFailure('set', error);
       if (!this.degradationEnabled) throw error;
@@ -1198,8 +1209,8 @@ export class CacheImpl implements SecureCache {
       // the store byte-identical to the other SDKs' bare
       // {namespace}:{operation}:{hash}; a backend prefix (e.g. Redis
       // keyPrefix) would make TypeScript read and write the prefixed key —
-      // every cross-SDK access silently misses, and the encryption AAD stays
-      // bound to the un-prefixed key while the ciphertext lives elsewhere.
+      // every cross-SDK access silently misses, and the encryption AAD would
+      // bind a prefixed key no other SDK computes.
       // Silently dropping the prefix instead would split the prefix policy
       // on one connection (auto-mode keys isolated, interop keys escaping) —
       // worse than refusing.

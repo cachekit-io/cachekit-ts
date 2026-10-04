@@ -1934,6 +1934,85 @@ describe('Cache Integration', () => {
     });
   });
 
+  describe('the encryption AAD binds the key as stored, backend keyPrefix included', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    /** Applies its keyPrefix to every key over a shared store, as the Redis
+     * and Memcached backends do on the wire. */
+    class PrefixingBackend implements Backend {
+      constructor(
+        readonly keyPrefix: string | undefined,
+        readonly store: Map<string, Uint8Array>
+      ) {}
+      private wire(key: string): string {
+        return (this.keyPrefix ?? '') + key;
+      }
+      async get(key: string): Promise<Uint8Array | null> {
+        return this.store.get(this.wire(key)) ?? null;
+      }
+      async set(key: string, value: Uint8Array): Promise<void> {
+        this.store.set(this.wire(key), value);
+      }
+      async delete(key: string): Promise<boolean> {
+        return this.store.delete(this.wire(key));
+      }
+      async exists(key: string): Promise<boolean> {
+        return this.store.has(this.wire(key));
+      }
+      async close(): Promise<void> {}
+    }
+
+    // One master key and tenant for every cache; degradation off so a decrypt
+    // failure throws instead of reading as a miss.
+    const secureOver = (backend: Backend) =>
+      createCache({
+        backend,
+        l1: { enabled: false },
+        encryption: { masterKey: '0'.repeat(64), tenantId: 'one-tenant' },
+        reliability: { degradation: false, retry: { maxAttempts: 1 } },
+      });
+
+    it('ciphertext copied to another prefix fails authentication', async () => {
+      const store = new Map<string, Uint8Array>();
+      const app1 = secureOver(new PrefixingBackend('app1:', store));
+      const app2 = secureOver(new PrefixingBackend('app2:', store));
+
+      await app1.set('k1', { v: 'from-app1' });
+      store.set('app2:k1', store.get('app1:k1')!);
+
+      await expect(app2.get('k1')).rejects.toThrow(EncryptionError);
+      expect(await app1.get('k1')).toEqual({ v: 'from-app1' });
+
+      await app1.close();
+      await app2.close();
+    });
+
+    it.each([
+      { keyPrefix: 'app1:', bound: 'app1:k1' },
+      { keyPrefix: '', bound: 'k1' },
+      { keyPrefix: undefined, bound: 'k1' },
+    ])(
+      'keyPrefix $keyPrefix binds $bound at encrypt, decrypt and the AAD-size pre-flight',
+      async ({ keyPrefix, bound }) => {
+        const encrypt = vi.spyOn(EncryptionManagerCore.prototype, 'encrypt');
+        const decrypt = vi.spyOn(EncryptionManagerCore.prototype, 'decrypt');
+        const validateKey = vi.spyOn(EncryptionManagerCore.prototype, 'validateKey');
+        const c = secureOver(new PrefixingBackend(keyPrefix, new Map()));
+
+        await c.set('k1', 'v');
+        expect(await c.get('k1')).toBe('v');
+
+        expect(encrypt).toHaveBeenCalledWith(expect.anything(), bound, true);
+        expect(decrypt).toHaveBeenCalledWith(expect.anything(), bound, true);
+        expect(validateKey.mock.calls.map(([key]) => key)).toEqual([bound, bound]);
+
+        await c.close();
+      }
+    );
+  });
+
   describe('backend-advertised compression default (LAB-1388)', () => {
     /** Plain MessagePack view of raw backend bytes ('decode failed' when the
      * envelope bytes aren't even valid MessagePack). */
