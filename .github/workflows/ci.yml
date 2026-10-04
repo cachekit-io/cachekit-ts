@@ -153,19 +153,20 @@ jobs:
           uuid <12
           vite floor
           yaml floor'
-            expected=$(printf '%s\n' "${expected}" | sed 's/^ *//' | sort)
+            expected=$(printf '%s\n' "${expected}" | sort)
 
             # Every key is reported. A bounded value counts only as a plain
             # `>=floor <N`, floor and bound at most three parts, the bound written
             # <N, <N.0 or <N.0.0. Anything else — an exact pin, `<12.1` (admits
             # 12.0.x), `<12.0.0.0` (invalid, so semver drops it), a `||` union —
             # reports as unparsed and fails the comparison. A key with whitespace
-            # could forge extra lines, so fail. Explicit `||`: set -e does not
+            # could forge extra lines, and bash drops a NUL byte from $(…), so a
+            # key with anything but printable ASCII fails. Explicit `||`: set -e does not
             # hold inside the self-test's `if guard` below.
             found=$(node -e '
-              const o = JSON.parse(require("fs").readFileSync(0, "utf8") || "{}") ?? {};
+              const o = JSON.parse(require("fs").readFileSync(0, "utf8").trim() || "{}") ?? {};
               for (const [k, v] of Object.entries(o)) {
-                if (/\s/.test(k)) throw new Error("override key contains whitespace: " + JSON.stringify(k));
+                if (/[^\x21-\x7e]/.test(k)) throw new Error("override key is not printable ASCII: " + JSON.stringify(k));
                 const s = String(v);
                 const m = /^>=\d+(?:\.\d+){0,2}\s+<(\d+)(?:\.0){0,2}$/.exec(s);
                 const shape = m ? "<" + m[1] : /^>=\d+(?:\.\d+){0,2}$/.test(s) ? "floor" : "unparsed " + JSON.stringify(v);
@@ -187,24 +188,26 @@ jobs:
 
           # Self-test: each fixture is one edit to the real overrides (which just
           # passed) that the guard must fail. Add the shape here when you close a hole.
+          # Fixtures target entries with no planned change (protobufjs, vite).
           fail=0
           while IFS= read -r edit; do
             [ -n "${edit}" ] || continue
             fixture=$(jq -c "${edit}" <<<"${overrides}")
             if guard <<<"${fixture}" >/dev/null 2>&1; then
-              echo "::error::Override guard self-test: the guard passed a fixture it must fail: ${edit}"
+              echo "::error::Override guard self-test: the guard passed a fixture it must fail: ${edit}. If the fixture targets an override you just changed, retarget it."
               fail=1
             fi
           done <<'FIXTURES'
           . + {"minimatch>brace-expansion": "5.0.8"}
           . + {"left-pad": ">=1.3.0"}
           . + {"left pad": ">=1.3.0"}
-          del(.uuid)
-          .uuid = ">=11.1.1 <13"
-          .uuid = ">=11.1.1"
-          .uuid = ">=11.1.1 <12.1"
-          .uuid = ">=11.1.1 <12.0.0.0"
-          .uuid = ">=11.1.1 <12 || >=13"
+          del(.protobufjs) + {"protobufjs\u0000": ">=7.6.5 <8"}
+          del(.protobufjs)
+          .protobufjs = ">=7.6.5 <9"
+          .protobufjs = ">=7.6.5"
+          .protobufjs = ">=7.6.5 <8.1"
+          .protobufjs = ">=7.6.5 <8.0.0.0"
+          .protobufjs = ">=7.6.5 <8 || >=9"
           .vite = "8.0.5"
           .vite = "^8.0.5"
           .vite = ">=8.0.5 <9"
