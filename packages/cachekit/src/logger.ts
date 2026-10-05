@@ -38,11 +38,23 @@ export function setLogger(logger: CachekitLogger | null): void {
  * and never leaves an async logger's rejection unhandled — every call site is
  * a fire-and-forget error path (metrics, background refresh, invalidation),
  * where a broken custom logger propagating would become an unhandled
- * rejection. TypeScript accepts an `async` function as a {@link CachekitLogger}. */
+ * rejection. TypeScript accepts an `async` function as a {@link CachekitLogger}.
+ *
+ * One promise stays out of reach: a non-async logger returning a promise whose
+ * `constructor` lookup throws. Every standard way to subscribe to a promise
+ * (`then`, `Promise.resolve`, `await`) reads that property first, so the
+ * lookup failure is reported but the promise's own rejection cannot be
+ * caught without mutating the caller's object. An `async` logger always
+ * returns an intrinsic promise and never hits this. */
 export function logError(message: string, error?: unknown): void {
   const reportLoggerFailure = (loggerError: unknown): void => {
-    // eslint-disable-next-line no-console -- last-resort sink when the active logger itself fails
-    console.error('[cachekit] logger threw; original report:', message, error, loggerError);
+    try {
+      // eslint-disable-next-line no-console -- last-resort sink when the active logger itself fails
+      console.error('[cachekit] logger threw; original report:', message, error, loggerError);
+    } catch {
+      // console.error failed too and no sink is left. Rethrowing would escape
+      // logError, or from the .catch below become a new unhandled rejection.
+    }
   };
   try {
     // Promise.resolve adopts any thenable the logger returns, so its
