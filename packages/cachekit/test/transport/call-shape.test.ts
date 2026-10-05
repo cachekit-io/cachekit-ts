@@ -11,6 +11,7 @@
 import diagnosticsChannel from 'node:diagnostics_channel';
 import { setImmediate as nextMacrotask } from 'node:timers/promises';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { CachekitIOCore } from '../../src/backends/cachekitio.js';
 import { createCache } from '../../src/index.js';
 import type { Cache, CacheOptions } from '../../src/index.js';
 import { startFakeSaas, type FakeSaas } from './fake-saas.js';
@@ -166,6 +167,45 @@ describe('CachekitIO call shape: connections', () => {
       if (ordered) expect(seen).toEqual(expected);
       else expect([...seen].sort()).toEqual([...expected].sort());
       expect(saas.connections()).toBe(connections);
+    }
+  );
+});
+
+describe('CachekitIO call shape: redirects', () => {
+  // The API never redirects, so a 3xx is an error and the client sends
+  // nothing to the Location it names: exactly one request per op.
+  const ops = {
+    get: { method: 'GET', run: (b: CachekitIOCore, key: string) => b.get(key) },
+    set: {
+      method: 'PUT',
+      run: (b: CachekitIOCore, key: string) => b.set(key, new Uint8Array([1]), 60),
+    },
+    delete: { method: 'DELETE', run: (b: CachekitIOCore, key: string) => b.delete(key) },
+    exists: { method: 'HEAD', run: (b: CachekitIOCore, key: string) => b.exists(key) },
+  };
+  const cases = Object.keys(ops).flatMap((op) =>
+    [301, 302, 303, 307, 308].map((status) => ({ op: op as keyof typeof ops, status }))
+  );
+
+  it('control: a fetch that follows reaches the redirect target', async () => {
+    const response = await fetch(`${saas.url}/v1/cache/redirect-307`, { method: 'PUT', body: 'x' });
+    expect(await response.text()).toBe('followed');
+    expect(saas.requests()).toEqual(['PUT redirect', 'PUT redirected']);
+  });
+
+  it.each(cases)(
+    '$op on HTTP $status is a permanent error and is not followed',
+    async ({ op, status }) => {
+      const backend = new CachekitIOCore({
+        apiKey: FAKE_API_KEY,
+        apiUrl: saas.url,
+        allowCustomHost: true,
+      });
+      await expect(ops[op].run(backend, `redirect-${status}`)).rejects.toMatchObject({
+        name: 'BackendError',
+        classification: 'permanent',
+      });
+      expect(saas.requests()).toEqual([`${ops[op].method} redirect`]);
     }
   );
 });

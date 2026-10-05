@@ -62,6 +62,95 @@ describe('URL Validator', () => {
     it('blocks IPv4-mapped IPv6 (::ffff:)', () => {
       expect(() => validateCachekitUrl('https://[::ffff:127.0.0.1]', true)).toThrow('private IP');
     });
+
+    it.each([
+      ['unspecified', '[::]'],
+      ['unspecified, uncompressed', '[0:0:0:0:0:0:0:0]'],
+      ['link-local fe80::/10, upper half', '[fe90::1]'],
+      ['link-local fe80::/10, top', '[febf::1]'],
+      ['site-local fec0::/10', '[fec0::1]'],
+      ['site-local fec0::/10, top', '[feff::1]'],
+      ['IPv4-compatible loopback', '[::7f00:1]'],
+      ['IPv4-compatible loopback, dotted', '[::127.0.0.1]'],
+      ['IPv4-compatible 10/8', '[::a00:1]'],
+      ['NAT64 10/8', '[64:ff9b::a00:1]'],
+      ['NAT64 loopback', '[64:ff9b::127.0.0.1]'],
+      ['NAT64 metadata', '[64:ff9b::a9fe:a9fe]'],
+      ['6to4 10/8', '[2002:a00:1::]'],
+      ['6to4 loopback', '[2002:7f00:1::1]'],
+      ['6to4 192.168/16', '[2002:c0a8:101::]'],
+      ['local-use NAT64 64:ff9b:1::/48', '[64:ff9b:1::a00:1]'],
+      ['local-use NAT64, any address', '[64:ff9b:1:ffff::1]'],
+      ['IPv4-translated loopback', '[::ffff:0:7f00:1]'],
+      ['IPv4-translated 10/8', '[::ffff:0:a00:1]'],
+    ])('blocks %s %s', (_name, host) => {
+      expect(() => validateCachekitUrl(`https://${host}`, true)).toThrow('private IP');
+    });
+
+    it.each([
+      ['NAT64 of a public IPv4', '[64:ff9b::808:808]'],
+      ['6to4 of a public IPv4', '[2002:808:808::1]'],
+      ['IPv4-translated public', '[::ffff:0:808:808]'],
+      ['documentation prefix', '[2001:db8::1]'],
+    ])('allows %s %s', (_name, host) => {
+      expect(() => validateCachekitUrl(`https://${host}`, true)).not.toThrow();
+    });
+  });
+
+  describe('query and fragment', () => {
+    // The SDK appends /v1/cache/{key} to the configured URL as a string, so a
+    // query or fragment there would swallow the whole request path.
+    it.each([
+      'https://api.cachekit.io/?',
+      'https://api.cachekit.io?',
+      'https://api.cachekit.io/?x=1',
+      'https://api.cachekit.io/#',
+      'https://api.cachekit.io#frag',
+    ])('rejects %s', (url) => {
+      expect(() => validateCachekitUrl(url)).toThrow(ConfigurationError);
+      expect(() => validateCachekitUrl(url)).toThrow('query or a fragment');
+    });
+
+    it('rejects them on a custom host too', () => {
+      expect(() => validateCachekitUrl('https://proxy.example.com/base?', true)).toThrow(
+        'query or a fragment'
+      );
+    });
+
+    it('still accepts a custom host with a path prefix', () => {
+      expect(() => validateCachekitUrl('https://proxy.example.com/base/', true)).not.toThrow();
+    });
+  });
+
+  describe('credentials', () => {
+    it.each([
+      'https://u:p@api.cachekit.io',
+      'https://u@api.cachekit.io',
+      'https://:p@api.cachekit.io',
+    ])('rejects %s', (url) => {
+      expect(() => validateCachekitUrl(url)).toThrow('must not carry credentials');
+      expect(() => validateCachekitUrl(url, true)).toThrow('must not carry credentials');
+    });
+  });
+
+  describe('returned base URL', () => {
+    // Requests go to the serialization of the URL that was checked, never the
+    // raw input, so every URL parser downstream reads the same host.
+    it.each([
+      ['https://api.cachekit.io', 'https://api.cachekit.io'],
+      ['https://api.cachekit.io/', 'https://api.cachekit.io'],
+      ['https://API.cachekit.io:443//', 'https://api.cachekit.io'],
+      ['https://api.cachekit.io\\@evil.example', 'https://api.cachekit.io/@evil.example'],
+      ['https://api.cachekit.io\\evil', 'https://api.cachekit.io/evil'],
+    ])('%s becomes %s', (url, base) => {
+      expect(validateCachekitUrl(url)).toBe(base);
+    });
+
+    it('keeps a custom host path prefix', () => {
+      expect(validateCachekitUrl('https://proxy.example.com/base/', true)).toBe(
+        'https://proxy.example.com/base'
+      );
+    });
   });
 
   describe('additional IPv4 private ranges', () => {

@@ -67,6 +67,19 @@ describe('CachekitIO backend inside workerd (mocked upstream)', () => {
     await backend.close();
   });
 
+  // The API never redirects: a 3xx is an error, never a second request.
+  // The mock's redirect target answers 200, so a followed redirect would pass.
+  it.each([301, 302, 303, 307, 308])('does not follow an HTTP %i', async (status) => {
+    const backend = new CachekitIOCore({ apiKey: 'ck_test_redirect' }); // pragma: allowlist secret
+    const key = `redirect-${status}`;
+    const permanent = { name: 'BackendError', classification: 'permanent' };
+
+    await expect(backend.get(key)).rejects.toMatchObject(permanent);
+    await expect(backend.set(key, new Uint8Array([1]), 60)).rejects.toMatchObject(permanent);
+    await expect(backend.delete(key)).rejects.toMatchObject(permanent);
+    await expect(backend.exists(key)).rejects.toMatchObject(permanent);
+  });
+
   it('createCache.io drives the full stack over the fetch backend', async () => {
     const cache = createCache.io({
       apiKey: 'ck_test_fullstack', // pragma: allowlist secret

@@ -148,10 +148,7 @@ export class CachekitIOCore implements Backend {
       throw new ConfigurationError('CachekitIO backend requires an apiKey');
     }
 
-    const apiUrl = config.apiUrl ?? DEFAULT_API_URL;
-    validateCachekitUrl(apiUrl, config.allowCustomHost);
-
-    this.apiUrl = apiUrl.replace(/\/+$/, '');
+    this.apiUrl = validateCachekitUrl(config.apiUrl ?? DEFAULT_API_URL, config.allowCustomHost);
     this.apiKey = config.apiKey;
     this.defaultTtl = validateTtl(config.defaultTtl ?? DEFAULT_TTL_SECONDS);
     this.timeout = config.timeout ?? DEFAULT_TIMEOUT_MS;
@@ -331,6 +328,11 @@ export class CachekitIOCore implements Backend {
       method,
       headers,
       body: opts?.body,
+      // The API never redirects, and this request carries credentials, so it
+      // goes only to the configured URL: 'manual' returns a 3xx as the
+      // response, which every caller treats as an error (it is not 2xx).
+      // Not 'error': Node raises that as a network failure, which is retried.
+      redirect: 'manual',
       signal: AbortSignal.timeout(this.timeout),
     });
   }
