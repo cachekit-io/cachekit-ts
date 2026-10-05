@@ -42,7 +42,7 @@ conforming writer emits, when core's own caps would refuse them, or when
 `compressed_data` is longer than LZ4's worst case for the declared size. That
 last check stops a small declared size from carrying a large payload into core's
 copy. A compression-on read treats such bytes as corrupt. The envelope-tolerant
-read on a compression-off cache decodes them as plain MessagePack. What `unpack`
+read on an unencrypted compression-off cache decodes them as plain MessagePack. What `unpack`
 may allocate is then a small multiple of `maxDecodedSize`: the input, the
 compressed payload, a `format` string of at most 64 bytes, and an output of at
 most `maxDecodedSize`, which is the same bound `serializer.decode` applies to its
@@ -56,9 +56,15 @@ also decodes as plain MessagePack an envelope that passed the header read but
 that core rejects (checksum or shape mismatch), and reports it through the SDK
 logger as a rate-limited `[cachekit] envelope-shaped value failed verified
 unpack` line carrying the key's digest. The line never includes core's error
-text: on an encrypted cache those bytes are decrypted plaintext.
+text, which can echo scalars from the cached value.
 
-One consequence on compression-off caches: a plain value whose MessagePack
+The envelope-tolerant read never runs after a decrypt. An encrypted cache
+decodes its plaintext in the one container its configuration selects, as the
+protocol requires: plain MessagePack with compression off, never a sniffed
+envelope. The AAD binds the compression flag, so an entry written under the
+other setting fails authentication instead of reaching the decoder.
+
+One consequence on unencrypted compression-off caches: a plain value whose MessagePack
 exactly mimics an envelope core would decompress, and which declares more than
 `maxDecodedSize`, is refused rather than decoded. Only decompressing could tell
 it from a real oversized envelope, and serving a real one as its raw 4-tuple

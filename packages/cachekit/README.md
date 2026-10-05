@@ -691,7 +691,7 @@ option degrades to a no-op the same way.)
 
 Internal error reporting (background refresh, invalidation channel, Redis
 connection events, and read anomalies such as an envelope-shaped value that
-fails its integrity check on a compression-off cache) defaults to
+fails its integrity check on an unencrypted compression-off cache) defaults to
 `console.error`; route it into your own logging pipeline with `setLogger`:
 
 ```typescript
