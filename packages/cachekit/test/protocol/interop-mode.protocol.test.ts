@@ -341,9 +341,19 @@ const READER_REJECTION: Record<string, RegExp> = {
 
 describe('interop/v1 reader vectors', () => {
   it('pins which accept vectors carry a value', () => {
-    // The two without one (an integer map key, an ext type) have their decoded
-    // form asserted in src/serialization/interop.test.ts instead.
-    expect(vectors.reader_accept_vectors.filter((v) => v.value !== undefined)).toHaveLength(4);
+    // The two without one (reader_non_string_map_key, reader_ext_type) have
+    // their decoded form asserted in src/serialization/interop.test.ts instead.
+    expect(
+      vectors.reader_accept_vectors.filter((v) => v.value !== undefined).map((v) => v.name)
+    ).toEqual([
+      'reader_padded_int_widths',
+      'reader_padded_headers',
+      'reader_unsorted_map_keys',
+      'reader_float32',
+    ]);
+  });
+
+  it('maps every reader reject vector to the guard error it must trip', () => {
     expect(vectors.reader_reject_vectors.map((v) => v.name).sort()).toEqual(
       Object.keys(READER_REJECTION).sort()
     );

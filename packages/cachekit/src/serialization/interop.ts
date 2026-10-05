@@ -67,6 +67,8 @@ const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
 /** Strings up to this many bytes try a pure-JS ASCII decode first. */
 const SHORT_STRING_MAX = 64;
+/** V8's shortest rope (ConsString::kMinLength): shorter concatenations are flat. */
+const FLAT_STRING_MIN = 13;
 
 /** Profile selector: args are hashed (strict arity), values round-trip. */
 type InteropProfile = 'args' | 'value';
@@ -666,16 +668,21 @@ function readInteropDocument(data: Uint8Array): unknown {
     );
   const take = (n: number): Uint8Array => data.subarray(pos, (pos += n));
   const str = (n: number): string => {
-    // Short ASCII (most keys) skips TextDecoder, which costs more per call than
-    // the whole loop at this length.
+    // Short ASCII (most keys) skips TextDecoder, whose per-call cost dominates
+    // at this length. Appending a character at a time is fastest for the
+    // shortest strings, but from 13 characters V8 builds a rope (cons string)
+    // that the decoded value keeps, many times larger than the bytes; build
+    // those in one call instead.
     if (n <= SHORT_STRING_MAX) {
-      let s = '';
-      for (let i = pos; i < pos + n; i++) {
-        const c = data[i]!;
-        if (c >= 0x80) return textDecoder.decode(take(n));
-        s += String.fromCharCode(c);
+      const end = pos + n;
+      for (let i = pos; i < end; i++) {
+        if (data[i]! >= 0x80) return textDecoder.decode(take(n));
       }
-      pos += n;
+      if (n >= FLAT_STRING_MIN) {
+        return String.fromCharCode.apply(null, take(n) as unknown as number[]);
+      }
+      let s = '';
+      for (; pos < end; pos++) s += String.fromCharCode(data[pos]!);
       return s;
     }
     return textDecoder.decode(take(n));

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { runInNewContext } from 'node:vm';
-import { decode as msgpackDecode, encode as msgpackEncode } from '@msgpack/msgpack';
+import { ExtData, decode as msgpackDecode, encode as msgpackEncode } from '@msgpack/msgpack';
 import {
   MessagePackSerializer,
   assertDecodeDepth,
@@ -452,30 +452,36 @@ describe('MessagePackSerializer', () => {
     it('differential fuzz: pre-scan is byte-faithful to the decoder across every type', () => {
       // The pre-scan is a second parser gating the real decoder; the one
       // catastrophic desync is a width miscount that shifts every later offset.
-      // Encode random legal values spanning EVERY msgpack head-byte family
-      // (incl. bin, bigint→int64, float64, ext→timestamp, and collections wide
-      // enough to emit array16/map16, not just fixarray/fixmap) and assert the
-      // pre-scan accepts exactly what the decoder accepts — proving no
-      // skip-width desync. The interop reader (decodeInteropValue) trusts the
-      // pre-scan for backing and end of input, so it runs in both arms too: on
-      // legal values it must read what @msgpack/msgpack reads (64-bit ints as
-      // BigInt, normalised to number when safe, as the interop path does).
-      const encOpts = { useBigInt64: true } as const;
+      // Encode random legal values spanning every head-byte family the encoder
+      // emits (each int and float width, str/bin/ext at every length tier,
+      // timestamp and application ext, collections wide enough for
+      // array16/map16), plus hand-built padded headers for the families it
+      // never emits (array32, map32, str32, bin32, ext32), and assert the
+      // pre-scan accepts exactly what the decoder accepts. The interop reader
+      // (decodeInteropValue) trusts the pre-scan for backing and end of input,
+      // so it runs in both arms too: on legal values it must read exactly what
+      // @msgpack/msgpack reads (64-bit ints as BigInt, normalised to number when
+      // safe, as the interop path does).
       const safeInts = (v: unknown): unknown => {
         if (typeof v === 'bigint') {
           return v >= Number.MIN_SAFE_INTEGER && v <= Number.MAX_SAFE_INTEGER ? Number(v) : v;
         }
         if (Array.isArray(v)) return v.map(safeInts);
-        if (
-          v !== null &&
-          typeof v === 'object' &&
-          !(v instanceof Uint8Array) &&
-          !(v instanceof Date)
-        ) {
+        if (v !== null && typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype) {
           const rec = v as Record<string, unknown>;
           return Object.fromEntries(Object.keys(rec).map((k) => [k, safeInts(rec[k])]));
         }
         return v;
+      };
+      /** The interop reader writes U+FFFD only for invalid UTF-8, where it
+       * deliberately differs from @msgpack/msgpack's lax short-string decoder. */
+      const hasReplacement = (v: unknown): boolean => {
+        if (typeof v === 'string') return v.includes('\ufffd');
+        if (Array.isArray(v)) return v.some(hasReplacement);
+        if (v !== null && typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype) {
+          return Object.entries(v).some(([k, x]) => k.includes('\ufffd') || hasReplacement(x));
+        }
+        return false;
       };
       const opts = { ...boundedDecodeOptions(10000, 10 * 1024 * 1024), useBigInt64: true };
       let seed = 0x2487;
@@ -484,17 +490,36 @@ describe('MessagePackSerializer', () => {
         seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
         return seed / 0x7fffffff;
       };
-      const scalar = (): unknown => {
-        const r = rand();
-        if (r < 0.14) return null;
-        if (r < 0.28) return Math.floor(rand() * 1e9); // int
-        if (r < 0.42) return rand() * 1e6 + 0.5; // float64
-        if (r < 0.56) return BigInt(Math.floor(rand() * 1e15)); // int64
-        if (r < 0.7) return rand() < 0.5;
-        if (r < 0.84) return 'k'.repeat(Math.floor(rand() * 40)); // fixstr/str8
-        if (r < 0.92) return new Uint8Array(Math.floor(rand() * 30)); // bin8
-        return new Date(Math.floor(rand() * 2e12)); // ext (timestamp)
-      };
+      const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rand() * xs.length)]!;
+      // Lengths straddle every header tier and the reader's short-string paths
+      // (13 = first rope length, 64/65 = ASCII fast path edge, 200/201 = the old
+      // decoder's TextDecoder edge, 255/256 = str8/str16). Lengths of 2^16 and up
+      // stay out: they would cost seconds; the padded headers below cover them.
+      const lengths = [0, 1, 5, 12, 13, 31, 32, 63, 64, 65, 200, 201, 255, 256, 300] as const;
+      const scalars: (() => unknown)[] = [
+        () => null,
+        () => rand() < 0.5,
+        () => Math.floor(rand() * 128), // positive fixint
+        () => 128 + Math.floor(rand() * 128), // uint8
+        () => 256 + Math.floor(rand() * 65000), // uint16
+        () => 65536 + Math.floor(rand() * 1e9), // uint32
+        () => 2 ** 40 + Math.floor(rand() * 1e6), // uint64 (number)
+        () => -1 - Math.floor(rand() * 32), // negative fixint
+        () => -33 - Math.floor(rand() * 96), // int8
+        () => -129 - Math.floor(rand() * 32000), // int16
+        () => -32769 - Math.floor(rand() * 1e9), // int32
+        () => -(2 ** 40) - Math.floor(rand() * 1e6), // int64 (number)
+        () => pick([2n ** 60n, -(2n ** 60n), 2n ** 64n - 1n, -(2n ** 63n), -1n, 1n]), // BigInt widths
+        () => (rand() - 0.5) * 1e6, // float (float32 when the round encodes floats as float32)
+        () => 'k'.repeat(pick(lengths)), // ASCII
+        () => 'Zoë東京'.repeat(1 + Math.floor(rand() * 40)), // non-ASCII, short and long
+        () => '\ufeffbom', // a leading U+FEFF; long ones differ from @msgpack/msgpack by design
+        () => new Uint8Array(pick(lengths)), // bin8 / bin16
+        () => new ExtData(1, new Uint8Array(pick([1, 2, 4, 8, 16, 3, 300] as const))), // fixext / ext8 / ext16
+        () => new Date(Math.floor(rand() * 2e12)), // timestamp ext
+      ];
+      const scalar = (): unknown => pick(scalars)();
+      const key = (i: number): string => pick(['f' + i, 'f' + i, 'kéy' + i, 'k'.repeat(20) + i]);
       const randomValue = (depth: number): unknown => {
         const r = rand();
         if (depth > 4 || r < 0.45) return scalar();
@@ -505,63 +530,100 @@ describe('MessagePackSerializer', () => {
           const wide = 16 + Math.floor(rand() * 24); // 16..39 → array16/map16
           if (rand() < 0.5) return Array.from({ length: wide }, () => scalar());
           const o: Record<string, unknown> = {};
-          for (let i = 0; i < wide; i++) o['f' + i] = scalar();
+          for (let i = 0; i < wide; i++) o[key(i)] = scalar();
           return o;
         }
         const n = Math.floor(rand() * 5); // narrow recursion (fixarray/fixmap)
         if (r < 0.8) return Array.from({ length: n }, () => randomValue(depth + 1));
         const o: Record<string, unknown> = {};
-        for (let i = 0; i < n; i++) o['f' + i] = randomValue(depth + 1);
+        for (let i = 0; i < n; i++) o[key(i)] = randomValue(depth + 1);
         return o;
       };
 
-      for (let i = 0; i < 500; i++) {
-        const bytes = msgpackEncode(randomValue(0), encOpts);
-        // Legal values must pass the pre-scan and round-trip through the decoder.
+      const check = (bytes: Uint8Array): void => {
+        // Legal documents must pass the pre-scan and read the same both ways.
         expect(() => assertDecodeDepth(bytes, 100)).not.toThrow();
-        expect(() => msgpackDecode(bytes, opts)).not.toThrow();
         expect(decodeInteropValue(bytes)).toStrictEqual(safeInts(msgpackDecode(bytes, opts)));
+      };
+      const legal: Uint8Array[] = [];
+      for (let i = 0; i < 500; i++) {
+        const bytes = msgpackEncode(randomValue(0), {
+          useBigInt64: true,
+          forceFloat32: i % 4 === 0,
+        });
+        check(bytes);
+        legal.push(bytes);
+      }
+      // Padded 32-bit headers no encoder emits: array32 [1, 2], map32 {a: 1},
+      // str32 'abc', bin32 de ad, ext32 type 1 [2a].
+      const hex = (h: string) => Uint8Array.from(Buffer.from(h.replace(/ /g, ''), 'hex'));
+      for (const h of [
+        'dd 00000002 01 02',
+        'df 00000001 a161 01',
+        'db 00000003 616263',
+        'c6 00000002 dead',
+        'c9 00000001 01 2a',
+      ]) {
+        check(hex(h));
       }
 
-      // Random garbage: the pre-scan must either accept or reject through
-      // SerializationError — never fault with a raw RangeError/TypeError (a bad
-      // skip width or out-of-range DataView read, i.e. a walker bug). We do NOT
-      // assert decode never throws on accepted garbage — a structurally-complete
-      // buffer can still be a malformed ext/invalid-UTF-8 str the decoder
-      // rejects, which is the SAFE desync direction (reject, not over-allocate).
-      // The bounded opts here mean no false-accept can amplify regardless; the
-      // dedicated nested-header test above pins the actual amplification bound.
-      for (let i = 0; i < 1000; i++) {
-        const bytes = new Uint8Array(Math.floor(rand() * 48));
-        for (let j = 0; j < bytes.length; j++) bytes[j] = Math.floor(rand() * 256);
+      // Garbage, built by flipping, inserting or deleting one byte of a legal
+      // document so most of it still parses. The pre-scan must accept or reject
+      // through SerializationError — never fault with a raw RangeError/TypeError
+      // (a bad skip width or out-of-range DataView read, i.e. a walker bug). The
+      // interop reader may also reject only with SerializationError, and never a
+      // document both the pre-scan and @msgpack/msgpack accept (it accepts every
+      // key type that decoder does, and more). When both accept, it must read
+      // the same value, except where it decodes invalid UTF-8 to U+FFFD.
+      // A structurally complete buffer can still be a malformed ext the decoder
+      // rejects: that is the safe desync direction (reject, not over-allocate).
+      let compared = 0;
+      for (let i = 0; i < 2000; i++) {
+        const src = pick(legal);
+        const at = Math.floor(rand() * src.length);
+        const byte = Math.floor(rand() * 256);
+        const mutation = rand();
+        let bytes: Uint8Array;
+        if (mutation < 0.5) {
+          bytes = src.slice();
+          bytes[at] = byte;
+        } else if (mutation < 0.75) {
+          bytes = new Uint8Array([...src.subarray(0, at), byte, ...src.subarray(at)]);
+        } else {
+          bytes = new Uint8Array([...src.subarray(0, at), ...src.subarray(at + 1)]);
+        }
         let scanned = true;
         try {
           assertDecodeDepth(bytes, 100);
         } catch (error) {
-          // A non-SerializationError means the walker itself faulted, not a
-          // structural rejection.
           expect(error).toBeInstanceOf(SerializationError);
           scanned = false;
         }
-        // The interop reader may reject garbage, but only as SerializationError,
-        // and never a document both the pre-scan and @msgpack/msgpack accept
-        // (it accepts every key type that decoder does, and more).
+        let reference: unknown;
         let decoded = false;
         try {
-          msgpackDecode(bytes, opts);
+          reference = msgpackDecode(bytes, opts);
           decoded = true;
         } catch {
           // garbage the decoder rejects: no claim
         }
+        let value: unknown;
         try {
-          decodeInteropValue(bytes);
+          value = decodeInteropValue(bytes);
         } catch (error) {
           expect(error).toBeInstanceOf(SerializationError);
           expect(scanned && decoded, `interop rejected a readable document: ${String(error)}`).toBe(
             false
           );
+          continue;
+        }
+        if (decoded && !hasReplacement(value)) {
+          expect(value).toStrictEqual(safeInts(reference));
+          compared++;
         }
       }
+      // The garbage arm only proves something if it reaches the comparison.
+      expect(compared).toBeGreaterThan(200);
     });
 
     it('directly exercises each pre-scan rejection branch', () => {

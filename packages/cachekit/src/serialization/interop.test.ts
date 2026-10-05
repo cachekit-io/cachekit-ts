@@ -404,9 +404,23 @@ describe('interop value decoding', () => {
     );
   });
 
-  it('reads invalid UTF-8 as U+FFFD at every length', () => {
+  it('reads invalid UTF-8 as U+FFFD on both short-string paths and above them', () => {
     // An overlong '/' (c0 af): @msgpack/msgpack read it as '/' below 201 bytes.
-    expect(decodeInteropValue(Uint8Array.of(0xa2, 0xc0, 0xaf))).toBe('\ufffd\ufffd');
+    // Lengths 2, 64 and 65 sit below, at and above the reader's ASCII fast-path
+    // limit; 300 is past the old decoder's TextDecoder edge.
+    for (const n of [2, 64, 65, 300]) {
+      const pad = 'a'.repeat(n - 2);
+      const doc = new Uint8Array([0xda, n >> 8, n & 0xff, ...Buffer.from(pad), 0xc0, 0xaf]);
+      expect(decodeInteropValue(doc)).toBe(pad + '\ufffd\ufffd');
+    }
+  });
+
+  it('reads int64 at its full width and sign', () => {
+    // d3 is signed: reading it unsigned would turn -1 into 2^64-1.
+    expect(
+      decodeInteropValue(Uint8Array.of(0xd3, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff))
+    ).toBe(-1);
+    expect(decodeInteropValue(Uint8Array.of(0xd3, 0x80, 0, 0, 0, 0, 0, 0, 0))).toBe(-(2n ** 63n));
   });
 
   it('reads an integer map key at any width as the same property', () => {
