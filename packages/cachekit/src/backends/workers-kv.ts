@@ -55,9 +55,9 @@ export interface WorkersKVBackendConfig {
  *   location but can take up to ~60s to propagate to other edge locations —
  *   KV is a read-optimized store, not a coordination primitive (distributed
  *   locking stays SaaS-only).
- * - `delete()`'s returned boolean comes from a read-then-delete (KV's own
- *   delete is void); under concurrent writers it is best-effort, matching
- *   the advisory nature of the Backend contract.
+ * - `delete()` always issues the KV delete; its returned boolean comes from
+ *   a read-ahead (KV's own delete is void), so under eventual consistency it
+ *   is advisory, matching the Backend contract.
  *
  * @example
  * ```typescript
@@ -112,17 +112,21 @@ export class WorkersKVBackend implements Backend {
     }
   }
 
+  /**
+   * Delete `key`. `kv.delete` is always issued: a read-ahead can miss an
+   * entry KV still holds (a write from another location not yet propagated,
+   * or a cached negative lookup), so it must never gate the delete.
+   *
+   * @returns Advisory: `true` only when the read-ahead saw a value (KV's own
+   *   delete is void). It drives `cache.delete()`'s return value, nothing
+   *   durable.
+   */
   async delete(key: string): Promise<boolean> {
     this.ensureNotClosed();
     try {
-      // KV's delete is void and idempotent; the contract's boolean needs a
-      // read first. ponytail: racy under concurrent writers — the boolean is
-      // advisory (drives cache.delete()'s return value, nothing durable).
-      if ((await this.kv.get(key, 'arrayBuffer')) === null) {
-        return false;
-      }
+      const existed = (await this.kv.get(key, 'arrayBuffer')) !== null;
       await this.kv.delete(key);
-      return true;
+      return existed;
     } catch (error) {
       throw this.wrapError('delete', error);
     }
