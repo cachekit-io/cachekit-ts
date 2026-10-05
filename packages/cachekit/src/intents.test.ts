@@ -432,47 +432,34 @@ describe('Intent-based Cache API', () => {
       expect(capturedOptions).toBeNull();
     });
 
-    it.each(['minimal', 'production'] as const)(
-      'createCache.%s() rejects encryption from a class getter',
-      (intent) => {
-        class Config {
-          url = 'redis://localhost:6379';
-          get encryption() {
-            return { masterKey: MASTER_KEY };
-          }
-        }
+    // Every encryption option an intent does not apply, read through a
+    // prototype getter, as on a class instance, rather than an own key.
+    it.each([
+      ['minimal', 'encryption'],
+      ['minimal', 'masterKey'],
+      ['minimal', 'previousMasterKeys'],
+      ['minimal', 'tenantId'],
+      ['production', 'encryption'],
+      ['production', 'masterKey'],
+      ['production', 'previousMasterKeys'],
+      ['production', 'tenantId'],
+      ['secure', 'encryption'],
+      ['io', 'masterKey'],
+      ['io', 'previousMasterKeys'],
+      ['io', 'tenantId'],
+    ] as const)('createCache.%s() rejects %s read through a prototype getter', (intent, key) => {
+      const proto = Object.defineProperty({}, key, { get: () => 'inherited' });
+      const options = Object.assign(Object.create(proto) as object, REQUIRED[intent]);
 
-        expect(() => createCache[intent](new Config() as never)).toThrow(
-          /does not support the option "encryption"/
-        );
-        expect(capturedOptions).toBeNull();
-      }
-    );
+      expect(() => createCache[intent](options as never)).toThrow(
+        new RegExp(`does not support the option "${key}"`)
+      );
+      expect(capturedOptions).toBeNull();
+    });
 
-    it.each(['encryption', 'masterKey', 'previousMasterKeys', 'tenantId'])(
-      'createCache.production() rejects %s inherited from a prototype',
-      (key) => {
-        const options = Object.create({ [key]: 'inherited' }) as Record<string, unknown>;
-        options.url = 'redis://localhost:6379';
-
-        expect(() => createCache.production(options as never)).toThrow(
-          new RegExp(`does not support the option "${key}"`)
-        );
-        expect(capturedOptions).toBeNull();
-      }
-    );
-
-    it('createCache.secure() rejects encryption from a class getter', () => {
-      class Config {
-        url = 'redis://localhost:6379';
-        masterKey = MASTER_KEY;
-        get encryption() {
-          return { tenantId: 'tenant-a' };
-        }
-      }
-
-      expect(() => createCache.secure(new Config() as never)).toThrow(
-        /does not support the option "encryption"/
+    it('createCache.minimal() given a string instead of options throws ConfigurationError', () => {
+      expect(() => createCache.minimal('redis://localhost:6379' as never)).toThrow(
+        ConfigurationError
       );
       expect(capturedOptions).toBeNull();
     });

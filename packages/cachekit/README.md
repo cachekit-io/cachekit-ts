@@ -102,8 +102,8 @@ Each intent accepts only the options in its own type (`MinimalOptions`,
 `ConfigurationError` at construction for any other option that is not
 `undefined`. The check covers plain JavaScript and non-literal objects, which
 TypeScript's excess-property check does not reach. It reads the object's own
-properties, and reads the encryption options below through prototypes and
-class getters too:
+enumerable properties, and reads the encryption options below through
+prototypes and class getters too:
 
 - `encryption`, `masterKey`, `previousMasterKeys` or `tenantId` on `minimal` or
   `production` throws. For an encrypted cache use `secure`, `io` with
@@ -111,6 +111,8 @@ class getters too:
 - `encryption` on `secure` throws: pass `masterKey`, `previousMasterKeys` and
   `tenantId` as top-level options. A `tenantId` that is set must be a string,
   on every path that takes one.
+- `masterKey`, `previousMasterKeys` or `tenantId` at the top level of `io`
+  throws: nest them under `encryption`.
 - `backend`, `url` and `keyPrefix` on `io` throw, as does `keyPrefix` alongside
   a `backend` instance (set the prefix on the instance).
 - `stampede` (distributed locking) is a `createCache()` option; every intent

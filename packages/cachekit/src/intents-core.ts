@@ -170,7 +170,8 @@ export interface IOOptions extends BaseIntentOptions {
  *
  * Each intent accepts only the options of its own type and throws
  * ConfigurationError at construction for any other option that is not
- * `undefined` — `encryption` on `minimal` / `production` / `secure` included.
+ * `undefined` — `encryption` on `minimal` / `production` / `secure`, and the
+ * top-level key options on `io`, included.
  * For `secure`, pass `masterKey`, `previousMasterKeys` and `tenantId` at the
  * top level.
  */
@@ -384,18 +385,21 @@ export function buildIntents<TCache extends SecureCache>(
 
 type IntentName = 'minimal' | 'production' | 'secure' | 'io';
 
+type EncryptionOptionKey = 'encryption' | keyof EncryptionConfig;
+
 /**
  * Encryption-bearing options an intent does not apply, read as properties of
  * the options object. A destructure's rest holds only own enumerable keys, so
  * these are also looked up through the prototype chain: one inherited from a
  * prototype or a class getter is rejected too. `secure` applies the key
- * options at the top level; `io` applies all of them.
+ * options at the top level and `io` applies a nested `encryption`, so each
+ * rejects the other spelling.
  */
-const UNSUPPORTED_ENCRYPTION_KEYS: Record<IntentName, readonly string[]> = {
+const UNSUPPORTED_ENCRYPTION_KEYS: Record<IntentName, readonly EncryptionOptionKey[]> = {
   minimal: ['encryption', 'masterKey', 'previousMasterKeys', 'tenantId'],
   production: ['encryption', 'masterKey', 'previousMasterKeys', 'tenantId'],
   secure: ['encryption'],
-  io: [],
+  io: ['masterKey', 'previousMasterKeys', 'tenantId'],
 };
 
 /**
@@ -417,7 +421,7 @@ function rejectUnsupportedOptions(
     .filter(([, value]) => value !== undefined)
     .map(([key]) => key);
   for (const key of UNSUPPORTED_ENCRYPTION_KEYS[intent]) {
-    if (!unsupported.includes(key) && Reflect.get(options, key) !== undefined) {
+    if (!unsupported.includes(key) && (options as Record<string, unknown>)[key] !== undefined) {
       unsupported.push(key);
     }
   }

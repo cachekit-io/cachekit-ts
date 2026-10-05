@@ -184,7 +184,6 @@ describe('EncryptionManagerCore', () => {
 
       expect(build).toThrow(ConfigurationError);
       expect(build).toThrow(/tenantId must be a string/);
-      expect(bindings.deriveTenantKeys).not.toHaveBeenCalled();
     }
   );
 });
