@@ -2,6 +2,8 @@ import { Backend } from './types.js';
 import { BackendError, ConfigurationError } from '../errors.js';
 import { classifyWorkersRuntimeError } from './error-classifier.js';
 import { DEFAULT_TTL_SECONDS } from '../constants.js';
+import { logError } from '../logger.js';
+import { blake2b16Hex } from '../serialization/key-generator.js';
 
 /**
  * Workers KV enforces a 60-second minimum on `expirationTtl`; shorter TTLs
@@ -55,9 +57,9 @@ export interface WorkersKVBackendConfig {
  *   location but can take up to ~60s to propagate to other edge locations —
  *   KV is a read-optimized store, not a coordination primitive (distributed
  *   locking stays SaaS-only).
- * - `delete()`'s returned boolean comes from a read-then-delete (KV's own
- *   delete is void); under concurrent writers it is best-effort, matching
- *   the advisory nature of the Backend contract.
+ * - `delete()` always issues the KV delete; its returned boolean comes from
+ *   a read-ahead (KV's own delete is void), so under eventual consistency it
+ *   is advisory, matching the Backend contract.
  *
  * @example
  * ```typescript
@@ -112,17 +114,46 @@ export class WorkersKVBackend implements Backend {
     }
   }
 
+  /**
+   * Delete `key`. `kv.delete` is always issued: a read-ahead can miss an
+   * entry KV still holds (a write from another location not yet propagated,
+   * or a cached negative lookup) or fail outright, so it must never gate the
+   * delete. A failing `kv.delete` still rejects with {@link BackendError}.
+   *
+   * A failed read-ahead is reported through the library logger
+   * (`setLogger`) by key digest, never the key itself.
+   *
+   * @returns Advisory: `true` only when the read-ahead saw a value (KV's own
+   *   delete is void); `false` when it missed or failed. It drives
+   *   `cache.delete()`'s return value, nothing durable.
+   */
   async delete(key: string): Promise<boolean> {
     this.ensureNotClosed();
+    // The read only feeds the advisory boolean; its failure is not the
+    // delete's failure.
+    let existed = false;
     try {
-      // KV's delete is void and idempotent; the contract's boolean needs a
-      // read first. ponytail: racy under concurrent writers — the boolean is
-      // advisory (drives cache.delete()'s return value, nothing durable).
-      if ((await this.kv.get(key, 'arrayBuffer')) === null) {
-        return false;
+      existed = (await this.kv.get(key, 'arrayBuffer')) !== null;
+    } catch (error) {
+      // Reported, not rethrown: the delete below still runs. Digest and
+      // classification only — the key and the error text can carry the
+      // caller's key (same rule as cache-core's describeDeleteFailure).
+      // Classifying reads the foreign error (a `message` getter can throw),
+      // so it is guarded too: reporting must never gate the delete.
+      let classification = 'unknown';
+      try {
+        if (error instanceof Error) classification = classifyWorkersRuntimeError(error);
+      } catch {
+        // Unclassifiable; reported as unknown.
       }
+      logError(
+        `[cachekit] Workers KV delete: read-ahead failed (${classification}), delete still issued; ` +
+          `returning false (keyHash=${blake2b16Hex(key)})`
+      );
+    }
+    try {
       await this.kv.delete(key);
-      return true;
+      return existed;
     } catch (error) {
       throw this.wrapError('delete', error);
     }
