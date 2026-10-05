@@ -1,3 +1,4 @@
+import { format, inspect } from 'node:util';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { setLogger, logError } from './logger.js';
 import { BackgroundRefreshManager } from './cache/background-refresh.js';
@@ -38,6 +39,77 @@ describe('pluggable logger (LAB-517)', () => {
       'detail',
       expect.any(Error)
     );
+  });
+
+  it('a rejecting async logger is reported, never left as an unhandled rejection', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      setLogger(async () => {
+        throw new Error('async logger bug');
+      });
+
+      expect(() => logError('[cachekit] report', 'detail')).not.toThrow();
+
+      await vi.waitFor(() => {
+        expect(consoleSpy).toHaveBeenCalledWith(
+          '[cachekit] logger threw; original report:',
+          '[cachekit] report',
+          'detail',
+          expect.objectContaining({ message: 'async logger bug' })
+        );
+      });
+      // Unhandled-rejection detection runs after the microtask queue drains.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+
+  it('a throwing console.error fallback never escapes, sync or async', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {
+      throw new Error('console sink down');
+    });
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      setLogger(() => {
+        throw new Error('sync logger bug');
+      });
+      expect(() => logError('[cachekit] report', 'detail')).not.toThrow();
+
+      setLogger(async () => {
+        throw new Error('async logger bug');
+      });
+      expect(() => logError('[cachekit] report', 'detail')).not.toThrow();
+      // Unhandled-rejection detection runs after the microtask queue drains.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+
+  it('an unformattable report still prints the original message', () => {
+    // Node's console.error formats its arguments with util.format, which runs
+    // an object's inspect hook and lets that hook's throw escape.
+    const printed: string[] = [];
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      printed.push(format(...args));
+    });
+    const hostile = {
+      [inspect.custom]() {
+        throw new Error('inspect hook bug');
+      },
+    };
+    setLogger(() => {
+      throw new Error('sync logger bug');
+    });
+
+    expect(() => logError('[cachekit] report', hostile)).not.toThrow();
+    expect(printed).toEqual([expect.stringContaining('[cachekit] report')]);
   });
 
   it('setLogger(null) restores the console.error default', () => {

@@ -7,6 +7,10 @@
  * `console.error`; applications can route these into their own logging
  * pipeline with {@link setLogger}.
  *
+ * The logger may be `async`. If it throws or its promise rejects, CacheKit
+ * reports that failure and the original message to `console.error`, never
+ * to the caller and never as an unhandled rejection.
+ *
  * @example
  * ```typescript
  * import { setLogger } from '@cachekit-io/cachekit';
@@ -30,15 +34,43 @@ export function setLogger(logger: CachekitLogger | null): void {
   activeLogger = logger ?? defaultLogger;
 }
 
-/** Internal: report a library error through the active logger. Never throws —
- * every call site is a fire-and-forget error path (metrics, background
- * refresh, invalidation), where a broken custom logger propagating would
- * become an unhandled rejection. */
+/** Internal: report a library error through the active logger. Never throws,
+ * and never leaves an async logger's rejection unhandled — every call site is
+ * a fire-and-forget error path (metrics, background refresh, invalidation),
+ * where a broken custom logger propagating would become an unhandled
+ * rejection. TypeScript accepts an `async` function as a {@link CachekitLogger}.
+ *
+ * One promise stays out of reach: a non-async logger returning a promise whose
+ * `constructor` lookup throws. Every standard way to subscribe to a promise
+ * (`then`, `Promise.resolve`, `await`) reads that property first, so the
+ * lookup failure is reported but the promise's own rejection cannot be
+ * caught without mutating the caller's object. An `async` logger always
+ * returns an intrinsic promise and never hits this. */
 export function logError(message: string, error?: unknown): void {
+  const reportLoggerFailure = (loggerError: unknown): void => {
+    try {
+      // eslint-disable-next-line no-console -- last-resort sink when the active logger itself fails
+      console.error('[cachekit] logger threw; original report:', message, error, loggerError);
+    } catch {
+      // Formatting a caller's object threw (e.g. a throwing inspect hook).
+      // Retry with our own string, which any working console can print.
+      try {
+        // eslint-disable-next-line no-console -- same last-resort sink, string only
+        console.error(`[cachekit] logger threw; report unprintable; original: ${message}`);
+      } catch {
+        // console.error throws even for a string, so the host replaced it and
+        // no sink is left. Rethrowing would escape logError, or from the
+        // .catch below become a new unhandled rejection. process.stderr is no
+        // fallback: Node's console.error swallows a closed pipe (EPIPE), but a
+        // direct stderr write emits an unhandled 'error' that kills the process.
+      }
+    }
+  };
   try {
-    activeLogger(message, error);
+    // Promise.resolve adopts any thenable the logger returns, so its
+    // rejection lands here instead of surfacing as an unhandled rejection.
+    void Promise.resolve(activeLogger(message, error)).catch(reportLoggerFailure);
   } catch (loggerError) {
-    // eslint-disable-next-line no-console -- last-resort sink when the active logger itself throws
-    console.error('[cachekit] logger threw; original report:', message, error, loggerError);
+    reportLoggerFailure(loggerError);
   }
 }
