@@ -99,11 +99,11 @@ says.
 
 Each intent accepts only the options in its own type (`MinimalOptions`,
 `ProductionOptions`, `SecureOptions`, `IOOptions`) and throws
-`ConfigurationError` at construction for any other option that is not
-`undefined`. The check covers plain JavaScript and non-literal objects, which
-TypeScript's excess-property check does not reach. It reads the object's own
-enumerable properties, and reads the encryption options below through
-prototypes and class getters too:
+`ConfigurationError` at construction for any other own enumerable option that
+is not `undefined`. The check covers plain JavaScript and non-literal objects,
+which TypeScript's excess-property check does not reach. The encryption
+options below, and `backend` and `url` on `io`, throw however they are
+defined: through a prototype, a class getter or a non-enumerable property too.
 
 - `encryption`, `masterKey`, `previousMasterKeys` or `tenantId` on `minimal` or
   `production` throws. For an encrypted cache use `secure`, `io` with

@@ -385,21 +385,22 @@ export function buildIntents<TCache extends SecureCache>(
 
 type IntentName = 'minimal' | 'production' | 'secure' | 'io';
 
-type EncryptionOptionKey = 'encryption' | keyof EncryptionConfig;
+type DataPathOptionKey = 'encryption' | keyof EncryptionConfig | 'backend' | 'url';
 
 /**
- * Encryption-bearing options an intent does not apply, read as properties of
- * the options object. A destructure's rest holds only own enumerable keys, so
- * these are also looked up through the prototype chain: one inherited from a
- * prototype or a class getter is rejected too. `secure` applies the key
- * options at the top level and `io` applies a nested `encryption`, so each
- * rejects the other spelling.
+ * Options an intent does not apply whose loss would change whether data is
+ * encrypted or where it is stored. They are read as plain properties of the
+ * options object, because a destructure's rest holds only own enumerable
+ * keys: one inherited from a prototype, returned by a class getter or set
+ * non-enumerable is rejected too. `secure` applies the key options at the
+ * top level and `io` applies a nested `encryption`, so each rejects the other
+ * spelling; `io` always targets cachekit.io, so it rejects `backend` and `url`.
  */
-const UNSUPPORTED_ENCRYPTION_KEYS: Record<IntentName, readonly EncryptionOptionKey[]> = {
+const UNSUPPORTED_DATA_PATH_KEYS: Record<IntentName, readonly DataPathOptionKey[]> = {
   minimal: ['encryption', 'masterKey', 'previousMasterKeys', 'tenantId'],
   production: ['encryption', 'masterKey', 'previousMasterKeys', 'tenantId'],
   secure: ['encryption'],
-  io: ['masterKey', 'previousMasterKeys', 'tenantId'],
+  io: ['masterKey', 'previousMasterKeys', 'tenantId', 'backend', 'url'],
 };
 
 /**
@@ -420,7 +421,7 @@ function rejectUnsupportedOptions(
   const unsupported = Object.entries(rest)
     .filter(([, value]) => value !== undefined)
     .map(([key]) => key);
-  for (const key of UNSUPPORTED_ENCRYPTION_KEYS[intent]) {
+  for (const key of UNSUPPORTED_DATA_PATH_KEYS[intent]) {
     if (!unsupported.includes(key) && (options as Record<string, unknown>)[key] !== undefined) {
       unsupported.push(key);
     }

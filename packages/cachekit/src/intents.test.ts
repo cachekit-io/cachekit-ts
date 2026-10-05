@@ -432,9 +432,10 @@ describe('Intent-based Cache API', () => {
       expect(capturedOptions).toBeNull();
     });
 
-    // Every encryption option an intent does not apply, read through a
-    // prototype getter, as on a class instance, rather than an own key.
-    it.each([
+    // Every option an intent does not apply whose loss would change whether
+    // data is encrypted or where it goes, defined so that a destructure's
+    // rest never sees it.
+    const DATA_PATH_KEYS = [
       ['minimal', 'encryption'],
       ['minimal', 'masterKey'],
       ['minimal', 'previousMasterKeys'],
@@ -447,9 +448,23 @@ describe('Intent-based Cache API', () => {
       ['io', 'masterKey'],
       ['io', 'previousMasterKeys'],
       ['io', 'tenantId'],
-    ] as const)('createCache.%s() rejects %s read through a prototype getter', (intent, key) => {
-      const proto = Object.defineProperty({}, key, { get: () => 'inherited' });
-      const options = Object.assign(Object.create(proto) as object, REQUIRED[intent]);
+      ['io', 'backend'],
+      ['io', 'url'],
+    ] as const;
+    const HIDDEN_DEFINITIONS: Record<string, (key: string) => object> = {
+      'a prototype value': (key) => Object.create({ [key]: 'hidden' }) as object,
+      'a prototype getter': (key) =>
+        Object.create(Object.defineProperty({}, key, { get: () => 'hidden' })) as object,
+      'an own non-enumerable property': (key) =>
+        Object.defineProperty({}, key, { value: 'hidden' }),
+    };
+
+    it.each(
+      DATA_PATH_KEYS.flatMap(([intent, key]) =>
+        Object.keys(HIDDEN_DEFINITIONS).map((how) => [intent, key, how] as const)
+      )
+    )('createCache.%s() rejects %s defined as %s', (intent, key, how) => {
+      const options = Object.assign(HIDDEN_DEFINITIONS[how](key), REQUIRED[intent]);
 
       expect(() => createCache[intent](options as never)).toThrow(
         new RegExp(`does not support the option "${key}"`)
