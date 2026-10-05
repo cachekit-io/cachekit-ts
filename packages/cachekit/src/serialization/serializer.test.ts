@@ -10,6 +10,7 @@ import {
   resolveSerializerConfig,
 } from './serializer.js';
 import { ConfigurationError, ValueTooLargeError, SerializationError } from '../errors.js';
+import { decodeInteropValue } from './interop.js';
 
 const retag = <T extends object>(value: T, tag: string): T =>
   Object.defineProperty(value, Symbol.toStringTag, { value: tag });
@@ -455,8 +456,27 @@ describe('MessagePackSerializer', () => {
       // (incl. bin, bigint→int64, float64, ext→timestamp, and collections wide
       // enough to emit array16/map16, not just fixarray/fixmap) and assert the
       // pre-scan accepts exactly what the decoder accepts — proving no
-      // skip-width desync. `useBigInt64` matches the interop decode path.
+      // skip-width desync. The interop reader (decodeInteropValue) trusts the
+      // pre-scan for backing and end of input, so it runs in both arms too: on
+      // legal values it must read what @msgpack/msgpack reads (64-bit ints as
+      // BigInt, normalised to number when safe, as the interop path does).
       const encOpts = { useBigInt64: true } as const;
+      const safeInts = (v: unknown): unknown => {
+        if (typeof v === 'bigint') {
+          return v >= Number.MIN_SAFE_INTEGER && v <= Number.MAX_SAFE_INTEGER ? Number(v) : v;
+        }
+        if (Array.isArray(v)) return v.map(safeInts);
+        if (
+          v !== null &&
+          typeof v === 'object' &&
+          !(v instanceof Uint8Array) &&
+          !(v instanceof Date)
+        ) {
+          const rec = v as Record<string, unknown>;
+          return Object.fromEntries(Object.keys(rec).map((k) => [k, safeInts(rec[k])]));
+        }
+        return v;
+      };
       const opts = { ...boundedDecodeOptions(10000, 10 * 1024 * 1024), useBigInt64: true };
       let seed = 0x2487;
       const rand = () => {
@@ -500,6 +520,7 @@ describe('MessagePackSerializer', () => {
         // Legal values must pass the pre-scan and round-trip through the decoder.
         expect(() => assertDecodeDepth(bytes, 100)).not.toThrow();
         expect(() => msgpackDecode(bytes, opts)).not.toThrow();
+        expect(decodeInteropValue(bytes)).toStrictEqual(safeInts(msgpackDecode(bytes, opts)));
       }
 
       // Random garbage: the pre-scan must either accept or reject through
@@ -513,12 +534,32 @@ describe('MessagePackSerializer', () => {
       for (let i = 0; i < 1000; i++) {
         const bytes = new Uint8Array(Math.floor(rand() * 48));
         for (let j = 0; j < bytes.length; j++) bytes[j] = Math.floor(rand() * 256);
+        let scanned = true;
         try {
           assertDecodeDepth(bytes, 100);
         } catch (error) {
           // A non-SerializationError means the walker itself faulted, not a
           // structural rejection.
           expect(error).toBeInstanceOf(SerializationError);
+          scanned = false;
+        }
+        // The interop reader may reject garbage, but only as SerializationError,
+        // and never a document both the pre-scan and @msgpack/msgpack accept
+        // (it accepts every key type that decoder does, and more).
+        let decoded = false;
+        try {
+          msgpackDecode(bytes, opts);
+          decoded = true;
+        } catch {
+          // garbage the decoder rejects: no claim
+        }
+        try {
+          decodeInteropValue(bytes);
+        } catch (error) {
+          expect(error).toBeInstanceOf(SerializationError);
+          expect(scanned && decoded, `interop rejected a readable document: ${String(error)}`).toBe(
+            false
+          );
         }
       }
     });

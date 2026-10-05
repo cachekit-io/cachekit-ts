@@ -13,6 +13,7 @@ import {
 } from './interop.js';
 import { ConfigurationError, SerializationError, ValueTooLargeError } from '../errors.js';
 import { DEFAULT_MAX_COLLECTION_SIZE } from '../constants.js';
+import { ExtData } from '@msgpack/msgpack';
 
 function hex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
@@ -389,8 +390,28 @@ describe('interop value decoding', () => {
     expect(() => decodeInteropValue(nils)).toThrow(/exceeds max/);
   });
 
+  it('rejects a backed map over the collection cap', () => {
+    const n = DEFAULT_MAX_COLLECTION_SIZE + 1;
+    const pairs = new Uint8Array(3 + n * 2);
+    pairs.set([0xde, n >> 8, n & 0xff]);
+    for (let i = 0; i < n; i++) pairs.set([0xa0, 0xc0], 3 + i * 2); // '' -> nil
+    expect(() => decodeInteropValue(pairs)).toThrow(/exceeds max/);
+  });
+
+  it('reads an ext type it has no codec for as ExtData (reader_ext_type)', () => {
+    expect(decodeInteropValue(Uint8Array.of(0xd4, 0x01, 0x2a))).toEqual(
+      new ExtData(1, Uint8Array.of(0x2a))
+    );
+  });
+
+  it('reads invalid UTF-8 as U+FFFD at every length', () => {
+    // An overlong '/' (c0 af): @msgpack/msgpack read it as '/' below 201 bytes.
+    expect(decodeInteropValue(Uint8Array.of(0xa2, 0xc0, 0xaf))).toBe('\ufffd\ufffd');
+  });
+
   it('reads an integer map key at any width as the same property', () => {
-    // {1: 42} with the key as fixint and as uint64; @msgpack/msgpack threw on the latter.
+    // {1: 42} with the key as fixint (reader_non_string_map_key) and as uint64;
+    // @msgpack/msgpack threw on the latter.
     expect(decodeInteropValue(Uint8Array.of(0x81, 0x01, 0x2a))).toEqual({ 1: 42 });
     expect(decodeInteropValue(Uint8Array.of(0x81, 0xcf, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x2a))).toEqual({
       1: 42,

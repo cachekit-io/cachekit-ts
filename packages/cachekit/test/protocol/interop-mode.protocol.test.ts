@@ -62,6 +62,7 @@ interface ReaderVector {
   name: string;
   input_hex: string;
   value?: unknown;
+  error?: string;
 }
 
 interface VectorFile {
@@ -329,7 +330,25 @@ describe('interop/v1 value vectors', () => {
   });
 });
 
+/**
+ * The guard error each reader reject vector must trip, keyed by name (a
+ * re-vendored reject vector fails until it is added here). The error class
+ * alone is a false green: any decoder failure throws SerializationError.
+ */
+const READER_REJECTION: Record<string, RegExp> = {
+  reader_trailing_byte: /^Trailing bytes after MessagePack document: .* \(decode pre-scan\)$/,
+};
+
 describe('interop/v1 reader vectors', () => {
+  it('pins which accept vectors carry a value', () => {
+    // The two without one (an integer map key, an ext type) have their decoded
+    // form asserted in src/serialization/interop.test.ts instead.
+    expect(vectors.reader_accept_vectors.filter((v) => v.value !== undefined)).toHaveLength(4);
+    expect(vectors.reader_reject_vectors.map((v) => v.name).sort()).toEqual(
+      Object.keys(READER_REJECTION).sort()
+    );
+  });
+
   it.each(vectors.reader_accept_vectors)('accepts $name', ({ input_hex, value }) => {
     const decoded = decodeInteropValue(hexToBytes(input_hex));
     if (value !== undefined) {
@@ -337,8 +356,10 @@ describe('interop/v1 reader vectors', () => {
     }
   });
 
-  it.each(vectors.reader_reject_vectors)('rejects $name', ({ input_hex }) => {
-    expect(() => decodeInteropValue(hexToBytes(input_hex))).toThrow(SerializationError);
+  it.each(vectors.reader_reject_vectors)('rejects $name ($error)', ({ name, input_hex }) => {
+    const run = (): unknown => decodeInteropValue(hexToBytes(input_hex));
+    expect(run).toThrow(SerializationError);
+    expect(run).toThrow(READER_REJECTION[name]!);
   });
 });
 

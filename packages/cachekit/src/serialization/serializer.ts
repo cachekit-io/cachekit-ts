@@ -107,6 +107,12 @@ export function boundedDecodeOptions(maxCollectionSize: number, maxDecodedSize: 
  * pre-scan/decoder desync can only ever *reject* (availability), never *admit*
  * bytes the decoder would then amplify.
  *
+ * The interop reader (readInteropDocument in interop.ts) does no bounds checks
+ * of its own: it relies on this walk for backing, depth and exact end of input.
+ * A width disagreement between the two could make it misread rather than
+ * reject, so it re-checks that it ended at `data.length`, and the differential
+ * fuzz in serializer.test.ts runs both parsers over the same inputs.
+ *
  * It also counts what L1 charges for on a read (see `ObjectCount`): the
  * values that decode to a heap object of their own (arrays and maps, empty
  * ones included, bin and ext), and the elements and map entries those arrays

@@ -65,6 +65,8 @@ const textEncoder = new TextEncoder();
 // ignoreBOM keeps a leading U+FEFF: it is part of the string, not a byte order
 // mark (bom_strings_value). A default TextDecoder strips it.
 const textDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
+/** Strings up to this many bytes try a pure-JS ASCII decode first. */
+const SHORT_STRING_MAX = 64;
 
 /** Profile selector: args are hashed (strict arity), values round-trip. */
 type InteropProfile = 'args' | 'value';
@@ -630,28 +632,54 @@ export function encodeInteropValueCounted(value: unknown, count: ObjectCount): U
 /**
  * Materialise the one MessagePack document in `data`. Call only after
  * assertDecodeDepth has accepted `data`: that walk proves every header is
- * backed by the input, the nesting is within bound and the document ends
- * exactly at `data.length`, so this reader does no bounds checks of its own.
+ * backed by the input and the nesting is within bound, so this reader does no
+ * bounds checks of its own. It still checks it ended exactly at `data.length`,
+ * so a width disagreement between the two parsers throws instead of misreading.
  *
  * The SDK reads interop values itself rather than through @msgpack/msgpack
  * (3.1.3), which rejects the string map key `__proto__` outright and strips a
  * leading U+FEFF from strings longer than 200 bytes. Both are ordinary interop
  * values (proto_key_value, bom_strings_value). Output matches that decoder
- * otherwise: maps become plain objects, a string or number key names the
- * property, 64-bit integers decode as BigInt, and ext values go through its
- * default codec (the timestamp ext becomes a Date).
+ * otherwise (maps become plain objects, a string or number key names the
+ * property, 64-bit integers decode as BigInt, bin values are views of `data`,
+ * and ext values go through its default codec, so the timestamp ext becomes a
+ * Date), with two differences:
+ * - An integer key written at 64-bit width names the property like any other
+ *   integer key; that decoder threw on it.
+ * - Invalid UTF-8 reads as U+FFFD at every length, as WHATWG decoding does;
+ *   that decoder did so only above 200 bytes and misread shorter strings (an
+ *   overlong `c0 af` came back as "/").
  */
 function readInteropDocument(data: Uint8Array): unknown {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   let pos = 0;
 
-  const length = (bytes: 1 | 2 | 4): number => {
-    const n = bytes === 1 ? data[pos]! : bytes === 2 ? view.getUint16(pos) : view.getUint32(pos);
-    pos += bytes;
-    return n;
+  /** Advance past an n-byte fixed-width value already read at `pos`. */
+  const fixed = <T>(n: number, v: T): T => {
+    pos += n;
+    return v;
   };
+  const length = (bytes: 1 | 2 | 4): number =>
+    fixed(
+      bytes,
+      bytes === 1 ? data[pos]! : bytes === 2 ? view.getUint16(pos) : view.getUint32(pos)
+    );
   const take = (n: number): Uint8Array => data.subarray(pos, (pos += n));
-  const str = (n: number): string => textDecoder.decode(take(n));
+  const str = (n: number): string => {
+    // Short ASCII (most keys) skips TextDecoder, which costs more per call than
+    // the whole loop at this length.
+    if (n <= SHORT_STRING_MAX) {
+      let s = '';
+      for (let i = pos; i < pos + n; i++) {
+        const c = data[i]!;
+        if (c >= 0x80) return textDecoder.decode(take(n));
+        s += String.fromCharCode(c);
+      }
+      pos += n;
+      return s;
+    }
+    return textDecoder.decode(take(n));
+  };
   const ext = (n: number): unknown => {
     const type = view.getInt8(pos++);
     return ExtensionCodec.defaultCodec.decode(take(n), type, undefined);
@@ -675,16 +703,21 @@ function readInteropDocument(data: Uint8Array): unknown {
       const key = read();
       if (typeof key !== 'string' && typeof key !== 'number' && typeof key !== 'bigint') {
         throw new SerializationError(
-          `Interop map key must be a string or integer, not ${typeof key}`
+          `Interop map key must be a string or number, not ${typeof key}`
         );
       }
-      // Assignment would treat '__proto__' as the prototype and drop the entry.
-      Object.defineProperty(out, String(key), {
-        value: read(),
-        enumerable: true,
-        writable: true,
-        configurable: true,
-      });
+      const name = String(key);
+      if (name === '__proto__') {
+        // Assignment would set the prototype and drop the entry.
+        Object.defineProperty(out, name, {
+          value: read(),
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
+      } else {
+        out[name] = read();
+      }
     }
     return out;
   };
@@ -696,7 +729,6 @@ function readInteropDocument(data: Uint8Array): unknown {
     if (b <= 0x8f) return map(b & 0x0f);
     if (b <= 0x9f) return array(b & 0x0f);
     if (b <= 0xbf) return str(b & 0x1f);
-    let v: unknown;
     switch (b) {
       case 0xc0:
         return null;
@@ -707,19 +739,15 @@ function readInteropDocument(data: Uint8Array): unknown {
       case 0xc4:
       case 0xc5:
       case 0xc6:
-        return take(length(b === 0xc4 ? 1 : b === 0xc5 ? 2 : 4)).slice();
+        return take(length(b === 0xc4 ? 1 : b === 0xc5 ? 2 : 4));
       case 0xc7:
       case 0xc8:
       case 0xc9:
         return ext(length(b === 0xc7 ? 1 : b === 0xc8 ? 2 : 4));
       case 0xca:
-        v = view.getFloat32(pos);
-        pos += 4;
-        return v;
+        return fixed(4, view.getFloat32(pos));
       case 0xcb:
-        v = view.getFloat64(pos);
-        pos += 8;
-        return v;
+        return fixed(8, view.getFloat64(pos));
       case 0xcc:
         return length(1);
       case 0xcd:
@@ -727,23 +755,15 @@ function readInteropDocument(data: Uint8Array): unknown {
       case 0xce:
         return length(4);
       case 0xcf:
-        v = view.getBigUint64(pos);
-        pos += 8;
-        return v;
+        return fixed(8, view.getBigUint64(pos));
       case 0xd0:
-        return view.getInt8(pos++);
+        return fixed(1, view.getInt8(pos));
       case 0xd1:
-        v = view.getInt16(pos);
-        pos += 2;
-        return v;
+        return fixed(2, view.getInt16(pos));
       case 0xd2:
-        v = view.getInt32(pos);
-        pos += 4;
-        return v;
+        return fixed(4, view.getInt32(pos));
       case 0xd3:
-        v = view.getBigInt64(pos);
-        pos += 8;
-        return v;
+        return fixed(8, view.getBigInt64(pos));
       case 0xd4:
         return ext(1);
       case 0xd5:
@@ -770,7 +790,13 @@ function readInteropDocument(data: Uint8Array): unknown {
     }
   }
 
-  return read();
+  const value = read();
+  if (pos !== data.length) {
+    throw new SerializationError(
+      `Interop reader consumed ${pos} of ${data.length} bytes; the decode pre-scan disagrees`
+    );
+  }
+  return value;
 }
 
 /**
@@ -780,7 +806,7 @@ function readInteropDocument(data: Uint8Array): unknown {
  * - Wire-format.md sentinel maps revive: `__datetime__` -> Date. `__date__` /
  *   `__time__` stay as maps — JS has no date-only/time-only type to revive
  *   into, and fabricating a Date instant for them would be wrong.
- * - 64-bit integers decode as BigInt (`useBigInt64`) so a Python-written
+ * - 64-bit integers decode as BigInt (readInteropDocument) so a Python-written
  *   integer beyond 2^53 (e.g. a snowflake ID) is never silently rounded on
  *   read; values inside the safe range normalize back to number for
  *   ergonomics. This mirrors the write-side rule (BigInt required beyond
