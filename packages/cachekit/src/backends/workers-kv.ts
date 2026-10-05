@@ -115,16 +115,24 @@ export class WorkersKVBackend implements Backend {
   /**
    * Delete `key`. `kv.delete` is always issued: a read-ahead can miss an
    * entry KV still holds (a write from another location not yet propagated,
-   * or a cached negative lookup), so it must never gate the delete.
+   * or a cached negative lookup) or fail outright, so it must never gate the
+   * delete. A failing `kv.delete` still rejects with {@link BackendError}.
    *
    * @returns Advisory: `true` only when the read-ahead saw a value (KV's own
-   *   delete is void). It drives `cache.delete()`'s return value, nothing
-   *   durable.
+   *   delete is void); `false` when it missed or failed. It drives
+   *   `cache.delete()`'s return value, nothing durable.
    */
   async delete(key: string): Promise<boolean> {
     this.ensureNotClosed();
+    // The read only feeds the advisory boolean; its failure is not the
+    // delete's failure.
+    let existed = false;
     try {
-      const existed = (await this.kv.get(key, 'arrayBuffer')) !== null;
+      existed = (await this.kv.get(key, 'arrayBuffer')) !== null;
+    } catch {
+      // Swallowed on purpose: the delete below still runs and reports.
+    }
+    try {
       await this.kv.delete(key);
       return existed;
     } catch (error) {
