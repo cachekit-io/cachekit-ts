@@ -67,8 +67,9 @@ const DEFAULT_CONFIG: SerializerConfig = {
  * single element is decoded. Collection headers are capped up front; string
  * and bin lengths are additionally bounded by each caller's input-size cap.
  *
- * Package-internal: shared by the auto-mode serializer, the interop decoder,
- * and the invalidation-event decoder so the bounds cannot drift apart.
+ * Package-internal: shared by the auto-mode serializer and the
+ * invalidation-event decoder so the bounds cannot drift apart. The interop
+ * reader (readInteropDocument) applies the same collection cap itself.
  */
 export function boundedDecodeOptions(maxCollectionSize: number, maxDecodedSize: number) {
   return {

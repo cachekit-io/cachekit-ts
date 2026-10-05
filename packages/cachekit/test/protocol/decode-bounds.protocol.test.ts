@@ -14,9 +14,9 @@
  * `unpack` gains the guard only when the pin moves to a core release that
  * carries it.
  *
- * Provenance: cachekit-io/protocol @ 1729eb7e (the merge of
- * cachekit-io/protocol#59, the revision that last touched the fixture;
- * fixture version 1.1.0).
+ * Provenance: cachekit-io/protocol @ 42ea601f (the merge of
+ * cachekit-io/protocol#164, the revision that last touched the fixture;
+ * fixture version 1.2.0).
  *
  * Re-vendor: copy test-vectors/decode-bounds.json byte-for-byte from the
  * protocol revision you then name in `Provenance` above (the fixtures dir is
@@ -41,7 +41,7 @@ import {
 import { SerializationError } from '../../src/errors.js';
 
 /** sha256 of test-vectors/decode-bounds.json at the provenance above. */
-const FIXTURE_SHA256 = '907b025d2b270a0f60abd9296a8a1c864e69057c553ac7a70206b44256558916'; // pragma: allowlist secret
+const FIXTURE_SHA256 = 'c52c27f724fe138e63440dc0306936b48fe389e2bd823c058b86b30d854e2e2e'; // pragma: allowlist secret
 
 interface Vector {
   name: string;
@@ -148,7 +148,7 @@ describe('Protocol decode-bounds vectors (spec/interop-mode.md#decode-bounds)', 
       'fixture differs from the pinned protocol revision; if intentional, refresh FIXTURE_SHA256 AND the counts'
     ).toBe(FIXTURE_SHA256);
     expect(vectors.spec).toBe('spec/interop-mode.md#decode-bounds');
-    expect(vectors.reject_vectors).toHaveLength(17);
+    expect(vectors.reject_vectors).toHaveLength(19);
     expect(vectors.accept_vectors).toHaveLength(3);
     expect(vectors.accept_vectors.map((v) => v.name).sort()).toEqual(Object.keys(EXPECTED).sort());
     // Reject vectors the event size cap stops before the event site's guard.
@@ -206,6 +206,11 @@ describe('Protocol decode-bounds vectors (spec/interop-mode.md#decode-bounds)', 
           case 'overclaim':
             expect(v.declared_slots, v.name).toBeGreaterThan(inputLen - 1);
             break;
+          case 'incomplete':
+            // Within the slot budget, so only the walk's completeness check
+            // rejects it: the reject loop asserts that check's own error.
+            expect(v.declared_slots, v.name).toBeLessThanOrEqual(inputLen - 1);
+            break;
           default:
             throw new Error(`${v.name}: unknown reject reason ${String(reason)}`);
         }
@@ -217,6 +222,11 @@ describe('Protocol decode-bounds vectors (spec/interop-mode.md#decode-bounds)', 
     expect(
       vectors.reject_vectors.filter((v) => v.reject_reasons?.join() === 'depth'),
       'no depth-only reject vector left: the depth bound is no longer pinned'
+    ).not.toHaveLength(0);
+    // Likewise the completeness check rests on the vectors that fit the budget.
+    expect(
+      vectors.reject_vectors.filter((v) => v.reject_reasons?.join() === 'incomplete'),
+      'no incomplete reject vector left: the completeness check is no longer pinned'
     ).not.toHaveLength(0);
   });
 

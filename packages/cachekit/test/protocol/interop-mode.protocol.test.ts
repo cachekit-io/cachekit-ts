@@ -10,9 +10,10 @@
  * tools/interop-crosscheck.mjs; this suite is the cachekit-ts SDK's own
  * mandatory verification (spec "SDK Implementation Requirements" #7).
  *
- * Provenance: cachekit-io/protocol test-vectors/interop-mode.json 1.2.0 from
- * https://github.com/cachekit-io/protocol/pull/94, copied byte-for-byte. Re-vendoring
- * means refreshing FIXTURE_SHA256 and the counts in the first test.
+ * Provenance: cachekit-io/protocol test-vectors/interop-mode.json 1.3.0 from
+ * https://github.com/cachekit-io/protocol/pull/164 (merge commit 42ea601f), copied
+ * byte-for-byte. Re-vendoring means refreshing FIXTURE_SHA256 and the counts in the
+ * first test.
  */
 
 import { createHash } from 'node:crypto';
@@ -30,6 +31,7 @@ import {
 } from '../../src/serialization/interop.js';
 import { EncryptionManager } from '../../src/encryption/manager.js';
 import { AAD_VERSION } from '../../src/constants.js';
+import { SerializationError } from '../../src/errors.js';
 
 interface KeyVector {
   name: string;
@@ -53,6 +55,13 @@ interface ErrorVector {
   operation?: string;
   args: unknown[];
   error: string;
+}
+
+/** reader_accept_vectors / reader_reject_vectors: raw MessagePack for the value reader. */
+interface ReaderVector {
+  name: string;
+  input_hex: string;
+  value?: unknown;
 }
 
 interface VectorFile {
@@ -79,10 +88,12 @@ interface VectorFile {
     ciphertext_hex: string;
   }[];
   error_vectors: ErrorVector[];
+  reader_accept_vectors: ReaderVector[];
+  reader_reject_vectors: ReaderVector[];
 }
 
 /** sha256 of test-vectors/interop-mode.json at the provenance above. */
-const FIXTURE_SHA256 = '702613766d1b92bc3a337627a96b9aedc89abfeb4d9208c2bb00c9539a0a1f40'; // pragma: allowlist secret
+const FIXTURE_SHA256 = 'e1ca6c2361509f347d17f3352e0d7ab4d4b61488737bdf0056bb5769d9794e72'; // pragma: allowlist secret
 
 const raw = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'interop-mode.json')
@@ -166,13 +177,64 @@ function fromTagged(v: unknown): unknown {
           throw new Error(`unknown tag ${keys[0]}`);
       }
     }
-    const out: Record<string, unknown> = {};
-    for (const k of keys) {
-      out[k] = fromTagged(record[k]);
-    }
-    return out;
+    return mapEntries(keys, (k) => fromTagged(record[k]));
   }
   return v;
+}
+
+/**
+ * Build a plain object with an own property per key. Assignment (`out[k] = v`)
+ * would treat a '__proto__' key as a prototype change and drop it
+ * (map_key_proto, proto_key_value), so define each property instead.
+ */
+function mapEntries(keys: string[], value: (k: string) => unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const k of keys) {
+    Object.defineProperty(out, k, {
+      value: value(k),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return out;
+}
+
+/**
+ * Tagged JSON -> what decodeInteropValue returns for it: a float64 reads back as
+ * a plain number (`2.0 === 2`), an integer as a number when it is safe and a
+ * BigInt otherwise, bytes as Uint8Array, and the wire-format `__datetime__`
+ * sentinel map as the Date the reader revives it into (millisecond precision).
+ * Value and reader vectors carry no other tag.
+ */
+function toReadForm(v: unknown): unknown {
+  if (Array.isArray(v)) {
+    return v.map(toReadForm);
+  }
+  if (v === null || typeof v !== 'object') {
+    return v;
+  }
+  const keys = Object.keys(v);
+  const record = v as Record<string, unknown>;
+  if (keys.length === 1 && keys[0]!.startsWith('$')) {
+    const val = record[keys[0]!] as string;
+    switch (keys[0]) {
+      case '$float':
+        return Number(val);
+      case '$int': {
+        const n = BigInt(val);
+        return n >= Number.MIN_SAFE_INTEGER && n <= Number.MAX_SAFE_INTEGER ? Number(n) : n;
+      }
+      case '$bytes':
+        return hexToBytes(val);
+      default:
+        throw new Error(`tag ${keys[0]} has no read form`);
+    }
+  }
+  if (keys.length === 2 && record['__datetime__'] === true && typeof record['value'] === 'string') {
+    return new Date(record['value']);
+  }
+  return mapEntries(keys, (k) => toReadForm(record[k]));
 }
 
 /** Mirror of EncryptionManager's private buildAAD (protocol v1.0.1 §5.6.2) —
@@ -212,9 +274,11 @@ describe('interop/v1 vector fixture', () => {
       createHash('sha256').update(raw).digest('hex'),
       'fixture differs from the pinned protocol revision; if intentional, refresh FIXTURE_SHA256 AND the counts'
     ).toBe(FIXTURE_SHA256);
-    expect(vectors.key_vectors).toHaveLength(35);
-    expect(vectors.value_vectors).toHaveLength(4);
-    expect(vectors.error_vectors).toHaveLength(13);
+    expect(vectors.key_vectors).toHaveLength(44);
+    expect(vectors.value_vectors).toHaveLength(6);
+    expect(vectors.error_vectors).toHaveLength(34);
+    expect(vectors.reader_accept_vectors).toHaveLength(6);
+    expect(vectors.reader_reject_vectors).toHaveLength(1);
   });
 });
 
@@ -242,11 +306,14 @@ describe('interop/v1 value vectors', () => {
     }
   );
 
-  it('accepts every published value payload on read (canonical or not)', () => {
-    for (const v of vectors.value_vectors) {
-      expect(() => decodeInteropValue(hexToBytes(v.canonical_msgpack_hex))).not.toThrow();
+  it.each(vectors.value_vectors)(
+    '$name reads back as its value',
+    ({ value, canonical_msgpack_hex }) => {
+      expect(decodeInteropValue(hexToBytes(canonical_msgpack_hex))).toStrictEqual(
+        toReadForm(value)
+      );
     }
-  });
+  );
 
   it('reads float64 2.0 from another SDK as the number 2', () => {
     const v = vectors.value_vectors.find((x) => x.name === 'float_value_stays_float64')!;
@@ -259,6 +326,19 @@ describe('interop/v1 value vectors', () => {
     expect(revived).toBeInstanceOf(Date);
     // JS Date carries milliseconds; the microsecond tail truncates on revival.
     expect(revived.getTime()).toBe(Date.UTC(2024, 0, 1, 12, 30, 45, 123));
+  });
+});
+
+describe('interop/v1 reader vectors', () => {
+  it.each(vectors.reader_accept_vectors)('accepts $name', ({ input_hex, value }) => {
+    const decoded = decodeInteropValue(hexToBytes(input_hex));
+    if (value !== undefined) {
+      expect(decoded).toStrictEqual(toReadForm(value));
+    }
+  });
+
+  it.each(vectors.reader_reject_vectors)('rejects $name', ({ input_hex }) => {
+    expect(() => decodeInteropValue(hexToBytes(input_hex))).toThrow(SerializationError);
   });
 });
 

@@ -12,6 +12,7 @@ import {
   InteropFloat,
 } from './interop.js';
 import { ConfigurationError, SerializationError, ValueTooLargeError } from '../errors.js';
+import { DEFAULT_MAX_COLLECTION_SIZE } from '../constants.js';
 
 function hex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
@@ -376,6 +377,29 @@ describe('interop value decoding', () => {
     );
     // map16 claiming 65535 entries.
     expect(() => decodeInteropValue(Uint8Array.of(0xde, 0xff, 0xff))).toThrow(SerializationError);
+  });
+
+  it('rejects a backed collection over the collection cap', () => {
+    const nils = new Uint8Array(3 + DEFAULT_MAX_COLLECTION_SIZE + 1).fill(0xc0);
+    nils.set([
+      0xdc,
+      (DEFAULT_MAX_COLLECTION_SIZE + 1) >> 8,
+      (DEFAULT_MAX_COLLECTION_SIZE + 1) & 0xff,
+    ]);
+    expect(() => decodeInteropValue(nils)).toThrow(/exceeds max/);
+  });
+
+  it('reads an integer map key at any width as the same property', () => {
+    // {1: 42} with the key as fixint and as uint64; @msgpack/msgpack threw on the latter.
+    expect(decodeInteropValue(Uint8Array.of(0x81, 0x01, 0x2a))).toEqual({ 1: 42 });
+    expect(decodeInteropValue(Uint8Array.of(0x81, 0xcf, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x2a))).toEqual({
+      1: 42,
+    });
+  });
+
+  it('still reads the msgpack timestamp ext as a Date', () => {
+    // fixext4, type -1, 32-bit seconds = 1.
+    expect(decodeInteropValue(Uint8Array.of(0xd6, 0xff, 0, 0, 0, 1))).toEqual(new Date(1000));
   });
 
   it('surfaces a CK v3 frame with a targeted diagnostic', () => {
