@@ -224,13 +224,10 @@ const PRODUCTION_RELIABILITY: ReliabilityConfig = {
 export function buildIntents<TCache extends SecureCache>(
   baseCreate: (options: CacheOptions) => TCache
 ): CreateCacheFn<TCache> {
-  // Each factory destructures exactly the options it applies; whatever is
-  // left over is rejected, so an option is accepted only if it is read.
-
   function createMinimal(options: MinimalOptions): TCache {
     const { url, keyPrefix, backend, ttl, l1, compression, serializer, invalidation, ...rest } =
       options;
-    rejectUnsupportedOptions('minimal', rest);
+    rejectUnsupportedOptions('minimal', options, rest);
 
     const cacheOptions: CacheOptions = {
       backend: resolveIntentBackend({ url, keyPrefix, backend }, 'minimal'),
@@ -266,7 +263,7 @@ export function buildIntents<TCache extends SecureCache>(
       invalidation,
       ...rest
     } = options;
-    rejectUnsupportedOptions('production', rest);
+    rejectUnsupportedOptions('production', options, rest);
 
     const cacheOptions: CacheOptions = {
       backend: resolveIntentBackend({ url, keyPrefix, backend }, 'production'),
@@ -299,7 +296,8 @@ export function buildIntents<TCache extends SecureCache>(
       invalidation,
       ...rest
     } = options;
-    rejectUnsupportedOptions('secure', rest);
+    rejectUnsupportedOptions('secure', options, rest);
+    const intentBackend = resolveIntentBackend({ url, keyPrefix, backend }, 'secure');
 
     const masterKey = masterKeyOption ?? envVar('CACHEKIT_MASTER_KEY');
     if (!masterKey) {
@@ -310,7 +308,7 @@ export function buildIntents<TCache extends SecureCache>(
     }
 
     const cacheOptions: CacheOptions = {
-      backend: resolveIntentBackend({ url, keyPrefix, backend }, 'secure'),
+      backend: intentBackend,
       defaultTtl: ttl ?? 600,
       l1: withFullL1Defaults(l1),
       encryption: {
@@ -343,7 +341,7 @@ export function buildIntents<TCache extends SecureCache>(
       invalidation,
       ...rest
     } = options;
-    rejectUnsupportedOptions('io', rest);
+    rejectUnsupportedOptions('io', options, rest);
 
     const apiKey = apiKeyOption ?? envVar('CACHEKIT_API_KEY');
     if (!apiKey) {
@@ -387,17 +385,42 @@ export function buildIntents<TCache extends SecureCache>(
 type IntentName = 'minimal' | 'production' | 'secure' | 'io';
 
 /**
+ * Encryption-bearing options an intent does not apply, read as properties of
+ * the options object. A destructure's rest holds only own enumerable keys, so
+ * these are also looked up through the prototype chain: one inherited from a
+ * prototype or a class getter is rejected too. `secure` applies the key
+ * options at the top level; `io` applies all of them.
+ */
+const UNSUPPORTED_ENCRYPTION_KEYS: Record<IntentName, readonly string[]> = {
+  minimal: ['encryption', 'masterKey', 'previousMasterKeys', 'tenantId'],
+  production: ['encryption', 'masterKey', 'previousMasterKeys', 'tenantId'],
+  secure: ['encryption'],
+  io: [],
+};
+
+/**
  * Reject the options left over after a factory destructured the ones it
  * applies: an option a preset does not apply fails at construction, never
  * gets dropped (protocol spec intent-presets.md, Explicit Configuration rule 2).
  * TypeScript object literals already fail to compile; this covers plain
  * JavaScript and non-literal objects. An option set to `undefined` asks for
- * nothing, so it passes.
+ * nothing, so it passes. `rest` is typed `Record<string, never>` so that an
+ * option added to an intent's type but not to its destructure fails to
+ * compile instead of throwing for every caller.
  */
-function rejectUnsupportedOptions(intent: IntentName, rest: object): void {
+function rejectUnsupportedOptions(
+  intent: IntentName,
+  options: object,
+  rest: Record<string, never>
+): void {
   const unsupported = Object.entries(rest)
     .filter(([, value]) => value !== undefined)
     .map(([key]) => key);
+  for (const key of UNSUPPORTED_ENCRYPTION_KEYS[intent]) {
+    if (!unsupported.includes(key) && Reflect.get(options, key) !== undefined) {
+      unsupported.push(key);
+    }
+  }
   if (unsupported.length === 0) return;
 
   let hint = '';
@@ -405,7 +428,7 @@ function rejectUnsupportedOptions(intent: IntentName, rest: object): void {
     hint =
       intent === 'secure'
         ? ' Pass masterKey, previousMasterKeys and tenantId as top-level options.'
-        : ' For an encrypted cache use createCache.secure(), or createCache() with encryption.';
+        : ' For an encrypted cache use createCache.secure(), createCache.io() with encryption, or createCache() with encryption.';
   }
   const names = unsupported.map((key) => `"${key}"`).join(', ');
   throw new ConfigurationError(
