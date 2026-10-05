@@ -829,7 +829,8 @@ from the SDK's perspective. Treat it as an accelerator tier, not
 authoritative storage. `delete()` on KV always issues the delete; its
 boolean comes from a read before the delete (KV's own delete is void), so it
 is advisory: a write from another location or a cached negative lookup can
-hide an entry from that read.
+hide an entry from that read. A read that fails returns `false` and is
+reported through the library logger by key digest.
 
 > **Cache API caveats.** `caches.default` requires a Worker on a **route or
 > custom domain** — it is a silent no-op on `*.workers.dev` and in the
