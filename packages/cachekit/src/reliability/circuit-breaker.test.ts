@@ -277,6 +277,26 @@ describe('CircuitBreaker', () => {
       expect(breaker.state).toBe('closed');
     });
 
+    it('a permanent error on a probe that settles after the breaker reopened frees no slot', async () => {
+      await openThenHalfOpen();
+      let rejectProbe!: (e: Error) => void;
+      const probe = breaker.execute(
+        () => new Promise<string>((_, reject) => (rejectProbe = reject))
+      );
+      await expect(
+        breaker.execute(() => Promise.reject(new BackendError('down', 'transient')))
+      ).rejects.toThrow();
+      expect(breaker.state).toBe('open');
+
+      // Not stale (the breaker is open, not half-open again), so the probe still
+      // releases its slot, but reopening already zeroed the count.
+      const err = new BackendError('rejected', 'permanent');
+      rejectProbe(err);
+      await expect(probe).rejects.toBe(err);
+      expect(breaker.state).toBe('open');
+      expect((breaker as unknown as { callsInHalfOpen: number }).callsInHalfOpen).toBe(0);
+    });
+
     // Opens, goes half-open, starts a probe that stays in flight, then reopens and
     // goes half-open again: the pending probe now belongs to a finished round.
     // With observe false nothing reads `state`, so the open -> half-open
