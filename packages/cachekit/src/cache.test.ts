@@ -18,7 +18,7 @@ import {
 import { forgedEnvelope } from '../test/fixtures/forged-envelope.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
 import { EncryptionManagerCore } from './encryption/manager-core.js';
-import type { SecureCache } from './types/cache.js';
+import type { SecureCache, WrapOptionsBase } from './types/cache.js';
 import type { Backend } from './backends/types.js';
 import { CacheImpl, type ByteStorageLike } from './cache-core.js';
 import { L1Cache } from './l1/lru-cache.js';
@@ -1131,6 +1131,29 @@ describe('Cache Integration', () => {
       expect(spy.mock.calls[0][5]).toBe(serializedLength);
       await swrCache.close();
     });
+  });
+
+  it('an SWR refresh of a wrap() with no ttl (a JavaScript caller) uses defaultTtl, not NaN', async () => {
+    const swrCache = createCache({
+      backend: new InMemoryBackend(),
+      defaultTtl: 60,
+      l1: { swrEnabled: true, swrThresholdRatio: 2 },
+    });
+    const spy = vi.spyOn(L1Cache.prototype, 'completeRefresh');
+    // `satisfies` keeps every other option type-checked; the directive fails
+    // the type-check if `ttl` ever stops being required.
+    const noTtl = { namespace: 'swr:no-ttl' } satisfies Omit<WrapOptionsBase, 'ttl'>;
+    // @ts-expect-error -- a JavaScript caller can omit the required ttl
+    const fn = swrCache.wrap(async () => 'v', noTtl);
+    try {
+      await fn(); // cold miss
+      await fn(); // stale hit, schedules the refresh
+      await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+      expect(spy.mock.calls[0][2]).toBe(60_000);
+    } finally {
+      spy.mockRestore();
+      await swrCache.close();
+    }
   });
 
   describe('SWR refresh persistence (L2-only setEntry + version-guarded L1)', () => {

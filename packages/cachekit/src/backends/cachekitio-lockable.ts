@@ -66,8 +66,12 @@ export class LockableCachekitIO implements LockableBackend, Required<Pick<Backen
           `Lock acquire failed (HTTP ${response.status})`,
           classifyHttpError(response.status)
         );
-      const body = (await response.json()) as { lock_id: string | null };
-      return body.lock_id;
+      // API-65: branch on lock_id presence, not the status. Only a non-empty
+      // string is a lease; null, absent, empty or any other type is contested,
+      // so a malformed 200 never turns single-flight off or releases "undefined".
+      const body = (await response.json()) as { lock_id?: unknown } | null;
+      const lockId = body?.lock_id;
+      return typeof lockId === 'string' && lockId !== '' ? lockId : null;
     } catch (error) {
       if (error instanceof BackendError) throw error;
       if (error instanceof Error) {
