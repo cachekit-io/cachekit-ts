@@ -2,7 +2,11 @@ import { readFileSync } from 'node:fs';
 import { cloudflareTest } from '@cloudflare/vitest-pool-workers';
 import { defineConfig } from 'vitest/config';
 
-/** Minimal cachekit.io SaaS emulation: PUT/GET/HEAD/DELETE /v1/cache/:key. */
+/**
+ * Minimal cachekit.io SaaS emulation: PUT/GET/HEAD/DELETE /v1/cache/:key.
+ * Key `redirect-{3xx}` answers that status pointing at key `redirected`,
+ * which answers 200 to any method, so a client that follows succeeds.
+ */
 function createMockCachekitIO() {
   const store = new Map<string, Uint8Array>();
   return async (request: Request): Promise<Response> => {
@@ -16,6 +20,14 @@ function createMockCachekitIO() {
     const match = url.pathname.match(/^\/v1\/cache\/(.+)$/);
     if (!match) return new Response('not found', { status: 404 });
     const key = decodeURIComponent(match[1]);
+    const redirectStatus = /^redirect-(3\d\d)$/.exec(key)?.[1];
+    if (redirectStatus) {
+      return new Response(null, {
+        status: Number(redirectStatus),
+        headers: { Location: '/v1/cache/redirected' },
+      });
+    }
+    if (key === 'redirected') return new Response('followed');
 
     switch (request.method) {
       case 'PUT':

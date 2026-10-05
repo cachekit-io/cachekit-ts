@@ -325,7 +325,11 @@ export interface FileBackendConfig {
 export interface CachekitIOBackendConfig {
   /** API key for authentication (required, e.g., "ck_live_...") */
   apiKey: string;
-  /** API endpoint URL (default: "https://api.cachekit.io"). Must be HTTPS. */
+  /**
+   * API endpoint URL (default: "https://api.cachekit.io"). Must be HTTPS,
+   * with no query or fragment. Redirects are never followed: a 3xx response
+   * is a permanent `BackendError`.
+   */
   apiUrl?: string;
   /**
    * Default TTL in seconds for set operations without explicit TTL.
@@ -337,7 +341,7 @@ export interface CachekitIOBackendConfig {
   defaultTtl?: number;
   /** Per-attempt request timeout in milliseconds (default: 5000, the protocol's CACHEKIT_TIMEOUT default) */
   timeout?: number;
-  /** Allow non-standard API hostnames (custom proxies, etc.) */
+  /** Allow non-standard API hostnames (custom proxies, etc.). Private and loopback IP addresses are still refused. */
   allowCustomHost?: boolean;
   /** Provider function for L1 cache metrics (used in request headers) */
   metricsProvider?: () => L1Metrics | null;

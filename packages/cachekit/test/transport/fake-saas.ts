@@ -9,6 +9,11 @@
  *   POST   /v1/cache/{key}/lock  200 {"lock_id": "<id>" | null}
  *   DELETE /v1/cache/{key}/lock  200 {"success":true}
  *
+ * Two keys exist only to test redirect handling, for any method:
+ * `redirect-{3xx}` answers that status with `Location: /v1/cache/redirected`,
+ * and `redirected` answers 200. A client that follows a redirect therefore
+ * succeeds and shows a `redirected` request.
+ *
  * The backend refuses private IPs and plain http (url-validator.ts), so the
  * fake serves a throwaway self-signed certificate for FAKE_HOST, and
  * startFakeSaas() resolves FAKE_HOST to 127.0.0.1 and trusts that
@@ -31,7 +36,8 @@ export interface FakeSaas {
   readonly url: string;
   /** Distinct TLS connections that carried a request since the last resetCounters(). */
   connections(): number;
-  /** Requests received since the last resetCounters(), as `METHOD route` (route: cache | lock). */
+  /** Requests received since the last resetCounters(), as `METHOD route`
+   * (route: cache | lock | redirect | redirected). */
   requests(): string[];
   /** Zero both counters; stored entries, held locks and open connections stay. */
   resetCounters(): void;
@@ -102,7 +108,10 @@ export async function startFakeSaas(): Promise<FakeSaas> {
       return;
     }
     const cacheKey = decodeURIComponent(match[1]);
-    const route = match[2] ? 'lock' : 'cache';
+    const redirectStatus = /^redirect-(3\d\d)$/.exec(cacheKey)?.[1];
+    let route = match[2] ? 'lock' : 'cache';
+    if (route === 'cache' && redirectStatus) route = 'redirect';
+    if (route === 'cache' && cacheKey === 'redirected') route = 'redirected';
     requests.push(`${req.method} ${route}`);
     sockets.add(req.socket);
 
@@ -112,6 +121,10 @@ export async function startFakeSaas(): Promise<FakeSaas> {
       const json = (status: number, value: unknown) =>
         res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
 
+      if (route === 'redirect') {
+        return res.writeHead(Number(redirectStatus), { location: '/v1/cache/redirected' }).end();
+      }
+      if (route === 'redirected') return res.writeHead(200).end('followed');
       if (route === 'lock') {
         if (req.method === 'POST') {
           if (locks.has(cacheKey)) return json(200, { lock_id: null });

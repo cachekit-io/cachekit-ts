@@ -62,6 +62,59 @@ describe('URL Validator', () => {
     it('blocks IPv4-mapped IPv6 (::ffff:)', () => {
       expect(() => validateCachekitUrl('https://[::ffff:127.0.0.1]', true)).toThrow('private IP');
     });
+
+    it.each([
+      ['unspecified', '[::]'],
+      ['unspecified, uncompressed', '[0:0:0:0:0:0:0:0]'],
+      ['link-local fe80::/10, upper half', '[fe90::1]'],
+      ['link-local fe80::/10, top', '[febf::1]'],
+      ['site-local fec0::/10', '[fec0::1]'],
+      ['site-local fec0::/10, top', '[feff::1]'],
+      ['IPv4-compatible loopback', '[::7f00:1]'],
+      ['IPv4-compatible loopback, dotted', '[::127.0.0.1]'],
+      ['IPv4-compatible 10/8', '[::a00:1]'],
+      ['NAT64 10/8', '[64:ff9b::a00:1]'],
+      ['NAT64 loopback', '[64:ff9b::127.0.0.1]'],
+      ['NAT64 metadata', '[64:ff9b::a9fe:a9fe]'],
+      ['6to4 10/8', '[2002:a00:1::]'],
+      ['6to4 loopback', '[2002:7f00:1::1]'],
+      ['6to4 192.168/16', '[2002:c0a8:101::]'],
+    ])('blocks %s %s', (_name, host) => {
+      expect(() => validateCachekitUrl(`https://${host}`, true)).toThrow('private IP');
+    });
+
+    it.each([
+      ['NAT64 of a public IPv4', '[64:ff9b::808:808]'],
+      ['6to4 of a public IPv4', '[2002:808:808::1]'],
+      ['documentation prefix', '[2001:db8::1]'],
+    ])('allows %s %s', (_name, host) => {
+      expect(() => validateCachekitUrl(`https://${host}`, true)).not.toThrow();
+    });
+  });
+
+  describe('query and fragment', () => {
+    // The SDK appends /v1/cache/{key} to the configured URL as a string, so a
+    // query or fragment there would swallow the whole request path.
+    it.each([
+      'https://api.cachekit.io/?',
+      'https://api.cachekit.io?',
+      'https://api.cachekit.io/?x=1',
+      'https://api.cachekit.io/#',
+      'https://api.cachekit.io#frag',
+    ])('rejects %s', (url) => {
+      expect(() => validateCachekitUrl(url)).toThrow(ConfigurationError);
+      expect(() => validateCachekitUrl(url)).toThrow('query or a fragment');
+    });
+
+    it('rejects them on a custom host too', () => {
+      expect(() => validateCachekitUrl('https://proxy.example.com/base?', true)).toThrow(
+        'query or a fragment'
+      );
+    });
+
+    it('still accepts a custom host with a path prefix', () => {
+      expect(() => validateCachekitUrl('https://proxy.example.com/base/', true)).not.toThrow();
+    });
   });
 
   describe('additional IPv4 private ranges', () => {

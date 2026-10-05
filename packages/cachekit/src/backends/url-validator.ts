@@ -19,34 +19,51 @@ function isStrictIPv4(hostname: string): boolean {
   );
 }
 
+function isPrivateIPv4([a, b]: number[]): boolean {
+  return (
+    a === 127 || // 127.0.0.0/8
+    a === 10 || // 10.0.0.0/8
+    (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
+    (a === 192 && b === 168) || // 192.168.0.0/16
+    (a === 169 && b === 254) || // 169.254.0.0/16
+    a === 0 // 0.0.0.0/8
+  );
+}
+
+/**
+ * The eight 16-bit groups of an IPv6 host as WHATWG `URL` serializes it:
+ * lowercase hex, at most one `::`, never a dotted quad.
+ */
+function ipv6Groups(bare: string): number[] {
+  const [head, tail] = bare.split('::');
+  const groups = (part: string) => (part ? part.split(':').map((g) => parseInt(g, 16)) : []);
+  if (tail === undefined) return groups(head);
+  const left = groups(head);
+  const right = groups(tail);
+  return [...left, ...new Array<number>(8 - left.length - right.length).fill(0), ...right];
+}
+
+function isPrivateIPv6(g: number[]): boolean {
+  const v4 = (hi: number, lo: number) => [hi >> 8, hi & 0xff, lo >> 8, lo & 0xff];
+  const zero = (from: number, to: number) => g.slice(from, to).every((x) => x === 0);
+  if (zero(0, 5) && g[5] === 0xffff) return true; // ::ffff:0:0/96 IPv4-mapped
+  if (zero(0, 6)) return isPrivateIPv4(v4(g[6], g[7])); // ::/96 IPv4-compatible, incl. :: and ::1
+  if (g[0] === 0x64 && g[1] === 0xff9b && zero(2, 6)) return isPrivateIPv4(v4(g[6], g[7])); // NAT64
+  if (g[0] === 0x2002) return isPrivateIPv4(v4(g[1], g[2])); // 2002::/16 6to4
+  if ((g[0] & 0xff80) === 0xfe80) return true; // fe80::/10 link-local, fec0::/10 site-local
+  if ((g[0] & 0xfe00) === 0xfc00) return true; // fc00::/7 unique local
+  return false;
+}
+
 function isPrivateIp(hostname: string): boolean {
   // Exact loopback names
   if (hostname === 'localhost' || hostname === 'localhost.') return true;
 
-  // Strip IPv6 brackets
-  const bare = hostname.replace(/^\[|\]$/g, '');
-
-  // IPv6 checks (only for strings containing ':')
-  if (bare.includes(':')) {
-    const lower = bare.toLowerCase();
-    if (lower === '::1') return true;
-    if (lower.startsWith('fe80:')) return true; // Link-local
-    if (lower.startsWith('fc') || lower.startsWith('fd')) return true; // Unique local fc00::/7
-    if (lower.startsWith('::ffff:')) return true; // IPv4-mapped
-    return false;
-  }
+  // IPv6 (WHATWG keeps the brackets on the hostname)
+  if (hostname.startsWith('[')) return isPrivateIPv6(ipv6Groups(hostname.slice(1, -1)));
 
   // IPv4 standard dotted-decimal (strict validation)
-  if (isStrictIPv4(hostname)) {
-    const nums = hostname.split('.').map(Number);
-    if (nums[0] === 127) return true; // 127.0.0.0/8
-    if (nums[0] === 10) return true; // 10.0.0.0/8
-    if (nums[0] === 172 && nums[1] >= 16 && nums[1] <= 31) return true; // 172.16.0.0/12
-    if (nums[0] === 192 && nums[1] === 168) return true; // 192.168.0.0/16
-    if (nums[0] === 169 && nums[1] === 254) return true; // 169.254.0.0/16
-    if (nums[0] === 0) return true; // 0.0.0.0/8
-    return false;
-  }
+  if (isStrictIPv4(hostname)) return isPrivateIPv4(hostname.split('.').map(Number));
 
   // Reject hostnames that look numeric but bypass isIP (octal/hex/decimal encodings)
   // These resolve to IPs at the OS level even though isIP doesn't recognize them
@@ -58,6 +75,12 @@ function isPrivateIp(hostname: string): boolean {
 export function validateCachekitUrl(url: string, allowCustomHost?: boolean): void {
   if (!url.startsWith('https://')) {
     throw new ConfigurationError('CachekitIO API URL must use HTTPS.');
+  }
+
+  // Request paths are appended to this string, so a query or fragment here
+  // would swallow every one of them.
+  if (/[?#]/.test(url)) {
+    throw new ConfigurationError('CachekitIO API URL must not carry a query or a fragment.');
   }
 
   let parsed: URL;
