@@ -42,6 +42,16 @@ describe('LockableCachekitIO', () => {
     expect(await lockable.acquireLock('contested-key')).toBeNull();
   });
 
+  it.each([
+    ['absent', '{}'],
+    ['empty', '{"lock_id":""}'],
+    ['non-string', '{"lock_id":42}'],
+    ['in a JSON null body', 'null'],
+  ])('acquireLock returns null on a 200 whose lock_id is %s (API-65)', async (_label, body) => {
+    fetchSpy.mockResolvedValueOnce(new Response(body, { status: 200 }));
+    expect(await lockable.acquireLock('malformed-key')).toBeNull();
+  });
+
   it('acquireLock returns null when contested (spec shape: 409 Conflict)', async () => {
     fetchSpy.mockResolvedValueOnce(mockResponse(409));
     expect(await lockable.acquireLock('contested-key')).toBeNull();

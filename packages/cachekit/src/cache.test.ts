@@ -1133,6 +1133,26 @@ describe('Cache Integration', () => {
     });
   });
 
+  it('an SWR refresh of a wrap() with no ttl (a JavaScript caller) uses defaultTtl, not NaN', async () => {
+    const swrCache = createCache({
+      backend: new InMemoryBackend(),
+      defaultTtl: 60,
+      l1: { swrEnabled: true, swrThresholdRatio: 2 },
+    });
+    const spy = vi.spyOn(L1Cache.prototype, 'completeRefresh');
+    const untyped = { namespace: 'swr:no-ttl' } as unknown as Parameters<typeof swrCache.wrap>[1];
+    const fn = swrCache.wrap(async () => 'v', untyped);
+    try {
+      await fn(); // cold miss
+      await fn(); // stale hit, schedules the refresh
+      await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+      expect(spy.mock.calls[0][2]).toBe(60_000);
+    } finally {
+      spy.mockRestore();
+      await swrCache.close();
+    }
+  });
+
   describe('SWR refresh persistence (L2-only setEntry + version-guarded L1)', () => {
     // The SWR refresh persists through setEntry with updateL1=false: the
     // ONLY L1 writer on the refresh path is completeRefresh, whose version
