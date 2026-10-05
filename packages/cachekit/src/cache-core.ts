@@ -459,8 +459,8 @@ export class CacheImpl implements SecureCache {
   private lastSetEncryptFailedWarnAt = 0;
 
   /**
-   * Verified unpack of a suspected legacy/foreign ByteStorage envelope on a
-   * compression-off cache. Returns null when the bytes aren't treated as an
+   * Verified unpack of a suspected legacy/foreign ByteStorage envelope on an
+   * unencrypted compression-off cache. Returns null when the bytes aren't treated as an
    * envelope — the caller then decodes them as plain serialized data. A
    * header or core-cap miss rules an envelope out; a checksum/shape rejection
    * from core is ambiguous (look-alike value or damaged envelope), so it is
@@ -577,9 +577,8 @@ export class CacheImpl implements SecureCache {
    * right for a user value that only looks like an envelope, silent corruption
    * for a damaged real one. The two can't be told apart here, so this report
    * is the only trace either leaves. Core's error text is left out on purpose:
-   * on a secure cache these bytes are decrypted plaintext, and its
-   * deserialization errors can echo scalars from them. The key is digested
-   * for the same reason warnSetRejected gives.
+   * its deserialization errors can echo scalars from the cached value. The key
+   * is digested for the same reason warnSetRejected gives.
    */
   private warnEnvelopeRejected(key: string, size: number): void {
     const now = Date.now();
@@ -779,7 +778,7 @@ export class CacheImpl implements SecureCache {
         );
       }
       plaintext = this.withEnvelopeCodec((codec) => codec.unpack(plaintext));
-    } else if (!interop && looksLikeEnvelope(plaintext)) {
+    } else if (!interop && !this.encryption && looksLikeEnvelope(plaintext)) {
       // Envelope tolerance (LAB-1388): a compression-off cache can read
       // entries a compression-on writer stored — same store, older SDK
       // default, or a mixed-version fleet mid-rollout. This is NOT optional
@@ -796,19 +795,18 @@ export class CacheImpl implements SecureCache {
       // rejects, fall back to plain-serialized; an envelope over the ceiling
       // or an allocation failure throws.
       //
-      // Encrypted caches never reach this branch for a genuinely mismatched
-      // entry: the AAD binds useEnvelope (frozen v0x03 set, protocol#12), so
-      // a compression-off secure cache reading a compression-on entry fails
-      // AAD verification in decrypt() above — a loud, counted decrypt
-      // failure (miss / L1 drop), never a silent wrong decode. Tolerance
-      // after a SUCCESSFUL decrypt only sees the same-AAD case: mostly a
-      // plaintext user value that happens to look like an envelope, resolved
-      // by the verified unpack. An envelope stored under compressed=false
-      // whose bytes exceed maxDecodedSize is refused by the ciphertext cap
-      // above; a smaller one is unwrapped like any look-alike, and no ts, py
-      // or rs writer produces one. We deliberately do NOT retry decrypt() with
-      // the flipped AAD flag: that would reintroduce exactly the envelope-
-      // mode ambiguity the AAD binding exists to rule out.
+      // Plaintext caches only. The protocol selects the post-decryption
+      // container from the reader's configuration, never by sniffing the
+      // decrypted bytes (spec/encryption.md). Encrypted caches never need the
+      // tolerance anyway: the AAD binds useEnvelope (frozen v0x03 set,
+      // protocol#12), so a compression-off secure cache reading a
+      // compression-on entry fails AAD verification in decrypt() above — a
+      // loud, counted decrypt failure (miss / L1 drop), never a silent wrong
+      // decode. A plaintext that DOES decrypt here was sealed as a plain
+      // serialized value, so it decodes as one, even when it happens to be a
+      // valid envelope. We deliberately do NOT retry decrypt() with the
+      // flipped AAD flag: that would reintroduce exactly the envelope-mode
+      // ambiguity the AAD binding exists to rule out.
       plaintext = this.tryUnwrapEnvelope(plaintext, key) ?? plaintext;
     }
     // The decode's depth pre-scan counts the heap objects and values on the

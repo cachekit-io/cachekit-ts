@@ -862,6 +862,31 @@ describe('Cache Integration', () => {
             await cache.close();
           }
         );
+
+        it('decodes a decrypted envelope-shaped plaintext as plain MessagePack, never unwrapping it', async () => {
+          // The protocol picks the post-decryption container from the reader's
+          // configuration, never by sniffing. A compression-off secure cache's
+          // container is plain MessagePack, so a stored value that happens to
+          // be a valid envelope comes back as the 4-element array it is.
+          const envelope = new ByteStorage().pack(
+            new MessagePackSerializer().encode({ data: 'inner' })
+          );
+          const stored = msgpackDecode(envelope) as unknown[];
+          expect(new MessagePackSerializer().encode(stored)).toEqual(envelope);
+          const cache = createCache({
+            backend: new InMemoryBackend(),
+            encryption,
+            compression: false,
+            l1: { enabled: false },
+            reliability: { degradation: false },
+          });
+          await cache.set('test:sealed-envelope', stored);
+
+          const read = await cache.get<unknown[]>('test:sealed-envelope');
+          expect(read).toHaveLength(4);
+          expect(read).toEqual(stored);
+          await cache.close();
+        });
       });
 
       it.each([0, null, 42.5, { a: 1 }, 'x'.repeat(65)])(
