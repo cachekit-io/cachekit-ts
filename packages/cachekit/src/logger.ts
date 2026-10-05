@@ -52,8 +52,18 @@ export function logError(message: string, error?: unknown): void {
       // eslint-disable-next-line no-console -- last-resort sink when the active logger itself fails
       console.error('[cachekit] logger threw; original report:', message, error, loggerError);
     } catch {
-      // console.error failed too and no sink is left. Rethrowing would escape
-      // logError, or from the .catch below become a new unhandled rejection.
+      // Formatting a caller's object threw (e.g. a throwing inspect hook).
+      // Retry with our own string, which any working console can print.
+      try {
+        // eslint-disable-next-line no-console -- same last-resort sink, string only
+        console.error(`[cachekit] logger threw; report unprintable; original: ${message}`);
+      } catch {
+        // console.error throws even for a string, so the host replaced it and
+        // no sink is left. Rethrowing would escape logError, or from the
+        // .catch below become a new unhandled rejection. process.stderr is no
+        // fallback: Node's console.error swallows a closed pipe (EPIPE), but a
+        // direct stderr write emits an unhandled 'error' that kills the process.
+      }
     }
   };
   try {

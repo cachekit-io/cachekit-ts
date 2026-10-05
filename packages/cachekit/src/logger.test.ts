@@ -1,3 +1,4 @@
+import { format, inspect } from 'node:util';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { setLogger, logError } from './logger.js';
 import { BackgroundRefreshManager } from './cache/background-refresh.js';
@@ -89,6 +90,26 @@ describe('pluggable logger (LAB-517)', () => {
     } finally {
       process.off('unhandledRejection', unhandled);
     }
+  });
+
+  it('an unformattable report still prints the original message', () => {
+    // Node's console.error formats its arguments with util.format, which runs
+    // an object's inspect hook and lets that hook's throw escape.
+    const printed: string[] = [];
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      printed.push(format(...args));
+    });
+    const hostile = {
+      [inspect.custom]() {
+        throw new Error('inspect hook bug');
+      },
+    };
+    setLogger(() => {
+      throw new Error('sync logger bug');
+    });
+
+    expect(() => logError('[cachekit] report', hostile)).not.toThrow();
+    expect(printed).toEqual([expect.stringContaining('[cachekit] report')]);
   });
 
   it('setLogger(null) restores the console.error default', () => {
