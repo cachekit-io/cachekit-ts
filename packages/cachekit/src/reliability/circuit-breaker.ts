@@ -184,7 +184,7 @@ export class CircuitBreaker {
    * ruled out a stale probe first (see `isStale`).
    */
   private releaseHalfOpenSlot(): void {
-    if (this.currentState === 'half-open' && this.callsInHalfOpen > 0) {
+    if (this.callsInHalfOpen > 0) {
       this.callsInHalfOpen--;
     }
   }
