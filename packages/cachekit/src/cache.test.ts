@@ -18,7 +18,7 @@ import {
 import { forgedEnvelope } from '../test/fixtures/forged-envelope.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
 import { EncryptionManagerCore } from './encryption/manager-core.js';
-import type { SecureCache } from './types/cache.js';
+import type { SecureCache, WrapOptionsBase } from './types/cache.js';
 import type { Backend } from './backends/types.js';
 import { CacheImpl, type ByteStorageLike } from './cache-core.js';
 import { L1Cache } from './l1/lru-cache.js';
@@ -1140,8 +1140,11 @@ describe('Cache Integration', () => {
       l1: { swrEnabled: true, swrThresholdRatio: 2 },
     });
     const spy = vi.spyOn(L1Cache.prototype, 'completeRefresh');
-    const untyped = { namespace: 'swr:no-ttl' } as unknown as Parameters<typeof swrCache.wrap>[1];
-    const fn = swrCache.wrap(async () => 'v', untyped);
+    // `satisfies` keeps every other option type-checked; the directive fails
+    // the type-check if `ttl` ever stops being required.
+    const noTtl = { namespace: 'swr:no-ttl' } satisfies Omit<WrapOptionsBase, 'ttl'>;
+    // @ts-expect-error -- a JavaScript caller can omit the required ttl
+    const fn = swrCache.wrap(async () => 'v', noTtl);
     try {
       await fn(); // cold miss
       await fn(); // stale hit, schedules the refresh
