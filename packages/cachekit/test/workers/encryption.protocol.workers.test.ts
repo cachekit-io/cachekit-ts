@@ -20,7 +20,8 @@
  *
  * The 1.2.0 `keyring` and `default_tenant` groups run through the same raw
  * and EncryptionManager layers. The fixture's sha256 is pinned by the Node
- * lane (test/protocol/encryption.protocol.test.ts): workerd has no fs.
+ * lane (test/protocol/encryption.protocol.test.ts): workerd has no fs. The
+ * 1.3.0 `master_key_input` rows run there too, through createCache.secure.
  */
 
 import { describe, it, expect } from 'vitest';
