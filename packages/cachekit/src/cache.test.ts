@@ -862,6 +862,10 @@ describe('Cache Integration', () => {
             await cache.close();
           }
         );
+      });
+
+      describe('encrypted caches: the post-decryption container is the configured one', () => {
+        const encryption = { masterKey: '0'.repeat(64), tenantId: 'ceiling' };
 
         it('decodes a decrypted envelope-shaped plaintext as plain MessagePack, never unwrapping it', async () => {
           // The protocol picks the post-decryption container from the reader's
@@ -883,7 +887,6 @@ describe('Cache Integration', () => {
           await cache.set('test:sealed-envelope', stored);
 
           const read = await cache.get<unknown[]>('test:sealed-envelope');
-          expect(read).toHaveLength(4);
           expect(read).toEqual(stored);
           await cache.close();
         });

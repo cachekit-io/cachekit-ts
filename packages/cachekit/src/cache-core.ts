@@ -265,8 +265,8 @@ export class CacheImpl implements SecureCache {
   private readonly encryption: EncryptionLike | null;
   private readonly byteStorage: ByteStorageLike | null;
   private readonly createByteStorage: () => ByteStorageLike;
-  /** Lazily-created codec for envelope-tolerant reads on compression-off
-   * caches (LAB-1388) — see decodeEntry. */
+  /** Lazily-created codec for envelope-tolerant reads on unencrypted
+   * compression-off caches (LAB-1388) — see decodeEntry. */
   private envelopeReader: ByteStorageLike | null = null;
   private readonly serializerConfig: SerializerConfig;
   private readonly defaultTtl: number;
@@ -768,6 +768,11 @@ export class CacheImpl implements SecureCache {
           `Ciphertext size ${plaintext.length} exceeds max ${maxPlaintext + AEAD_OVERHEAD_BYTES}`
         );
       }
+      // The AAD binds useEnvelope (frozen v0x03 set, protocol#12), so an entry
+      // written under the other compression setting fails here — a loud,
+      // counted decrypt failure, never a silent wrong decode. We deliberately
+      // do NOT retry with the flipped flag: that would reintroduce exactly the
+      // envelope-mode ambiguity the AAD binding exists to rule out.
       plaintext = await this.encryption.decrypt(plaintext, this.aadKey(key), useEnvelope);
     }
     if (useEnvelope) {
@@ -795,18 +800,9 @@ export class CacheImpl implements SecureCache {
       // rejects, fall back to plain-serialized; an envelope over the ceiling
       // or an allocation failure throws.
       //
-      // Plaintext caches only. The protocol selects the post-decryption
+      // Unencrypted caches only: the protocol selects the post-decryption
       // container from the reader's configuration, never by sniffing the
-      // decrypted bytes (spec/encryption.md). Encrypted caches never need the
-      // tolerance anyway: the AAD binds useEnvelope (frozen v0x03 set,
-      // protocol#12), so a compression-off secure cache reading a
-      // compression-on entry fails AAD verification in decrypt() above — a
-      // loud, counted decrypt failure (miss / L1 drop), never a silent wrong
-      // decode. A plaintext that DOES decrypt here was sealed as a plain
-      // serialized value, so it decodes as one, even when it happens to be a
-      // valid envelope. We deliberately do NOT retry decrypt() with the
-      // flipped AAD flag: that would reintroduce exactly the envelope-mode
-      // ambiguity the AAD binding exists to rule out.
+      // decrypted bytes (spec/encryption.md).
       plaintext = this.tryUnwrapEnvelope(plaintext, key) ?? plaintext;
     }
     // The decode's depth pre-scan counts the heap objects and values on the

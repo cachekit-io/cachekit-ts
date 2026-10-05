@@ -45,8 +45,8 @@ export function maxEnvelopeInputSize(maxDecodedSize: number): number {
 
 /**
  * Cheap structural sniff for the ByteStorage envelope: a positional msgpack
- * 4-tuple (fixarray(4) marker). Gates envelope tolerance on compression-off
- * caches so reads of anything else never pay envelopeVerdict. Which
+ * 4-tuple (fixarray(4) marker). Gates envelope tolerance on unencrypted
+ * compression-off caches so reads of anything else never pay envelopeVerdict. Which
  * `compressed_data` encodings count — bin (protocol 1.1) or the legacy array
  * of ints older writers still emit — is readEnvelopeHeader's call alone, so
  * the two cannot drift; any other `[0]` marker fails its read at byte 2.
