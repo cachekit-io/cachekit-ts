@@ -206,7 +206,7 @@ describe('FileBackend', () => {
     });
   });
 
-  it('uses the fractional wall-clock expiry boundary from cachekit-py', async () => {
+  it('expires an entry once the wall clock reaches its expiry second', async () => {
     vi.useFakeTimers();
     try {
       const filePath = path.join(dir, TEST_KEY_HASH);
@@ -215,11 +215,9 @@ describe('FileBackend', () => {
 
       vi.setSystemTime(1_000_999);
       expect(await backend.getTTL('test-key')).toBe(0);
-
-      vi.setSystemTime(1_001_000);
       expect(await backend.get('test-key')).toEqual(new Uint8Array([1]));
 
-      vi.setSystemTime(1_001_001);
+      vi.setSystemTime(1_001_000);
       expect(await backend.get('test-key')).toBeNull();
     } finally {
       vi.useRealTimers();

@@ -402,9 +402,9 @@ function nowSeconds(): bigint {
   return BigInt(Math.floor(Date.now() / 1000));
 }
 
-/** Python compares the integer wire timestamp to its fractional wall clock. */
+/** An entry is expired once the wall clock reaches its whole-second expiry (spec/file-backend-format.md). */
 function isExpired(expiry: bigint): boolean {
-  return expiry > 0n && BigInt(Date.now()) > expiry * 1000n;
+  return expiry > 0n && BigInt(Date.now()) >= expiry * 1000n;
 }
 
 /**
