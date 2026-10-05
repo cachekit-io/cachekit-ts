@@ -206,7 +206,7 @@ describe('FileBackend', () => {
     });
   });
 
-  it('uses the fractional wall-clock expiry boundary from cachekit-py', async () => {
+  it('expires an entry once the wall clock reaches its expiry second', async () => {
     vi.useFakeTimers();
     try {
       const filePath = path.join(dir, TEST_KEY_HASH);
@@ -215,11 +215,27 @@ describe('FileBackend', () => {
 
       vi.setSystemTime(1_000_999);
       expect(await backend.getTTL('test-key')).toBe(0);
-
-      vi.setSystemTime(1_001_000);
       expect(await backend.get('test-key')).toEqual(new Uint8Array([1]));
 
-      vi.setSystemTime(1_001_001);
+      vi.setSystemTime(1_001_000);
+      expect(await backend.get('test-key')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('writes whole-second deadlines: a 1 s TTL can lapse 1 ms later, a sub-second TTL at once', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000_999);
+      await backend.set('test-key', new Uint8Array([1]), 0.5);
+      const raw = await fs.readFile(path.join(dir, TEST_KEY_HASH));
+      expect(raw.readBigUInt64BE(6)).toBe(1000n); // the current second, never the 0 sentinel
+      expect(await backend.get('test-key')).toBeNull();
+
+      await backend.set('test-key', new Uint8Array([2]), 1);
+      expect(await backend.get('test-key')).toEqual(new Uint8Array([2]));
+      vi.setSystemTime(1_001_000);
       expect(await backend.get('test-key')).toBeNull();
     } finally {
       vi.useRealTimers();
