@@ -3,8 +3,8 @@
  *
  * Byte-verifies the wasm32 cachekit-core bindings and the Workers
  * EncryptionManager against protocol/test-vectors/encryption.json (Python
- * ground truth; vendored in ./fixtures/ — re-copy from the protocol repo on
- * spec change). Runs inside real workerd via @cloudflare/vitest-pool-workers,
+ * ground truth; vendored in ./fixtures/ and sha256-pinned by the Node lane).
+ * Runs inside real workerd via @cloudflare/vitest-pool-workers,
  * so wasm instantiation itself is under test.
  *
  * Three layers:
@@ -337,7 +337,6 @@ describe('encryption vectors — keyring (protocol 1.2.0)', () => {
     '%s: raw bindings decrypt under its own entry, and aad_hex matches the spec',
     (_name, vector) => {
       const e = entry(vector.encrypted_with);
-      expect(vector.key_fingerprint_hex).toBe(e.derived_key_fingerprint_hex);
       expect(bytesToHex(buildReferenceAAD(vector, keyring.tenant_id))).toBe(vector.aad_hex);
       ensureInitialized();
       const tk = deriveTenantKeys(hexToBytes(e.master_key_hex), keyring.tenant_id);
@@ -375,8 +374,17 @@ describe('encryption vectors — keyring (protocol 1.2.0)', () => {
 
   it('EncryptionManager without the previous key rejects the k1 vector', async () => {
     const vector = keyring.vectors.find((v) => v.encrypted_with === 'k1')!;
+    const k2Vector = keyring.vectors.find((v) => v.encrypted_with === 'k2')!;
     const manager = new EncryptionManager(entry('k2').master_key_hex, keyring.tenant_id);
     try {
+      // The same manager decrypts the k2 vector first, so an initialisation
+      // failure cannot be what makes the k1 rejection pass.
+      const plaintext = await manager.decrypt(
+        hexToBytes(k2Vector.ciphertext_hex),
+        k2Vector.cache_key,
+        k2Vector.compressed
+      );
+      expect(bytesToHex(plaintext)).toBe(k2Vector.plaintext_hex);
       await expect(
         manager.decrypt(hexToBytes(vector.ciphertext_hex), vector.cache_key, vector.compressed)
       ).rejects.toThrow(EncryptionError);

@@ -30,6 +30,5 @@ describe('protocol encryption.json fixture', () => {
       createHash('sha256').update(raw).digest('hex'),
       'fixture differs from the pinned protocol revision; if intentional, follow the re-vendor list in the FIXTURE_SHA256 docblock'
     ).toBe(FIXTURE_SHA256);
-    expect(JSON.parse(raw.toString('utf8')).version).toBe('1.2.0');
   });
 });

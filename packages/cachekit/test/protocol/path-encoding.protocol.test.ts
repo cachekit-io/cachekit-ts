@@ -2,8 +2,8 @@
  * Cache-Key Path Encoding Protocol Tests (CWE-22)
  *
  * Verifies `encodeKey` and every CachekitIO request builder against
- * protocol/test-vectors/path-encoding.json (vendored in ./fixtures/ — re-copy
- * on spec change). Spec: protocol/spec/saas-api.md § Cache-Key Path Encoding.
+ * protocol/test-vectors/path-encoding.json (vendored in ./fixtures/ and
+ * sha256-pinned below). Spec: protocol/spec/saas-api.md § Cache-Key Path Encoding.
  *
  * Every wire assertion reads the URL the real class handed to `fetch` and
  * parses it with `new URL()` — the post-WHATWG-normalisation path, which is
@@ -88,8 +88,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-// Pins the platform premise the reject-not-encode design rests on. If a runtime
-// ever stops collapsing these, the decision needs revisiting — not silently.
 describe('protocol path-encoding.json fixture', () => {
   it('is the pinned upstream file, unedited since vendoring', () => {
     expect(
@@ -99,6 +97,8 @@ describe('protocol path-encoding.json fixture', () => {
   });
 });
 
+// Pins the platform premise the reject-not-encode design rests on. If a runtime
+// ever stops collapsing these, the decision needs revisiting — not silently.
 describe('AC-0 repro — raw encodeURIComponent lets a dot-segment key escape /v1/cache/', () => {
   it('literal dots collapse client-side', () => {
     expect(new URL(`${BASE}${PREFIX}${encodeURIComponent('.')}`).pathname).toBe(PREFIX);
