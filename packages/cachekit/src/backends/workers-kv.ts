@@ -138,8 +138,14 @@ export class WorkersKVBackend implements Backend {
       // Reported, not rethrown: the delete below still runs. Digest and
       // classification only — the key and the error text can carry the
       // caller's key (same rule as cache-core's describeDeleteFailure).
-      const classification =
-        error instanceof Error ? classifyWorkersRuntimeError(error) : 'unknown';
+      // Classifying reads the foreign error (a `message` getter can throw),
+      // so it is guarded too: reporting must never gate the delete.
+      let classification = 'unknown';
+      try {
+        if (error instanceof Error) classification = classifyWorkersRuntimeError(error);
+      } catch {
+        // Unclassifiable; reported as unknown.
+      }
       logError(
         `[cachekit] Workers KV delete: read-ahead failed (${classification}), delete still issued; ` +
           `returning false (keyHash=${blake2b16Hex(key)})`

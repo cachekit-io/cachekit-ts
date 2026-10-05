@@ -65,6 +65,26 @@ describe('WorkersKVBackend.delete (unit, KV double)', () => {
     expect(error).toBeUndefined();
   });
 
+  it('issues kv.delete even when the rejected read-ahead error cannot be classified', async () => {
+    const log = vi.fn();
+    setLogger(log);
+    const hostile = new Error();
+    Object.defineProperty(hostile, 'message', {
+      get() {
+        throw new Error('message getter threw');
+      },
+    });
+    const kv = new KVDouble(async () => {
+      throw hostile;
+    });
+    const backend = new WorkersKVBackend({ kv });
+
+    expect(await backend.delete('kv:hostile')).toBe(false);
+    expect(kv.deleted).toEqual(['kv:hostile']);
+    expect(log).toHaveBeenCalledOnce();
+    expect(log.mock.calls[0]![0]).toContain('read-ahead failed (unknown)');
+  });
+
   it('does not log when the read-ahead succeeds', async () => {
     const log = vi.fn();
     setLogger(log);
