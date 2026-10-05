@@ -277,29 +277,6 @@ describe('CircuitBreaker', () => {
       expect(breaker.state).toBe('closed');
     });
 
-    it('a probe that outlives its half-open round frees no slot in the next round', async () => {
-      await openThenHalfOpen();
-      let rejectStale!: (e: Error) => void;
-      const stale = breaker.execute(() => new Promise((_, reject) => (rejectStale = reject)));
-
-      // A second probe fails for real: open, then half-open again (a new round).
-      await expect(
-        breaker.execute(() => Promise.reject(new BackendError('down', 'transient')))
-      ).rejects.toThrow();
-      vi.advanceTimersByTime(150);
-      expect(breaker.state).toBe('half-open');
-
-      // Fill this round's two slots, then let the stale probe hit a permanent error.
-      for (let i = 0; i < 2; i++) void breaker.execute(() => new Promise(() => {}));
-      const err = new BackendError('rejected', 'permanent');
-      rejectStale(err);
-      await expect(stale).rejects.toBe(err);
-
-      await expect(breaker.execute(() => Promise.resolve('ok'))).rejects.toThrow(
-        'half-open limit reached'
-      );
-    });
-
     // Opens, goes half-open, starts a probe that stays in flight, then reopens and
     // goes half-open again: the pending probe now belongs to a finished round.
     // With observe false nothing reads `state`, so the open -> half-open
@@ -317,6 +294,20 @@ describe('CircuitBreaker', () => {
       if (observe) expect(breaker.state).toBe('half-open');
       return { stale, settle };
     };
+
+    it('a probe that outlives its half-open round frees no slot in the next round', async () => {
+      const { stale, settle } = await strandProbeAcrossRounds();
+
+      // Fill this round's two slots, then let the stale probe hit a permanent error.
+      for (let i = 0; i < 2; i++) void breaker.execute(() => new Promise(() => {}));
+      const err = new BackendError('rejected', 'permanent');
+      settle.reject(err);
+      await expect(stale).rejects.toBe(err);
+
+      await expect(breaker.execute(() => Promise.resolve('ok'))).rejects.toThrow(
+        'half-open limit reached'
+      );
+    });
 
     it('a probe that outlives its round does not count toward closing the next', async () => {
       const { stale, settle } = await strandProbeAcrossRounds();
@@ -347,6 +338,17 @@ describe('CircuitBreaker', () => {
       await breaker.execute(() => Promise.resolve('ok'));
       resolveEarly('ok');
       await early;
+      expect(breaker.state).toBe('half-open');
+    });
+
+    it('a transient error on a call started before the breaker opened does not reopen it', async () => {
+      let rejectEarly!: (e: Error) => void;
+      const early = breaker.execute(
+        () => new Promise<string>((_, reject) => (rejectEarly = reject))
+      );
+      await openThenHalfOpen();
+      rejectEarly(new BackendError('down', 'transient'));
+      await expect(early).rejects.toThrow('down');
       expect(breaker.state).toBe('half-open');
     });
 
