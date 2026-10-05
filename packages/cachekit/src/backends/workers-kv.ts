@@ -2,6 +2,8 @@ import { Backend } from './types.js';
 import { BackendError, ConfigurationError } from '../errors.js';
 import { classifyWorkersRuntimeError } from './error-classifier.js';
 import { DEFAULT_TTL_SECONDS } from '../constants.js';
+import { logError } from '../logger.js';
+import { blake2b16Hex } from '../serialization/key-generator.js';
 
 /**
  * Workers KV enforces a 60-second minimum on `expirationTtl`; shorter TTLs
@@ -118,6 +120,9 @@ export class WorkersKVBackend implements Backend {
    * or a cached negative lookup) or fail outright, so it must never gate the
    * delete. A failing `kv.delete` still rejects with {@link BackendError}.
    *
+   * A failed read-ahead is reported through the library logger
+   * (`setLogger`) by key digest, never the key itself.
+   *
    * @returns Advisory: `true` only when the read-ahead saw a value (KV's own
    *   delete is void); `false` when it missed or failed. It drives
    *   `cache.delete()`'s return value, nothing durable.
@@ -129,8 +134,16 @@ export class WorkersKVBackend implements Backend {
     let existed = false;
     try {
       existed = (await this.kv.get(key, 'arrayBuffer')) !== null;
-    } catch {
-      // Swallowed on purpose: the delete below still runs and reports.
+    } catch (error) {
+      // Reported, not rethrown: the delete below still runs. Digest and
+      // classification only — the key and the error text can carry the
+      // caller's key (same rule as cache-core's describeDeleteFailure).
+      const classification =
+        error instanceof Error ? classifyWorkersRuntimeError(error) : 'unknown';
+      logError(
+        `[cachekit] Workers KV delete: read-ahead failed (${classification}), delete still issued; ` +
+          `returning false (keyHash=${blake2b16Hex(key)})`
+      );
     }
     try {
       await this.kv.delete(key);

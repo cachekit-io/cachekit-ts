@@ -1,5 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { BackendError } from '../errors.js';
+import { setLogger } from '../logger.js';
+import { blake2b16Hex } from '../serialization/key-generator.js';
 import { WorkersKVBackend, type KVNamespaceLike } from './workers-kv.js';
 
 /**
@@ -32,6 +34,10 @@ class KVDouble implements KVNamespaceLike {
 }
 
 describe('WorkersKVBackend.delete (unit, KV double)', () => {
+  afterEach(() => {
+    setLogger(null);
+  });
+
   it('issues kv.delete even when the read-ahead returns null', async () => {
     const kv = new KVDouble();
     const backend = new WorkersKVBackend({ kv });
@@ -40,14 +46,32 @@ describe('WorkersKVBackend.delete (unit, KV double)', () => {
     expect(kv.deleted).toEqual(['kv:stale']);
   });
 
-  it('issues kv.delete even when the read-ahead rejects', async () => {
+  it('issues kv.delete even when the read-ahead rejects, and reports it by digest', async () => {
+    const log = vi.fn();
+    setLogger(log);
     const kv = new KVDouble(async () => {
-      throw new Error('KV GET failed: 503');
+      throw new Error('KV GET failed: 503 for kv:flaky');
     });
     const backend = new WorkersKVBackend({ kv });
 
     expect(await backend.delete('kv:flaky')).toBe(false);
     expect(kv.deleted).toEqual(['kv:flaky']);
+    expect(log).toHaveBeenCalledOnce();
+    const [message, error] = log.mock.calls[0]!;
+    expect(message).toContain('read-ahead failed (transient)');
+    expect(message).toContain(`keyHash=${blake2b16Hex('kv:flaky')}`);
+    // Neither the key nor the error text (which here embeds the key) is logged.
+    expect(message).not.toContain('kv:flaky');
+    expect(error).toBeUndefined();
+  });
+
+  it('does not log when the read-ahead succeeds', async () => {
+    const log = vi.fn();
+    setLogger(log);
+    const backend = new WorkersKVBackend({ kv: new KVDouble() });
+
+    await backend.delete('kv:stale');
+    expect(log).not.toHaveBeenCalled();
   });
 
   it('still rejects with BackendError when kv.delete itself fails', async () => {
