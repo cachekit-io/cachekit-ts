@@ -148,10 +148,7 @@ export class CachekitIOCore implements Backend {
       throw new ConfigurationError('CachekitIO backend requires an apiKey');
     }
 
-    const apiUrl = config.apiUrl ?? DEFAULT_API_URL;
-    validateCachekitUrl(apiUrl, config.allowCustomHost);
-
-    this.apiUrl = apiUrl.replace(/\/+$/, '');
+    this.apiUrl = validateCachekitUrl(config.apiUrl ?? DEFAULT_API_URL, config.allowCustomHost);
     this.apiKey = config.apiKey;
     this.defaultTtl = validateTtl(config.defaultTtl ?? DEFAULT_TTL_SECONDS);
     this.timeout = config.timeout ?? DEFAULT_TIMEOUT_MS;

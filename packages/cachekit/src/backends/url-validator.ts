@@ -72,12 +72,18 @@ function isPrivateIp(hostname: string): boolean {
   return false;
 }
 
-export function validateCachekitUrl(url: string, allowCustomHost?: boolean): void {
+/**
+ * Validate a CachekitIO API URL and return it as `URL` serialized it, trailing
+ * slashes trimmed: the base every request path is appended to. Requests go to
+ * that serialization, never the raw input, so a runtime whose URL parser
+ * differs from this one still reads the host that was checked.
+ */
+export function validateCachekitUrl(url: string, allowCustomHost?: boolean): string {
   if (!url.startsWith('https://')) {
     throw new ConfigurationError('CachekitIO API URL must use HTTPS.');
   }
 
-  // Request paths are appended to this string, so a query or fragment here
+  // Request paths are appended to the base URL, so a query or fragment in it
   // would swallow every one of them.
   if (/[?#]/.test(url)) {
     throw new ConfigurationError('CachekitIO API URL must not carry a query or a fragment.');
@@ -90,6 +96,10 @@ export function validateCachekitUrl(url: string, allowCustomHost?: boolean): voi
     throw new ConfigurationError('CachekitIO API URL is malformed.');
   }
 
+  if (parsed.username || parsed.password) {
+    throw new ConfigurationError('CachekitIO API URL must not carry credentials.');
+  }
+
   if (isPrivateIp(parsed.hostname)) {
     throw new ConfigurationError('CachekitIO API URL must not point to a private IP address.');
   }
@@ -97,4 +107,6 @@ export function validateCachekitUrl(url: string, allowCustomHost?: boolean): voi
   if (!allowCustomHost && !ALLOWED_HOSTS.has(parsed.hostname)) {
     throw new ConfigurationError('API URL hostname not permitted. See documentation.');
   }
+
+  return parsed.href.replace(/\/+$/, '');
 }

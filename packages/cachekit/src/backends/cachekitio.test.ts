@@ -58,6 +58,16 @@ describe('CachekitIO Backend', () => {
       expect(() => cachekitio({ apiKey: 'key', apiUrl: 'https://api.cachekit.io' })).not.toThrow();
     });
 
+    it('sends requests to the validated URL as serialized, not the raw input', async () => {
+      const b = cachekitio({ apiKey: 'key', apiUrl: 'https://api.cachekit.io\\@evil.example' });
+      fetchSpy.mockResolvedValueOnce(mockResponse(404));
+      await b.get('k');
+      expect(fetchSpy).toHaveBeenCalledWith(
+        'https://api.cachekit.io/@evil.example/v1/cache/k',
+        expect.anything()
+      );
+    });
+
     it('defaults to https://api.cachekit.io', () => {
       const b = cachekitio({ apiKey: 'key' });
       fetchSpy.mockResolvedValueOnce(mockResponse(404));

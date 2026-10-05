@@ -117,6 +117,37 @@ describe('URL Validator', () => {
     });
   });
 
+  describe('credentials', () => {
+    it.each([
+      'https://u:p@api.cachekit.io',
+      'https://u@api.cachekit.io',
+      'https://:p@api.cachekit.io',
+    ])('rejects %s', (url) => {
+      expect(() => validateCachekitUrl(url)).toThrow('must not carry credentials');
+      expect(() => validateCachekitUrl(url, true)).toThrow('must not carry credentials');
+    });
+  });
+
+  describe('returned base URL', () => {
+    // Requests go to the serialization of the URL that was checked, never the
+    // raw input, so every URL parser downstream reads the same host.
+    it.each([
+      ['https://api.cachekit.io', 'https://api.cachekit.io'],
+      ['https://api.cachekit.io/', 'https://api.cachekit.io'],
+      ['https://API.cachekit.io:443//', 'https://api.cachekit.io'],
+      ['https://api.cachekit.io\\@evil.example', 'https://api.cachekit.io/@evil.example'],
+      ['https://api.cachekit.io\\evil', 'https://api.cachekit.io/evil'],
+    ])('%s becomes %s', (url, base) => {
+      expect(validateCachekitUrl(url)).toBe(base);
+    });
+
+    it('keeps a custom host path prefix', () => {
+      expect(validateCachekitUrl('https://proxy.example.com/base/', true)).toBe(
+        'https://proxy.example.com/base'
+      );
+    });
+  });
+
   describe('additional IPv4 private ranges', () => {
     it('blocks 172.16.0.0/12 range', () => {
       expect(() => validateCachekitUrl('https://172.16.0.1', true)).toThrow('private IP');

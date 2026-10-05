@@ -327,8 +327,8 @@ export interface CachekitIOBackendConfig {
   apiKey: string;
   /**
    * API endpoint URL (default: "https://api.cachekit.io"). Must be HTTPS,
-   * with no query or fragment. Redirects are never followed: a 3xx response
-   * is a permanent `BackendError`.
+   * with no credentials, query or fragment. Redirects are never followed: a
+   * 3xx response is a permanent `BackendError`.
    */
   apiUrl?: string;
   /**
