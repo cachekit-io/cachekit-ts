@@ -41,7 +41,8 @@ interface BaseIntentOptions {
  * Backend selection for the storage-agnostic intents (minimal / production /
  * secure): a Redis connection URL, or any pre-built {@link Backend} instance
  * (Workers KV / Cache API, custom backends). Exactly one of `url` /
- * `backend` — enforced at compile time here and at runtime for JS callers.
+ * `backend`, and `keyPrefix` only with `url` — enforced at compile time here
+ * and at runtime for JS callers.
  */
 type IntentBackendOptions =
   | {
@@ -166,6 +167,12 @@ export interface IOOptions extends BaseIntentOptions {
  * The createCache function augmented with intent-based factory methods.
  * Generic over the platform's cache surface — Node returns SecureCache,
  * Workers returns WorkersCache (SecureCache + withExecutionContext).
+ *
+ * Each intent accepts only the options of its own type and throws
+ * ConfigurationError at construction for any other option that is not
+ * `undefined` — `encryption` on `minimal` / `production` / `secure` included.
+ * For `secure`, pass `masterKey`, `previousMasterKeys` and `tenantId` at the
+ * top level.
  */
 export interface CreateCacheFn<TCache extends SecureCache = SecureCache> {
   /** Create a cache with explicit options. */
@@ -217,12 +224,19 @@ const PRODUCTION_RELIABILITY: ReliabilityConfig = {
 export function buildIntents<TCache extends SecureCache>(
   baseCreate: (options: CacheOptions) => TCache
 ): CreateCacheFn<TCache> {
+  // Each factory destructures exactly the options it applies; whatever is
+  // left over is rejected, so an option is accepted only if it is read.
+
   function createMinimal(options: MinimalOptions): TCache {
+    const { url, keyPrefix, backend, ttl, l1, compression, serializer, invalidation, ...rest } =
+      options;
+    rejectUnsupportedOptions('minimal', rest);
+
     const cacheOptions: CacheOptions = {
-      backend: resolveIntentBackend(options, 'minimal'),
-      defaultTtl: options.ttl ?? 300,
+      backend: resolveIntentBackend({ url, keyPrefix, backend }, 'minimal'),
+      defaultTtl: ttl ?? 300,
       l1: {
-        ...options.l1,
+        ...l1,
         swrEnabled: false,
         namespaceIndex: false,
       },
@@ -230,31 +244,64 @@ export function buildIntents<TCache extends SecureCache>(
         circuitBreaker: { failureThreshold: Infinity },
         degradation: false,
       },
-      compression: options.compression,
-      serializer: options.serializer,
-      invalidation: options.invalidation,
+      compression,
+      serializer,
+      invalidation,
     };
 
     return baseCreate(cacheOptions);
   }
 
   function createProduction(options: ProductionOptions): TCache {
+    const {
+      url,
+      keyPrefix,
+      backend,
+      ttl,
+      l1,
+      reliability,
+      compression,
+      metrics,
+      serializer,
+      invalidation,
+      ...rest
+    } = options;
+    rejectUnsupportedOptions('production', rest);
+
     const cacheOptions: CacheOptions = {
-      backend: resolveIntentBackend(options, 'production'),
-      defaultTtl: options.ttl ?? 600,
-      l1: withFullL1Defaults(options.l1),
-      reliability: mergeReliability(PRODUCTION_RELIABILITY, options.reliability),
-      compression: options.compression,
-      metrics: options.metrics ?? true,
-      serializer: options.serializer,
-      invalidation: options.invalidation,
+      backend: resolveIntentBackend({ url, keyPrefix, backend }, 'production'),
+      defaultTtl: ttl ?? 600,
+      l1: withFullL1Defaults(l1),
+      reliability: mergeReliability(PRODUCTION_RELIABILITY, reliability),
+      compression,
+      metrics: metrics ?? true,
+      serializer,
+      invalidation,
     };
 
     return baseCreate(cacheOptions);
   }
 
   function createSecure(options: SecureOptions): TCache {
-    const masterKey = options.masterKey ?? envVar('CACHEKIT_MASTER_KEY');
+    const {
+      url,
+      keyPrefix,
+      backend,
+      ttl,
+      l1,
+      masterKey: masterKeyOption,
+      tenantId,
+      previousMasterKeys,
+      reliability,
+      compression,
+      metrics,
+      serializer,
+      invalidation,
+      ...rest
+    } = options;
+    rejectUnsupportedOptions('secure', rest);
+
+    const masterKey = masterKeyOption ?? envVar('CACHEKIT_MASTER_KEY');
     if (!masterKey) {
       throw new ConfigurationError(
         'createCache.secure() requires a master key. ' +
@@ -263,26 +310,42 @@ export function buildIntents<TCache extends SecureCache>(
     }
 
     const cacheOptions: CacheOptions = {
-      backend: resolveIntentBackend(options, 'secure'),
-      defaultTtl: options.ttl ?? 600,
-      l1: withFullL1Defaults(options.l1),
+      backend: resolveIntentBackend({ url, keyPrefix, backend }, 'secure'),
+      defaultTtl: ttl ?? 600,
+      l1: withFullL1Defaults(l1),
       encryption: {
         masterKey,
-        tenantId: options.tenantId,
-        previousMasterKeys: options.previousMasterKeys ?? envPreviousMasterKeys(),
+        tenantId,
+        previousMasterKeys: previousMasterKeys ?? envPreviousMasterKeys(),
       },
-      reliability: mergeReliability(PRODUCTION_RELIABILITY, options.reliability),
-      compression: options.compression,
-      metrics: options.metrics ?? true,
-      serializer: options.serializer,
-      invalidation: options.invalidation,
+      reliability: mergeReliability(PRODUCTION_RELIABILITY, reliability),
+      compression,
+      metrics: metrics ?? true,
+      serializer,
+      invalidation,
     };
 
     return baseCreate(cacheOptions);
   }
 
   function createIO(options: IOOptions): TCache {
-    const apiKey = options.apiKey ?? envVar('CACHEKIT_API_KEY');
+    const {
+      apiKey: apiKeyOption,
+      apiUrl,
+      timeout,
+      ttl,
+      l1,
+      encryption,
+      reliability,
+      compression,
+      metrics,
+      serializer,
+      invalidation,
+      ...rest
+    } = options;
+    rejectUnsupportedOptions('io', rest);
+
+    const apiKey = apiKeyOption ?? envVar('CACHEKIT_API_KEY');
     if (!apiKey) {
       throw new ConfigurationError(
         'createCache.io() requires an API key. ' +
@@ -293,17 +356,17 @@ export function buildIntents<TCache extends SecureCache>(
     const cacheOptions: CacheOptions = {
       backend: {
         apiKey,
-        apiUrl: options.apiUrl,
-        timeout: options.timeout,
+        apiUrl,
+        timeout,
       },
-      defaultTtl: options.ttl ?? 3600,
-      l1: withFullL1Defaults(options.l1),
-      encryption: options.encryption,
-      reliability: mergeReliability(PRODUCTION_RELIABILITY, options.reliability),
-      compression: options.compression,
-      metrics: options.metrics ?? true,
-      serializer: options.serializer,
-      invalidation: options.invalidation,
+      defaultTtl: ttl ?? 3600,
+      l1: withFullL1Defaults(l1),
+      encryption,
+      reliability: mergeReliability(PRODUCTION_RELIABILITY, reliability),
+      compression,
+      metrics: metrics ?? true,
+      serializer,
+      invalidation,
     };
 
     return baseCreate(cacheOptions);
@@ -321,19 +384,53 @@ export function buildIntents<TCache extends SecureCache>(
 // Helpers
 // ============================================================================
 
+type IntentName = 'minimal' | 'production' | 'secure' | 'io';
+
+/**
+ * Reject the options left over after a factory destructured the ones it
+ * applies: an option a preset does not apply fails at construction, never
+ * gets dropped (protocol spec intent-presets.md, Explicit Configuration rule 2).
+ * TypeScript object literals already fail to compile; this covers plain
+ * JavaScript and non-literal objects. An option set to `undefined` asks for
+ * nothing, so it passes.
+ */
+function rejectUnsupportedOptions(intent: IntentName, rest: object): void {
+  const unsupported = Object.entries(rest)
+    .filter(([, value]) => value !== undefined)
+    .map(([key]) => key);
+  if (unsupported.length === 0) return;
+
+  let hint = '';
+  if (unsupported.includes('encryption')) {
+    hint =
+      intent === 'secure'
+        ? ' Pass masterKey, previousMasterKeys and tenantId as top-level options.'
+        : ' For an encrypted cache use createCache.secure(), or createCache() with encryption.';
+  }
+  const names = unsupported.map((key) => `"${key}"`).join(', ');
+  throw new ConfigurationError(
+    `createCache.${intent}() does not support the ${unsupported.length === 1 ? 'option' : 'options'} ${names}.${hint}`
+  );
+}
+
 /**
  * Resolve the backend for the storage-agnostic intents: a pre-built Backend
  * instance wins; otherwise the url becomes a Redis backend config. The
  * runtime guard covers JS callers the compile-time union can't reach.
  */
 function resolveIntentBackend(
-  options: IntentBackendOptions,
-  intent: 'minimal' | 'production' | 'secure'
+  options: { url?: string; keyPrefix?: string; backend?: Backend },
+  intent: Exclude<IntentName, 'io'>
 ): CacheOptions['backend'] {
   if (options.backend !== undefined) {
     if (options.url !== undefined) {
       throw new ConfigurationError(
         `createCache.${intent}() accepts either url (Redis) or backend (instance), not both.`
+      );
+    }
+    if (options.keyPrefix !== undefined) {
+      throw new ConfigurationError(
+        `createCache.${intent}() keyPrefix applies only with url; set the prefix on the backend instance.`
       );
     }
     return options.backend;
