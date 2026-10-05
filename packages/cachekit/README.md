@@ -446,6 +446,8 @@ bounded by `defaultTtl` — if you rely on TTLs for correctness across processes
 there, set a small `defaultTtl`, disable L1 (`l1: { enabled: false }`), or
 implement `getWithTtl` on your custom backend.
 
+How fresh a cachekit.io read is, and how long a deleted project's data stays readable: [Consistency and Deletion](https://docs.cachekit.io/concepts/consistency/).
+
 ### Memcached
 
 ```typescript
