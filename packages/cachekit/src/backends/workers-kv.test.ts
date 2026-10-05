@@ -85,6 +85,18 @@ describe('WorkersKVBackend.delete (unit, KV double)', () => {
     expect(log.mock.calls[0]![0]).toContain('read-ahead failed (unknown)');
   });
 
+  it('issues kv.delete and reports unknown when the read-ahead rejects with a non-Error', async () => {
+    const log = vi.fn();
+    setLogger(log);
+    const kv = new KVDouble(() => Promise.reject('KV GET failed: 503'));
+    const backend = new WorkersKVBackend({ kv });
+
+    expect(await backend.delete('kv:non-error')).toBe(false);
+    expect(kv.deleted).toEqual(['kv:non-error']);
+    expect(log).toHaveBeenCalledOnce();
+    expect(log.mock.calls[0]![0]).toContain('read-ahead failed (unknown)');
+  });
+
   it('does not log when the read-ahead succeeds', async () => {
     const log = vi.fn();
     setLogger(log);
