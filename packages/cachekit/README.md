@@ -699,6 +699,10 @@ setLogger((message, error) => myLogger.warn({ error }, message));
 setLogger(null); // restore the default
 ```
 
+The logger may be `async`. If it throws or its promise rejects, the SDK reports
+that failure, with the original message, to `console.error`; it never reaches
+the cache operation and never surfaces as an unhandled rejection.
+
 With the CachekitIO backend, the `X-CacheKit-L1-*` telemetry headers are wired
 automatically from the cache's live L1/L2 hit and miss counters; pass your own
 `metricsProvider` in the backend config to override. Every CachekitIO request

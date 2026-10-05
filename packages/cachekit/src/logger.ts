@@ -7,6 +7,10 @@
  * `console.error`; applications can route these into their own logging
  * pipeline with {@link setLogger}.
  *
+ * The logger may be `async`. If it throws or its promise rejects, CacheKit
+ * reports that failure and the original message to `console.error`, never
+ * to the caller and never as an unhandled rejection.
+ *
  * @example
  * ```typescript
  * import { setLogger } from '@cachekit-io/cachekit';
@@ -30,15 +34,21 @@ export function setLogger(logger: CachekitLogger | null): void {
   activeLogger = logger ?? defaultLogger;
 }
 
-/** Internal: report a library error through the active logger. Never throws —
- * every call site is a fire-and-forget error path (metrics, background
- * refresh, invalidation), where a broken custom logger propagating would
- * become an unhandled rejection. */
+/** Internal: report a library error through the active logger. Never throws,
+ * and never leaves an async logger's rejection unhandled — every call site is
+ * a fire-and-forget error path (metrics, background refresh, invalidation),
+ * where a broken custom logger propagating would become an unhandled
+ * rejection. TypeScript accepts an `async` function as a {@link CachekitLogger}. */
 export function logError(message: string, error?: unknown): void {
-  try {
-    activeLogger(message, error);
-  } catch (loggerError) {
-    // eslint-disable-next-line no-console -- last-resort sink when the active logger itself throws
+  const reportLoggerFailure = (loggerError: unknown): void => {
+    // eslint-disable-next-line no-console -- last-resort sink when the active logger itself fails
     console.error('[cachekit] logger threw; original report:', message, error, loggerError);
+  };
+  try {
+    // Promise.resolve adopts any thenable the logger returns, so its
+    // rejection lands here instead of surfacing as an unhandled rejection.
+    void Promise.resolve(activeLogger(message, error)).catch(reportLoggerFailure);
+  } catch (loggerError) {
+    reportLoggerFailure(loggerError);
   }
 }

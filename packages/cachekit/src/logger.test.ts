@@ -40,6 +40,33 @@ describe('pluggable logger (LAB-517)', () => {
     );
   });
 
+  it('a rejecting async logger is reported, never left as an unhandled rejection', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      setLogger(async () => {
+        throw new Error('async logger bug');
+      });
+
+      expect(() => logError('[cachekit] report', 'detail')).not.toThrow();
+
+      await vi.waitFor(() => {
+        expect(consoleSpy).toHaveBeenCalledWith(
+          '[cachekit] logger threw; original report:',
+          '[cachekit] report',
+          'detail',
+          expect.objectContaining({ message: 'async logger bug' })
+        );
+      });
+      // Unhandled-rejection detection runs after the microtask queue drains.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+
   it('setLogger(null) restores the console.error default', () => {
     const custom = vi.fn();
     setLogger(custom);
