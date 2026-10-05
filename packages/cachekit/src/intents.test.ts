@@ -380,6 +380,186 @@ describe('Intent-based Cache API', () => {
   });
 
   // ========================================================================
+  // Options a preset does not apply are rejected, never dropped (LAB-8218)
+  // ========================================================================
+  describe('options a preset does not apply', () => {
+    const MASTER_KEY = 'a'.repeat(64);
+    const REQUIRED = {
+      minimal: { url: 'redis://localhost:6379' },
+      production: { url: 'redis://localhost:6379' },
+      secure: { url: 'redis://localhost:6379', masterKey: MASTER_KEY },
+      io: { apiKey: 'ck_live_test123' },
+    } as const;
+    const INTENTS = ['minimal', 'production', 'secure', 'io'] as const;
+    const BACKEND = { get: vi.fn(), set: vi.fn(), delete: vi.fn(), exists: vi.fn() };
+
+    // An untyped object, as plain JavaScript or a non-literal TypeScript value
+    // reaches the factory: no compile-time excess-property check applies.
+    function build(intent: (typeof INTENTS)[number], extra: Record<string, unknown>): void {
+      const options: object = { ...REQUIRED[intent], ...extra };
+      createCache[intent](options as never);
+    }
+
+    it.each(['minimal', 'production'] as const)(
+      'createCache.%s() rejects encryption before building a cache',
+      (intent) => {
+        const extra = { encryption: { masterKey: MASTER_KEY } };
+
+        expect(() => build(intent, extra)).toThrow(ConfigurationError);
+        expect(() => build(intent, extra)).toThrow(
+          new RegExp(
+            `createCache\\.${intent}\\(\\) does not support the option "encryption".*createCache\\.secure\\(\\)`
+          )
+        );
+        expect(capturedOptions).toBeNull();
+      }
+    );
+
+    it('createCache.secure() rejects a nested encryption.tenantId, naming it before a missing master key', () => {
+      // No top-level masterKey and no CACHEKIT_MASTER_KEY: the misplaced
+      // option is the real mistake, so it is the error the caller sees.
+      delete process.env.CACHEKIT_MASTER_KEY;
+      const call = () =>
+        createCache.secure({
+          url: 'redis://localhost:6379',
+          encryption: { masterKey: MASTER_KEY, tenantId: 'tenant-a' },
+        } as never);
+
+      expect(call).toThrow(ConfigurationError);
+      expect(call).toThrow(
+        /does not support the option "encryption".*masterKey, previousMasterKeys and tenantId/
+      );
+      expect(capturedOptions).toBeNull();
+    });
+
+    // Every option an intent does not apply whose loss would change whether
+    // data is encrypted or where it goes, defined so that a destructure's
+    // rest never sees it.
+    const DATA_PATH_KEYS = [
+      ['minimal', 'encryption'],
+      ['minimal', 'masterKey'],
+      ['minimal', 'previousMasterKeys'],
+      ['minimal', 'tenantId'],
+      ['production', 'encryption'],
+      ['production', 'masterKey'],
+      ['production', 'previousMasterKeys'],
+      ['production', 'tenantId'],
+      ['secure', 'encryption'],
+      ['io', 'masterKey'],
+      ['io', 'previousMasterKeys'],
+      ['io', 'tenantId'],
+      ['io', 'backend'],
+      ['io', 'url'],
+    ] as const;
+    const HIDDEN_DEFINITIONS: Record<string, (key: string) => object> = {
+      'a prototype value': (key) => Object.create({ [key]: 'hidden' }) as object,
+      'a prototype getter': (key) =>
+        Object.create(Object.defineProperty({}, key, { get: () => 'hidden' })) as object,
+      'an own non-enumerable property': (key) =>
+        Object.defineProperty({}, key, { value: 'hidden' }),
+    };
+
+    it.each(
+      DATA_PATH_KEYS.flatMap(([intent, key]) =>
+        Object.keys(HIDDEN_DEFINITIONS).map((how) => [intent, key, how] as const)
+      )
+    )('createCache.%s() rejects %s defined as %s', (intent, key, how) => {
+      const options = Object.assign(HIDDEN_DEFINITIONS[how](key), REQUIRED[intent]);
+
+      expect(() => createCache[intent](options as never)).toThrow(
+        new RegExp(`does not support the option "${key}"`)
+      );
+      expect(capturedOptions).toBeNull();
+    });
+
+    it('createCache.minimal() given a string instead of options throws ConfigurationError', () => {
+      expect(() => createCache.minimal('redis://localhost:6379' as never)).toThrow(
+        ConfigurationError
+      );
+      expect(capturedOptions).toBeNull();
+    });
+
+    it('createCache.production() still applies the options a class instance carries', () => {
+      class Config {
+        ttl = 120;
+        get url() {
+          return 'redis://localhost:6379';
+        }
+      }
+
+      createCache.production(new Config() as never);
+
+      expect(capturedOptions!.backend).toEqual({ url: 'redis://localhost:6379' });
+      expect(capturedOptions!.defaultTtl).toBe(120);
+    });
+
+    it.each(INTENTS)('createCache.%s() rejects an unknown option', (intent) => {
+      expect(() => build(intent, { tll: 60 })).toThrow(ConfigurationError);
+      expect(() => build(intent, { tll: 60 })).toThrow(/does not support the option "tll"/);
+      expect(capturedOptions).toBeNull();
+    });
+
+    it.each(INTENTS)('createCache.%s() rejects stampede, which no preset applies', (intent) => {
+      expect(() => build(intent, { stampede: { lockTimeout: 1000 } })).toThrow(
+        /does not support the option "stampede"/
+      );
+      expect(capturedOptions).toBeNull();
+    });
+
+    it('createCache.minimal() rejects metrics and reliability, naming both', () => {
+      expect(() => build('minimal', { metrics: true, reliability: { degradation: true } })).toThrow(
+        /does not support the options "metrics", "reliability"/
+      );
+      expect(capturedOptions).toBeNull();
+    });
+
+    it('createCache.io() rejects backend, url and keyPrefix', () => {
+      expect(() => build('io', { backend: BACKEND })).toThrow(
+        /does not support the option "backend"/
+      );
+      expect(() => build('io', { url: 'redis://localhost:6379' })).toThrow(
+        /does not support the option "url"/
+      );
+      expect(() => build('io', { keyPrefix: 'app:' })).toThrow(
+        /does not support the option "keyPrefix"/
+      );
+      expect(capturedOptions).toBeNull();
+    });
+
+    it.each(INTENTS)(
+      'createCache.%s() accepts an unsupported option set to undefined',
+      (intent) => {
+        build(intent, { encryption: undefined, tll: undefined });
+
+        expect(capturedOptions).not.toBeNull();
+      }
+    );
+
+    it.each(['minimal', 'production', 'secure'] as const)(
+      'createCache.%s() rejects keyPrefix with a backend instance',
+      (intent) => {
+        expect(() =>
+          createCache[intent]({
+            backend: BACKEND,
+            keyPrefix: 'app:',
+            ...(intent === 'secure' ? { masterKey: MASTER_KEY } : {}),
+          } as never)
+        ).toThrow(/keyPrefix applies only with url/);
+        expect(capturedOptions).toBeNull();
+      }
+    );
+
+    it('createCache.secure() reports keyPrefix beside a backend before a missing master key', () => {
+      delete process.env.CACHEKIT_MASTER_KEY;
+
+      expect(() => createCache.secure({ backend: BACKEND, keyPrefix: 'app:' } as never)).toThrow(
+        /keyPrefix applies only with url/
+      );
+      expect(capturedOptions).toBeNull();
+    });
+  });
+
+  // ========================================================================
   // createCache() — original API unchanged
   // ========================================================================
   describe('createCache() (original)', () => {

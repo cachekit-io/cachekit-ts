@@ -109,6 +109,11 @@ describe('config errors throw before the backend is resolved', () => {
       /Master key must be hex-encoded/,
     ],
     [
+      'encryption tenantId',
+      { encryption: { masterKey: 'ab'.repeat(32), tenantId: null as never } },
+      /tenantId must be a string, got null/,
+    ],
+    [
       // fakeRuntime has no createInvalidationChannel, as on Workers
       'invalidation without Pub/Sub',
       { invalidation: { redis: createMockRedis() } },

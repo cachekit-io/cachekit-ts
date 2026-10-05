@@ -132,9 +132,9 @@ export class EncryptionManagerCore {
    *   window. Reads attempt keys sequentially, current first; writes always
    *   use masterKey. Rotation is forward-only: masterKey must not appear
    *   here — a key that ever encrypted is never re-promoted.
-   * @throws {ConfigurationError} if any key is invalid, more than 3 previous
-   *   keys are configured (rejected, never truncated), or masterKey appears
-   *   in previousMasterKeys
+   * @throws {ConfigurationError} if any key is invalid, tenantId is set but
+   *   not a string, more than 3 previous keys are configured (rejected, never
+   *   truncated), or masterKey appears in previousMasterKeys
    */
   constructor(
     private readonly masterKey: string,
@@ -143,6 +143,13 @@ export class EncryptionManagerCore {
     private readonly previousMasterKeys: readonly string[] = []
   ) {
     validateKeyHex(masterKey, 'Master key');
+    // Absent means the default tenant; any other non-string value, null
+    // included, is a configuration error.
+    if (tenantId !== undefined && typeof tenantId !== 'string') {
+      throw new ConfigurationError(
+        `tenantId must be a string, got ${tenantId === null ? 'null' : typeof tenantId}`
+      );
+    }
     this.effectiveTenantId = tenantId ?? 'default';
     if (previousMasterKeys.length > MAX_PREVIOUS_MASTER_KEYS) {
       throw new ConfigurationError(

@@ -175,6 +175,17 @@ describe('EncryptionManagerCore', () => {
     expect(decodeAadTenantId(aad)).toBe('acme-corp');
     manager.dispose();
   });
+
+  it.each([null, 42, {}])(
+    'rejects a tenantId that is set but not a string (%j) at construction',
+    (tenantId) => {
+      const { bindings } = mockBindings();
+      const build = () => new TestManager(async () => bindings, tenantId as never);
+
+      expect(build).toThrow(ConfigurationError);
+      expect(build).toThrow(/tenantId must be a string/);
+    }
+  );
 });
 
 describe('EncryptionManagerCore keyring config (previousMasterKeys)', () => {

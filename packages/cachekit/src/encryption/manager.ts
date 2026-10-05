@@ -47,8 +47,8 @@ export class EncryptionManager extends EncryptionManagerCore {
    * @param previousMasterKeys - Decrypt-only previous master keys (max 3,
    *   same hex format) for a key-rotation grace window; reads attempt keys
    *   sequentially, current first, writes always use masterKey
-   * @throws {ConfigurationError} if any key is invalid, more than 3 previous
-   *   keys are configured, or masterKey appears in previousMasterKeys
+   * @throws {ConfigurationError} on invalid configuration, as listed on the
+   *   {@link EncryptionManagerCore} constructor
    */
   constructor(masterKey: string, tenantId?: string, previousMasterKeys?: readonly string[]) {
     super(masterKey, tenantId, loadNapiBindings, previousMasterKeys);

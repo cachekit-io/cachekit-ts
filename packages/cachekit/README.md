@@ -92,7 +92,31 @@ Each intent pre-configures the full stack with sensible defaults:
 | `secure`     | Redis       | On (threshold: 5) | On    | On                     | On     | AES-256-GCM | 600s        |
 | `io`         | cachekit.io | On (threshold: 5) | On    | On                     | On     | Optional    | 3600s       |
 
-All defaults are overridable — pass `reliability`, `l1`, or `metrics` to customize.
+Every intent takes `ttl`, `l1`, `serializer`, `compression` and `invalidation`;
+`production`, `secure` and `io` also take `reliability` and `metrics`
+overrides. `minimal` keeps L1 SWR and the namespace index off, whatever `l1`
+says.
+
+Each intent accepts only the options in its own type (`MinimalOptions`,
+`ProductionOptions`, `SecureOptions`, `IOOptions`) and throws
+`ConfigurationError` at construction for any other own enumerable option that
+is not `undefined`. The check covers plain JavaScript and non-literal objects,
+which TypeScript's excess-property check does not reach. The encryption
+options below, and `backend` and `url` on `io`, throw however they are
+defined: through a prototype, a class getter or a non-enumerable property too.
+
+- `encryption`, `masterKey`, `previousMasterKeys` or `tenantId` on `minimal` or
+  `production` throws. For an encrypted cache use `secure`, `io` with
+  `encryption`, or `createCache()` with `encryption`.
+- `encryption` on `secure` throws: pass `masterKey`, `previousMasterKeys` and
+  `tenantId` as top-level options. A `tenantId` that is set must be a string,
+  on every path that takes one.
+- `masterKey`, `previousMasterKeys` or `tenantId` at the top level of `io`
+  throws: nest them under `encryption`.
+- `backend`, `url` and `keyPrefix` on `io` throw, as does `keyPrefix` alongside
+  a `backend` instance (set the prefix on the instance).
+- `stampede` (distributed locking) is a `createCache()` option; every intent
+  rejects it.
 
 ## Manual Configuration
 
