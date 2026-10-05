@@ -47,9 +47,12 @@ function isPrivateIPv6(g: number[]): boolean {
   const v4 = (hi: number, lo: number) => [hi >> 8, hi & 0xff, lo >> 8, lo & 0xff];
   const zero = (from: number, to: number) => g.slice(from, to).every((x) => x === 0);
   if (zero(0, 5) && g[5] === 0xffff) return true; // ::ffff:0:0/96 IPv4-mapped
+  if (zero(0, 4) && g[4] === 0xffff && g[5] === 0) return isPrivateIPv4(v4(g[6], g[7])); // ::ffff:0:0:0/96 IPv4-translated
   if (zero(0, 6)) return isPrivateIPv4(v4(g[6], g[7])); // ::/96 IPv4-compatible, incl. :: and ::1
   if (g[0] === 0x64 && g[1] === 0xff9b && zero(2, 6)) return isPrivateIPv4(v4(g[6], g[7])); // NAT64
   if (g[0] === 0x2002) return isPrivateIPv4(v4(g[1], g[2])); // 2002::/16 6to4
+  // 64:ff9b:1::/48 local-use NAT64: never global, and it fixes no position for the embedded IPv4
+  if (g[0] === 0x64 && g[1] === 0xff9b && g[2] === 1) return true;
   if ((g[0] & 0xff80) === 0xfe80) return true; // fe80::/10 link-local, fec0::/10 site-local
   if ((g[0] & 0xfe00) === 0xfc00) return true; // fc00::/7 unique local
   return false;

@@ -79,6 +79,10 @@ describe('URL Validator', () => {
       ['6to4 10/8', '[2002:a00:1::]'],
       ['6to4 loopback', '[2002:7f00:1::1]'],
       ['6to4 192.168/16', '[2002:c0a8:101::]'],
+      ['local-use NAT64 64:ff9b:1::/48', '[64:ff9b:1::a00:1]'],
+      ['local-use NAT64, any address', '[64:ff9b:1:ffff::1]'],
+      ['IPv4-translated loopback', '[::ffff:0:7f00:1]'],
+      ['IPv4-translated 10/8', '[::ffff:0:a00:1]'],
     ])('blocks %s %s', (_name, host) => {
       expect(() => validateCachekitUrl(`https://${host}`, true)).toThrow('private IP');
     });
@@ -86,6 +90,7 @@ describe('URL Validator', () => {
     it.each([
       ['NAT64 of a public IPv4', '[64:ff9b::808:808]'],
       ['6to4 of a public IPv4', '[2002:808:808::1]'],
+      ['IPv4-translated public', '[::ffff:0:808:808]'],
       ['documentation prefix', '[2001:db8::1]'],
     ])('allows %s %s', (_name, host) => {
       expect(() => validateCachekitUrl(`https://${host}`, true)).not.toThrow();
