@@ -31,12 +31,13 @@ interface Vector {
 }
 
 /**
- * sha256 of test-vectors/path-encoding.json (fixture version 1.1.0).
- * Provenance: cachekit-io/protocol @ 774281b. Re-vendoring means copying the
+ * sha256 of test-vectors/path-encoding.json (fixture version 1.2.0).
+ * Provenance: cachekit-io/protocol @ f3563544 (the merge of
+ * cachekit-io/protocol#154). Re-vendoring means copying the
  * file byte-for-byte from a named protocol revision, then updating this
  * docblock and FIXTURE_SHA256 together.
  */
-const FIXTURE_SHA256 = '8f6fd4be5440da9cf4bbb1a112cb89c410c4e46734c7d8a9c023eaa034727ee3'; // pragma: allowlist secret
+const FIXTURE_SHA256 = '807af0d39ccf3f5afda65577787ac5adcd01ff6617468060161c84267fa7e0cb'; // pragma: allowlist secret
 
 const here = dirname(fileURLToPath(import.meta.url));
 const raw = readFileSync(join(here, 'fixtures', 'path-encoding.json'));
