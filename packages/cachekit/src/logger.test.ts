@@ -40,6 +40,43 @@ describe('pluggable logger (LAB-517)', () => {
     );
   });
 
+  it('an async custom logger that rejects never leaks an unhandled rejection', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      setLogger(async () => {
+        throw new Error('log sink down');
+      });
+
+      expect(logError('[cachekit] report', 'detail')).toBeUndefined();
+      // Node reports an unhandled rejection only after the microtask queue drains.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(consoleSpy).toHaveBeenCalledWith(
+        '[cachekit] logger rejected; original report:',
+        '[cachekit] report',
+        'detail',
+        expect.objectContaining({ message: 'log sink down' })
+      );
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+
+  it('an async custom logger that resolves stays off the console', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const custom = vi.fn(async () => {});
+    setLogger(custom);
+
+    logError('[cachekit] report', 'detail');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(custom).toHaveBeenCalledWith('[cachekit] report', 'detail');
+    expect(consoleSpy).not.toHaveBeenCalled();
+  });
+
   it('setLogger(null) restores the console.error default', () => {
     const custom = vi.fn();
     setLogger(custom);

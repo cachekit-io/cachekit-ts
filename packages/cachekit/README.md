@@ -699,6 +699,11 @@ setLogger((message, error) => myLogger.warn({ error }, message));
 setLogger(null); // restore the default
 ```
 
+The logger may be `async`, for example one that ships each report to a remote
+sink. CacheKit does not await it. If it throws or its promise rejects, the
+failure and the original report go to `console.error` instead, so a broken log
+sink never fails a cache call or surfaces as an unhandled rejection.
+
 With the CachekitIO backend, the `X-CacheKit-L1-*` telemetry headers are wired
 automatically from the cache's live L1/L2 hit and miss counters; pass your own
 `metricsProvider` in the backend config to override. Every CachekitIO request
