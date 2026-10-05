@@ -1,5 +1,5 @@
 {
-  "version": "1.1.0",
+  "version": "1.2.0",
   "generator": "extracted from cachekit-rs v0.5.1 + cachekit-ts v0.1.0 (Python ground truth); arrow/orjson/original_type vectors generated with cryptography/OpenSSL (fixed nonces) matching real cachekit-py serializer metadata, verified by tools/encryption-verify.py",
   "algorithm": "AES-256-GCM",
   "key_derivation": "HKDF-SHA256 with cachekit_v1_ salt prefix",
@@ -12,6 +12,45 @@
   "master_key_note": "32 bytes of 0x61 (ASCII 'a' repeated 32 times)",
   "tenant_id": "cross-sdk-test",
   "derived_key_fingerprint_hex": "96179a9bc881aa7ca83f04b78a66afd3",
+  "keyring": {
+    "tenant_id": "keyring-conformance",
+    "entries": [
+      {
+        "id": "k1",
+        "master_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+        "derived_key_fingerprint_hex": "b6bfaa4119e9d72c87a393b17f1e117b"
+      },
+      {
+        "id": "k2",
+        "master_key_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+        "derived_key_fingerprint_hex": "e066ffdacfb5fb11a6ecc44c7a0ecb4e"
+      }
+    ],
+    "vectors": [
+      {
+        "name": "encrypted_with_k1",
+        "encrypted_with": "k1",
+        "plaintext_hex": "6b312d706c61696e74657874",
+        "cache_key": "keyring:k1:entry",
+        "format": "msgpack",
+        "compressed": false,
+        "aad_hex": "03000000136b657972696e672d636f6e666f726d616e6365000000106b657972696e673a6b313a656e747279000000076d73677061636b0000000546616c7365",
+        "ciphertext_hex": "010101010101010101010101ebc2f0799d210e06f1ec990ec8d2b3b1b6876e1cdbecb09600b89292",
+        "key_fingerprint_hex": "b6bfaa4119e9d72c87a393b17f1e117b"
+      },
+      {
+        "name": "encrypted_with_k2",
+        "encrypted_with": "k2",
+        "plaintext_hex": "6b322d706c61696e74657874",
+        "cache_key": "keyring:k2:entry",
+        "format": "msgpack",
+        "compressed": false,
+        "aad_hex": "03000000136b657972696e672d636f6e666f726d616e6365000000106b657972696e673a6b323a656e747279000000076d73677061636b0000000546616c7365",
+        "ciphertext_hex": "020202020202020202020202c9e7a0e25b70e67fc71a191af2d8ec795ce7fa3bf69d06e291ec1bce",
+        "key_fingerprint_hex": "e066ffdacfb5fb11a6ecc44c7a0ecb4e"
+      }
+    ]
+  },
   "vectors": [
     {
       "name": "basic_bytes",
@@ -80,5 +119,21 @@
       "aad_hex": "030000000e63726f73732d73646b2d7465737400000018746573743a6f726967696e616c2d747970653a6e756d7079000000076d73677061636b0000000546616c7365000000056e756d7079",
       "ciphertext_hex": "0a0b0c0d0e0f101100000003657e765491f9790882c0543d98ab280c5951a1ed"
     }
-  ]
+  ],
+  "default_tenant": {
+    "note": "spec/intent-presets.md \u00a7 Master Key Input rule 5: with no caller-supplied tenant every SDK MUST derive keys and build AAD with the literal \"default\". Same master key as the main set; sealed with the stdlib HKDF + cryptography AES-GCM reference (fixed nonce), verified by tools/encryption-verify.py. The cache_key is interop-mode.json key_vectors[single_int].expected_key and the plaintext is value_vectors[issue_example_object] \u2014 the vector is directly loadable as an interop-mode entry.",
+    "tenant_id": "default",
+    "derived_key_fingerprint_hex": "52d54c97f8e5efaa5bdf58a301f92726",
+    "vectors": [
+      {
+        "name": "default_tenant_interop",
+        "plaintext_hex": "82a36167651ea46e616d65a5616c696365",
+        "cache_key": "users:get_user:61598716255080080f6456eb065c2e51badfaa4320b0efe97469c29cffee8875",
+        "format": "msgpack",
+        "compressed": false,
+        "aad_hex": "030000000764656661756c740000004f75736572733a6765745f757365723a36313539383731363235353038303038306636343536656230363563326535316261646661613433323062306566653937343639633239636666656538383735000000076d73677061636b0000000546616c7365",
+        "ciphertext_hex": "0d0e0f1011121314151617183c29af318238925ee76d081934adce133c0b4a7c5eb5704102b04582dcbf278ffd"
+      }
+    ]
+  }
 }

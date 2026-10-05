@@ -17,6 +17,10 @@
  *    the ground-truth aad_hex byte-for-byte.
  * 3. Fingerprint, AAD literal equality, round-trips, counter-nonce
  *    monotonicity, and tamper rejection.
+ *
+ * The 1.2.0 `keyring` and `default_tenant` groups run through the same raw
+ * and EncryptionManager layers. The fixture's sha256 is pinned by the Node
+ * lane (test/protocol/encryption.protocol.test.ts): workerd has no fs.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -45,6 +49,16 @@ interface EncryptionVector {
 const vectors = fixture.vectors as EncryptionVector[];
 const masterKeyHex = fixture.master_key_hex as string;
 const tenantId = fixture.tenant_id as string;
+const keyring = fixture.keyring as {
+  tenant_id: string;
+  entries: { id: string; master_key_hex: string; derived_key_fingerprint_hex: string }[];
+  vectors: (EncryptionVector & { encrypted_with: string; key_fingerprint_hex: string })[];
+};
+const defaultTenant = fixture.default_tenant as {
+  tenant_id: string;
+  derived_key_fingerprint_hex: string;
+  vectors: EncryptionVector[];
+};
 
 function hexToBytes(hex: string): Uint8Array {
   const bytes = new Uint8Array(hex.length / 2);
@@ -67,10 +81,10 @@ function bytesToHex(bytes: Uint8Array): string {
  * Used to literal-check the fixture's aad_hex — the SDK's own builder is
  * verified cryptographically in the EncryptionManager layer below.
  */
-function buildReferenceAAD(vector: EncryptionVector): Uint8Array {
+function buildReferenceAAD(vector: EncryptionVector, tenant: string = tenantId): Uint8Array {
   const encoder = new TextEncoder();
   const components = [
-    encoder.encode(tenantId),
+    encoder.encode(tenant),
     encoder.encode(vector.cache_key),
     encoder.encode(vector.format),
     encoder.encode(vector.compressed ? 'True' : 'False'),
@@ -293,6 +307,129 @@ describe('keyring rotation — Workers EncryptionManager (wasm keyring loop)', (
       cutOver.dispose();
     }
   });
+});
+
+describe('encryption vectors — keyring (protocol 1.2.0)', () => {
+  const entry = (id: string) => {
+    const found = keyring.entries.find((e) => e.id === id);
+    if (found === undefined) throw new Error(`keyring vector names unknown entry ${id}`);
+    return found;
+  };
+
+  it('vendors both keyring vectors', () => {
+    expect(keyring.vectors.map((v) => v.name)).toEqual(['encrypted_with_k1', 'encrypted_with_k2']);
+  });
+
+  it.each(keyring.entries.map((e) => [e.id, e] as const))(
+    'derived key fingerprint for entry %s matches ground truth',
+    (_id, e) => {
+      ensureInitialized();
+      const tk = deriveTenantKeys(hexToBytes(e.master_key_hex), keyring.tenant_id);
+      try {
+        expect(bytesToHex(tk.encryptionFingerprint())).toBe(e.derived_key_fingerprint_hex);
+      } finally {
+        tk.free();
+      }
+    }
+  );
+
+  it.each(keyring.vectors.map((v) => [v.name, v] as const))(
+    '%s: raw bindings decrypt under its own entry, and aad_hex matches the spec',
+    (_name, vector) => {
+      const e = entry(vector.encrypted_with);
+      expect(vector.key_fingerprint_hex).toBe(e.derived_key_fingerprint_hex);
+      expect(bytesToHex(buildReferenceAAD(vector, keyring.tenant_id))).toBe(vector.aad_hex);
+      ensureInitialized();
+      const tk = deriveTenantKeys(hexToBytes(e.master_key_hex), keyring.tenant_id);
+      try {
+        const plaintext = decryptWithTenantKeys(
+          hexToBytes(vector.ciphertext_hex),
+          hexToBytes(vector.aad_hex),
+          tk
+        );
+        expect(bytesToHex(plaintext)).toBe(vector.plaintext_hex);
+      } finally {
+        tk.free();
+      }
+    }
+  );
+
+  it.each(keyring.vectors.map((v) => [v.name, v] as const))(
+    '%s: EncryptionManager(masterKey=k2, previousMasterKeys=[k1]) decrypts it',
+    async (_name, vector) => {
+      const manager = new EncryptionManager(entry('k2').master_key_hex, keyring.tenant_id, [
+        entry('k1').master_key_hex,
+      ]);
+      try {
+        const plaintext = await manager.decrypt(
+          hexToBytes(vector.ciphertext_hex),
+          vector.cache_key,
+          vector.compressed
+        );
+        expect(bytesToHex(plaintext)).toBe(vector.plaintext_hex);
+      } finally {
+        manager.dispose();
+      }
+    }
+  );
+
+  it('EncryptionManager without the previous key rejects the k1 vector', async () => {
+    const vector = keyring.vectors.find((v) => v.encrypted_with === 'k1')!;
+    const manager = new EncryptionManager(entry('k2').master_key_hex, keyring.tenant_id);
+    try {
+      await expect(
+        manager.decrypt(hexToBytes(vector.ciphertext_hex), vector.cache_key, vector.compressed)
+      ).rejects.toThrow(EncryptionError);
+    } finally {
+      manager.dispose();
+    }
+  });
+});
+
+describe('encryption vectors — default tenant (protocol 1.2.0)', () => {
+  it('vendors the default-tenant vector under the literal "default"', () => {
+    expect(defaultTenant.tenant_id).toBe('default');
+    expect(defaultTenant.vectors.map((v) => v.name)).toEqual(['default_tenant_interop']);
+  });
+
+  it('derived key fingerprint for tenant "default" matches ground truth', () => {
+    ensureInitialized();
+    const tk = deriveTenantKeys(hexToBytes(masterKeyHex), defaultTenant.tenant_id);
+    try {
+      expect(bytesToHex(tk.encryptionFingerprint())).toBe(
+        defaultTenant.derived_key_fingerprint_hex
+      );
+    } finally {
+      tk.free();
+    }
+  });
+
+  it.each(defaultTenant.vectors.map((v) => [v.name, v] as const))(
+    '%s: aad_hex matches the spec AAD construction',
+    (_name, vector) => {
+      expect(bytesToHex(buildReferenceAAD(vector, defaultTenant.tenant_id))).toBe(vector.aad_hex);
+    }
+  );
+
+  it.each(defaultTenant.vectors.map((v) => [v.name, v] as const))(
+    '%s: EncryptionManager with no tenantId decrypts it',
+    async (_name, vector) => {
+      const manager = new EncryptionManager(masterKeyHex);
+      try {
+        const plaintext = await manager.decrypt(
+          hexToBytes(vector.ciphertext_hex),
+          vector.cache_key,
+          vector.compressed
+        );
+        expect(bytesToHex(plaintext)).toBe(vector.plaintext_hex);
+        expect(bytesToHex((await manager.getKeyFingerprint())!)).toBe(
+          defaultTenant.derived_key_fingerprint_hex
+        );
+      } finally {
+        manager.dispose();
+      }
+    }
+  );
 });
 
 // The vendored vectors are at most 9 B, a single AES block. This ciphertext

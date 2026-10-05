@@ -11,6 +11,7 @@
  * traversal ships (spec rule 2).
  */
 
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,10 +30,17 @@ interface Vector {
   note: string;
 }
 
+/**
+ * sha256 of test-vectors/path-encoding.json (fixture version 1.1.0).
+ * Provenance: cachekit-io/protocol @ 774281b. Re-vendoring means copying the
+ * file byte-for-byte from a named protocol revision, then updating this
+ * docblock and FIXTURE_SHA256 together.
+ */
+const FIXTURE_SHA256 = '8f6fd4be5440da9cf4bbb1a112cb89c410c4e46734c7d8a9c023eaa034727ee3'; // pragma: allowlist secret
+
 const here = dirname(fileURLToPath(import.meta.url));
-const { vectors } = JSON.parse(
-  readFileSync(join(here, 'fixtures', 'path-encoding.json'), 'utf8')
-) as { vectors: Vector[] };
+const raw = readFileSync(join(here, 'fixtures', 'path-encoding.json'));
+const { vectors } = JSON.parse(raw.toString('utf8')) as { vectors: Vector[] };
 const reserved = vectors.filter((v) => v.reject);
 const transmittable = vectors.filter((v) => !v.reject);
 
@@ -82,6 +90,15 @@ afterEach(() => {
 
 // Pins the platform premise the reject-not-encode design rests on. If a runtime
 // ever stops collapsing these, the decision needs revisiting — not silently.
+describe('protocol path-encoding.json fixture', () => {
+  it('is the pinned upstream file, unedited since vendoring', () => {
+    expect(
+      createHash('sha256').update(raw).digest('hex'),
+      'fixture differs from the pinned protocol revision; if intentional, refresh FIXTURE_SHA256 and the provenance'
+    ).toBe(FIXTURE_SHA256);
+  });
+});
+
 describe('AC-0 repro — raw encodeURIComponent lets a dot-segment key escape /v1/cache/', () => {
   it('literal dots collapse client-side', () => {
     expect(new URL(`${BASE}${PREFIX}${encodeURIComponent('.')}`).pathname).toBe(PREFIX);
