@@ -413,6 +413,18 @@ describe('interop value decoding', () => {
       const doc = new Uint8Array([0xda, n >> 8, n & 0xff, ...Buffer.from(pad), 0xc0, 0xaf]);
       expect(decodeInteropValue(doc)).toBe(pad + '\ufffd\ufffd');
     }
+    // Every non-ASCII byte, a lone continuation byte (80..bf) included, must
+    // leave the ASCII fast path and decode as WHATWG does. Lengths 1 and 13
+    // take the two short-string paths, 64/65 straddle their limit.
+    const utf8 = new TextDecoder('utf-8', { ignoreBOM: true });
+    for (const n of [1, 13, 64, 65, 300]) {
+      const head = n < 32 ? [0xa0 | n] : n < 256 ? [0xd9, n] : [0xda, n >> 8, n & 0xff];
+      for (let byte = 0x80; byte <= 0xff; byte++) {
+        const bytes = new Uint8Array(n).fill(0x61);
+        bytes[n - 1] = byte;
+        expect(decodeInteropValue(new Uint8Array([...head, ...bytes]))).toBe(utf8.decode(bytes));
+      }
+    }
   });
 
   it('reads int64 at its full width and sign', () => {
