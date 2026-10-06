@@ -1,8 +1,8 @@
-import { decode as msgpackDecode } from '@msgpack/msgpack';
+import { ExtensionCodec } from '@msgpack/msgpack';
 import { blake2b } from '@noble/hashes/blake2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { ConfigurationError, SerializationError, ValueTooLargeError } from '../errors.js';
-import { assertDecodeDepth, boundedDecodeOptions, type ObjectCount } from './serializer.js';
+import { assertDecodeDepth, type ObjectCount } from './serializer.js';
 import {
   DEFAULT_MAX_ENCODED_SIZE,
   DEFAULT_MAX_DECODED_SIZE,
@@ -62,6 +62,13 @@ const CK_FRAME_MAGIC_0 = 0x43;
 const CK_FRAME_MAGIC_1 = 0x4b;
 
 const textEncoder = new TextEncoder();
+// ignoreBOM keeps a leading U+FEFF: it is part of the string, not a byte order
+// mark (bom_strings_value). A default TextDecoder strips it.
+const textDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
+/** Strings up to this many bytes try a pure-JS ASCII decode first. */
+const SHORT_STRING_MAX = 64;
+/** V8's shortest rope (ConsString::kMinLength): shorter concatenations are flat. */
+const FLAT_STRING_MIN = 13;
 
 /** Profile selector: args are hashed (strict arity), values round-trip. */
 type InteropProfile = 'args' | 'value';
@@ -625,13 +632,188 @@ export function encodeInteropValueCounted(value: unknown, count: ObjectCount): U
 }
 
 /**
+ * Materialise the one MessagePack document in `data`. Call only after
+ * assertDecodeDepth has accepted `data`: that walk proves every header is
+ * backed by the input and the nesting is within bound, so this reader does no
+ * bounds checks of its own. It still checks it ended exactly at `data.length`,
+ * so a width disagreement between the two parsers throws instead of misreading.
+ *
+ * The SDK reads interop values itself rather than through @msgpack/msgpack
+ * (3.1.3), which rejects the string map key `__proto__` outright and strips a
+ * leading U+FEFF from strings longer than 200 bytes. Both are ordinary interop
+ * values (proto_key_value, bom_strings_value). Output matches that decoder
+ * otherwise (maps become plain objects, a string or number key names the
+ * property, 64-bit integers decode as BigInt, bin values are views of `data`,
+ * and ext values go through its default codec, so the timestamp ext becomes a
+ * Date), with two differences:
+ * - An integer key written at 64-bit width names the property like any other
+ *   integer key; that decoder threw on it.
+ * - Invalid UTF-8 reads as U+FFFD at every length, as WHATWG decoding does;
+ *   that decoder did so only above 200 bytes and misread shorter strings (an
+ *   overlong `c0 af` came back as "/").
+ */
+function readInteropDocument(data: Uint8Array): unknown {
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  let pos = 0;
+
+  /** Advance past an n-byte fixed-width value already read at `pos`. */
+  const fixed = <T>(n: number, v: T): T => {
+    pos += n;
+    return v;
+  };
+  const length = (bytes: 1 | 2 | 4): number =>
+    fixed(
+      bytes,
+      bytes === 1 ? data[pos]! : bytes === 2 ? view.getUint16(pos) : view.getUint32(pos)
+    );
+  const take = (n: number): Uint8Array => data.subarray(pos, (pos += n));
+  const str = (n: number): string => {
+    // Short ASCII (most keys) skips TextDecoder, whose per-call cost dominates
+    // at this length. Appending a character at a time is fastest for the
+    // shortest strings, but from 13 characters V8 builds a rope (cons string)
+    // that the decoded value keeps, many times larger than the bytes; build
+    // those in one call instead.
+    if (n <= SHORT_STRING_MAX) {
+      const end = pos + n;
+      for (let i = pos; i < end; i++) {
+        if (data[i]! >= 0x80) return textDecoder.decode(take(n));
+      }
+      if (n >= FLAT_STRING_MIN) {
+        return String.fromCharCode.apply(null, take(n) as unknown as number[]);
+      }
+      let s = '';
+      for (; pos < end; pos++) s += String.fromCharCode(data[pos]!);
+      return s;
+    }
+    return textDecoder.decode(take(n));
+  };
+  const ext = (n: number): unknown => {
+    const type = view.getInt8(pos++);
+    return ExtensionCodec.defaultCodec.decode(take(n), type, undefined);
+  };
+  const capped = (n: number, kind: 'array' | 'map'): number => {
+    if (n > DEFAULT_MAX_COLLECTION_SIZE) {
+      throw new SerializationError(
+        `Interop ${kind} of ${n} entries exceeds max ${DEFAULT_MAX_COLLECTION_SIZE}`
+      );
+    }
+    return n;
+  };
+  const array = (n: number): unknown[] => {
+    const out = new Array<unknown>(capped(n, 'array'));
+    for (let i = 0; i < n; i++) out[i] = read();
+    return out;
+  };
+  const map = (n: number): Record<string, unknown> => {
+    const out: Record<string, unknown> = {};
+    for (let i = capped(n, 'map'); i > 0; i--) {
+      const key = read();
+      if (typeof key !== 'string' && typeof key !== 'number' && typeof key !== 'bigint') {
+        throw new SerializationError(
+          `Interop map key must be a string or number, not ${typeof key}`
+        );
+      }
+      const name = String(key);
+      if (name === '__proto__') {
+        // Assignment would set the prototype and drop the entry.
+        Object.defineProperty(out, name, {
+          value: read(),
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
+      } else {
+        out[name] = read();
+      }
+    }
+    return out;
+  };
+
+  function read(): unknown {
+    const b = data[pos++]!;
+    if (b <= 0x7f) return b; // positive fixint
+    if (b >= 0xe0) return b - 0x100; // negative fixint
+    if (b <= 0x8f) return map(b & 0x0f);
+    if (b <= 0x9f) return array(b & 0x0f);
+    if (b <= 0xbf) return str(b & 0x1f);
+    switch (b) {
+      case 0xc0:
+        return null;
+      case 0xc2:
+        return false;
+      case 0xc3:
+        return true;
+      case 0xc4:
+      case 0xc5:
+      case 0xc6:
+        return take(length(b === 0xc4 ? 1 : b === 0xc5 ? 2 : 4));
+      case 0xc7:
+      case 0xc8:
+      case 0xc9:
+        return ext(length(b === 0xc7 ? 1 : b === 0xc8 ? 2 : 4));
+      case 0xca:
+        return fixed(4, view.getFloat32(pos));
+      case 0xcb:
+        return fixed(8, view.getFloat64(pos));
+      case 0xcc:
+        return length(1);
+      case 0xcd:
+        return length(2);
+      case 0xce:
+        return length(4);
+      case 0xcf:
+        return fixed(8, view.getBigUint64(pos));
+      case 0xd0:
+        return fixed(1, view.getInt8(pos));
+      case 0xd1:
+        return fixed(2, view.getInt16(pos));
+      case 0xd2:
+        return fixed(4, view.getInt32(pos));
+      case 0xd3:
+        return fixed(8, view.getBigInt64(pos));
+      case 0xd4:
+        return ext(1);
+      case 0xd5:
+        return ext(2);
+      case 0xd6:
+        return ext(4);
+      case 0xd7:
+        return ext(8);
+      case 0xd8:
+        return ext(16);
+      case 0xd9:
+      case 0xda:
+      case 0xdb:
+        return str(length(b === 0xd9 ? 1 : b === 0xda ? 2 : 4));
+      case 0xdc:
+      case 0xdd:
+        return array(length(b === 0xdc ? 2 : 4));
+      case 0xde:
+      case 0xdf:
+        return map(length(b === 0xde ? 2 : 4));
+      default:
+        // 0xc1 (never used): assertDecodeDepth rejects it first.
+        throw new SerializationError(`Invalid MessagePack head byte 0x${b.toString(16)}`);
+    }
+  }
+
+  const value = read();
+  if (pos !== data.length) {
+    throw new SerializationError(
+      `Interop reader consumed ${pos} of ${data.length} bytes; the decode pre-scan disagrees`
+    );
+  }
+  return value;
+}
+
+/**
  * One post-decode pass: depth validation, sentinel revival, and int
  * normalization.
  *
  * - Wire-format.md sentinel maps revive: `__datetime__` -> Date. `__date__` /
  *   `__time__` stay as maps — JS has no date-only/time-only type to revive
  *   into, and fabricating a Date instant for them would be wrong.
- * - 64-bit integers decode as BigInt (`useBigInt64`) so a Python-written
+ * - 64-bit integers decode as BigInt (readInteropDocument) so a Python-written
  *   integer beyond 2^53 (e.g. a snowflake ID) is never silently rounded on
  *   read; values inside the safe range normalize back to number for
  *   ergonomics. This mirrors the write-side rule (BigInt required beyond
@@ -662,14 +844,15 @@ function reviveDecoded(v: unknown, depth: number): unknown {
       return revived;
     }
   }
+  // An own '__proto__' data property shadows the accessor, so assignment is safe here.
   for (const k of keys) obj[k] = reviveDecoded(obj[k], depth + 1);
   return obj;
 }
 
 /**
  * Deserialize an interop value: exactly one well-formed MessagePack document
- * (canonical or not). Trailing bytes are rejected (@msgpack/msgpack is
- * strict by default). A payload starting with the CK v3 frame magic
+ * (canonical or not). Trailing bytes are rejected (the assertDecodeDepth
+ * pre-scan consumes exactly the input). A payload starting with the CK v3 frame magic
  * (`0x43 0x4B`, "CK") gets a targeted diagnostic — it is a
  * Python-SDK-internal auto-mode entry, not an interop value.
  *
@@ -702,13 +885,9 @@ export function decodeInteropValueCounted<T>(data: Uint8Array, count?: ObjectCou
   const counted = assertDecodeDepth(data, DEFAULT_MAX_DEPTH);
   let decoded: unknown;
   try {
-    // Backend bytes are untrusted — bound header preallocation (full
-    // rationale: boundedDecodeOptions in serializer.ts).
-    decoded = msgpackDecode(data, {
-      useBigInt64: true,
-      ...boundedDecodeOptions(DEFAULT_MAX_COLLECTION_SIZE, DEFAULT_MAX_DECODED_SIZE),
-    });
+    decoded = readInteropDocument(data);
   } catch (error) {
+    if (error instanceof SerializationError) throw error;
     throw new SerializationError(
       `Failed to decode interop MessagePack: ${error instanceof Error ? error.message : 'Unknown error'}`,
       { cause: error instanceof Error ? error : undefined }

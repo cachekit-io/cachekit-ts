@@ -12,6 +12,8 @@ import {
   InteropFloat,
 } from './interop.js';
 import { ConfigurationError, SerializationError, ValueTooLargeError } from '../errors.js';
+import { DEFAULT_MAX_COLLECTION_SIZE } from '../constants.js';
+import { ExtData } from '@msgpack/msgpack';
 
 function hex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
@@ -376,6 +378,81 @@ describe('interop value decoding', () => {
     );
     // map16 claiming 65535 entries.
     expect(() => decodeInteropValue(Uint8Array.of(0xde, 0xff, 0xff))).toThrow(SerializationError);
+  });
+
+  it('rejects a backed collection over the collection cap', () => {
+    const nils = new Uint8Array(3 + DEFAULT_MAX_COLLECTION_SIZE + 1).fill(0xc0);
+    nils.set([
+      0xdc,
+      (DEFAULT_MAX_COLLECTION_SIZE + 1) >> 8,
+      (DEFAULT_MAX_COLLECTION_SIZE + 1) & 0xff,
+    ]);
+    expect(() => decodeInteropValue(nils)).toThrow(/exceeds max/);
+  });
+
+  it('rejects a backed map over the collection cap', () => {
+    const n = DEFAULT_MAX_COLLECTION_SIZE + 1;
+    const pairs = new Uint8Array(3 + n * 2);
+    pairs.set([0xde, n >> 8, n & 0xff]);
+    for (let i = 0; i < n; i++) pairs.set([0xa0, 0xc0], 3 + i * 2); // '' -> nil
+    expect(() => decodeInteropValue(pairs)).toThrow(/exceeds max/);
+  });
+
+  it('reads an ext type it has no codec for as ExtData (reader_ext_type)', () => {
+    expect(decodeInteropValue(Uint8Array.of(0xd4, 0x01, 0x2a))).toEqual(
+      new ExtData(1, Uint8Array.of(0x2a))
+    );
+  });
+
+  it('reads invalid UTF-8 as U+FFFD on both short-string paths and above them', () => {
+    // An overlong '/' (c0 af): @msgpack/msgpack read it as '/' below 201 bytes.
+    // Lengths 2, 64 and 65 sit below, at and above the reader's ASCII fast-path
+    // limit; 300 is past the old decoder's TextDecoder edge.
+    for (const n of [2, 64, 65, 300]) {
+      const pad = 'a'.repeat(n - 2);
+      const doc = new Uint8Array([0xda, n >> 8, n & 0xff, ...Buffer.from(pad), 0xc0, 0xaf]);
+      expect(decodeInteropValue(doc)).toBe(pad + '\ufffd\ufffd');
+    }
+  });
+
+  it('reads int64 at its full width and sign', () => {
+    // d3 is signed: reading it unsigned would turn -1 into 2^64-1.
+    expect(
+      decodeInteropValue(Uint8Array.of(0xd3, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff))
+    ).toBe(-1);
+    expect(decodeInteropValue(Uint8Array.of(0xd3, 0x80, 0, 0, 0, 0, 0, 0, 0))).toBe(-(2n ** 63n));
+  });
+
+  it('reads an integer map key at any width as the same property', () => {
+    // {1: 42} with the key as fixint (reader_non_string_map_key) and as uint64;
+    // @msgpack/msgpack threw on the latter.
+    expect(decodeInteropValue(Uint8Array.of(0x81, 0x01, 0x2a))).toEqual({ 1: 42 });
+    expect(decodeInteropValue(Uint8Array.of(0x81, 0xcf, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x2a))).toEqual({
+      1: 42,
+    });
+  });
+
+  it('rejects a map key that is not a string or number', () => {
+    // The pre-scan counts map entries but never checks key types, so the
+    // reader refuses these itself: nil, bool, bin, array, map and ext keys.
+    const keys: [number[], string][] = [
+      [[0xc0], 'object'],
+      [[0xc3], 'boolean'],
+      [[0xc4, 0x00], 'object'],
+      [[0x90], 'object'],
+      [[0x80], 'object'],
+      [[0xd4, 0x01, 0x2a], 'object'],
+    ];
+    for (const [key, type] of keys) {
+      expect(() => decodeInteropValue(Uint8Array.of(0x81, ...key, 0x01))).toThrow(
+        `Interop map key must be a string or number, not ${type}`
+      );
+    }
+  });
+
+  it('still reads the msgpack timestamp ext as a Date', () => {
+    // fixext4, type -1, 32-bit seconds = 1.
+    expect(decodeInteropValue(Uint8Array.of(0xd6, 0xff, 0, 0, 0, 1))).toEqual(new Date(1000));
   });
 
   it('surfaces a CK v3 frame with a targeted diagnostic', () => {
