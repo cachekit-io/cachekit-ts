@@ -186,6 +186,14 @@ describe('EncryptionManagerCore', () => {
       expect(build).toThrow(/tenantId must be a string/);
     }
   );
+
+  it('rejects an empty tenantId at construction', () => {
+    const { bindings } = mockBindings();
+    const build = () => new TestManager(async () => bindings, '');
+
+    expect(build).toThrow(ConfigurationError);
+    expect(build).toThrow(/tenantId must not be empty/);
+  });
 });
 
 describe('EncryptionManagerCore keyring config (previousMasterKeys)', () => {

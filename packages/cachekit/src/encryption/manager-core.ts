@@ -133,7 +133,7 @@ export class EncryptionManagerCore {
    *   use masterKey. Rotation is forward-only: masterKey must not appear
    *   here — a key that ever encrypted is never re-promoted.
    * @throws {ConfigurationError} if any key is invalid, tenantId is set but
-   *   not a string, more than 3 previous keys are configured (rejected, never
+   *   not a string or is empty, more than 3 previous keys are configured (rejected, never
    *   truncated), or masterKey appears in previousMasterKeys
    */
   constructor(
@@ -149,6 +149,11 @@ export class EncryptionManagerCore {
       throw new ConfigurationError(
         `tenantId must be a string, got ${tenantId === null ? 'null' : typeof tenantId}`
       );
+    }
+    // The native key derivation rejects an empty tenant id; fail here, at
+    // construction, rather than at the first operation.
+    if (tenantId === '') {
+      throw new ConfigurationError('tenantId must not be empty; omit it for the default tenant');
     }
     this.effectiveTenantId = tenantId ?? 'default';
     if (previousMasterKeys.length > MAX_PREVIOUS_MASTER_KEYS) {

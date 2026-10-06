@@ -63,6 +63,8 @@ type IntentBackendOptions =
  * Options for `createCache.minimal()` — speed-first, no protection.
  *
  * Disables circuit breaker, retry, and degradation for maximum throughput.
+ * L1 SWR and the namespace index default off; an explicit `l1.swrEnabled` or
+ * `l1.namespaceIndex` turns them on.
  * With degradation off, backend or decode failures make `get()`, `set()`, and
  * `wrap()` throw rather than return null or skip a cache write; the caller's
  * own try/catch is the failure boundary.
@@ -235,8 +237,8 @@ export function buildIntents<TCache extends SecureCache>(
       defaultTtl: ttl ?? 300,
       l1: {
         ...l1,
-        swrEnabled: false,
-        namespaceIndex: false,
+        swrEnabled: l1?.swrEnabled ?? false,
+        namespaceIndex: l1?.namespaceIndex ?? false,
       },
       reliability: {
         circuitBreaker: { failureThreshold: Infinity },
@@ -473,8 +475,8 @@ function resolveIntentBackend(
 
 /**
  * Full-featured L1 defaults shared by the production / secure / io intents
- * (SWR + namespace index on unless overridden). `minimal` deliberately does
- * NOT use this — it hard-disables both.
+ * (SWR + namespace index on unless overridden). `minimal` does NOT use this:
+ * it defaults both off, and an explicit `l1` value still wins (PRE-48).
  */
 function withFullL1Defaults(l1: BaseIntentOptions['l1']): CacheOptions['l1'] {
   return {
