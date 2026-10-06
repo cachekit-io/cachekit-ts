@@ -61,6 +61,20 @@ describe('Intent-based Cache API', () => {
       expect(capturedOptions!.l1?.namespaceIndex).toBe(false);
     });
 
+    it('honours an explicit l1.swrEnabled', () => {
+      createCache.minimal({ url: 'redis://localhost:6379', l1: { swrEnabled: true } });
+
+      expect(capturedOptions!.l1?.swrEnabled).toBe(true);
+      expect(capturedOptions!.l1?.namespaceIndex).toBe(false);
+    });
+
+    it('honours an explicit l1.namespaceIndex', () => {
+      createCache.minimal({ url: 'redis://localhost:6379', l1: { namespaceIndex: true } });
+
+      expect(capturedOptions!.l1?.namespaceIndex).toBe(true);
+      expect(capturedOptions!.l1?.swrEnabled).toBe(false);
+    });
+
     it('respects TTL override', () => {
       createCache.minimal({ url: 'redis://localhost:6379', ttl: 120 });
 

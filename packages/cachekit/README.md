@@ -94,8 +94,8 @@ Each intent pre-configures the full stack with sensible defaults:
 
 Every intent takes `ttl`, `l1`, `serializer`, `compression` and `invalidation`;
 `production`, `secure` and `io` also take `reliability` and `metrics`
-overrides. `minimal` keeps L1 SWR and the namespace index off, whatever `l1`
-says.
+overrides. `minimal` turns L1 SWR and the namespace index off by default; an
+explicit `l1.swrEnabled` or `l1.namespaceIndex` overrides that.
 
 Each intent accepts only the options in its own type (`MinimalOptions`,
 `ProductionOptions`, `SecureOptions`, `IOOptions`) and throws
@@ -109,8 +109,8 @@ defined: through a prototype, a class getter or a non-enumerable property too.
   `production` throws. For an encrypted cache use `secure`, `io` with
   `encryption`, or `createCache()` with `encryption`.
 - `encryption` on `secure` throws: pass `masterKey`, `previousMasterKeys` and
-  `tenantId` as top-level options. A `tenantId` that is set must be a string,
-  on every path that takes one.
+  `tenantId` as top-level options. A `tenantId` that is set must be a non-empty
+  string, on every path that takes one.
 - `masterKey`, `previousMasterKeys` or `tenantId` at the top level of `io`
   throws: nest them under `encryption`.
 - `backend`, `url` and `keyPrefix` on `io` throw, as does `keyPrefix` alongside
