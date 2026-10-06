@@ -1,6 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
 import { runInNewContext } from 'node:vm';
-import { ExtData, decode as msgpackDecode, encode as msgpackEncode } from '@msgpack/msgpack';
+import {
+  DecodeError,
+  ExtData,
+  decode as msgpackDecode,
+  encode as msgpackEncode,
+} from '@msgpack/msgpack';
 import {
   MessagePackSerializer,
   assertDecodeDepth,
@@ -455,13 +460,14 @@ describe('MessagePackSerializer', () => {
       // Encode random legal values spanning every head-byte family the encoder
       // emits (each int and float width, str/bin/ext at every length tier,
       // timestamp and application ext, collections wide enough for
-      // array16/map16), plus hand-built padded headers for the families it
-      // never emits (array32, map32, str32, bin32, ext32), and assert the
-      // pre-scan accepts exactly what the decoder accepts. The interop reader
-      // (decodeInteropValue) trusts the pre-scan for backing and end of input,
-      // so it runs in both arms too: on legal values it must read exactly what
-      // @msgpack/msgpack reads (64-bit ints as BigInt, normalised to number when
-      // safe, as the interop path does).
+      // array16/map16), plus hand-built documents whose array32, map32, str32,
+      // bin32 and ext32 headers are padded (a 32-bit length under 2^16, a form
+      // no encoder emits), and assert the pre-scan accepts exactly what the
+      // decoder accepts. The interop reader (decodeInteropValue) trusts the
+      // pre-scan for backing and end of input, so it runs in both arms too:
+      // on legal values it must read exactly what @msgpack/msgpack reads
+      // (64-bit ints as BigInt, normalised to number when safe, as the interop
+      // path does).
       const safeInts = (v: unknown): unknown => {
         if (typeof v === 'bigint') {
           return v >= Number.MIN_SAFE_INTEGER && v <= Number.MAX_SAFE_INTEGER ? Number(v) : v;
@@ -474,14 +480,25 @@ describe('MessagePackSerializer', () => {
         return v;
       };
       /** The interop reader writes U+FFFD only for invalid UTF-8, where it
-       * deliberately differs from @msgpack/msgpack's lax short-string decoder. */
-      const hasReplacement = (v: unknown): boolean => {
-        if (typeof v === 'string') return v.includes('\ufffd');
-        if (Array.isArray(v)) return v.some(hasReplacement);
-        if (v !== null && typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype) {
-          return Object.entries(v).some(([k, x]) => k.includes('\ufffd') || hasReplacement(x));
+       * deliberately differs from @msgpack/msgpack's lax short-string decoder.
+       * Take the reference's string or key wherever the reader wrote U+FFFD,
+       * so everything else in the document is still compared. */
+      const excusingReplacement = (v: unknown, ref: unknown): unknown => {
+        if (typeof v === 'string') return v.includes('\ufffd') && typeof ref === 'string' ? ref : v;
+        if (Array.isArray(v)) {
+          return Array.isArray(ref) ? v.map((x, i) => excusingReplacement(x, ref[i])) : v;
         }
-        return false;
+        if (v !== null && typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype) {
+          if (ref === null || typeof ref !== 'object') return v;
+          const refEntries = Object.entries(ref);
+          return Object.fromEntries(
+            Object.entries(v).map(([k, x], i) => {
+              const [refKey, refValue] = refEntries[i] ?? [k, undefined];
+              return [k.includes('\ufffd') ? refKey : k, excusingReplacement(x, refValue)];
+            })
+          );
+        }
+        return v;
       };
       const opts = { ...boundedDecodeOptions(10000, 10 * 1024 * 1024), useBigInt64: true };
       let seed = 0x2487;
@@ -503,12 +520,10 @@ describe('MessagePackSerializer', () => {
         () => 128 + Math.floor(rand() * 128), // uint8
         () => 256 + Math.floor(rand() * 65000), // uint16
         () => 65536 + Math.floor(rand() * 1e9), // uint32
-        () => 2 ** 40 + Math.floor(rand() * 1e6), // uint64 (number)
         () => -1 - Math.floor(rand() * 32), // negative fixint
         () => -33 - Math.floor(rand() * 96), // int8
         () => -129 - Math.floor(rand() * 32000), // int16
         () => -32769 - Math.floor(rand() * 1e9), // int32
-        () => -(2 ** 40) - Math.floor(rand() * 1e6), // int64 (number)
         () => pick([2n ** 60n, -(2n ** 60n), 2n ** 64n - 1n, -(2n ** 63n), -1n, 1n]), // BigInt widths
         () => (rand() - 0.5) * 1e6, // float (float32 when the round encodes floats as float32)
         () => 'k'.repeat(pick(lengths)), // ASCII
@@ -555,7 +570,8 @@ describe('MessagePackSerializer', () => {
         legal.push(bytes);
       }
       // Padded 32-bit headers no encoder emits: array32 [1, 2], map32 {a: 1},
-      // str32 'abc', bin32 de ad, ext32 type 1 [2a].
+      // str32 'abc', bin32 de ad, ext32 type 1 [2a]. They join the garbage
+      // arm's sources so its mutations reach the 32-bit length fields.
       const hex = (h: string) => Uint8Array.from(Buffer.from(h.replace(/ /g, ''), 'hex'));
       for (const h of [
         'dd 00000002 01 02',
@@ -565,16 +581,21 @@ describe('MessagePackSerializer', () => {
         'c9 00000001 01 2a',
       ]) {
         check(hex(h));
+        legal.push(hex(h));
       }
 
       // Garbage, built by flipping, inserting or deleting one byte of a legal
       // document so most of it still parses. The pre-scan must accept or reject
       // through SerializationError — never fault with a raw RangeError/TypeError
       // (a bad skip width or out-of-range DataView read, i.e. a walker bug). The
-      // interop reader may also reject only with SerializationError, and never a
-      // document both the pre-scan and @msgpack/msgpack accept (it accepts every
-      // key type that decoder does, and more). When both accept, it must read
-      // the same value, except where it decodes invalid UTF-8 to U+FFFD.
+      // interop reader runs the pre-scan first: it must reject exactly what the
+      // pre-scan rejects, with the pre-scan's error. On a document the pre-scan
+      // accepts it may reject through its own checks or the ext codec's
+      // DecodeError (a timestamp ext of the wrong size), never a wrapped fault of
+      // the reader itself, and never a document @msgpack/msgpack also accepts
+      // (it accepts every key type that decoder does, and more). When both
+      // accept, it must read the same value, except where it decodes invalid
+      // UTF-8 to U+FFFD.
       // A structurally complete buffer can still be a malformed ext the decoder
       // rejects: that is the safe desync direction (reject, not over-allocate).
       let compared = 0;
@@ -612,13 +633,21 @@ describe('MessagePackSerializer', () => {
           value = decodeInteropValue(bytes);
         } catch (error) {
           expect(error).toBeInstanceOf(SerializationError);
+          const { message, cause } = error as SerializationError;
+          if (!scanned) {
+            expect(message).toMatch(/\(decode pre-scan\)$/);
+          } else if (/^Failed to decode interop/.test(message)) {
+            expect(cause).toBeInstanceOf(DecodeError);
+          }
           expect(scanned && decoded, `interop rejected a readable document: ${String(error)}`).toBe(
             false
           );
           continue;
         }
-        if (decoded && !hasReplacement(value)) {
-          expect(value).toStrictEqual(safeInts(reference));
+        expect(scanned, 'interop read a document the pre-scan rejects').toBe(true);
+        if (decoded) {
+          const expected = safeInts(reference);
+          expect(excusingReplacement(value, expected)).toStrictEqual(expected);
           compared++;
         }
       }
