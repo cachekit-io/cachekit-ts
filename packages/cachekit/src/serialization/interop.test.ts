@@ -432,6 +432,24 @@ describe('interop value decoding', () => {
     });
   });
 
+  it('rejects a map key that is not a string or number', () => {
+    // The pre-scan counts map entries but never checks key types, so the
+    // reader refuses these itself: nil, bool, bin, array, map and ext keys.
+    const keys: [number[], string][] = [
+      [[0xc0], 'object'],
+      [[0xc3], 'boolean'],
+      [[0xc4, 0x00], 'object'],
+      [[0x90], 'object'],
+      [[0x80], 'object'],
+      [[0xd4, 0x01, 0x2a], 'object'],
+    ];
+    for (const [key, type] of keys) {
+      expect(() => decodeInteropValue(Uint8Array.of(0x81, ...key, 0x01))).toThrow(
+        `Interop map key must be a string or number, not ${type}`
+      );
+    }
+  });
+
   it('still reads the msgpack timestamp ext as a Date', () => {
     // fixext4, type -1, 32-bit seconds = 1.
     expect(decodeInteropValue(Uint8Array.of(0xd6, 0xff, 0, 0, 0, 1))).toEqual(new Date(1000));
