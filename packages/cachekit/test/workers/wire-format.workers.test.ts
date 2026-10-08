@@ -4,10 +4,11 @@
  * Verifies the wasm-backed ByteStorage against
  * protocol/test-vectors/wire-format.json (vendored in ./fixtures/ and
  * sha256-pinned by the Node lane, test/protocol/wire-format.protocol.test.ts):
- * decodes every ground-truth envelope and the constructed 32-bit ratio-wrap
- * envelope, round-trips, validates, rejects corruption, and refuses every
- * reject vector on the envelope read path — inside real workerd, on the
- * wasm32 build.
+ * decodes every ground-truth envelope and every constructed envelope (the
+ * 32-bit ratio-wrap and the bin16 -> bin32 edge), round-trips, validates,
+ * rejects corruption, refuses every reject and payload reject vector on the
+ * envelope read path, and reads the temporal sentinel payloads — inside real
+ * workerd, on the wasm32 build.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -20,14 +21,21 @@ import {
   bytesToHex,
   compressedData,
   construct,
+  constructedDataLength,
   constructedVectors,
-  expectRejectedOnRead,
+  expectRevived,
+  expectSpecError,
   expectedBinMarker,
+  expectedFailure,
   firstMismatch,
   hexToBytes,
   legacyVectors,
-  rejectReadConfig,
+  payloadRejectVectors,
+  readRejection,
+  readValue,
   rejectVectors,
+  storedReadConfig,
+  temporalSentinelVectors,
   vectors,
 } from '../fixtures/wire-vectors.js';
 
@@ -98,14 +106,20 @@ describe('wire-format vectors (wasm ByteStorage)', () => {
     }
   });
 
-  it('carries the 32-bit ratio-wrap constructed vector', () => {
-    expect(constructedVectors.map((v) => v.name)).toEqual(['envelope_ratio_product_wraps_32_bits']);
+  it('carries the ratio-wrap and the bin16 -> bin32 edge constructed vectors', () => {
+    expect(constructedVectors.map((v) => v.name)).toEqual([
+      'envelope_ratio_product_wraps_32_bits',
+      'envelope_bin16_max',
+      'envelope_bin32_min',
+      'envelope_legacy_array32_min',
+    ]);
   });
 
-  // The wasm32 target this lane exists for: compressed_data is the first
-  // length at which 1000 * compressed_size overflows 32 bits, so a reader that
-  // multiplies in 32-bit (or pointer) width rejects this envelope as a ratio
-  // bomb. A pass on a 64-bit host proves nothing about wasm32.
+  // The wasm32 target this lane exists for: the ratio-wrap envelope's
+  // compressed_data is the first length at which 1000 * compressed_size
+  // overflows 32 bits, so a reader that multiplies in 32-bit (or pointer)
+  // width rejects it as a ratio bomb. A pass on a 64-bit host proves nothing
+  // about wasm32. The other three sit either side of the bin16 -> bin32 edge.
   it.each(constructedVectors.map((v) => [v.name, v] as const))(
     'unpacks constructed envelope %s to its constructed input',
     (_name, vector) => {
@@ -113,22 +127,53 @@ describe('wire-format vectors (wasm ByteStorage)', () => {
       const input = construct(vector.input_construction);
       expect(envelope.length).toBe(vector.envelope_size);
       expect(input.length).toBe(vector.original_size);
-      expect(compressedData(envelope).length).toBe(vector.compressed_size);
+      expect(constructedDataLength(envelope, vector.envelope_encoding)).toBe(
+        vector.compressed_size
+      );
       expect(firstMismatch(storage.unpack(envelope), input)).toBe(-1);
     }
   );
 
-  it('carries the six reject vectors', () => {
+  it('carries the fourteen reject vectors', () => {
     expect(rejectVectors.map((v) => v.name)).toEqual(Object.keys(REJECT_EXPECTATIONS));
   });
 
   // Through the Workers entry's compression-on read, as a stored entry: the
-  // header checks in envelopeVerdict, then the wasm unpack.
+  // header checks in envelopeVerdict, then the wasm unpack. A `gap` vector
+  // must still be refused; the spec's assertion is an expected failure.
   it.each(rejectVectors.map((v) => [v.name, v] as const))(
     'refuses reject vector %s on the envelope read path with the error the spec names',
     async (name, vector) => {
-      const cache = createCache(rejectReadConfig(hexToBytes(vector.envelope_hex)));
-      await expectRejectedOnRead(cache, name);
+      const error = await readRejection(
+        createCache(storedReadConfig(hexToBytes(vector.envelope_hex)))
+      );
+      const { gap } = REJECT_EXPECTATIONS[name];
+      if (!gap) return expectSpecError(error, name);
+      expect(error.message).toMatch(gap.raises);
+      expectedFailure(gap.rule, () => expectSpecError(error, name));
+    }
+  );
+
+  // The envelope is sound, so the refusal can only come from the payload
+  // decode's structural guard.
+  it.each(payloadRejectVectors.map((v) => [v.name, v] as const))(
+    'refuses payload reject vector %s with the payload pre-scan error',
+    async (_name, vector) => {
+      const envelope = hexToBytes(vector.envelope_hex);
+      expect(bytesToHex(storage.unpack(envelope))).toBe(vector.input_hex);
+      const error = await readRejection(createCache(storedReadConfig(envelope)));
+      expect(error.message).toMatch(/\(decode pre-scan\)$/);
+    }
+  );
+
+  // WIRE-20: the Workers entry revives no sentinel map on the default path
+  // (see the Node lane for the interop reader, which is the same code).
+  it.each(temporalSentinelVectors.map((v) => [v.name, v] as const))(
+    'default read path: %s is returned as its map (expected failure, WIRE-20)',
+    async (_name, vector) => {
+      const stored = storage.pack(hexToBytes(vector.payload_hex));
+      const value = await readValue(createCache(storedReadConfig(stored)));
+      expectedFailure('WIRE-20', () => expectRevived(value, vector));
     }
   );
 
