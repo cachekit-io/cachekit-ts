@@ -56,7 +56,6 @@ export interface RejectVector {
  */
 export interface PayloadRejectVector {
   name: string;
-  derived_from: string;
   envelope_hex: string;
   input_hex: string;
 }
@@ -65,7 +64,8 @@ export interface PayloadRejectVector {
 export interface TemporalSentinelVector {
   name: string;
   payload_hex: string;
-  revives_to: { type: 'datetime' | 'date' | 'time'; iso: string };
+  /** "datetime", "date" or "time". */
+  revives_to: { type: string; iso: string };
 }
 
 // Annotated, not cast: `pnpm type-check:tests` then checks every entry of the
@@ -76,8 +76,7 @@ export const legacyVectors = vectors.filter((v) => v.envelope_encoding === undef
 export const constructedVectors: ConstructedVector[] = fixture.constructed_vectors;
 export const rejectVectors: RejectVector[] = fixture.reject_vectors;
 export const payloadRejectVectors: PayloadRejectVector[] = fixture.payload_reject_vectors;
-export const temporalSentinelVectors =
-  fixture.temporal_sentinel_vectors as TemporalSentinelVector[];
+export const temporalSentinelVectors: TemporalSentinelVector[] = fixture.temporal_sentinel_vectors;
 
 /**
  * What reading each reject vector through the SDK's envelope read path must
@@ -90,9 +89,9 @@ export const temporalSentinelVectors =
  * 255, a uint64 size) is "not an envelope core would accept", refused before
  * unpack.
  *
- * `gap` marks a vector whose named error the SDK does not raise yet: the read
- * must still refuse it with `gap.raises`, and the spec's assertion is held as
- * an expected failure naming `gap.rule` (see expectedFailure).
+ * `gap` marks a vector whose named error the SDK does not raise yet: the spec's
+ * assertion is held as an expected failure naming `gap.rule` (see
+ * expectedFailure), and the read must still refuse it with `gap.raises`.
  *
  * The allocation bound the table also asks of the size-cap and ratio vectors
  * is not asserted here: like cachekit-py, this SDK asserts it once core's
@@ -125,7 +124,10 @@ export const REJECT_EXPECTATIONS: Record<
   // then refuses element 1 as the wrong type: still before unpack, but a
   // type error, not the slot-sum error WIRE-9 names. Core never sees these
   // bytes, so moving to a core release with an envelope pre-scan does not
-  // change this; only a slot-sum check in readEnvelopeHeader does.
+  // change this. Nor does a slot-sum check inside readEnvelopeHeader alone:
+  // every refusal there is null, reported as "not an envelope core would
+  // accept". Only a new envelope verdict whose ENVELOPE_REJECTIONS text names
+  // the pre-scan closes the gap.
   reject_envelope_slots_overclaim: {
     raises: /pre-scan/,
     gap: { rule: 'WIRE-9', raises: /not an envelope core would accept/ },
@@ -177,12 +179,11 @@ export async function readRejection(cache: {
   close(): Promise<void>;
 }): Promise<Error> {
   const error = await cache.get('wire:reject').then(
-    () => new Error('read accepted the vector'),
+    () => undefined,
     (e: unknown) => e
   );
   await cache.close();
-  expect(error).toBeInstanceOf(Error);
-  expect((error as Error).message).not.toBe('read accepted the vector');
+  expect(error, 'read accepted the vector').toBeInstanceOf(Error);
   return error as Error;
 }
 
@@ -198,11 +199,20 @@ export async function readValue(cache: {
   }
 }
 
-/** The error REJECT_EXPECTATIONS names for reject vector `name`. */
+/**
+ * The error REJECT_EXPECTATIONS names for reject vector `name`. For a `gap`
+ * vector the named error is an expected failure, checked first so a closed
+ * gap reports its rule; the read must still raise `gap.raises`.
+ */
 export function expectSpecError(error: Error, name: string): void {
-  const { raises, never } = REJECT_EXPECTATIONS[name];
-  expect(error.message).toMatch(raises);
-  if (never) expect(error.message).not.toMatch(never);
+  const { raises, never, gap } = REJECT_EXPECTATIONS[name];
+  const named = () => {
+    expect(error.message).toMatch(raises);
+    if (never) expect(error.message).not.toMatch(never);
+  };
+  if (!gap) return named();
+  expectedFailure(gap.rule, named);
+  expect(error.message).toMatch(gap.raises);
 }
 
 /**
@@ -218,6 +228,15 @@ export function expectRevived(value: unknown, vector: TemporalSentinelVector): v
     return;
   }
   expect(value).not.toEqual({ [`__${type}__`]: true, value: iso });
+}
+
+/**
+ * A sentinel the reader does not revive (WIRE-20): it must come back as
+ * exactly the map its payload decodes to, and revival is an expected failure.
+ */
+export function expectUnrevived(value: unknown, vector: TemporalSentinelVector): void {
+  expect(value).toEqual(decode(hexToBytes(vector.payload_hex)));
+  expectedFailure('WIRE-20', () => expectRevived(value, vector));
 }
 
 // The envelope is a 4-element fixarray (0x94), so byte 1 is the msgpack

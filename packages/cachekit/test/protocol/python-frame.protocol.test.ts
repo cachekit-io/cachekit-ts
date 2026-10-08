@@ -1,10 +1,12 @@
 /**
  * Other SDKs' containers (protocol spec/wire-format.md, SDK Storage Containers)
  *
- * An SDK must not decode another SDK's auto-mode container (WIRE-21). The
+ * An SDK must not decode another SDK's auto-mode container (WIRE-21). Three
  * error vectors of test-vectors/python-frame.json (vendored in ./fixtures/,
- * sha256-pinned below) that carry a foreign container are fed to this SDK's
- * readers: the compression-on envelope read path, and the interop reader.
+ * sha256-pinned below) are fed to this SDK's readers: the CK frame in
+ * `ck_frame_fed_to_interop_reader`, and the two containers named below. The
+ * frame-check vectors (truncated, wrong version, header overrun) test
+ * cachekit-py's frame parser, which this SDK does not have.
  *
  * Two of them name cachekit-py's frame reader, but their bytes are this SDK's
  * own containers: `bare_envelope_fed_to_frame_reader` is its default

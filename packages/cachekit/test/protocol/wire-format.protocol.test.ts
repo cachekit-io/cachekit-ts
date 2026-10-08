@@ -20,8 +20,8 @@ import {
   constructedVectors,
   expectRevived,
   expectSpecError,
+  expectUnrevived,
   expectedBinMarker,
-  expectedFailure,
   firstMismatch,
   fixture,
   hexToBytes,
@@ -46,9 +46,6 @@ import {
  * REJECT_EXPECTATIONS in test/fixtures/wire-vectors.ts.
  */
 const FIXTURE_SHA256 = '2f6818903a552a7c09414c1e5c02caf21fa92dcd56ccff5634c8257038e7575c'; // pragma: allowlist secret
-
-/** The protocol's 512 MiB envelope cap: the vectors run at the spec's limits. */
-const SPEC_MAX_UNCOMPRESSED = 512 * 1024 * 1024;
 
 // Raw bytes of the same file the JSON import above parses: the pin covers
 // every byte (legacy vectors and the limits block included), not a re-serialisation.
@@ -288,7 +285,7 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
         expect(constructedDataLength(envelope, vector.envelope_encoding)).toBe(
           vector.compressed_size
         );
-        expect(envelopeVerdict(envelope, SPEC_MAX_UNCOMPRESSED)).toBe('unpack');
+        expect(envelopeVerdict(envelope, fixture.limits.max_uncompressed_size)).toBe('unpack');
         expect(firstMismatch(bs.unpack(envelope), input)).toBe(-1);
       }
     );
@@ -305,10 +302,7 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
         const error = await readRejection(
           createCache(storedReadConfig(hexToBytes(vector.envelope_hex)))
         );
-        const { gap } = REJECT_EXPECTATIONS[name];
-        if (!gap) return expectSpecError(error, name);
-        expect(error.message).toMatch(gap.raises);
-        expectedFailure(gap.rule, () => expectSpecError(error, name));
+        expectSpecError(error, name);
       }
     );
 
@@ -347,8 +341,7 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
       'default read path: %s is returned as its map (expected failure, WIRE-20)',
       async (_name, vector) => {
         const stored = bs.pack(hexToBytes(vector.payload_hex));
-        const value = await readValue(createCache(storedReadConfig(stored)));
-        expectedFailure('WIRE-20', () => expectRevived(value, vector));
+        expectUnrevived(await readValue(createCache(storedReadConfig(stored))), vector);
       }
     );
 
@@ -357,7 +350,7 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
       (_name, vector) => {
         const value = decodeInteropValue(hexToBytes(vector.payload_hex));
         if (vector.revives_to.type === 'datetime') return expectRevived(value, vector);
-        expectedFailure('WIRE-20', () => expectRevived(value, vector));
+        expectUnrevived(value, vector);
       }
     );
 

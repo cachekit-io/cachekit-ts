@@ -23,10 +23,9 @@ import {
   construct,
   constructedDataLength,
   constructedVectors,
-  expectRevived,
   expectSpecError,
+  expectUnrevived,
   expectedBinMarker,
-  expectedFailure,
   firstMismatch,
   hexToBytes,
   legacyVectors,
@@ -139,18 +138,14 @@ describe('wire-format vectors (wasm ByteStorage)', () => {
   });
 
   // Through the Workers entry's compression-on read, as a stored entry: the
-  // header checks in envelopeVerdict, then the wasm unpack. A `gap` vector
-  // must still be refused; the spec's assertion is an expected failure.
+  // header checks in envelopeVerdict, then the wasm unpack.
   it.each(rejectVectors.map((v) => [v.name, v] as const))(
     'refuses reject vector %s on the envelope read path with the error the spec names',
     async (name, vector) => {
       const error = await readRejection(
         createCache(storedReadConfig(hexToBytes(vector.envelope_hex)))
       );
-      const { gap } = REJECT_EXPECTATIONS[name];
-      if (!gap) return expectSpecError(error, name);
-      expect(error.message).toMatch(gap.raises);
-      expectedFailure(gap.rule, () => expectSpecError(error, name));
+      expectSpecError(error, name);
     }
   );
 
@@ -172,8 +167,7 @@ describe('wire-format vectors (wasm ByteStorage)', () => {
     'default read path: %s is returned as its map (expected failure, WIRE-20)',
     async (_name, vector) => {
       const stored = storage.pack(hexToBytes(vector.payload_hex));
-      const value = await readValue(createCache(storedReadConfig(stored)));
-      expectedFailure('WIRE-20', () => expectRevived(value, vector));
+      expectUnrevived(await readValue(createCache(storedReadConfig(stored))), vector);
     }
   );
 
