@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 import { createCache } from '../../src/index.js';
-import { readEnvelopeHeader } from '../../src/serialization/envelope.js';
+import { envelopeVerdict, readEnvelopeHeader } from '../../src/serialization/envelope.js';
+import { decodeInteropValue } from '../../src/serialization/interop.js';
 // Single vendored copy of protocol/test-vectors/wire-format.json (see the
 // FIXTURE_SHA256 docblock below for the re-vendor rule); this lane runs the
 // same vectors through the NAPI binding so both bindings are held to identical bytes.
@@ -15,21 +16,28 @@ import {
   bytesToHex,
   compressedData,
   construct,
+  constructedDataLength,
   constructedVectors,
-  expectRejectedOnRead,
+  expectRevived,
+  expectSpecError,
+  expectUnrevived,
   expectedBinMarker,
   firstMismatch,
   fixture,
   hexToBytes,
   legacyVectors,
-  rejectReadConfig,
+  payloadRejectVectors,
+  readRejection,
+  readValue,
   rejectVectors,
+  storedReadConfig,
+  temporalSentinelVectors,
   vectors,
 } from '../fixtures/wire-vectors.js';
 
 /**
- * sha256 of test-vectors/wire-format.json (fixture version 1.3.0).
- * Provenance: cachekit-io/protocol @ b90ab132. Re-vendoring means copying the
+ * sha256 of test-vectors/wire-format.json (fixture version 1.4.0).
+ * Provenance: cachekit-io/protocol @ 4b8fddb2 (the merge of cachekit-io/protocol#171). Re-vendoring means copying the
  * file byte-for-byte from a named protocol revision, then changing together:
  * the version and revision in this docblock, the FIXTURE_SHA256 value below,
  * the version/count guard in the "protocol wire-format.json vectors" suite,
@@ -37,7 +45,7 @@ import {
  * test/workers/wire-format.workers.test.ts), and the reject-vector set,
  * REJECT_EXPECTATIONS in test/fixtures/wire-vectors.ts.
  */
-const FIXTURE_SHA256 = '5d72ca1ff27202ab46aa501f54abf77e535f275d2ea4443966ad464f3c020cd7'; // pragma: allowlist secret
+const FIXTURE_SHA256 = '2f6818903a552a7c09414c1e5c02caf21fa92dcd56ccff5634c8257038e7575c'; // pragma: allowlist secret
 
 // Raw bytes of the same file the JSON import above parses: the pin covers
 // every byte (legacy vectors and the limits block included), not a re-serialisation.
@@ -211,10 +219,10 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
       ).toBe(FIXTURE_SHA256);
     });
 
-    it('vendors fixture 1.3.0: seven legacy vectors, seven bin twins, bin8 and bin16 pinned', () => {
-      expect(fixture.version).toBe('1.3.0');
-      expect(legacyVectors).toHaveLength(7);
-      expect(binVectors).toHaveLength(7);
+    it('vendors fixture 1.4.0: nine legacy vectors, nine bin twins, bin8 and bin16 pinned', () => {
+      expect(fixture.version).toBe('1.4.0');
+      expect(legacyVectors).toHaveLength(9);
+      expect(binVectors).toHaveLength(9);
       expect(new Set(binVectors.map((v) => hexToBytes(v.envelope_hex)[1]))).toEqual(
         new Set([0xc4, 0xc5])
       );
@@ -252,16 +260,21 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
       }
     });
 
-    it('carries the 32-bit ratio-wrap constructed vector', () => {
+    it('carries the ratio-wrap and the bin16 -> bin32 edge constructed vectors', () => {
       expect(constructedVectors.map((v) => v.name)).toEqual([
         'envelope_ratio_product_wraps_32_bits',
+        'envelope_bin16_max',
+        'envelope_bin32_min',
+        'envelope_legacy_array32_min',
       ]);
     });
 
-    // compressed_data is the first length at which 1000 * compressed_size
-    // overflows 32 bits; a reader that multiplies in 32-bit width rejects it.
-    // This NAPI build is 64-bit, so a pointer-width reader passes here too:
-    // only the Workers lane proves wasm32.
+    // The ratio-wrap envelope's compressed_data is the first length at which
+    // 1000 * compressed_size overflows 32 bits; a reader that multiplies in
+    // 32-bit width rejects it. This NAPI build is 64-bit, so a pointer-width
+    // reader passes here too: only the Workers lane proves wasm32. The other
+    // three sit either side of the bin16 -> bin32 edge, one in the legacy
+    // array32 encoding. The SDK's own header gate must admit each one too.
     it.each(constructedVectors.map((v) => [v.name, v] as const))(
       'unpacks constructed envelope %s to its constructed input',
       (_name, vector) => {
@@ -269,12 +282,15 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
         const input = construct(vector.input_construction);
         expect(envelope.length).toBe(vector.envelope_size);
         expect(input.length).toBe(vector.original_size);
-        expect(compressedData(envelope).length).toBe(vector.compressed_size);
+        expect(constructedDataLength(envelope, vector.envelope_encoding)).toBe(
+          vector.compressed_size
+        );
+        expect(envelopeVerdict(envelope, fixture.limits.max_uncompressed_size)).toBe('unpack');
         expect(firstMismatch(bs.unpack(envelope), input)).toBe(-1);
       }
     );
 
-    it('carries the six reject vectors', () => {
+    it('carries the fourteen reject vectors', () => {
       expect(rejectVectors.map((v) => v.name)).toEqual(Object.keys(REJECT_EXPECTATIONS));
     });
 
@@ -283,8 +299,58 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
     it.each(rejectVectors.map((v) => [v.name, v] as const))(
       'refuses reject vector %s on the envelope read path with the error the spec names',
       async (name, vector) => {
-        const cache = createCache(rejectReadConfig(hexToBytes(vector.envelope_hex)));
-        await expectRejectedOnRead(cache, name);
+        const error = await readRejection(
+          createCache(storedReadConfig(hexToBytes(vector.envelope_hex)))
+        );
+        expectSpecError(error, name);
+      }
+    );
+
+    it('carries the two payload reject vectors', () => {
+      expect(payloadRejectVectors.map((v) => v.name)).toEqual([
+        'payload_array32_max_claim_alone',
+        'payload_nested_array16_each_header_fits_sum_overclaims',
+      ]);
+    });
+
+    // The envelope is sound, so the refusal can only come from the payload
+    // decode's structural guard, which must reject before materialising.
+    it.each(payloadRejectVectors.map((v) => [v.name, v] as const))(
+      'refuses payload reject vector %s with the payload pre-scan error',
+      async (_name, vector) => {
+        const envelope = hexToBytes(vector.envelope_hex);
+        expect(bytesToHex(bs.unpack(envelope))).toBe(vector.input_hex);
+        const error = await readRejection(createCache(storedReadConfig(envelope)));
+        expect(error.message).toMatch(/\(decode pre-scan\)$/);
+      }
+    );
+
+    // WIRE-20 asks every SDK to revive all three maps. This SDK revives none
+    // on the default path, and only __datetime__ in interop mode; how a
+    // JavaScript reader should revive a date or a time is an open question,
+    // so those are held as expected failures, not changed here.
+    it('carries the three temporal sentinel vectors', () => {
+      expect(temporalSentinelVectors.map((v) => v.revives_to.type)).toEqual([
+        'datetime',
+        'date',
+        'time',
+      ]);
+    });
+
+    it.each(temporalSentinelVectors.map((v) => [v.name, v] as const))(
+      'default read path: %s is returned as its map (expected failure, WIRE-20)',
+      async (_name, vector) => {
+        const stored = bs.pack(hexToBytes(vector.payload_hex));
+        expectUnrevived(await readValue(createCache(storedReadConfig(stored))), vector);
+      }
+    );
+
+    it.each(temporalSentinelVectors.map((v) => [v.name, v] as const))(
+      'interop reader: %s',
+      (_name, vector) => {
+        const value = decodeInteropValue(hexToBytes(vector.payload_hex));
+        if (vector.revives_to.type === 'datetime') return expectRevived(value, vector);
+        expectUnrevived(value, vector);
       }
     );
 

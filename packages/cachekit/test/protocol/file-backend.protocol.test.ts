@@ -7,9 +7,9 @@
  * frozen at its `reader_now_unix_seconds` (default 0), as the fixture's own
  * `format` field requires, so `expired_entry` is read at exactly its expiry.
  *
- * Provenance: cachekit-io/protocol @ 936f22f (the merge of
- * cachekit-io/protocol#42, the revision that last touched the fixture;
- * fixture version 1.1.0).
+ * Provenance: cachekit-io/protocol @ 4b8fddb2 (the merge of
+ * cachekit-io/protocol#171, the revision that last touched the fixture;
+ * fixture version 1.2.0).
  *
  * Re-vendor: copy test-vectors/file-backend.json byte-for-byte from the
  * protocol revision you then name in `Provenance` above, then update
@@ -25,7 +25,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { file, type FileBackend } from '../../src/backends/file.js';
 
 /** sha256 of test-vectors/file-backend.json at the provenance above. */
-const FIXTURE_SHA256 = '8d9d8c4709baf9ef3a8f2d71d21fb5a56207bc7a05c9bc7a967ac567f2604615'; // pragma: allowlist secret
+const FIXTURE_SHA256 = 'b7b0c51935a3a00ab340005ae1e091797b14938f92eecae23346bdccf0d12af4'; // pragma: allowlist secret
 
 interface Vector {
   name: string;
@@ -86,6 +86,15 @@ describe('Protocol file-backend vectors (spec/file-backend-format.md)', () => {
       unknown_flag_preserved: 'miss_preserve',
       reserved_nonzero_preserved: 'miss_preserve',
       expired_entry: 'miss_expired',
+      empty_payload: 'return_payload',
+      binary_payload: 'return_payload',
+      unknown_flag_high_bit: 'miss_preserve',
+      reserved_one_preserved: 'miss_preserve',
+      reserved_ff_preserved: 'miss_preserve',
+      // Expired AND unknown: the reader keeps the file for the newer writer
+      // that understands it, rather than deleting it as expired.
+      unknown_flag_expired: 'miss_preserve',
+      reserved_nonzero_expired: 'miss_preserve',
     });
   });
 
