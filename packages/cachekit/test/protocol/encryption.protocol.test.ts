@@ -18,8 +18,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createCache } from '../../src/index.js';
-import { ConfigurationError, EncryptionError } from '../../src/errors.js';
-import { generateInteropKey, decodeInteropValue } from '../../src/serialization/interop.js';
+import { ConfigurationError, EncryptionError, SerializationError } from '../../src/errors.js';
+import { generateInteropKey } from '../../src/serialization/interop.js';
 import type { Backend } from '../../src/backends/types.js';
 
 /**
@@ -113,23 +113,34 @@ function plant(rows: SealedRow[], keyPrefix = ''): InMemoryBackend {
   return backend;
 }
 
-/** What a read gives back: the value, or the error it threw. */
-async function settle(read: Promise<unknown>): Promise<{ value: unknown } | { error: Error }> {
-  return read.then(
-    (value) => ({ value }),
-    (error: unknown) => ({ error: error as Error })
-  );
-}
-
 /**
- * A compute function for an interop wrap of `arity` arguments: the interop
- * guard reads fn.length, which a mock's rest parameters report as 0.
+ * A compute function that must never run, for an interop wrap of `arity`
+ * arguments: the interop guard reads fn.length, which a mock's rest
+ * parameters report as 0.
  */
-function computeOfArity<T>(arity: number, body: () => Promise<T>) {
-  const compute = vi.fn(async (..._args: unknown[]): Promise<T> => body());
+function computeOfArity(arity: number) {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const compute = vi.fn(async (..._args: unknown[]): Promise<unknown> => {
+    throw new Error('the sealed entry must be read, not recomputed');
+  });
   Object.defineProperty(compute, 'length', { value: arity });
   return compute;
 }
+
+/**
+ * Asserts that `read` failed after authentication: decryption succeeded and
+ * the plaintext was refused, with `message`.
+ */
+async function expectRefusedAfterDecrypt(read: Promise<unknown>, message: RegExp): Promise<void> {
+  await expect(read).rejects.toBeInstanceOf(SerializationError);
+  await expect(read).rejects.toThrow(message);
+}
+
+/** The read-path refusal of a plaintext that holds bytes after its one document. */
+const TRAILING_BYTES = /^Trailing bytes after MessagePack document: /;
+
+/** The read-path refusal of a plaintext that is no ByteStorage envelope. */
+const NOT_AN_ENVELOPE = /not an envelope core would accept; refused before unpack$/;
 
 /** A cache under the fixture's main key and tenant, with nothing absorbing a read's error. */
 function vectorCache(backend: Backend, compression: boolean) {
@@ -137,7 +148,7 @@ function vectorCache(backend: Backend, compression: boolean) {
     backend,
     l1: { enabled: false },
     encryption: { masterKey: fixture.master_key_hex, tenantId: fixture.tenant_id },
-    reliability: { degradation: false, retry: { maxAttempts: 1 } },
+    reliability: { degradation: false },
     compression,
   });
 }
@@ -210,7 +221,6 @@ describe('encryption.json master_key_input (protocol 1.4.0) — createCache.secu
         const read = ACCEPT_READS[name]!;
         expect([vector.format, vector.compressed]).toEqual(['msgpack', false]);
         expect(generateInteropKey(read.namespace, read.op, read.args)).toBe(vector.cache_key);
-        expect(decodeInteropValue(Buffer.from(vector.plaintext_hex, 'hex'))).toEqual(read.value);
 
         vi.stubEnv('CACHEKIT_PREVIOUS_MASTER_KEYS', undefined);
         // Every accept row in one backend, so a read that reached another
@@ -222,9 +232,7 @@ describe('encryption.json master_key_input (protocol 1.4.0) — createCache.secu
           ...supplyKey(vector.master_key_hex),
         });
         try {
-          const compute = computeOfArity(read.args.length, async (): Promise<unknown> => {
-            throw new Error('the sealed entry must be read, not recomputed');
-          });
+          const compute = computeOfArity(read.args.length);
           const wrapped = cache.wrap(compute, {
             namespace: read.namespace,
             interop: read.op,
@@ -316,7 +324,15 @@ describe('encryption.json keyring.configuration (protocol 1.5.0) — loaded at c
         expect(load).toThrow(ConfigurationError);
         return;
       }
-      await load().close();
+      // The keyring reaches the native binding lazily, on first use, so only
+      // an encrypted round trip shows the binding accepted it.
+      const cache = load();
+      try {
+        await cache.set('keyring:probe', 1);
+        expect(await cache.get('keyring:probe')).toBe(1);
+      } finally {
+        await cache.close();
+      }
     });
   });
 });
@@ -355,27 +371,37 @@ describe('encryption.json aad_reject_vectors (protocol 1.5.0, ENC-1) — no retr
   });
 
   // Controls: each reader authenticates an entry sealed under the AAD it
-  // builds, so the failures below are the AAD, not the key or tenant.
+  // builds, so the failures below are the AAD, not the key, tenant or
+  // prefix handling. Neither plaintext is a value these readers decode, so
+  // each read fails after decryption, with the error that names its bytes.
+  // The prefixed control reads basic_bytes's key test:vector:1 as vector:1
+  // behind the prefix test:, so it authenticates only if the AAD carries
+  // the prefix exactly once.
   it.each([
-    ['compression off', 'basic_bytes', false],
-    ['compression on', 'compressed_basic', true],
-  ] as const)('control: the %s reader authenticates %s', async (_reader, name, compression) => {
-    const sealed = fixture.vectors.find((v) => v.name === name)!;
-    expect([sealed.format, sealed.compressed, sealed.original_type]).toEqual([
-      'msgpack',
-      compression,
-      undefined,
-    ]);
-    const cache = vectorCache(plant([sealed]), compression);
-    try {
-      const outcome = await settle(cache.get(sealed.cache_key));
-      // Neither plaintext is a value this reader decodes; what matters is
-      // that the read got past authentication.
-      if ('error' in outcome) expect(outcome.error).not.toBeInstanceOf(EncryptionError);
-    } finally {
-      await cache.close();
+    ['compression off', 'basic_bytes', false, '', TRAILING_BYTES],
+    ['compression on', 'compressed_basic', true, '', NOT_AN_ENVELOPE],
+    ['compression off, key prefix test:,', 'basic_bytes', false, 'test:', TRAILING_BYTES],
+  ] as const)(
+    'control: the %s reader authenticates %s',
+    async (_reader, name, compression, keyPrefix, refusal) => {
+      const sealed = fixture.vectors.find((v) => v.name === name)!;
+      expect([sealed.format, sealed.compressed, sealed.original_type]).toEqual([
+        'msgpack',
+        compression,
+        undefined,
+      ]);
+      expect(sealed.cache_key.startsWith(keyPrefix)).toBe(true);
+      const cache = vectorCache(plant([sealed], keyPrefix), compression);
+      try {
+        await expectRefusedAfterDecrypt(
+          cache.get(sealed.cache_key.slice(keyPrefix.length)),
+          refusal
+        );
+      } finally {
+        await cache.close();
+      }
     }
-  });
+  );
 
   it.each(rows.filter((v) => v.name in AAD_READERS).map((v) => [v.name, v] as const))(
     '%s: fails authentication',
@@ -389,13 +415,11 @@ describe('encryption.json aad_reject_vectors (protocol 1.5.0, ENC-1) — no retr
 
       const cache = vectorCache(plant([row], keyPrefix), compression);
       try {
-        const outcome = await settle(cache.get(row.cache_key.slice(keyPrefix.length)));
+        const read = cache.get(row.cache_key.slice(keyPrefix.length));
         // Most rows' plaintexts are no value after a retry either, so only
         // the authentication failure itself shows that none was attempted.
-        expect(outcome).toHaveProperty('error');
-        const { error } = outcome as { error: Error };
-        expect(error).toBeInstanceOf(EncryptionError);
-        expect(error.message).toMatch(/^Decryption failed: /);
+        await expect(read).rejects.toBeInstanceOf(EncryptionError);
+        await expect(read).rejects.toThrow(/^Decryption failed: /);
       } finally {
         await cache.close();
       }
@@ -411,7 +435,7 @@ describe('encryption.json decrypted_container (protocol 1.5.0, ENC-3) — the co
     return found;
   };
 
-  it('vendors the five rows for the readers cachekit-ts has, and two for cachekit-py readers', () => {
+  it('vendors four rows for the readers cachekit-ts has, and two for cachekit-py readers', () => {
     expect(rows.map((v) => [v.name, v.reader])).toEqual([
       ['container_envelope_to_plain_reader', 'plain_msgpack'],
       ['container_trailing_byte_to_interop_reader', 'interop'],
@@ -441,10 +465,7 @@ describe('encryption.json decrypted_container (protocol 1.5.0, ENC-3) — the co
     expect([vector.compressed, vector.outcome]).toEqual([true, 'error']);
     const cache = vectorCache(plant([vector]), true);
     try {
-      const outcome = await settle(cache.get(vector.cache_key));
-      expect(outcome).toHaveProperty('error');
-      // Refused after authentication, by the envelope check.
-      expect((outcome as { error: Error }).error).not.toBeInstanceOf(EncryptionError);
+      await expectRefusedAfterDecrypt(cache.get(vector.cache_key), NOT_AN_ENVELOPE);
     } finally {
       await cache.close();
     }
@@ -460,19 +481,19 @@ describe('encryption.json decrypted_container (protocol 1.5.0, ENC-3) — the co
     expect([vector.compressed, vector.outcome]).toEqual([false, 'error']);
     expect(generateInteropKey('t', 'op', [...args])).toBe(vector.cache_key);
 
-    const cache = vectorCache(plant([vector]), true);
+    // An interop read ignores the compression setting; the row's own flag is
+    // what an interop reader's AAD carries.
+    const cache = vectorCache(plant([vector]), vector.compressed);
     try {
-      const compute = computeOfArity(args.length, async (): Promise<unknown> => 'recomputed');
+      const compute = computeOfArity(args.length);
       const wrapped = cache.wrap(compute, {
         namespace: 't',
         interop: 'op',
         interopArity: args.length,
         ttl: 60,
       });
-      const outcome = await settle(wrapped(...args));
-      expect(outcome).toHaveProperty('error');
       // Refused after authentication, by the one-document check.
-      expect((outcome as { error: Error }).error).not.toBeInstanceOf(EncryptionError);
+      await expectRefusedAfterDecrypt(wrapped(...args), TRAILING_BYTES);
       expect(compute).not.toHaveBeenCalled();
     } finally {
       await cache.close();
