@@ -551,8 +551,13 @@ function encodeCanonical(
     checkCollectionSize(Object.keys(v).length, 'map');
     // Object.keys/entries skip Symbol keys, so { [s]: 1, a: 2 } would encode
     // as { a: 2 } — two distinct arguments, one cache key. Reject instead,
-    // as the Map branch does; enumerable or not, before any value is read.
-    if (Object.getOwnPropertySymbols(v).length > 0) {
+    // as the Map branch does, before any value is read. Symbols follow the
+    // same own-enumerable rule as string keys: a non-enumerable one is
+    // metadata (a namespace's Symbol.toStringTag), not data. Called via
+    // Object.prototype because null-prototype objects lack the method.
+    if (
+      Object.getOwnPropertySymbols(v).some((s) => Object.prototype.propertyIsEnumerable.call(v, s))
+    ) {
       throw new SerializationError('Interop map keys must be strings, got symbol');
     }
     encodeMapEntries(Object.entries(v), profile, depth, sink);

@@ -124,17 +124,13 @@ describe('interop argument encoding (args profile)', () => {
 
   it('rejects non-string Map keys', () => {
     expect(() => encodeInteropArgs([new Map([[1, 'x']])])).toThrow(/keys must be strings/);
-  });
-
-  it('rejects Symbol Map keys with SerializationError', () => {
-    const m = new Map([[Symbol('k'), 'x']]);
-    expect(() => encodeInteropArgs([m])).toThrow(SerializationError);
-    expect(() => encodeInteropArgs([m])).toThrow(/keys must be strings, got symbol/);
+    expect(() => encodeInteropArgs([new Map([[Symbol('k'), 'x']])])).toThrow(
+      new SerializationError('Interop map keys must be strings, got symbol')
+    );
   });
 
   describe('Symbol-keyed object properties', () => {
     const sym = Symbol('k');
-    const nonEnumerable = Object.defineProperty({ a: 2 }, sym, { value: 1, enumerable: false });
     const nullProto = Object.assign(Object.create(null) as Record<PropertyKey, unknown>, {
       a: 2,
       [sym]: 1,
@@ -144,14 +140,12 @@ describe('interop argument encoding (args profile)', () => {
       ['symbol-only object', { [sym]: 1 }],
       ['nested in an array', [{ [sym]: 1, a: 2 }]],
       ['nested in a Map value', new Map([['m', { [sym]: 1, a: 2 }]])],
-      ['non-enumerable', nonEnumerable],
       ['null prototype', nullProto],
     ];
 
     it.each(cases)('rejects a Symbol key (%s) in the args profile', (_name, value) => {
       expect(() => encodeInteropArgs([value])).toThrow(SerializationError);
       expect(() => encodeInteropArgs([value])).toThrow(/keys must be strings, got symbol/);
-      expect(() => generateInteropKey('users', 'get', [value])).toThrow(SerializationError);
     });
 
     it.each(cases)('rejects a Symbol key (%s) in the value profile', (_name, value) => {
@@ -180,6 +174,21 @@ describe('interop argument encoding (args profile)', () => {
         a: 2,
       });
       expect(hex(encodeInteropValue(plainNullProto))).toBe('81a16102');
+    });
+
+    it('ignores non-enumerable Symbol keys, like non-enumerable string keys', () => {
+      // Hidden Symbols are bookkeeping (a module namespace's Symbol.toStringTag,
+      // MobX's $mobx), not data: the bytes match the same object without them.
+      const hidden = Object.defineProperty({ a: 2 }, sym, { value: 1, enumerable: false });
+      expect(hex(encodeInteropArgs([hidden]))).toBe('9181a16102');
+      expect(hex(encodeInteropValue(hidden))).toBe('81a16102');
+      // Null prototype has no propertyIsEnumerable of its own; namespace-shaped.
+      const nsLike = Object.defineProperty(
+        Object.assign(Object.create(null) as Record<string, unknown>, { a: 2 }),
+        Symbol.toStringTag,
+        { value: 'Module', enumerable: false }
+      );
+      expect(hex(encodeInteropValue(nsLike))).toBe('81a16102');
     });
   });
 
