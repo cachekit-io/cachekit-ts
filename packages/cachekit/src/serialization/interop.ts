@@ -549,6 +549,12 @@ function encodeCanonical(
     // object is rejected before any tuple is built or value read, mirroring
     // the Map branch's .size check. Throw-only: the emitter call is unchanged.
     checkCollectionSize(Object.keys(v).length, 'map');
+    // Object.keys/entries skip Symbol keys, so { [s]: 1, a: 2 } would encode
+    // as { a: 2 } — two distinct arguments, one cache key. Reject instead,
+    // as the Map branch does; enumerable or not, before any value is read.
+    if (Object.getOwnPropertySymbols(v).length > 0) {
+      throw new SerializationError('Interop map keys must be strings, got symbol');
+    }
     encodeMapEntries(Object.entries(v), profile, depth, sink);
   } else {
     // Closed data model: a value that encodes on one SDK and errors on

@@ -126,6 +126,63 @@ describe('interop argument encoding (args profile)', () => {
     expect(() => encodeInteropArgs([new Map([[1, 'x']])])).toThrow(/keys must be strings/);
   });
 
+  it('rejects Symbol Map keys with SerializationError', () => {
+    const m = new Map([[Symbol('k'), 'x']]);
+    expect(() => encodeInteropArgs([m])).toThrow(SerializationError);
+    expect(() => encodeInteropArgs([m])).toThrow(/keys must be strings, got symbol/);
+  });
+
+  describe('Symbol-keyed object properties', () => {
+    const sym = Symbol('k');
+    const nonEnumerable = Object.defineProperty({ a: 2 }, sym, { value: 1, enumerable: false });
+    const nullProto = Object.assign(Object.create(null) as Record<PropertyKey, unknown>, {
+      a: 2,
+      [sym]: 1,
+    });
+    const cases: [string, unknown][] = [
+      ['top level', { [sym]: 1, a: 2 }],
+      ['symbol-only object', { [sym]: 1 }],
+      ['nested in an array', [{ [sym]: 1, a: 2 }]],
+      ['nested in a Map value', new Map([['m', { [sym]: 1, a: 2 }]])],
+      ['non-enumerable', nonEnumerable],
+      ['null prototype', nullProto],
+    ];
+
+    it.each(cases)('rejects a Symbol key (%s) in the args profile', (_name, value) => {
+      expect(() => encodeInteropArgs([value])).toThrow(SerializationError);
+      expect(() => encodeInteropArgs([value])).toThrow(/keys must be strings, got symbol/);
+      expect(() => generateInteropKey('users', 'get', [value])).toThrow(SerializationError);
+    });
+
+    it.each(cases)('rejects a Symbol key (%s) in the value profile', (_name, value) => {
+      expect(() => encodeInteropValue(value)).toThrow(SerializationError);
+      expect(() => encodeInteropValue(value)).toThrow(/keys must be strings, got symbol/);
+    });
+
+    it('rejects before reading any property value', () => {
+      let reads = 0;
+      const obj = {
+        get a(): number {
+          reads++;
+          return 1;
+        },
+        [sym]: 1,
+      };
+      expect(() => encodeInteropArgs([obj])).toThrow(SerializationError);
+      expect(() => encodeInteropValue(obj)).toThrow(SerializationError);
+      expect(reads).toBe(0);
+    });
+
+    it('leaves objects without Symbol keys byte-identical', () => {
+      expect(hex(encodeInteropArgs([{ a: 2 }]))).toBe('9181a16102');
+      expect(hex(encodeInteropValue({ a: 2 }))).toBe('81a16102');
+      const plainNullProto = Object.assign(Object.create(null) as Record<string, unknown>, {
+        a: 2,
+      });
+      expect(hex(encodeInteropValue(plainNullProto))).toBe('81a16102');
+    });
+  });
+
   it('rejects class instances (closed data model)', () => {
     class User {
       id = 1;
