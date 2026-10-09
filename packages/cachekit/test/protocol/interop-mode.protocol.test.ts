@@ -121,7 +121,11 @@ function assertVectorFile(value: unknown): asserts value is VectorFile {
         args_hash: 'string',
         expected_key: 'string',
       }),
-      value_vectors: table({ name: 'string', canonical_msgpack_hex: 'string' }),
+      value_vectors: table({
+        name: 'string',
+        value: ['object', 'array'],
+        canonical_msgpack_hex: 'string',
+      }),
       aad_vectors: table({
         name: 'string',
         tenant_id: 'string',

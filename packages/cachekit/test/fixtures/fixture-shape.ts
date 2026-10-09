@@ -14,8 +14,8 @@
  * - `table(row)`: an array whose every element matches `row`;
  * - `oneOf(...values)`: a string equal to one of `values`;
  * - an object: a JSON object holding at least the listed fields;
- * - a list of the above, any of which passes; `'undefined'` in it makes a
- *   field optional.
+ * - a list of the above, at most one of each kind: the one of the value's
+ *   kind decides. `'undefined'` in it makes a field optional.
  */
 
 type Kind = 'string' | 'number' | 'boolean' | 'null' | 'array' | 'object' | 'undefined';
@@ -34,7 +34,7 @@ export interface ObjectShape {
 
 type Single = Kind | Table | OneOf | ObjectShape;
 
-export type Shape = Single | Single[];
+type Shape = Single | Single[];
 
 /** An array whose every element matches `row`. */
 export function table(row: Shape): Table {
@@ -68,8 +68,14 @@ export function assertFixture(value: unknown, shape: ObjectShape, file: string):
     const fail = (expected: string, got = kindOf(v)) =>
       new TypeError(`${file}: ${path || '(root)'}: expected ${expected}, got ${got}`);
     const alternatives: Single[] = Array.isArray(s) ? s : [s];
+    const kinds = alternatives.map(kindOfShape);
+    // With one alternative per kind, the value's kind picks the only candidate,
+    // so no other alternative could have accepted a value this one refuses.
+    if (new Set(kinds).size !== kinds.length) {
+      throw new TypeError(`${file}: ${path || '(root)'}: shape lists two alternatives of one kind`);
+    }
     const match = alternatives.find((a) => kindOfShape(a) === kindOf(v));
-    if (match === undefined) throw fail(alternatives.map(kindOfShape).join(' | '));
+    if (match === undefined) throw fail(kinds.join(' | '));
     if (match instanceof Table) {
       if (!Array.isArray(v)) throw fail('array');
       v.forEach((row, i) => check(row, match.row, `${path}[${i}]`));
