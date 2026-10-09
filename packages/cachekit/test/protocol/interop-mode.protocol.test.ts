@@ -32,6 +32,7 @@ import {
 import { EncryptionManager } from '../../src/encryption/manager.js';
 import { AAD_VERSION } from '../../src/constants.js';
 import { SerializationError } from '../../src/errors.js';
+import { assertFixture, table, type ObjectShape } from '../fixtures/fixture-shape.js';
 
 interface KeyVector {
   name: string;
@@ -99,7 +100,64 @@ const FIXTURE_SHA256 = 'e1ca6c2361509f347d17f3352e0d7ab4d4b61488737bdf0056bb5769
 const raw = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'interop-mode.json')
 );
-const vectors = JSON.parse(raw.toString('utf8')) as VectorFile;
+
+const READER_SHAPE: ObjectShape = {
+  name: 'string',
+  input_hex: 'string',
+  error: ['string', 'undefined'],
+};
+
+function assertVectorFile(value: unknown): asserts value is VectorFile {
+  assertFixture(
+    value,
+    {
+      segment_pattern: 'string',
+      key_vectors: table({
+        name: 'string',
+        namespace: 'string',
+        operation: 'string',
+        args: 'array',
+        canonical_args_hex: 'string',
+        args_hash: 'string',
+        expected_key: 'string',
+      }),
+      value_vectors: table({ name: 'string', canonical_msgpack_hex: 'string' }),
+      aad_vectors: table({
+        name: 'string',
+        tenant_id: 'string',
+        cache_key: 'string',
+        format: 'string',
+        compressed: 'boolean',
+        aad_hex: 'string',
+      }),
+      encryption_vectors: table({
+        name: 'string',
+        master_key_hex: 'string',
+        tenant_id: 'string',
+        derived_key_fingerprint_hex: 'string',
+        cache_key: 'string',
+        aad_hex: 'string',
+        plaintext_hex: 'string',
+        nonce_hex: 'string',
+        ciphertext_hex: 'string',
+      }),
+      error_vectors: table({
+        name: 'string',
+        namespace: ['string', 'undefined'],
+        operation: ['string', 'undefined'],
+        args: 'array',
+        error: 'string',
+      }),
+      reader_accept_vectors: table(READER_SHAPE),
+      reader_reject_vectors: table(READER_SHAPE),
+    },
+    'interop-mode.json'
+  );
+}
+
+const parsed: unknown = JSON.parse(raw.toString('utf8'));
+assertVectorFile(parsed);
+const vectors: VectorFile = parsed;
 
 function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);

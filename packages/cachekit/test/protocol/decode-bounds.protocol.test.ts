@@ -39,6 +39,7 @@ import {
   MAX_INVALIDATION_EVENT_DEPTH,
 } from '../../src/constants.js';
 import { SerializationError } from '../../src/errors.js';
+import { assertFixture, table, type ObjectShape } from '../fixtures/fixture-shape.js';
 
 /** sha256 of test-vectors/decode-bounds.json at the provenance above. */
 const FIXTURE_SHA256 = 'c52c27f724fe138e63440dc0306936b48fe389e2bd823c058b86b30d854e2e2e'; // pragma: allowlist secret
@@ -61,7 +62,27 @@ interface VectorFile {
 const raw = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'decode-bounds.json')
 );
-const vectors = JSON.parse(raw.toString('utf8')) as VectorFile;
+
+const VECTOR_SHAPE: ObjectShape = {
+  name: 'string',
+  construction: { repeat_hex: 'string', count: 'number', suffix_hex: 'string' },
+  input_hex: 'string',
+  nesting_depth: 'number',
+  declared_slots: 'number',
+  reject_reasons: ['array', 'undefined'],
+};
+
+function assertVectorFile(value: unknown): asserts value is VectorFile {
+  assertFixture(
+    value,
+    { spec: 'string', reject_vectors: table(VECTOR_SHAPE), accept_vectors: table(VECTOR_SHAPE) },
+    'decode-bounds.json'
+  );
+}
+
+const parsed: unknown = JSON.parse(raw.toString('utf8'));
+assertVectorFile(parsed);
+const vectors: VectorFile = parsed;
 
 /** field_notes.construction: input = fromhex(repeat_hex) * count + fromhex(suffix_hex). */
 function build(v: Vector): Buffer {

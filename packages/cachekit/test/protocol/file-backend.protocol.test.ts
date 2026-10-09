@@ -23,6 +23,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { file, type FileBackend } from '../../src/backends/file.js';
+import { assertFixture, table } from '../fixtures/fixture-shape.js';
 
 /** sha256 of test-vectors/file-backend.json at the provenance above. */
 const FIXTURE_SHA256 = 'b7b0c51935a3a00ab340005ae1e091797b14938f92eecae23346bdccf0d12af4'; // pragma: allowlist secret
@@ -39,7 +40,28 @@ interface Vector {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const raw = readFileSync(join(here, 'fixtures', 'file-backend.json'));
-const { vectors } = JSON.parse(raw.toString('utf8')) as { vectors: Vector[] };
+
+function assertVectorFile(value: unknown): asserts value is { vectors: Vector[] } {
+  assertFixture(
+    value,
+    {
+      vectors: table({
+        name: 'string',
+        key_utf8: 'string',
+        filename: 'string',
+        file_hex: 'string',
+        payload_hex: 'string',
+        reader_now_unix_seconds: ['number', 'undefined'],
+        reader_action: 'string',
+      }),
+    },
+    'file-backend.json'
+  );
+}
+
+const parsed: unknown = JSON.parse(raw.toString('utf8'));
+assertVectorFile(parsed);
+const { vectors } = parsed;
 const byAction = (action: Vector['reader_action']) =>
   vectors.filter((v) => v.reader_action === action);
 

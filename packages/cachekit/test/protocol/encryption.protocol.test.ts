@@ -21,6 +21,7 @@ import { createCache } from '../../src/index.js';
 import { ConfigurationError, EncryptionError, SerializationError } from '../../src/errors.js';
 import { generateInteropKey } from '../../src/serialization/interop.js';
 import type { Backend } from '../../src/backends/types.js';
+import { assertFixture, table, type ObjectShape } from '../fixtures/fixture-shape.js';
 
 /**
  * sha256 of test-vectors/encryption.json (fixture version 1.5.0).
@@ -80,7 +81,58 @@ interface Fixture {
   };
 }
 
-const fixture = JSON.parse(raw.toString('utf8')) as Fixture;
+const SEALED_ROW_SHAPE: ObjectShape = {
+  name: 'string',
+  cache_key: 'string',
+  format: 'string',
+  compressed: 'boolean',
+  original_type: ['string', 'undefined'],
+  ciphertext_hex: 'string',
+};
+
+function assertFixtureFile(value: unknown): asserts value is Fixture {
+  assertFixture(
+    value,
+    {
+      master_key_hex: 'string',
+      tenant_id: 'string',
+      vectors: table({ ...SEALED_ROW_SHAPE, plaintext_hex: 'string' }),
+      master_key_input: {
+        tenant_id: 'string',
+        accept_vectors: table({
+          ...SEALED_ROW_SHAPE,
+          master_key_hex: 'string',
+          plaintext_hex: 'string',
+        }),
+        reject_vectors: table({ name: 'string', master_key_hex: 'string' }),
+      },
+      keyring: {
+        configuration: {
+          vectors: table({
+            name: 'string',
+            current_master_key_hex: 'string',
+            decrypt_only_master_keys_hex: table('string'),
+            verdict: 'string',
+          }),
+        },
+      },
+      aad_reject_vectors: table({ ...SEALED_ROW_SHAPE, sealed_as: 'string' }),
+      decrypted_container: {
+        vectors: table({
+          ...SEALED_ROW_SHAPE,
+          reader: 'string',
+          plaintext_hex: 'string',
+          outcome: 'string',
+        }),
+      },
+    },
+    'encryption.json'
+  );
+}
+
+const parsed: unknown = JSON.parse(raw.toString('utf8'));
+assertFixtureFile(parsed);
+const fixture: Fixture = parsed;
 const masterKeyInput = fixture.master_key_input;
 
 class InMemoryBackend implements Backend {
@@ -119,7 +171,6 @@ function plant(rows: SealedRow[], keyPrefix = ''): InMemoryBackend {
  * parameters report as 0.
  */
 function computeOfArity(arity: number) {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const compute = vi.fn(async (..._args: unknown[]): Promise<unknown> => {
     throw new Error('the sealed entry must be read, not recomputed');
   });
@@ -481,8 +532,8 @@ describe('encryption.json decrypted_container (protocol 1.5.0, ENC-3) — the co
     expect([vector.compressed, vector.outcome]).toEqual([false, 'error']);
     expect(generateInteropKey('t', 'op', [...args])).toBe(vector.cache_key);
 
-    // An interop read ignores the compression setting; the row's own flag is
-    // what an interop reader's AAD carries.
+    // An interop read builds AAD compressed=False whatever this setting is,
+    // which is how the row (asserted false above) was sealed.
     const cache = vectorCache(plant([vector]), vector.compressed);
     try {
       const compute = computeOfArity(args.length);

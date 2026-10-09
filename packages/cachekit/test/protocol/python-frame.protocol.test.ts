@@ -38,6 +38,7 @@ import {
   readValue,
   storedReadConfig,
 } from '../fixtures/wire-vectors.js';
+import { assertFixture, table } from '../fixtures/fixture-shape.js';
 
 /** sha256 of test-vectors/python-frame.json at the provenance above. */
 const FIXTURE_SHA256 = 'b677d5f14de4a3cd1fa5307d4b46eae0545a20e51e9163f96495ee7ad15600d0'; // pragma: allowlist secret
@@ -50,7 +51,18 @@ interface ErrorVector {
 const raw = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'python-frame.json')
 );
-const { error_vectors } = JSON.parse(raw.toString('utf8')) as { error_vectors: ErrorVector[] };
+
+function assertVectorFile(value: unknown): asserts value is { error_vectors: ErrorVector[] } {
+  assertFixture(
+    value,
+    { error_vectors: table({ name: 'string', frame_hex: 'string' }) },
+    'python-frame.json'
+  );
+}
+
+const parsed: unknown = JSON.parse(raw.toString('utf8'));
+assertVectorFile(parsed);
+const { error_vectors } = parsed;
 
 function frame(name: string): Uint8Array {
   const vector = error_vectors.find((v) => v.name === name);
