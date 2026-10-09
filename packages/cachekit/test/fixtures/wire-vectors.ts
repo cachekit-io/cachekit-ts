@@ -87,8 +87,7 @@ export const temporalSentinelVectors: TemporalSentinelVector[] = fixture.tempora
  * The SDK's typed decode is readEnvelopeHeader: a shape no conforming writer
  * emits (wrong arity, a checksum of other than 8 bytes, a legacy element over
  * 255, a uint64 size) is "not an envelope core would accept", refused before
- * unpack. Length headers that together declare more slots than the input can
- * back fail its slot-sum pre-scan (WIRE-9) first, with the pre-scan's error.
+ * unpack.
  *
  * The allocation bound the table also asks of the size-cap and ratio vectors
  * is not asserted here: like cachekit-py, this SDK asserts it once core's

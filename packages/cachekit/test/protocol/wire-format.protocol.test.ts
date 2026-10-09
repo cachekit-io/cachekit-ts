@@ -408,15 +408,16 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
       }
     });
 
-    it('returns null for every truncation, and for trailing bytes', () => {
+    it('refuses every truncation, and returns null for trailing bytes', () => {
+      // A truncation is null or, once its headers over-claim, 'slots-overclaim'.
       const packed = bs.pack(new TextEncoder().encode('truncation walk'));
       for (let len = 0; len < packed.length; len++) {
-        expect(declared(packed.subarray(0, len))).toBeNull();
+        expect([null, 'slots-overclaim']).toContain(readEnvelopeHeader(packed.subarray(0, len)));
       }
       expect(declared(packed)).toBe(15);
       const padded = new Uint8Array(packed.length + 1);
       padded.set(packed);
-      expect(declared(padded)).toBeNull();
+      expect(readEnvelopeHeader(padded)).toBeNull();
     });
 
     it('requires format to be a short UTF-8 str or bin, as core decodes it', () => {

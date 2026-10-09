@@ -77,7 +77,7 @@ describe('envelopeVerdict', () => {
   });
 
   it("is 'slots-overclaim' when the length headers declare more slots than the input can back", () => {
-    // [fixarray(4), bin8(38)] then 38 bytes: 42 slots in 42 bytes (WIRE-9).
+    // [fixarray(4), bin8(38)] then 39 bytes (38 bin + element 1): 42 slots in 42 bytes (WIRE-9).
     const bytes = new Uint8Array([0x94, 0xc4, 38, ...new Uint8Array(39)]);
     expect(envelopeVerdict(bytes, MAX)).toBe('slots-overclaim');
     // Any outer header but a 4-element array stays 'not-envelope', however much it declares.

@@ -59,8 +59,9 @@ export function looksLikeEnvelope(bytes: Uint8Array): boolean {
 
 /**
  * The compressed length and `original_size` a ByteStorage envelope carries,
- * read without unpacking it — or null when the bytes are not an envelope in
- * a shape a conforming writer emits: `[bin | legacy array of uint8,
+ * read without unpacking it — 'slots-overclaim' when its length headers
+ * declare more slots than the input can back (below), or null when the bytes
+ * are not an envelope in a shape a conforming writer emits: `[bin | legacy array of uint8,
  * [8 x uint8], uint, format]`, every uint an unsigned fixint/uint8/16/32 (no
  * uint64, no signed forms), `format` a str or bin of at most
  * MAX_FORMAT_BYTES valid UTF-8 (core decodes it as a `String`, which takes
@@ -209,8 +210,7 @@ export const ENVELOPE_REJECTIONS: Record<Exclude<EnvelopeVerdict, 'unpack'>, str
  *   admits, or the compressed length exceeds what any LZ4 writer emits for
  *   the declared size.
  * - `'slots-overclaim'` — a 4-element array whose length headers, summed,
- *   declare more slots than the input can back (WIRE-9's pre-scan). Never
- *   unpacked, so nothing is materialised for them.
+ *   declare more slots than the input can back (WIRE-9's pre-scan).
  * - `'over-size-cap'`, `'zero-length'`, `'over-ratio'` — an envelope core
  *   would reject before allocating its output: `original_size` over the
  *   512 MiB cap, empty `compressed_data`, or `original_size` past 1000x the
