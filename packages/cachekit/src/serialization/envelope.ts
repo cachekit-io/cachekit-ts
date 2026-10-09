@@ -71,12 +71,27 @@ export function looksLikeEnvelope(bytes: Uint8Array): boolean {
  * that shape still decodes as itself.
  * Walks a legacy array-of-ints payload byte by byte, so the cost is linear in
  * input size — never in the declared size.
+ *
+ * Also the envelope's slot-sum pre-scan (protocol WIRE-9): every declared
+ * collection element and str/bin byte needs at least one input byte, so the
+ * slots declared so far may never exceed the input length minus one. Checked
+ * as each length header is read, before anything after it, so an over-claim
+ * returns 'slots-overclaim' even where a later check would also have failed.
+ * The walk returns null at any outer header but a 4-element array, before it
+ * counts a slot, so nothing else can get that result. A conforming envelope
+ * always fits; the sum is at most two uint32 lengths plus 12, exact in a
+ * double.
  */
 export function readEnvelopeHeader(
   bytes: Uint8Array
-): { compressedLength: number; declaredSize: number } | null {
+): { compressedLength: number; declaredSize: number } | 'slots-overclaim' | null {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let pos = 0;
+  let slots = 0;
+  const overclaims = (declared: number): boolean => {
+    slots += declared;
+    return slots > view.byteLength - 1;
+  };
   const take = (width: 1 | 2 | 4): number | null => {
     if (pos + width > view.byteLength) return null;
     const value =
@@ -113,6 +128,7 @@ export function readEnvelopeHeader(
 
   const outer = take(1);
   if (outer === null || arrayLength(outer) !== 4) return null;
+  if (overclaims(4)) return 'slots-overclaim';
 
   // [0] compressed_data: bin since protocol 1.1, an array of uint8 before it.
   const data = take(1);
@@ -121,16 +137,22 @@ export function readEnvelopeHeader(
   const binWidth = ({ 0xc4: 1, 0xc5: 2, 0xc6: 4 } as const)[data];
   if (binWidth !== undefined) {
     compressedLength = take(binWidth);
-    if (compressedLength === null || pos + compressedLength > view.byteLength) return null;
+    if (compressedLength === null) return null;
+    if (overclaims(compressedLength)) return 'slots-overclaim';
+    if (pos + compressedLength > view.byteLength) return null;
     pos += compressedLength;
   } else {
     compressedLength = arrayLength(data);
-    if (compressedLength === null || !byteArray(compressedLength)) return null;
+    if (compressedLength === null) return null;
+    if (overclaims(compressedLength)) return 'slots-overclaim';
+    if (!byteArray(compressedLength)) return null;
   }
 
   // [1] checksum: always an array of 8 uint8.
   const checksum = take(1);
-  if (checksum === null || arrayLength(checksum) !== 8 || !byteArray(8)) return null;
+  if (checksum === null || arrayLength(checksum) !== 8) return null;
+  if (overclaims(8)) return 'slots-overclaim';
+  if (!byteArray(8)) return null;
 
   // [2] original_size.
   const declaredSize = uint();
@@ -145,13 +167,9 @@ export function readEnvelopeHeader(
   else if (format === 0xda || format === 0xc5) formatLength = take(2);
   else if (format === 0xdb || format === 0xc6) formatLength = take(4);
   else return null;
-  if (
-    formatLength === null ||
-    formatLength > MAX_FORMAT_BYTES ||
-    pos + formatLength !== view.byteLength
-  ) {
-    return null;
-  }
+  if (formatLength === null) return null;
+  if (overclaims(formatLength)) return 'slots-overclaim';
+  if (formatLength > MAX_FORMAT_BYTES || pos + formatLength !== view.byteLength) return null;
   try {
     UTF8.decode(bytes.subarray(pos));
   } catch {
@@ -163,6 +181,7 @@ export function readEnvelopeHeader(
 export type EnvelopeVerdict =
   | 'unpack'
   | 'not-envelope'
+  | 'slots-overclaim'
   | 'over-size-cap'
   | 'zero-length'
   | 'over-ratio';
@@ -170,6 +189,8 @@ export type EnvelopeVerdict =
 /** What a compression-on read reports for each verdict it refuses before unpack. */
 export const ENVELOPE_REJECTIONS: Record<Exclude<EnvelopeVerdict, 'unpack'>, string> = {
   'not-envelope': 'are not an envelope core would accept',
+  'slots-overclaim':
+    'declare more MessagePack slots than their length can back (envelope pre-scan)',
   'over-size-cap': `are an envelope whose original_size exceeds the ${CORE_MAX_UNCOMPRESSED_SIZE} B size cap`,
   'zero-length': 'are an envelope with zero-length compressed_data',
   'over-ratio': `are an envelope whose original_size exceeds ${CORE_MAX_COMPRESSION_RATIO}x its compressed_data (compression ratio cap)`,
@@ -187,6 +208,9 @@ export const ENVELOPE_REJECTIONS: Record<Exclude<EnvelopeVerdict, 'unpack'>, str
  * - `'not-envelope'` — the bytes are not in a shape readEnvelopeHeader
  *   admits, or the compressed length exceeds what any LZ4 writer emits for
  *   the declared size.
+ * - `'slots-overclaim'` — a 4-element array whose length headers, summed,
+ *   declare more slots than the input can back (WIRE-9's pre-scan). Never
+ *   unpacked, so nothing is materialised for them.
  * - `'over-size-cap'`, `'zero-length'`, `'over-ratio'` — an envelope core
  *   would reject before allocating its output: `original_size` over the
  *   512 MiB cap, empty `compressed_data`, or `original_size` past 1000x the
@@ -211,6 +235,7 @@ export function envelopeVerdict(bytes: Uint8Array, maxDecodedSize: number): Enve
 
   const header = readEnvelopeHeader(bytes);
   if (header === null) return 'not-envelope';
+  if (header === 'slots-overclaim') return header;
   const { compressedLength, declaredSize } = header;
   if (declaredSize > CORE_MAX_UNCOMPRESSED_SIZE) return 'over-size-cap';
   if (compressedLength === 0) return 'zero-length';

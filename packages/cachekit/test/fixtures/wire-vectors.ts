@@ -87,20 +87,14 @@ export const temporalSentinelVectors: TemporalSentinelVector[] = fixture.tempora
  * The SDK's typed decode is readEnvelopeHeader: a shape no conforming writer
  * emits (wrong arity, a checksum of other than 8 bytes, a legacy element over
  * 255, a uint64 size) is "not an envelope core would accept", refused before
- * unpack.
- *
- * `gap` marks a vector whose named error the SDK does not raise yet: the spec's
- * assertion is held as an expected failure naming `gap.rule` (see
- * expectedFailure), and the read must still refuse it with `gap.raises`.
+ * unpack. Length headers that together declare more slots than the input can
+ * back fail its slot-sum pre-scan (WIRE-9) first, with the pre-scan's error.
  *
  * The allocation bound the table also asks of the size-cap and ratio vectors
  * is not asserted here: like cachekit-py, this SDK asserts it once core's
  * allocation probe runs on the core version it pins.
  */
-export const REJECT_EXPECTATIONS: Record<
-  string,
-  { raises: RegExp; never?: RegExp; gap?: { rule: string; raises: RegExp } }
-> = {
+export const REJECT_EXPECTATIONS: Record<string, { raises: RegExp; never?: RegExp }> = {
   reject_original_size_over_cap: { raises: /size cap/ },
   // A uint64 original_size is a shape no conforming writer emits, so the
   // header read refuses it: the table's "step-2 error from a range-checked
@@ -119,18 +113,11 @@ export const REJECT_EXPECTATIONS: Record<
   reject_checksum_nine_elements: { raises: /not an envelope core would accept/ },
   reject_checksum_seven_elements: { raises: /not an envelope core would accept/ },
   reject_legacy_element_above_255: { raises: /not an envelope core would accept/ },
-  // The table asks for the pre-scan's own error. readEnvelopeHeader checks
-  // each header against the bytes after it, so it takes the 38-byte bin and
-  // then refuses element 1 as the wrong type: still before unpack, but a
-  // type error, not the slot-sum error WIRE-9 names. Core never sees these
-  // bytes, so moving to a core release with an envelope pre-scan does not
-  // change this. Nor does a slot-sum check inside readEnvelopeHeader alone:
-  // every refusal there is null, reported as "not an envelope core would
-  // accept". Only a new envelope verdict whose ENVELOPE_REJECTIONS text names
-  // the pre-scan closes the gap.
+  // The pre-scan's own error: the slot sum passes 41 at the 38-byte bin,
+  // before element 1's type is read. Core never sees these bytes.
   reject_envelope_slots_overclaim: {
-    raises: /pre-scan/,
-    gap: { rule: 'WIRE-9', raises: /not an envelope core would accept/ },
+    raises: /\(envelope pre-scan\)/,
+    never: /not an envelope core would accept/,
   },
   reject_original_size_sign_bit: {
     raises: /not an envelope core would accept/,
@@ -199,20 +186,11 @@ export async function readValue(cache: {
   }
 }
 
-/**
- * The error REJECT_EXPECTATIONS names for reject vector `name`. For a `gap`
- * vector the named error is an expected failure, checked first so a closed
- * gap reports its rule; the read must still raise `gap.raises`.
- */
+/** The error REJECT_EXPECTATIONS names for reject vector `name`. */
 export function expectSpecError(error: Error, name: string): void {
-  const { raises, never, gap } = REJECT_EXPECTATIONS[name];
-  const named = () => {
-    expect(error.message).toMatch(raises);
-    if (never) expect(error.message).not.toMatch(never);
-  };
-  if (!gap) return named();
-  expectedFailure(gap.rule, named);
-  expect(error.message).toMatch(gap.raises);
+  const { raises, never } = REJECT_EXPECTATIONS[name];
+  expect(error.message).toMatch(raises);
+  if (never) expect(error.message).not.toMatch(never);
 }
 
 /**
