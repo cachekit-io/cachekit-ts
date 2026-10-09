@@ -379,7 +379,10 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
   // before unpack allocates it. It must agree with core on every conforming
   // envelope — both encodings — or a legitimate entry would stop reading.
   describe('readEnvelopeHeader (pre-unpack header read)', () => {
-    const declared = (bytes: Uint8Array) => readEnvelopeHeader(bytes)?.declaredSize ?? null;
+    const declared = (bytes: Uint8Array) => {
+      const header = readEnvelopeHeader(bytes);
+      return header === null || header === 'slots-overclaim' ? null : header.declaredSize;
+    };
 
     it.each(vectors.map((v) => [v.name, v] as const))(
       'reads original_size from ground-truth envelope %s',
@@ -394,23 +397,27 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
         for (let i = 0; i < size; i++) payload[i] = (i * 131 + 17) & 0xff;
         const packed = bs.pack(payload);
         const header = readEnvelopeHeader(packed);
-        expect(header?.declaredSize).toBe(size);
+        if (header === null || header === 'slots-overclaim') {
+          throw new Error(`no header read from a fresh pack of ${size} B: ${header}`);
+        }
+        expect(header.declaredSize).toBe(size);
         // envelopeVerdict refuses anything past lz4_flex's worst case; the
         // real writer must stay inside it, even on incompressible input.
-        expect(header!.compressedLength).toBeGreaterThan(0);
-        expect(header!.compressedLength).toBeLessThanOrEqual(20 + Math.floor((size * 110) / 100));
+        expect(header.compressedLength).toBeGreaterThan(0);
+        expect(header.compressedLength).toBeLessThanOrEqual(20 + Math.floor((size * 110) / 100));
       }
     });
 
-    it('returns null for every truncation, and for trailing bytes', () => {
+    it('refuses every truncation, and returns null for trailing bytes', () => {
+      // A truncation is null or, once its headers over-claim, 'slots-overclaim'.
       const packed = bs.pack(new TextEncoder().encode('truncation walk'));
       for (let len = 0; len < packed.length; len++) {
-        expect(declared(packed.subarray(0, len))).toBeNull();
+        expect([null, 'slots-overclaim']).toContain(readEnvelopeHeader(packed.subarray(0, len)));
       }
       expect(declared(packed)).toBe(15);
       const padded = new Uint8Array(packed.length + 1);
       padded.set(packed);
-      expect(declared(padded)).toBeNull();
+      expect(readEnvelopeHeader(padded)).toBeNull();
     });
 
     it('requires format to be a short UTF-8 str or bin, as core decodes it', () => {
@@ -421,6 +428,7 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
 
       expect(withFormat([0xa1, 0x61])).toBe(0); // fixstr
       expect(withFormat([0xd9, 64, ...text(64)])).toBe(0); // str8 at the cap
+      expect(withFormat([0xda, 0, 1, 0x61])).toBe(0); // str16
       expect(withFormat([0xc4, 1, 0x61])).toBe(0); // bin: serde's String takes it
       expect(withFormat([0xd9, 65, ...text(65)])).toBeNull(); // over the cap
       expect(withFormat([0xa1, 0xff])).toBeNull(); // invalid UTF-8
@@ -438,11 +446,36 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
         [0x94, 0xc4, 0x00, 0x98, 0, 0, 0, 0, 0, 0, 0, 0xcd, 0x01, 0x00, 0x00], // checksum byte > 0xff
         [0x94, 0xc4, 0x00, 0x98, 0, 0, 0, 0, 0, 0, 0, 0, 0xd2, 0, 0, 0, 1], // int32 size
         [0x94, 0xc4, 0x00, 0x98, 0, 0, 0, 0, 0, 0, 0, 0, 0xcf, 0, 0, 0, 0, 0, 0, 0, 1], // uint64 size
-        [0x94, 0xc4, 0x05, 0x00], // bin length runs past the end
+        [0x94, 0xc6, 0, 0, 0, 4, 0, 0, 0], // bin32 length runs past the end, within the slot sum
+        [0x94, 0xc6, 0, 0, 0], // bin32 length header cut short, within the slot sum
+        [0x94, 0xc4, 0x00, 0x98, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0xdb, 0x00], // str32 format length cut short
         [0x94, 0x91, 0xcd, 0x01, 0x00, 0x98, 0, 0, 0, 0, 0, 0, 0, 0, 0x00], // legacy byte > 0xff
       ];
       for (const bytes of cases) {
         expect(readEnvelopeHeader(new Uint8Array(bytes))).toBeNull();
+      }
+    });
+
+    it("returns 'slots-overclaim' at the first header that takes the slot sum past the input length minus one", () => {
+      const overclaim = rejectVectors.find((v) => v.name === 'reject_envelope_slots_overclaim')!;
+      const bytes = hexToBytes(overclaim.envelope_hex);
+      expect(bytes.length).toBe(42);
+      expect(readEnvelopeHeader(bytes)).toBe('slots-overclaim'); // 4 + 38 > 41, at the bin8
+      // One more byte backs the 42 slots, so the walk passes the bin8 and refuses
+      // element 1's type instead.
+      const backed = new Uint8Array(43);
+      backed.set(bytes);
+      expect(readEnvelopeHeader(backed)).toBeNull();
+
+      const cases: number[][] = [
+        [0x94, 0xc4, 0x00], // outer: 4 > 2
+        [0x94, 0xc4, 0x05, 0, 0, 0], // bin8: 9 > 5
+        [0x94, 0xdc, 0xff, 0xff, 0x00], // legacy array16: 65539 > 4
+        [0x94, 0xc4, 0x00, 0x98, 0, 0, 0, 0, 0], // checksum: 12 > 8
+        [0x94, 0xc4, 0x00, 0x98, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0xdb, 0, 0, 0xff, 0xff], // format str32: 65547 > 17
+      ];
+      for (const c of cases) {
+        expect(readEnvelopeHeader(new Uint8Array(c))).toBe('slots-overclaim');
       }
     });
 
