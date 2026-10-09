@@ -23,7 +23,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { file, type FileBackend } from '../../src/backends/file.js';
-import { assertFixture, table } from '../fixtures/fixture-shape.js';
+import { assertFixture, oneOf, table } from '../fixtures/fixture-shape.js';
 
 /** sha256 of test-vectors/file-backend.json at the provenance above. */
 const FIXTURE_SHA256 = 'b7b0c51935a3a00ab340005ae1e091797b14938f92eecae23346bdccf0d12af4'; // pragma: allowlist secret
@@ -52,7 +52,7 @@ function assertVectorFile(value: unknown): asserts value is { vectors: Vector[] 
         file_hex: 'string',
         payload_hex: 'string',
         reader_now_unix_seconds: ['number', 'undefined'],
-        reader_action: 'string',
+        reader_action: oneOf('return_payload', 'miss_preserve', 'miss_expired'),
       }),
     },
     'file-backend.json'

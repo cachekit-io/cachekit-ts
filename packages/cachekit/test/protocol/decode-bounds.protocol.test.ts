@@ -69,7 +69,7 @@ const VECTOR_SHAPE: ObjectShape = {
   input_hex: 'string',
   nesting_depth: 'number',
   declared_slots: 'number',
-  reject_reasons: ['array', 'undefined'],
+  reject_reasons: [table('string'), 'undefined'],
 };
 
 function assertVectorFile(value: unknown): asserts value is VectorFile {

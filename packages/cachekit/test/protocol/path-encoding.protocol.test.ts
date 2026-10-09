@@ -52,7 +52,7 @@ function assertVectorFile(value: unknown): asserts value is { vectors: Vector[] 
         encoded: ['string', 'null'],
         decoded: ['string', 'null'],
         reject: ['boolean', 'undefined'],
-        encoded_alternates: ['array', 'undefined'],
+        encoded_alternates: [table('string'), 'undefined'],
         note: 'string',
       }),
     },

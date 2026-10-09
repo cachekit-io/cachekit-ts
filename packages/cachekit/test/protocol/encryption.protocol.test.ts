@@ -21,7 +21,7 @@ import { createCache } from '../../src/index.js';
 import { ConfigurationError, EncryptionError, SerializationError } from '../../src/errors.js';
 import { generateInteropKey } from '../../src/serialization/interop.js';
 import type { Backend } from '../../src/backends/types.js';
-import { assertFixture, table, type ObjectShape } from '../fixtures/fixture-shape.js';
+import { assertFixture, oneOf, table, type ObjectShape } from '../fixtures/fixture-shape.js';
 
 /**
  * sha256 of test-vectors/encryption.json (fixture version 1.5.0).
@@ -112,7 +112,7 @@ function assertFixtureFile(value: unknown): asserts value is Fixture {
             name: 'string',
             current_master_key_hex: 'string',
             decrypt_only_master_keys_hex: table('string'),
-            verdict: 'string',
+            verdict: oneOf('accept', 'reject'),
           }),
         },
       },
