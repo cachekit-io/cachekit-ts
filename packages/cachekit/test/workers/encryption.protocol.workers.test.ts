@@ -21,7 +21,8 @@
  * The 1.2.0 `keyring` and `default_tenant` groups run through the same raw
  * and EncryptionManager layers. The fixture's sha256 is pinned by the Node
  * lane (test/protocol/encryption.protocol.test.ts): workerd has no fs. The
- * 1.3.0 `master_key_input` rows run there too, through createCache.secure.
+ * tables that judge a configured cache run there too: `master_key_input`,
+ * `keyring.configuration`, `aad_reject_vectors` and `decrypted_container`.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -441,7 +442,7 @@ describe('encryption vectors — default tenant (protocol 1.2.0)', () => {
   );
 });
 
-// The vendored vectors are at most 9 B, a single AES block. This ciphertext
+// The vendored vectors are at most 59 B, four AES blocks. This ciphertext
 // spans 12 full blocks plus an 8 B partial, produced by OpenSSL (python
 // cryptography AESGCM) under the HKDF key for the fixture's master key and
 // tenant, so the multi-block CTR/GHASH path of the wasm build is pinned to an
