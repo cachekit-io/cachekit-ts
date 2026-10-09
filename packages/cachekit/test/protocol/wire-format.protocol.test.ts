@@ -428,6 +428,7 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
 
       expect(withFormat([0xa1, 0x61])).toBe(0); // fixstr
       expect(withFormat([0xd9, 64, ...text(64)])).toBe(0); // str8 at the cap
+      expect(withFormat([0xda, 0, 1, 0x61])).toBe(0); // str16
       expect(withFormat([0xc4, 1, 0x61])).toBe(0); // bin: serde's String takes it
       expect(withFormat([0xd9, 65, ...text(65)])).toBeNull(); // over the cap
       expect(withFormat([0xa1, 0xff])).toBeNull(); // invalid UTF-8
@@ -446,6 +447,8 @@ describe('Protocol v1.1 Wire Format (ByteStorage)', () => {
         [0x94, 0xc4, 0x00, 0x98, 0, 0, 0, 0, 0, 0, 0, 0, 0xd2, 0, 0, 0, 1], // int32 size
         [0x94, 0xc4, 0x00, 0x98, 0, 0, 0, 0, 0, 0, 0, 0, 0xcf, 0, 0, 0, 0, 0, 0, 0, 1], // uint64 size
         [0x94, 0xc6, 0, 0, 0, 4, 0, 0, 0], // bin32 length runs past the end, within the slot sum
+        [0x94, 0xc6, 0, 0, 0], // bin32 length header cut short, within the slot sum
+        [0x94, 0xc4, 0x00, 0x98, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0xdb, 0x00], // str32 format length cut short
         [0x94, 0x91, 0xcd, 0x01, 0x00, 0x98, 0, 0, 0, 0, 0, 0, 0, 0, 0x00], // legacy byte > 0xff
       ];
       for (const bytes of cases) {
