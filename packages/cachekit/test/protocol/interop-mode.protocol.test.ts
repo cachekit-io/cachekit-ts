@@ -123,7 +123,8 @@ function assertVectorFile(value: unknown): asserts value is VectorFile {
       }),
       value_vectors: table({
         name: 'string',
-        value: ['object', 'array'],
+        // Any JSON value, a top-level primitive included; only a missing field fails.
+        value: ['string', 'number', 'boolean', 'null', 'object', 'array'],
         canonical_msgpack_hex: 'string',
       }),
       aad_vectors: table({
