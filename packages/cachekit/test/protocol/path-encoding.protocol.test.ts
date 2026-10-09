@@ -20,6 +20,7 @@ import { CachekitIOCore, encodeKey } from '../../src/backends/cachekitio.js';
 import { TTLCachekitIO } from '../../src/backends/cachekitio-ttl.js';
 import { LockableCachekitIO } from '../../src/backends/cachekitio-lockable.js';
 import { ConfigurationError } from '../../src/errors.js';
+import { assertFixture, table } from '../fixtures/fixture-shape.js';
 
 interface Vector {
   key: string;
@@ -41,7 +42,27 @@ const FIXTURE_SHA256 = '807af0d39ccf3f5afda65577787ac5adcd01ff6617468060161c8426
 
 const here = dirname(fileURLToPath(import.meta.url));
 const raw = readFileSync(join(here, 'fixtures', 'path-encoding.json'));
-const { vectors } = JSON.parse(raw.toString('utf8')) as { vectors: Vector[] };
+
+function assertVectorFile(value: unknown): asserts value is { vectors: Vector[] } {
+  assertFixture(
+    value,
+    {
+      vectors: table({
+        key: 'string',
+        encoded: ['string', 'null'],
+        decoded: ['string', 'null'],
+        reject: ['boolean', 'undefined'],
+        encoded_alternates: [table('string'), 'undefined'],
+        note: 'string',
+      }),
+    },
+    'path-encoding.json'
+  );
+}
+
+const parsed: unknown = JSON.parse(raw.toString('utf8'));
+assertVectorFile(parsed);
+const { vectors } = parsed;
 const reserved = vectors.filter((v) => v.reject);
 const transmittable = vectors.filter((v) => !v.reject);
 

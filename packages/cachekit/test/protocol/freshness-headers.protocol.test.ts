@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import { freshnessFromHeaders } from '../../src/backends/cachekitio.js';
+import { assertFixture, table } from '../fixtures/fixture-shape.js';
 
 interface FreshnessVector {
   name: string;
@@ -39,9 +40,30 @@ const FIXTURE_SHA256 = '74beb975b6855f52d9dd453279873faf8048a9c3c79a8167cfda099b
 
 const here = dirname(fileURLToPath(import.meta.url));
 const raw = readFileSync(join(here, 'fixtures', 'freshness-headers.json'));
-const { freshness_vectors: freshnessVectors, fresh_for_vectors: freshForVectors } = JSON.parse(
-  raw.toString('utf8')
-) as { freshness_vectors: FreshnessVector[]; fresh_for_vectors: FreshForVector[] };
+
+interface VectorFile {
+  freshness_vectors: FreshnessVector[];
+  fresh_for_vectors: FreshForVector[];
+}
+
+function assertVectorFile(value: unknown): asserts value is VectorFile {
+  assertFixture(
+    value,
+    {
+      freshness_vectors: table({ name: 'string', value: ['string', 'null'], stale: 'boolean' }),
+      fresh_for_vectors: table({
+        name: 'string',
+        value: ['string', 'null'],
+        fresh_for: ['number', 'null'],
+      }),
+    },
+    'freshness-headers.json'
+  );
+}
+
+const parsed: unknown = JSON.parse(raw.toString('utf8'));
+assertVectorFile(parsed);
+const { freshness_vectors: freshnessVectors, fresh_for_vectors: freshForVectors } = parsed;
 
 /** The headers of a `GET 200` carrying `name: value`, or neither when `value` is null. */
 function headersWith(name: string, value: string | null): Headers {
