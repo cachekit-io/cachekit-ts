@@ -131,10 +131,8 @@ describe('interop argument encoding (args profile)', () => {
 
   describe('Symbol-keyed object properties', () => {
     const sym = Symbol('k');
-    const nullProto = Object.assign(Object.create(null) as Record<PropertyKey, unknown>, {
-      a: 2,
-      [sym]: 1,
-    });
+    // A literal __proto__: null sets the prototype, with no type assertion.
+    const nullProto = { __proto__: null, a: 2, [sym]: 1 };
     const cases: [string, unknown][] = [
       ['top level', { [sym]: 1, a: 2 }],
       ['symbol-only object', { [sym]: 1 }],
@@ -142,6 +140,10 @@ describe('interop argument encoding (args profile)', () => {
       ['nested in a Map value', new Map([['m', { [sym]: 1, a: 2 }]])],
       ['null prototype', nullProto],
     ];
+
+    it('builds the null-prototype case it claims to', () => {
+      expect(Object.getPrototypeOf(nullProto)).toBeNull();
+    });
 
     it.each(cases)('rejects a Symbol key (%s) in the args profile', (_name, value) => {
       expect(() => encodeInteropArgs([value])).toThrow(SerializationError);
@@ -170,9 +172,8 @@ describe('interop argument encoding (args profile)', () => {
     it('leaves objects without Symbol keys byte-identical', () => {
       expect(hex(encodeInteropArgs([{ a: 2 }]))).toBe('9181a16102');
       expect(hex(encodeInteropValue({ a: 2 }))).toBe('81a16102');
-      const plainNullProto = Object.assign(Object.create(null) as Record<string, unknown>, {
-        a: 2,
-      });
+      const plainNullProto = { __proto__: null, a: 2 };
+      expect(Object.getPrototypeOf(plainNullProto)).toBeNull();
       expect(hex(encodeInteropValue(plainNullProto))).toBe('81a16102');
     });
 
@@ -183,11 +184,11 @@ describe('interop argument encoding (args profile)', () => {
       expect(hex(encodeInteropArgs([hidden]))).toBe('9181a16102');
       expect(hex(encodeInteropValue(hidden))).toBe('81a16102');
       // Null prototype has no propertyIsEnumerable of its own; namespace-shaped.
-      const nsLike = Object.defineProperty(
-        Object.assign(Object.create(null) as Record<string, unknown>, { a: 2 }),
-        Symbol.toStringTag,
-        { value: 'Module', enumerable: false }
-      );
+      const nsLike = Object.defineProperty({ __proto__: null, a: 2 }, Symbol.toStringTag, {
+        value: 'Module',
+        enumerable: false,
+      });
+      expect(Object.getPrototypeOf(nsLike)).toBeNull();
       expect(hex(encodeInteropValue(nsLike))).toBe('81a16102');
     });
   });
