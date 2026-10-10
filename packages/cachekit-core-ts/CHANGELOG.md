@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.0](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-core-ts-v0.1.3...cachekit-core-ts-v0.2.0) (2026-10-10)
+
+
+### Features
+
+* **encryption:** previousMasterKeys keyring rotation surface (LAB-685) ([#103](https://github.com/cachekit-io/cachekit-ts/issues/103)) ([e7d1a8f](https://github.com/cachekit-io/cachekit-ts/commit/e7d1a8fffe7833078d363bed23b30199653327dd))
+* **encryption:** surface hardware-acceleration detection (LAB-523) ([#132](https://github.com/cachekit-io/cachekit-ts/issues/132)) ([0ae83ba](https://github.com/cachekit-io/cachekit-ts/commit/0ae83ba54e804360b236e91385dfe47303538fba))
+
+
+### Bug Fixes
+
+* L1 TTL cap, loud size rejections, Node-free workers types (LAB-1388) ([#98](https://github.com/cachekit-io/cachekit-ts/issues/98)) ([13a3345](https://github.com/cachekit-io/cachekit-ts/commit/13a3345a8136f92e094995e6d68413e52c94a8b4))
+
+
+### Performance Improvements
+
+* **core-bindings:** return NAPI results as copied Uint8Arrays (LAB-7084) ([#171](https://github.com/cachekit-io/cachekit-ts/issues/171)) ([460a15f](https://github.com/cachekit-io/cachekit-ts/commit/460a15fe0978a6d6a3a8cf75bfad95841dd2ce57))
+
 ## [0.1.3](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-core-ts-v0.1.2...cachekit-core-ts-v0.1.3) (2026-08-03)
 
 
