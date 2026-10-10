@@ -124,6 +124,73 @@ describe('interop argument encoding (args profile)', () => {
 
   it('rejects non-string Map keys', () => {
     expect(() => encodeInteropArgs([new Map([[1, 'x']])])).toThrow(/keys must be strings/);
+    expect(() => encodeInteropArgs([new Map([[Symbol('k'), 'x']])])).toThrow(
+      new SerializationError('Interop map keys must be strings, got symbol')
+    );
+  });
+
+  describe('Symbol-keyed object properties', () => {
+    const sym = Symbol('k');
+    // A literal __proto__: null sets the prototype, with no type assertion.
+    const nullProto = { __proto__: null, a: 2, [sym]: 1 };
+    const cases: [string, unknown][] = [
+      ['top level', { [sym]: 1, a: 2 }],
+      ['symbol-only object', { [sym]: 1 }],
+      ['nested in an array', [{ [sym]: 1, a: 2 }]],
+      ['nested in a Map value', new Map([['m', { [sym]: 1, a: 2 }]])],
+      ['null prototype', nullProto],
+    ];
+
+    it('builds the null-prototype case it claims to', () => {
+      expect(Object.getPrototypeOf(nullProto)).toBeNull();
+    });
+
+    it.each(cases)('rejects a Symbol key (%s) in the args profile', (_name, value) => {
+      expect(() => encodeInteropArgs([value])).toThrow(SerializationError);
+      expect(() => encodeInteropArgs([value])).toThrow(/keys must be strings, got symbol/);
+    });
+
+    it.each(cases)('rejects a Symbol key (%s) in the value profile', (_name, value) => {
+      expect(() => encodeInteropValue(value)).toThrow(SerializationError);
+      expect(() => encodeInteropValue(value)).toThrow(/keys must be strings, got symbol/);
+    });
+
+    it('rejects before reading any property value', () => {
+      let reads = 0;
+      const obj = {
+        get a(): number {
+          reads++;
+          return 1;
+        },
+        [sym]: 1,
+      };
+      expect(() => encodeInteropArgs([obj])).toThrow(SerializationError);
+      expect(() => encodeInteropValue(obj)).toThrow(SerializationError);
+      expect(reads).toBe(0);
+    });
+
+    it('leaves objects without Symbol keys byte-identical', () => {
+      expect(hex(encodeInteropArgs([{ a: 2 }]))).toBe('9181a16102');
+      expect(hex(encodeInteropValue({ a: 2 }))).toBe('81a16102');
+      const plainNullProto = { __proto__: null, a: 2 };
+      expect(Object.getPrototypeOf(plainNullProto)).toBeNull();
+      expect(hex(encodeInteropValue(plainNullProto))).toBe('81a16102');
+    });
+
+    it('ignores non-enumerable Symbol keys, like non-enumerable string keys', () => {
+      // Hidden Symbols are bookkeeping (a module namespace's Symbol.toStringTag,
+      // MobX's $mobx), not data: the bytes match the same object without them.
+      const hidden = Object.defineProperty({ a: 2 }, sym, { value: 1, enumerable: false });
+      expect(hex(encodeInteropArgs([hidden]))).toBe('9181a16102');
+      expect(hex(encodeInteropValue(hidden))).toBe('81a16102');
+      // Null prototype has no propertyIsEnumerable of its own; namespace-shaped.
+      const nsLike = Object.defineProperty({ __proto__: null, a: 2 }, Symbol.toStringTag, {
+        value: 'Module',
+        enumerable: false,
+      });
+      expect(Object.getPrototypeOf(nsLike)).toBeNull();
+      expect(hex(encodeInteropValue(nsLike))).toBe('81a16102');
+    });
   });
 
   it('rejects class instances (closed data model)', () => {

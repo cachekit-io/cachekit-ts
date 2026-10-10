@@ -19,7 +19,7 @@ import {
 } from './serialization/interop.js';
 import { generateKey } from './serialization/key-generator.js';
 import { EncryptionManager } from './encryption/manager.js';
-import { ConfigurationError, ValueTooLargeError } from './errors.js';
+import { ConfigurationError, SerializationError, ValueTooLargeError } from './errors.js';
 import { DEFAULT_MAX_DECODED_SIZE } from './constants.js';
 
 class InMemoryBackend implements Backend {
@@ -296,6 +296,38 @@ describe('cache.wrap interop mode', () => {
     // Degradation must NOT swallow the closed-model error into "computed but
     // never cached" — the spec requires a loud rejection.
     await expect(fn(1)).rejects.toThrow(/not in the interop data model/);
+  });
+
+  it('rejects a Symbol-keyed argument before calling the function or touching the backend', async () => {
+    const backend = new InMemoryBackend();
+    cache = createCache({ backend, l1: { enabled: false } });
+
+    let calls = 0;
+    const fn = cache.wrap(
+      async (_filter: Record<string, unknown>) => {
+        calls++;
+        return 1;
+      },
+      { namespace: 'users', interop: 'find', interopArity: 1, ttl: 60 }
+    );
+    // Dropping the Symbol key would collide with fn({ a: 2 })'s cache key.
+    await expect(fn({ [Symbol('k')]: 1, a: 2 })).rejects.toThrow(SerializationError);
+    expect(calls).toBe(0);
+    expect(backend.store.size).toBe(0);
+  });
+
+  it('rejects a Symbol-keyed return value at store time and stores nothing', async () => {
+    const backend = new InMemoryBackend();
+    cache = createCache({ backend, l1: { enabled: false } });
+
+    const fn = cache.wrap(async (_id: number) => ({ [Symbol('k')]: 1, a: 2 }), {
+      namespace: 'users',
+      interop: 'get_tagged',
+      interopArity: 1,
+      ttl: 60,
+    });
+    await expect(fn(1)).rejects.toThrow(SerializationError);
+    expect(backend.store.size).toBe(0);
   });
 
   it('rejects invalid segments at wrap time, before any call', () => {
