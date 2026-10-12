@@ -194,6 +194,46 @@ describe('createCache full stack inside workerd', () => {
   });
 });
 
+describe('secure keys at the AAD limit through the wasm binding (LAB-9108)', () => {
+  const TENANT = 'lab-9108';
+  const KEY_PREFIX = 'wk:';
+  const MAX_AAD = 64 * 1024;
+  // v0x03 AAD = version byte + four 4-byte length prefixes + tenant id +
+  // keyPrefix + key + 'msgpack' + 'True'/'False' (the compressed flag), written
+  // out as in the cache.test.ts LAB-5142 block. The at-limit key round-trips
+  // through the wasm encrypt/decrypt, so the TS pre-flight and the wasm
+  // MAX_AAD_SIZE must agree byte for byte.
+  const keyBudget = (compressed: boolean) =>
+    MAX_AAD -
+    (1 + 16 + TENANT.length + KEY_PREFIX.length + 'msgpack'.length + (compressed ? 4 : 5));
+
+  it.each([true, false])('boundary is 65 536 AAD bytes (compression=%s)', async (compression) => {
+    const backend = Object.assign(memoryBackend(), { keyPrefix: KEY_PREFIX });
+    const cache = createCache({
+      backend,
+      compression,
+      encryption: { masterKey: MASTER_KEY_HEX, tenantId: TENANT },
+      l1: { enabled: false }, // force the L2 path so the read decrypts through wasm
+    });
+    const atLimit = `ns:${'k'.repeat(keyBudget(compression) - 'ns:'.length)}`;
+
+    await cache.set(atLimit, 'fits');
+    expect(await cache.get(atLimit)).toBe('fits');
+    expect(backend.store.size).toBe(1);
+
+    const calls = { get: 0, set: 0 };
+    const { get, set } = backend;
+    backend.get = (key) => (calls.get++, get(key));
+    backend.set = (key, value, ttl) => (calls.set++, set(key, value, ttl));
+
+    await expect(cache.set(`${atLimit}k`, 'v')).rejects.toThrow(ConfigurationError);
+    await expect(cache.get(`${atLimit}k`)).rejects.toThrow(ConfigurationError);
+    expect(calls).toEqual({ get: 0, set: 0 });
+
+    await cache.close();
+  });
+});
+
 describe('intents with explicit config (no process.env)', () => {
   it('createCache.io without apiKey throws ConfigurationError (not a process crash)', () => {
     expect(() => createCache.io({} as Parameters<typeof createCache.io>[0])).toThrow(
