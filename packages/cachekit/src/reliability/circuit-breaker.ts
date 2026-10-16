@@ -25,7 +25,7 @@ export interface CircuitBreakerConfig {
   /** Time in ms before transitioning from open to half-open (default: 5000) */
   timeout: number;
 
-  /** Max calls allowed in half-open state (default: 3) */
+  /** Max probe calls in flight at once in half-open state (default: 3) */
   halfOpenMaxCalls: number;
 
   /** Rolling window for failure counting in ms (default: 60000) */
@@ -46,7 +46,8 @@ const DEFAULT_CONFIG: CircuitBreakerConfig = {
  * States:
  * - CLOSED: Normal operation, requests pass through
  * - OPEN: All requests fail fast with CircuitBreakerOpenError
- * - HALF-OPEN: Limited requests allowed to test if service recovered
+ * - HALF-OPEN: At most `halfOpenMaxCalls` probes in flight at once test if
+ *   the service recovered
  *
  * Transitions:
  * - CLOSED + failures >= threshold → OPEN
@@ -55,8 +56,10 @@ const DEFAULT_CONFIG: CircuitBreakerConfig = {
  * - HALF-OPEN + any failure → OPEN
  *
  * Only errors that `isRetryable` accepts count as failures; any other error
- * frees its half-open probe slot without counting either way. While half-open,
- * only a probe that took a slot in the current round counts at all.
+ * frees its half-open probe slot without counting either way. A success that
+ * does not close the breaker also frees its slot, so `successThreshold` can
+ * exceed `halfOpenMaxCalls`. While half-open, only a probe that took a slot in
+ * the current round counts at all.
  */
 export class CircuitBreaker {
   private readonly config: CircuitBreakerConfig;
@@ -161,6 +164,8 @@ export class CircuitBreaker {
       this.successesInHalfOpen++;
       if (this.successesInHalfOpen >= this.config.successThreshold) {
         this.transitionToClosed();
+      } else {
+        this.releaseHalfOpenSlot();
       }
     }
   }
@@ -178,10 +183,12 @@ export class CircuitBreaker {
   }
 
   /**
-   * Free a probe slot without counting a success or a failure. Without this,
-   * `halfOpenMaxCalls` non-retryable errors in a row would fill every slot and
-   * wedge the breaker half-open against a healthy backend. Callers must have
-   * ruled out a stale probe first (see `isStale`).
+   * Free a probe slot, so `halfOpenMaxCalls` caps probes in flight rather than
+   * probes per round. Without this, `halfOpenMaxCalls` probes that settle
+   * without closing or reopening the breaker (successes below
+   * `successThreshold`, non-retryable errors) would fill every slot and wedge
+   * the breaker half-open against a healthy backend. Callers must have ruled
+   * out a stale probe first (see `isStale`).
    */
   private releaseHalfOpenSlot(): void {
     if (this.callsInHalfOpen > 0) {

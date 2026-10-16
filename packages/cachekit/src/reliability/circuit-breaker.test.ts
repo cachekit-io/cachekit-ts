@@ -228,6 +228,45 @@ describe('CircuitBreaker', () => {
     expect(breaker3.tryAcquireHalfOpenSlot()).toBe(false);
   });
 
+  describe('halfOpenMaxCalls below successThreshold', () => {
+    const openThenHalfOpen = async (successThreshold: number) => {
+      vi.useFakeTimers();
+      const b = new CircuitBreaker({
+        failureThreshold: 1,
+        successThreshold,
+        halfOpenMaxCalls: 1,
+        timeout: 100,
+      });
+      await expect(b.execute(() => Promise.reject(new Error()))).rejects.toThrow();
+      vi.advanceTimersByTime(150);
+      expect(b.state).toBe('half-open');
+      return b;
+    };
+
+    it('sequential successful probes close the breaker instead of wedging it', async () => {
+      const b = await openThenHalfOpen(3);
+
+      // Each success below the threshold must free its slot for the next probe.
+      for (let i = 0; i < 3; i++) {
+        await expect(b.execute(() => Promise.resolve('ok'))).resolves.toBe('ok');
+      }
+      expect(b.state).toBe('closed');
+    });
+
+    it('still caps probes in flight', async () => {
+      const b = await openThenHalfOpen(2);
+      let resolveProbe!: (v: string) => void;
+      const probe = b.execute(() => new Promise<string>((r) => (resolveProbe = r)));
+
+      await expect(b.execute(() => Promise.resolve('ok'))).rejects.toThrow(CircuitBreakerOpenError);
+
+      resolveProbe('ok');
+      await probe;
+      await b.execute(() => Promise.resolve('ok'));
+      expect(b.state).toBe('closed');
+    });
+  });
+
   describe('error classification', () => {
     const openThenHalfOpen = async () => {
       vi.useFakeTimers();
