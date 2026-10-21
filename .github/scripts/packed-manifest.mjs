@@ -1,15 +1,17 @@
 // Print the package/package.json that `pnpm publish <tarball>` would publish,
 // or exit 1 with an ::error line. Usage: node packed-manifest.mjs <tarball>
 //
-// pnpm (tar-stream) reads the first entry whose path.normalize(name), with
-// backslashes then made slashes, is package/package.json. Another tar reader
-// can disagree on which entry that is: GNU tar applies a pax global header's
-// path to later entries, tar-stream does not. So this reads the archive the
-// way tar-stream does, and refuses anything outside the plain subset where the
-// two cannot differ: checksummed USTAR headers, regular files and empty
-// directories, octal fields, no pax, GNU long-name or link entries. pnpm pack
-// writes only that subset. Exactly one entry may normalise to
-// package/package.json, and its name must be that literally.
+// pnpm (tar-stream) reads the first entry whose
+// path.normalize(name).replaceAll("\\", "/") is package/package.json. Another
+// tar reader can disagree on which entry that is: GNU tar applies a pax global
+// header's path to later entries, tar-stream does not. So this reads the
+// archive the way tar-stream does, and refuses anything outside the plain
+// subset where the two cannot differ: checksummed USTAR headers, regular files
+// and empty directories, octal fields, no pax, GNU long-name or link entries.
+// Every name must also be canonical: no backslash, and path.normalize leaves
+// it unchanged. pnpm's expression is then the name itself, so no rewriting of
+// pnpm's needs mirroring here. pnpm pack writes only that subset. Exactly one
+// entry may be named package/package.json.
 import { readFileSync } from 'node:fs';
 import { normalize } from 'node:path';
 import { gunzipSync } from 'node:zlib';
@@ -59,14 +61,14 @@ for (let off = 0; off < tar.length; ) {
   const start = off + 512;
   off = start + Math.ceil(size / 512) * 512;
   if (off > tar.length) refuse(`ends inside the data of '${name}'`);
-  if (normalize(name.replaceAll('\\', '/')) === 'package/package.json') {
+  if (name.includes('\\') || normalize(name) !== name) {
+    refuse(`has a non-canonical entry name ${JSON.stringify(name)} at byte ${start - 512}`);
+  }
+  if (name === 'package/package.json') {
     found.push({ name, body: tar.subarray(start, start + size) });
   }
 }
 
-if (found.length !== 1 || found[0].name !== 'package/package.json') {
-  refuse(
-    `entries pnpm may read as package/package.json are [${found.map((f) => JSON.stringify(f.name))}], expected exactly "package/package.json"`
-  );
-}
+if (found.length !== 1)
+  refuse(`has ${found.length} package/package.json entries, expected exactly 1`);
 process.stdout.write(found[0].body);

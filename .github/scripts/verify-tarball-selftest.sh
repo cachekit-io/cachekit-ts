@@ -113,14 +113,20 @@ pack empty-spec package/package.json '{"@msgpack/msgpack":""}'
 bad empty-spec 1 'not a map of names to version strings'
 # --- the manifest checked is the one pnpm publishes --------------------------
 # pnpm reads the first entry that normalises to package/package.json; a raw tar
-# read of package/package.json would see the second.
+# read of package/package.json would see the second. Every name must be
+# canonical, so each of these is refused at the decoy.
 pack decoy-dot ./package/package.json '{"@cachekit-io/cachekit-core-ts":"'$never'"}' package/package.json '{}'
-bad decoy-dot 1 'expected exactly'
+bad decoy-dot 1 'non-canonical entry name'
 pack decoy-after package/package.json '{}' package//package.json '{"@cachekit-io/cachekit-core-ts":"'$never'"}'
-bad decoy-after 1 'expected exactly'
-# pnpm makes a backslash a slash.
+bad decoy-after 1 'non-canonical entry name'
+# pnpm makes a backslash a slash after normalising, so a\b is one segment to
+# path.normalize and a\b/../package/package.json reads as package/package.json.
 pack decoy-backslash 'package\package.json' '{"@cachekit-io/cachekit-core-ts":"'$never'"}' package/package.json '{}'
-bad decoy-backslash 1 'expected exactly'
+bad decoy-backslash 1 'non-canonical entry name'
+raw decoy-backslash-dotdot 0 'a\b/../package/package.json' "$evil" 0 package/package.json "$clean"
+bad decoy-backslash-dotdot 1 'non-canonical entry name'
+raw two-manifests 0 package/package.json "$evil" 0 package/package.json "$clean"
+bad two-manifests 1 'expected exactly 1'
 # GNU tar applies a pax global header's path to the next entry; tar-stream,
 # which pnpm uses, does not, so the two read different manifests.
 raw decoy-pax-global g pax_global_header 'path=package/decoy.json' 0 package/package.json "$evil" \
