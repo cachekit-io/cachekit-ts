@@ -17,6 +17,11 @@ jobs:
 
       - uses: ./.github/actions/setup-pnpm-node
 
+      # The release jobs' tarball verifier, run against fixtures: it must refuse
+      # a tarball whose dependencies npm does not serve, and pass one it does.
+      - name: Release tarball verifier self-test
+        run: bash .github/scripts/verify-tarball-selftest.sh
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
