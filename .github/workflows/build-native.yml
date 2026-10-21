@@ -1,35 +1,45 @@
 name: Build Native
 
-# This workflow BUILDS and TESTS only — it must not publish.
+# This workflow BUILDS and TESTS the native binding. It never publishes.
 #
-# @cachekit-io/cachekit-core-ts has never published from CI: 0.1.0 and 0.1.2
-# were both manual (`cachekit-ray`, no provenance attestations), and the old
-# tag-gated publish job here never ran once — GitHub App-created release tags
-# don't trigger this workflow, and the repo has no NPM_TOKEN secret so it
-# would have died ENEEDAUTH anyway (LAB-831, LAB-1390). It was deleted rather
-# than migrated; do not re-add npm-token auth here.
-#
-# Until a working CI publish path exists (needs a release-please.yml job plus
-# a package-level npm trusted publisher — tracked as LAB-1390's follow-up),
-# publishing stays manual. Runbook facts the deleted job used to encode:
-# push the cachekit-core-ts-v* tag by hand — that runs the full matrix here
-# as pre-publish validation, and its bindings-* artifacts (expire ~90 days)
-# are the only source of the darwin/windows .node binaries you cannot
-# cross-build locally. napi-rs scaffolds npm/<platform>/package.json at the
-# version present when `napi build` first ran and never bumps it, so run
-# `npx napi version` before `npx napi prepublish -t npm --no-gh-release`
-# (the 0.1.2 lesson). Publish platform dirs as `npm publish ./npm/<dir>` —
-# a bare `npm/<dir>` parses as GitHub shorthand and dies on ssh.
+# It runs on PRs (linux-x64 only) and on pushes to main. release-please.yml
+# also calls it when it creates a cachekit-core-ts release: the call builds the
+# release tag on the full matrix, then release-please.yml packs and publishes
+# the six npm packages through OIDC trusted publishing. So the binaries on npm
+# come from the same job definition that validates every push to main. Do not
+# add a publish job, an id-token or npm-token auth here: these jobs run
+# dependency code (build.rs, proc-macros, the napi CLI), which must never run
+# beside publish credentials (see the comment above the build-cachekit job in
+# release-please.yml).
 on:
   push:
     branches: [main]
-    tags: ['cachekit-core-ts-v*']
+  workflow_call:
+    inputs:
+      ref:
+        description: Release tag to build, as refs/tags/<tag>
+        required: true
+        type: string
+    # One digest per target: release-please.yml checks every downloaded
+    # bindings-* artifact against these before it packs anything.
+    outputs:
+      digest-x86_64-unknown-linux-gnu:
+        value: ${{ jobs.build.outputs.digest-x86_64-unknown-linux-gnu }}
+      digest-aarch64-unknown-linux-gnu:
+        value: ${{ jobs.build.outputs.digest-aarch64-unknown-linux-gnu }}
+      digest-x86_64-apple-darwin:
+        value: ${{ jobs.build.outputs.digest-x86_64-apple-darwin }}
+      digest-aarch64-apple-darwin:
+        value: ${{ jobs.build.outputs.digest-aarch64-apple-darwin }}
+      digest-x86_64-pc-windows-msvc:
+        value: ${{ jobs.build.outputs.digest-x86_64-pc-windows-msvc }}
   pull_request:
     branches: [main]
     # Skip the whole workflow for PRs that don't touch the native crate.
     paths:
       - 'packages/cachekit-core-ts/**'
       - '.github/workflows/build-native.yml'
+      - '.github/scripts/digest-files.mjs'
       - '.github/actions/setup-pnpm-node/**'
       - 'pnpm-lock.yaml'
 
@@ -40,11 +50,18 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  # Push to main and manually pushed cachekit-core-ts-v* tags: full
-  # cross-platform validation, the validation a (currently manual, see
-  # header) publish relies on.
+  # Push to main and the release call from release-please.yml: full
+  # cross-platform build.
   build:
     if: github.event_name != 'pull_request'
+    # Each output is gated on its own leg, so a leg can set no other target's
+    # digest; the empty values the other legs produce do not overwrite it.
+    outputs:
+      digest-x86_64-unknown-linux-gnu: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && steps.digest.outputs.digest || '' }}
+      digest-aarch64-unknown-linux-gnu: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && steps.digest.outputs.digest || '' }}
+      digest-x86_64-apple-darwin: ${{ matrix.target == 'x86_64-apple-darwin' && steps.digest.outputs.digest || '' }}
+      digest-aarch64-apple-darwin: ${{ matrix.target == 'aarch64-apple-darwin' && steps.digest.outputs.digest || '' }}
+      digest-x86_64-pc-windows-msvc: ${{ matrix.target == 'x86_64-pc-windows-msvc' && steps.digest.outputs.digest || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -66,12 +83,16 @@ jobs:
 
     steps: &build-steps
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # Empty unless release-please.yml called this workflow.
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
 
-      # Tag runs build the binaries that get published (see header), so they
-      # restore no cache: a cache entry is written by whatever ran before it.
+      # The release call restores no cache: a cache entry is written by
+      # whatever ran before it, and these binaries get published.
       - uses: ./.github/actions/setup-pnpm-node
         with:
-          cache: ${{ github.ref_type != 'tag' && 'pnpm' || '' }}
+          cache: ${{ !inputs.ref && 'pnpm' || '' }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # stable
@@ -80,7 +101,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache Rust build artifacts
-        if: github.ref_type != 'tag'
+        if: ${{ !inputs.ref }}
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: packages/cachekit-core-ts
@@ -92,8 +113,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
+      # --ignore-scripts: napi build needs no dependency install scripts.
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Build native module
         working-directory: packages/cachekit-core-ts
@@ -102,11 +124,26 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-gcc' || '' }}
 
+      # The upload carries the binary plus the JS loader napi build stamped
+      # with this version and the types it regenerated (a release ships
+      # linux-x64-gnu's copies). The digest lets release-please.yml check the
+      # upload it gets.
+      - name: Digest
+        id: digest
+        shell: bash
+        working-directory: packages/cachekit-core-ts
+        run: |
+          digest=$(node ../../.github/scripts/digest-files.mjs ./*.node index.js index.d.ts)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
       - name: Upload artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
         with:
           name: bindings-${{ matrix.target }}
-          path: packages/cachekit-core-ts/*.node
+          path: |
+            packages/cachekit-core-ts/*.node
+            packages/cachekit-core-ts/index.js
+            packages/cachekit-core-ts/index.d.ts
           if-no-files-found: error
 
   # PRs build the cheap linux-x64 target only (catches the vast majority of
@@ -136,11 +173,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
 
       - uses: ./.github/actions/setup-pnpm-node
         with:
           node-version: ${{ matrix.node }}
-          cache: ${{ github.ref_type != 'tag' && 'pnpm' || '' }}
+          cache: ${{ !inputs.ref && 'pnpm' || '' }}
 
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -149,7 +189,7 @@ jobs:
           path: packages/cachekit-core-ts
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Test native module
         working-directory: packages/cachekit-core-ts
