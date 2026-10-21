@@ -8,12 +8,10 @@ name: Build Native
 # the six npm packages through OIDC trusted publishing. So the binaries on npm
 # come from the same job definition that validates every push to main. Do not
 # add a publish job or npm-token auth here: the repo has no npm token, and
-# release tags created by the GitHub App never trigger this file's tag push.
-# The tag trigger stays for a manually pushed tag, as a validation run.
+# release tags created by the GitHub App trigger no tag-push workflow.
 on:
   push:
     branches: [main]
-    tags: ['cachekit-core-ts-v*']
   workflow_call:
     inputs:
       ref:
@@ -39,6 +37,7 @@ on:
     paths:
       - 'packages/cachekit-core-ts/**'
       - '.github/workflows/build-native.yml'
+      - '.github/scripts/digest-files.mjs'
       - '.github/actions/setup-pnpm-node/**'
       - 'pnpm-lock.yaml'
 
@@ -49,18 +48,18 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  # Push to main, a manually pushed cachekit-core-ts-v* tag, and the release
-  # call from release-please.yml: full cross-platform build.
+  # Push to main and the release call from release-please.yml: full
+  # cross-platform build.
   build:
     if: github.event_name != 'pull_request'
-    # Each leg sets only its own key; empty outputs from the other legs do
-    # not overwrite it, so all five survive the matrix.
+    # Each output is gated on its own leg, so a leg can set no other target's
+    # digest; the empty values the other legs produce do not overwrite it.
     outputs:
-      digest-x86_64-unknown-linux-gnu: ${{ steps.digest.outputs.digest-x86_64-unknown-linux-gnu }}
-      digest-aarch64-unknown-linux-gnu: ${{ steps.digest.outputs.digest-aarch64-unknown-linux-gnu }}
-      digest-x86_64-apple-darwin: ${{ steps.digest.outputs.digest-x86_64-apple-darwin }}
-      digest-aarch64-apple-darwin: ${{ steps.digest.outputs.digest-aarch64-apple-darwin }}
-      digest-x86_64-pc-windows-msvc: ${{ steps.digest.outputs.digest-x86_64-pc-windows-msvc }}
+      digest-x86_64-unknown-linux-gnu: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && steps.digest.outputs.digest || '' }}
+      digest-aarch64-unknown-linux-gnu: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && steps.digest.outputs.digest || '' }}
+      digest-x86_64-apple-darwin: ${{ matrix.target == 'x86_64-apple-darwin' && steps.digest.outputs.digest || '' }}
+      digest-aarch64-apple-darwin: ${{ matrix.target == 'aarch64-apple-darwin' && steps.digest.outputs.digest || '' }}
+      digest-x86_64-pc-windows-msvc: ${{ matrix.target == 'x86_64-pc-windows-msvc' && steps.digest.outputs.digest || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -87,12 +86,11 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      # Release builds (the release-please.yml call, or a tag push) restore no
-      # cache: a cache entry is written by whatever ran before it, and these
-      # binaries get published.
+      # The release call restores no cache: a cache entry is written by
+      # whatever ran before it, and these binaries get published.
       - uses: ./.github/actions/setup-pnpm-node
         with:
-          cache: ${{ github.ref_type != 'tag' && !inputs.ref && 'pnpm' || '' }}
+          cache: ${{ !inputs.ref && 'pnpm' || '' }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # stable
@@ -101,7 +99,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache Rust build artifacts
-        if: github.ref_type != 'tag' && !inputs.ref
+        if: ${{ !inputs.ref }}
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: packages/cachekit-core-ts
@@ -131,9 +129,9 @@ jobs:
         id: digest
         shell: bash
         working-directory: packages/cachekit-core-ts
-        env:
-          TARGET: ${{ matrix.target }}
-        run: echo "digest-$TARGET=$(node ../../.github/scripts/digest-files.mjs ./*.node index.js index.d.ts)" >> "$GITHUB_OUTPUT"
+        run: |
+          digest=$(node ../../.github/scripts/digest-files.mjs ./*.node index.js index.d.ts)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
@@ -179,7 +177,7 @@ jobs:
       - uses: ./.github/actions/setup-pnpm-node
         with:
           node-version: ${{ matrix.node }}
-          cache: ${{ github.ref_type != 'tag' && !inputs.ref && 'pnpm' || '' }}
+          cache: ${{ !inputs.ref && 'pnpm' || '' }}
 
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8

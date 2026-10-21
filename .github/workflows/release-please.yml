@@ -18,7 +18,7 @@ on:
         required: false
         type: string
       core_ts_tag:
-        description: 'Existing cachekit-core-ts tag to publish (recovery only)'
+        description: 'Existing cachekit-core-ts tag to publish, bare name, 0.2.0 or later (recovery only)'
         required: false
         type: string
 
@@ -36,8 +36,7 @@ jobs:
       cachekit--release_created: ${{ steps.release.outputs['packages/cachekit--release_created'] }}
       cachekit--tag_name: ${{ steps.release.outputs['packages/cachekit--tag_name'] }}
       cachekit--version: ${{ steps.release.outputs['packages/cachekit--version'] }}
-      # cachekit-core-ts publishes here too, through build-native.yml's matrix:
-      # tags created by the GitHub App do not trigger its tag push.
+      # cachekit-core-ts publishes here too: see build-cachekit-core-ts-native.
       core-ts--release_created: ${{ steps.release.outputs['packages/cachekit-core-ts--release_created'] }}
       core-ts--tag_name: ${{ steps.release.outputs['packages/cachekit-core-ts--tag_name'] }}
       # cachekit-core-wasm publishes here because tags created by the GitHub
@@ -82,8 +81,8 @@ jobs:
   # runs no dependency code. Every step of an `id-token: write` job can mint
   # the npm OIDC token, and npm trusted publishers bind to this workflow file,
   # not to a job — so a compromised build dependency (turbo, tsc, a cargo
-  # build.rs or proc-macro) running beside the token could publish EITHER
-  # package at any version. Split, it can only influence the tarball its own
+  # build.rs or proc-macro) running beside the token could publish ANY package
+  # this workflow publishes, at any version. Split, it can only influence the tarball its own
   # build job hands over: the publish job refuses a tarball whose sha256 is not
   # the one that build job reported, or whose name/version or registry (as
   # pnpm itself reads them) is not the package being released on npmjs.org.
@@ -358,9 +357,8 @@ jobs:
   # platform's .node binary, and the main package (JS loader, types, all five
   # binaries, and exact-version optionalDependencies on the five). The binaries
   # need macOS and Windows runners, so build-native.yml builds them, called on
-  # the release tag: the same job definition builds every push to main, and
-  # adding a target there is the only change a release needs. Its jobs run
-  # read-only and restore no cache on this call.
+  # the release tag: the same job definition builds every push to main. Its
+  # jobs run read-only and restore no cache on this call.
   build-cachekit-core-ts-native:
     name: Build @cachekit-io/cachekit-core-ts binaries
     needs: release-please
@@ -376,7 +374,7 @@ jobs:
     needs: [release-please, build-cachekit-core-ts-native]
     runs-on: ubuntu-latest
     outputs:
-      sha256: ${{ steps.pack.outputs.sha256 }}
+      sha256-by-file: ${{ steps.pack.outputs.sha256-by-file }}
     permissions:
       contents: read
 
@@ -404,47 +402,52 @@ jobs:
           path: ${{ runner.temp }}/bindings
 
       # Any job in this run can replace an artifact by name, so each target's
-      # download must match the digest its build leg reported, and only its
-      # .node is staged for napi (napi artifacts takes every .node under the
-      # directory it reads). The targets come from this checkout's napi config,
-      # the same list napi pre-publish writes into optionalDependencies.
-      # napi build stamps the loader and the types with the package version;
-      # the checked-in copies are whatever the last local build wrote, so the
-      # package ships the copies linux-x64-gnu's build generated.
+      # download must match the digest its build leg reported. The digest is
+      # recomputed over exactly the files that target should have uploaded,
+      # its binary named by napi's own triple parsing, and only that binary is
+      # staged: a leg that also uploads another platform's binary fails the
+      # check instead of overwriting it. The targets come from this checkout's
+      # napi config, the list napi pre-publish writes into optionalDependencies.
       - name: Verify and stage binaries
         working-directory: packages/cachekit-core-ts
         env:
           DIGESTS: ${{ toJSON(needs.build-cachekit-core-ts-native.outputs) }}
         run: |
           mkdir artifacts
-          for target in $(jq -r '.napi.targets[]' package.json); do
+          binary=$(jq -er .napi.binaryName package.json)
+          targets=$(jq -er '.napi.targets | select(length > 0) | .[]' package.json)
+          for target in $targets; do
             dir="$RUNNER_TEMP/bindings/bindings-$target"
             want=$(jq -r --arg key "digest-$target" '.[$key] // ""' <<<"$DIGESTS")
             if [ -z "$want" ] || [ ! -d "$dir" ]; then
               echo "::error::No build of napi target $target — each target needs a matrix leg and a digest output in build-native.yml."
               exit 1
             fi
-            got=$(node ../../.github/scripts/digest-files.mjs "$dir"/*)
+            file="$binary.$(node -p "require('@napi-rs/cli').parseTriple(process.argv[1]).platformArchABI" "$target").node"
+            got=$(node ../../.github/scripts/digest-files.mjs "$dir/$file" "$dir/index.js" "$dir/index.d.ts") || got=unreadable
             if [ "$got" != "$want" ]; then
-              echo "::error::bindings-$target is '$got', its build reported '$want' — refusing to pack."
+              echo "::error::bindings-$target is not exactly $file, index.js and index.d.ts with the digest its build reported ('$got', not '$want') — refusing to pack."
               exit 1
             fi
-            cp "$dir"/*.node artifacts/
+            cp "$dir/$file" artifacts/
           done
-          cp "$RUNNER_TEMP/bindings/bindings-x86_64-unknown-linux-gnu/index.js" \
-            "$RUNNER_TEMP/bindings/bindings-x86_64-unknown-linux-gnu/index.d.ts" .
 
-      # napi artifacts copies each binary into its npm/<platform> package and
-      # into the package root, where `files` ships all five in the main package
-      # too, as 0.1.2 did. That keeps the main package loadable when npm skips
-      # the platform optionalDependency (npm/cli#4828, fixed only in npm
-      # 11.3.0; Node 22 bundles npm 10). napi pre-publish stamps this version
-      # into the platform manifests, which napi never bumps on its own, and
-      # writes the main package's optionalDependencies on them.
+      # napi build stamps the loader and the types with the package version,
+      # and the checked-in copies carry whatever the last local build wrote, so
+      # the package ships the ones linux-x64-gnu's build generated (verified
+      # above). napi artifacts copies each binary into its npm/<platform>
+      # package and into the package root, where `files` ships all five in the
+      # main package too, as 0.1.2 did. That keeps the main package loadable
+      # when npm skips the platform optionalDependency (npm/cli#4828, fixed
+      # only in npm 11.3.0; Node 22 bundles npm 10). napi pre-publish stamps
+      # this version into the platform manifests, which napi never bumps on its
+      # own, and writes the main package's optionalDependencies on them.
       # --skip-optional-publish stops it running `npm publish` on each one.
       - name: Assemble packages
         working-directory: packages/cachekit-core-ts
         run: |
+          cp "$RUNNER_TEMP/bindings/bindings-x86_64-unknown-linux-gnu/index.js" \
+            "$RUNNER_TEMP/bindings/bindings-x86_64-unknown-linux-gnu/index.d.ts" .
           pnpm exec napi artifacts
           pnpm exec napi pre-publish -t npm --skip-optional-publish --no-gh-release
 
@@ -460,14 +463,18 @@ jobs:
           for dir in npm/*/; do
             (cd "$dir" && pnpm pack --out "$out/cachekit-core-ts-$(basename "$dir").tgz")
           done
-          echo "sha256=$(cd "$out" && sha256sum -- *.tgz | jq -Rnc '[inputs | split("  ") | {(.[1]): .[0]}] | add')" >> "$GITHUB_OUTPUT"
+          sums=$(cd "$out" && sha256sum -- *.tgz | jq -Rnc '[inputs | split("  ") | {(.[1]): .[0]}] | add')
+          echo "sha256-by-file=$sums" >> "$GITHUB_OUTPUT"
 
+      # 30 days, not 7: GitHub allows re-running a run for 30 days, and a
+      # re-run of a publish that stopped partway needs these exact bytes (a
+      # rebuild's binaries differ, and the publish job refuses them).
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
         with:
           name: cachekit-core-ts-tarballs
           path: ${{ runner.temp }}/core-ts
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
 
   publish-cachekit-core-ts:
     name: Publish @cachekit-io/cachekit-core-ts
@@ -510,13 +517,13 @@ jobs:
       - name: Verify tarballs
         shell: bash
         env:
-          SHA256: ${{ needs.build-cachekit-core-ts.outputs.sha256 }}
+          SHA256_BY_FILE: ${{ needs.build-cachekit-core-ts.outputs.sha256-by-file }}
           PKG: packages/cachekit-core-ts
         run: |
           version=$(jq -r .version "$PKG/package.json")
           verify() { # tarball-name manifest
             .github/scripts/verify-tarball.sh "$RUNNER_TEMP/core-ts/$1" "$2" \
-              "$(jq -r --arg file "$1" '.[$file] // ""' <<<"$SHA256")"
+              "$(jq -r --arg file "$1" '.[$file] // ""' <<<"$SHA256_BY_FILE")"
           }
           for dir in "$PKG"/npm/*/; do
             platform=$(basename "$dir")
@@ -540,7 +547,13 @@ jobs:
           publish() { # tarball-name package-name
             local tgz="$RUNNER_TEMP/core-ts/$1" ours theirs
             ours="sha512-$(openssl dgst -sha512 -binary "$tgz" | base64 -w0)"
-            theirs=$(npm view "$2@$version" dist.integrity 2>/dev/null || true)
+            # E404 means not published yet; any other lookup failure stops here.
+            theirs=$(npm view "$2@$version" dist.integrity 2>"$RUNNER_TEMP/npm-view.err") ||
+              grep -q 'code E404' "$RUNNER_TEMP/npm-view.err" || {
+                cat "$RUNNER_TEMP/npm-view.err"
+                echo "::error::Could not look up $2@$version on npm — refusing to publish."
+                exit 1
+              }
             if [ "$theirs" = "$ours" ]; then
               echo "$2@$version is already on npm with these bytes — skipping."
             elif [ -n "$theirs" ]; then

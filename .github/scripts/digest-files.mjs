@@ -19,6 +19,14 @@ if (files.length === 0) {
   process.exit(2);
 }
 
+const read = (file) => {
+  try {
+    return readFileSync(file);
+  } catch (error) {
+    console.error(`digest-files: cannot read ${file}: ${error.code ?? error.message}`);
+    process.exit(1);
+  }
+};
 const sha256 = (data) => createHash('sha256').update(data).digest('hex');
-const lines = files.map((file) => `${sha256(readFileSync(file))}  ${basename(file)}\n`).sort();
+const lines = files.map((file) => `${sha256(read(file))}  ${basename(file)}\n`).sort();
 console.log(sha256(lines.join('')));

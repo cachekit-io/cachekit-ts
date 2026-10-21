@@ -2,7 +2,7 @@
 
 Native Rust bindings for [`@cachekit-io/cachekit`](https://www.npmjs.com/package/@cachekit-io/cachekit). Provides byte-storage (LZ4 + xxHash3), HKDF key derivation, and AES-256-GCM encryption primitives via N-API.
 
-> **Version note**: 0.1.1 and 0.1.3 were tagged in git but never published to npm. Published versions jump 0.1.0 → 0.1.2 → 0.2.0. From 0.2.0 on, every version is published from CI with npm provenance, which `npm audit signatures` verifies. If you're pinning, use 0.2.0 or later.
+> **Version note**: 0.1.1 and 0.1.3 were tagged in git but never published to npm. If you're pinning, pick a version npm lists.
 
 ## Installation
 
