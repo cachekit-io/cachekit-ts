@@ -103,7 +103,7 @@ These are loopback numbers, and loopback milliseconds do not carry over to a rea
 
 ## What `main` looks like
 
-`main` is the integration branch and is **not guaranteed stable between releases**. Per-PR CI only builds the native crate on linux-x64 to keep PR turnaround fast; the full 5-platform matrix (linux x64/arm64, macOS x86/arm64, Windows) runs on `push: main` and on release tags. Cross-platform regressions can land on `main` and stay there until the post-merge run catches them — they're always caught before a release tag is cut, so published artifacts on npm are always validated against every platform.
+`main` is the integration branch and is **not guaranteed stable between releases**. Per-PR CI only builds the native crate on linux-x64 to keep PR turnaround fast; the full 5-platform matrix (linux x64/arm64, macOS x86/arm64, Windows) runs on `push: main`. Cross-platform regressions can land on `main` and stay there until the post-merge run catches them. A `cachekit-core-ts` release runs the same matrix again on its tag, and publishes the binaries that run builds; if any platform fails to build, nothing is published.
 
 If you need stable, depend on a published version on npm.
 

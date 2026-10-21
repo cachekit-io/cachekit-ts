@@ -17,6 +17,10 @@ on:
         description: 'Existing cachekit-core-wasm tag to publish (recovery only)'
         required: false
         type: string
+      core_ts_tag:
+        description: 'Existing cachekit-core-ts tag to publish (recovery only)'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -32,10 +36,8 @@ jobs:
       cachekit--release_created: ${{ steps.release.outputs['packages/cachekit--release_created'] }}
       cachekit--tag_name: ${{ steps.release.outputs['packages/cachekit--tag_name'] }}
       cachekit--version: ${{ steps.release.outputs['packages/cachekit--version'] }}
-      # cachekit-core-ts outputs — currently unconsumed: App-created tags do
-      # NOT trigger build-native.yml's push workflow, and core-ts publishing
-      # is manual today (see build-native.yml's header; a CI publish path
-      # consuming these outputs is LAB-1390's follow-up).
+      # cachekit-core-ts publishes here too, through build-native.yml's matrix:
+      # tags created by the GitHub App do not trigger its tag push.
       core-ts--release_created: ${{ steps.release.outputs['packages/cachekit-core-ts--release_created'] }}
       core-ts--tag_name: ${{ steps.release.outputs['packages/cachekit-core-ts--tag_name'] }}
       # cachekit-core-wasm publishes here because tags created by the GitHub
@@ -351,3 +353,204 @@ jobs:
       # the package-level trusted publisher after that and OIDC takes over.
       - name: Publish to npm
         run: pnpm publish "$RUNNER_TEMP/package.tgz" --access public --provenance --no-git-checks
+
+  # cachekit-core-ts is six npm packages: one per napi target holding that
+  # platform's .node binary, and the main package (JS loader, types, all five
+  # binaries, and exact-version optionalDependencies on the five). The binaries
+  # need macOS and Windows runners, so build-native.yml builds them, called on
+  # the release tag: the same job definition builds every push to main, and
+  # adding a target there is the only change a release needs. Its jobs run
+  # read-only and restore no cache on this call.
+  build-cachekit-core-ts-native:
+    name: Build @cachekit-io/cachekit-core-ts binaries
+    needs: release-please
+    if: needs.release-please.outputs.core-ts--release_created == 'true' || github.event.inputs.core_ts_tag != ''
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-native.yml
+    with:
+      ref: refs/tags/${{ needs.release-please.outputs.core-ts--tag_name || github.event.inputs.core_ts_tag }}
+
+  build-cachekit-core-ts:
+    name: Build @cachekit-io/cachekit-core-ts
+    needs: [release-please, build-cachekit-core-ts-native]
+    runs-on: ubuntu-latest
+    outputs:
+      sha256: ${{ steps.pack.outputs.sha256 }}
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: refs/tags/${{ needs.release-please.outputs.core-ts--tag_name || github.event.inputs.core_ts_tag }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: '22'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
+
+      # --ignore-scripts: the napi CLI below needs no dependency scripts.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: bindings-*
+          path: ${{ runner.temp }}/bindings
+
+      # Any job in this run can replace an artifact by name, so each target's
+      # download must match the digest its build leg reported, and only its
+      # .node is staged for napi (napi artifacts takes every .node under the
+      # directory it reads). The targets come from this checkout's napi config,
+      # the same list napi pre-publish writes into optionalDependencies.
+      # napi build stamps the loader and the types with the package version;
+      # the checked-in copies are whatever the last local build wrote, so the
+      # package ships the copies linux-x64-gnu's build generated.
+      - name: Verify and stage binaries
+        working-directory: packages/cachekit-core-ts
+        env:
+          DIGESTS: ${{ toJSON(needs.build-cachekit-core-ts-native.outputs) }}
+        run: |
+          mkdir artifacts
+          for target in $(jq -r '.napi.targets[]' package.json); do
+            dir="$RUNNER_TEMP/bindings/bindings-$target"
+            want=$(jq -r --arg key "digest-$target" '.[$key] // ""' <<<"$DIGESTS")
+            if [ -z "$want" ] || [ ! -d "$dir" ]; then
+              echo "::error::No build of napi target $target — each target needs a matrix leg and a digest output in build-native.yml."
+              exit 1
+            fi
+            got=$(node ../../.github/scripts/digest-files.mjs "$dir"/*)
+            if [ "$got" != "$want" ]; then
+              echo "::error::bindings-$target is '$got', its build reported '$want' — refusing to pack."
+              exit 1
+            fi
+            cp "$dir"/*.node artifacts/
+          done
+          cp "$RUNNER_TEMP/bindings/bindings-x86_64-unknown-linux-gnu/index.js" \
+            "$RUNNER_TEMP/bindings/bindings-x86_64-unknown-linux-gnu/index.d.ts" .
+
+      # napi artifacts copies each binary into its npm/<platform> package and
+      # into the package root, where `files` ships all five in the main package
+      # too, as 0.1.2 did. That keeps the main package loadable when npm skips
+      # the platform optionalDependency (npm/cli#4828, fixed only in npm
+      # 11.3.0; Node 22 bundles npm 10). napi pre-publish stamps this version
+      # into the platform manifests, which napi never bumps on its own, and
+      # writes the main package's optionalDependencies on them.
+      # --skip-optional-publish stops it running `npm publish` on each one.
+      - name: Assemble packages
+        working-directory: packages/cachekit-core-ts
+        run: |
+          pnpm exec napi artifacts
+          pnpm exec napi pre-publish -t npm --skip-optional-publish --no-gh-release
+
+      # One tarball per package, named after it, and their sha256s as one JSON
+      # map for the publish job to check each against.
+      - name: Pack
+        id: pack
+        working-directory: packages/cachekit-core-ts
+        run: |
+          out="$RUNNER_TEMP/core-ts"
+          mkdir "$out"
+          pnpm pack --out "$out/cachekit-core-ts.tgz"
+          for dir in npm/*/; do
+            (cd "$dir" && pnpm pack --out "$out/cachekit-core-ts-$(basename "$dir").tgz")
+          done
+          echo "sha256=$(cd "$out" && sha256sum -- *.tgz | jq -Rnc '[inputs | split("  ") | {(.[1]): .[0]}] | add')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        with:
+          name: cachekit-core-ts-tarballs
+          path: ${{ runner.temp }}/core-ts
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-cachekit-core-ts:
+    name: Publish @cachekit-io/cachekit-core-ts
+    needs: [release-please, build-cachekit-core-ts]
+    runs-on: ubuntu-latest
+    # Same reason as publish-cachekit-core-wasm.
+    concurrency:
+      group: publish-cachekit-core-ts-${{ needs.release-please.outputs.core-ts--tag_name || github.event.inputs.core_ts_tag }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+
+    # Same shape as publish-cachekit: no dependency code runs beside the token.
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: refs/tags/${{ needs.release-please.outputs.core-ts--tag_name || github.event.inputs.core_ts_tag }}
+          persist-credentials: false
+
+      # No `registry-url` — same reason as publish-cachekit.
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: '22'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v2
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: cachekit-core-ts-tarballs
+          path: ${{ runner.temp }}/core-ts
+
+      # Same pins as publish-cachekit, for all six tarballs before any publish.
+      # The package list comes from this checkout, never from the artifact:
+      # the main package plus one per npm/<platform> directory, all at the main
+      # package's version (the checked-in platform manifests keep the version
+      # napi scaffolded them at).
+      - name: Verify tarballs
+        shell: bash
+        env:
+          SHA256: ${{ needs.build-cachekit-core-ts.outputs.sha256 }}
+          PKG: packages/cachekit-core-ts
+        run: |
+          version=$(jq -r .version "$PKG/package.json")
+          verify() { # tarball-name manifest
+            .github/scripts/verify-tarball.sh "$RUNNER_TEMP/core-ts/$1" "$2" \
+              "$(jq -r --arg file "$1" '.[$file] // ""' <<<"$SHA256")"
+          }
+          for dir in "$PKG"/npm/*/; do
+            platform=$(basename "$dir")
+            jq --arg v "$version" '.version = $v' "$dir/package.json" > "$RUNNER_TEMP/$platform.json"
+            verify "cachekit-core-ts-$platform.tgz" "$RUNNER_TEMP/$platform.json"
+          done
+          verify cachekit-core-ts.tgz "$PKG/package.json"
+
+      # Auth is npm OIDC trusted publishing: each of the six packages has its
+      # own package-level trusted publisher on npmjs.com for this workflow.
+      # Platform packages first: the main package pins each one exactly, so it
+      # must not reach npm before they do. A version already on npm with these
+      # exact bytes is skipped, so "Re-run failed jobs" finishes a publish that
+      # stopped partway; the same version with other bytes fails the job.
+      - name: Publish to npm
+        shell: bash
+        env:
+          PKG: packages/cachekit-core-ts
+        run: |
+          version=$(jq -r .version "$PKG/package.json")
+          publish() { # tarball-name package-name
+            local tgz="$RUNNER_TEMP/core-ts/$1" ours theirs
+            ours="sha512-$(openssl dgst -sha512 -binary "$tgz" | base64 -w0)"
+            theirs=$(npm view "$2@$version" dist.integrity 2>/dev/null || true)
+            if [ "$theirs" = "$ours" ]; then
+              echo "$2@$version is already on npm with these bytes — skipping."
+            elif [ -n "$theirs" ]; then
+              echo "::error::$2@$version is already on npm as $theirs, not this tarball ($ours) — refusing."
+              exit 1
+            else
+              pnpm publish "$tgz" --access public --provenance --no-git-checks
+            fi
+          }
+          for dir in "$PKG"/npm/*/; do
+            publish "cachekit-core-ts-$(basename "$dir").tgz" "$(jq -r .name "$dir/package.json")"
+          done
+          publish cachekit-core-ts.tgz "$(jq -r .name "$PKG/package.json")"
