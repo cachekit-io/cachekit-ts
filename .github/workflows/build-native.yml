@@ -7,8 +7,10 @@ name: Build Native
 # release tag on the full matrix, then release-please.yml packs and publishes
 # the six npm packages through OIDC trusted publishing. So the binaries on npm
 # come from the same job definition that validates every push to main. Do not
-# add a publish job or npm-token auth here: the repo has no npm token, and
-# release tags created by the GitHub App trigger no tag-push workflow.
+# add a publish job, an id-token or npm-token auth here: these jobs run
+# dependency code (build.rs, proc-macros, the napi CLI), which must never run
+# beside publish credentials (see the comment above the build-cachekit job in
+# release-please.yml).
 on:
   push:
     branches: [main]
@@ -122,9 +124,10 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-gcc' || '' }}
 
-      # The upload carries the binary plus the JS loader and types napi build
-      # regenerated, stamped with this version (a release ships linux-x64-gnu's
-      # copies). The digest lets release-please.yml check the upload it gets.
+      # The upload carries the binary plus the JS loader napi build stamped
+      # with this version and the types it regenerated (a release ships
+      # linux-x64-gnu's copies). The digest lets release-please.yml check the
+      # upload it gets.
       - name: Digest
         id: digest
         shell: bash

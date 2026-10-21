@@ -420,22 +420,22 @@ jobs:
             dir="$RUNNER_TEMP/bindings/bindings-$target"
             want=$(jq -r --arg key "digest-$target" '.[$key] // ""' <<<"$DIGESTS")
             if [ -z "$want" ] || [ ! -d "$dir" ]; then
-              echo "::error::No build of napi target $target — each target needs a matrix leg and a digest output in build-native.yml."
+              echo "::error::No build of napi target $target. A target needs a matrix leg in build-native.yml, its digest in both of that file's output maps, and an npm/<platform> package."
               exit 1
             fi
             file="$binary.$(node -p "require('@napi-rs/cli').parseTriple(process.argv[1]).platformArchABI" "$target").node"
             got=$(node ../../.github/scripts/digest-files.mjs "$dir/$file" "$dir/index.js" "$dir/index.d.ts") || got=unreadable
             if [ "$got" != "$want" ]; then
-              echo "::error::bindings-$target is not exactly $file, index.js and index.d.ts with the digest its build reported ('$got', not '$want') — refusing to pack."
+              echo "::error::bindings-$target: the digest of $file, index.js and index.d.ts is '$got', but its build reported '$want'. Refusing to pack."
               exit 1
             fi
             cp "$dir/$file" artifacts/
           done
 
-      # napi build stamps the loader and the types with the package version,
-      # and the checked-in copies carry whatever the last local build wrote, so
-      # the package ships the ones linux-x64-gnu's build generated (verified
-      # above). napi artifacts copies each binary into its npm/<platform>
+      # napi build stamps the loader with the package version and regenerates
+      # the types from the Rust source; the checked-in copies carry whatever the
+      # last local build wrote, so the package ships the ones linux-x64-gnu's
+      # build generated (verified above). napi artifacts copies each binary into its npm/<platform>
       # package and into the package root, where `files` ships all five in the
       # main package too, as 0.1.2 did. That keeps the main package loadable
       # when npm skips the platform optionalDependency (npm/cli#4828, fixed
@@ -510,6 +510,9 @@ jobs:
           path: ${{ runner.temp }}/core-ts
 
       # Same pins as publish-cachekit, for all six tarballs before any publish.
+      # verify-tarball.sh comes from the tag, unlike in publish-cachekit-core-wasm:
+      # a core-ts tag older than 0.2.0 has no build action or scripts, so its
+      # build already fails at setup, before anything reaches this job.
       # The package list comes from this checkout, never from the artifact:
       # the main package plus one per npm/<platform> directory, all at the main
       # package's version (the checked-in platform manifests keep the version
