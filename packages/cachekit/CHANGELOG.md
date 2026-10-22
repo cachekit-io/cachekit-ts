@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.2.0...cachekit-v0.2.1) (2026-10-22)
+
+
+### Bug Fixes
+
+* **cachekit:** depend on the published core-ts and core-wasm 0.2.0, so the release installs (LAB-10269) ([#241](https://github.com/cachekit-io/cachekit-ts/issues/241)) ([10947ef](https://github.com/cachekit-io/cachekit-ts/commit/10947ef4947034dd922b8ca3172230136af0e107))
+
 ## [0.2.0](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.1.5...cachekit-v0.2.0) (2026-10-16)
 
 
