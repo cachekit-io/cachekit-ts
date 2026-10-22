@@ -4,7 +4,9 @@ Backend-agnostic caching for TypeScript/Node.js — works with Redis, Memcached,
 
 > **Status: beta** — CacheKit is in closed beta ahead of 1.0. APIs are stabilising; minor breaking changes may still occur between 0.x releases.
 >
-> **Version note**: 0.1.1 was tagged in git but never published to npm (a CI auth bug, fixed in #45). Published versions on npm jump 0.1.0 → 0.1.2. If you're pinning, use 0.1.2 or later.
+> **Version note**: install 0.2.1 or later. 0.2.0 is on npm but does not install: it pins `@cachekit-io/cachekit-core-ts` 0.1.3, which was never published. 0.2.1 ships the same code with dependencies npm serves. Likewise, 0.1.1 was tagged but never published, so npm jumps from 0.1.0 to 0.1.2.
+>
+> **Upgrading from 0.1.x**: 0.2.0 has breaking changes, listed in the [0.2.0 changelog](https://github.com/cachekit-io/cachekit-ts/blob/main/packages/cachekit/CHANGELOG.md#020-2026-10-16). Two of them make entries written by a 0.1.x secure cache fail decryption: a secure cache created without a `tenantId`, and a secure cache whose backend sets a `keyPrefix`. For either, once no 0.1.x instance is still writing, delete the entries it wrote or move to a fresh namespace or `keyPrefix`. Do not wait out the TTL.
 
 ## Features
 
