@@ -37,7 +37,7 @@ import {
 
 /**
  * sha256 of test-vectors/wire-format.json (fixture version 1.4.0).
- * Provenance: cachekit-io/protocol @ 4b8fddb2 (the merge of cachekit-io/protocol#171). Re-vendoring means copying the
+ * Provenance: cachekit-io/protocol @ 4f8665f4 (the merge of cachekit-io/protocol#196). Re-vendoring means copying the
  * file byte-for-byte from a named protocol revision, then changing together:
  * the version and revision in this docblock, the FIXTURE_SHA256 value below,
  * the version/count guard in the "protocol wire-format.json vectors" suite,
@@ -45,7 +45,7 @@ import {
  * test/workers/wire-format.workers.test.ts), and the reject-vector set,
  * REJECT_EXPECTATIONS in test/fixtures/wire-vectors.ts.
  */
-const FIXTURE_SHA256 = '2f6818903a552a7c09414c1e5c02caf21fa92dcd56ccff5634c8257038e7575c'; // pragma: allowlist secret
+const FIXTURE_SHA256 = '806de79dca2e0e6b221b8ec191526207d32f9fe5d88597098dd2549427b4993c'; // pragma: allowlist secret
 
 // Raw bytes of the same file the JSON import above parses: the pin covers
 // every byte (legacy vectors and the limits block included), not a re-serialisation.
