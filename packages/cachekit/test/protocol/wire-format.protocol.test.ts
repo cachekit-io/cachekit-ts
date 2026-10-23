@@ -53,7 +53,7 @@ const rawFixture = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '..', 'workers', 'fixtures', 'wire-format.json')
 );
 
-// LAB-7084: pack/unpack return a plain Uint8Array (not a Buffer) that owns its
+// pack/unpack return a plain Uint8Array (not a Buffer) that owns its
 // whole ArrayBuffer: no pool slab, no offset view.
 function expectOwnedCopy(bytes: Uint8Array): void {
   expect(bytes.constructor).toBe(Uint8Array);

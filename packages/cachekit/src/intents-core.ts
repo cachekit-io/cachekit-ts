@@ -71,7 +71,7 @@ type IntentBackendOptions =
  * Use for read-heavy, non-critical caching (product catalogs, public APIs).
  *
  * Read-heavy public APIs routinely serve multi-MB responses — mind the
- * serializer's **1 MiB default `maxEncodedSize`** (LAB-1388): values above
+ * serializer's **1 MiB default `maxEncodedSize`**: values above
  * it are rejected with ValueTooLargeError and NEVER cached, and the
  * rejection is easy to absorb silently (consumer try/catch around set).
  * If your payloads can exceed 1 MiB, raise `serializer.maxEncodedSize`

@@ -83,7 +83,7 @@ export function boundedDecodeOptions(maxCollectionSize: number, maxDecodedSize: 
 
 /**
  * Reject untrusted MessagePack whose collection nesting exceeds `maxDepth`,
- * before it reaches the decoder (LAB-2487).
+ * before it reaches the decoder.
  *
  * `boundedDecodeOptions` caps each collection's *declared* size, but
  * `@msgpack/msgpack` (3.1.3, latest; `main` has no depth option) eagerly runs
@@ -398,7 +398,7 @@ function bytesOf(value: ArrayBufferLike | ArrayBufferView): Uint8Array {
 /**
  * A binary value's type and bytes, from its brand; undefined if `value` is not
  * binary. Not instanceof, which another realm's buffers (vm, jest) fail, nor
- * Symbol.toStringTag, which any object can set (LAB-4839).
+ * Symbol.toStringTag, which any object can set.
  */
 function binary(value: object): [type: string, bytes: Uint8Array] | undefined {
   if (ArrayBuffer.isView(value)) {
@@ -537,7 +537,7 @@ export function normalize(
     // of that shape, e.g. { Int8Array: Uint8Array.of(255) }.
     if (walk.forKey) return new ExtData(0, encode([type, blake2b(bytes, { dkLen: 32 })]));
     // A value would decode as a Uint8Array — a silent type change — so reject
-    // it with the fix instead (LAB-4839).
+    // it with the fix instead.
     throw new SerializationError(
       `Cannot serialize ${type}: binary values must be a Uint8Array or Buffer ` +
         '(view the bytes with new Uint8Array(buffer, byteOffset, byteLength))'
@@ -570,8 +570,7 @@ export function normalize(
  *
  * Features:
  * - Deterministic output (sorted keys, normalized values)
- * - Five-layer DoS protection (C4 fix; decode bounds added in LAB-281,
- *   pre-decode depth bound in LAB-2487):
+ * - Five-layer DoS protection:
  *   1. maxDecodedSize - limit input size to decode() and str/bin lengths inside it
  *   2. maxEncodedSize - limit output size from encode()
  *   3. maxDepth - limit nesting depth (at encode time, and pre-decode via
@@ -579,7 +578,7 @@ export function normalize(
  *   4. maxCollectionSize - bound collection headers at decode time (no
  *      preallocation from forged headers) and collection sizes at encode time
  *   5. assertDecodeDepth - reject over-depth / structurally-incomplete input
- *      before the decoder allocates (LAB-2487; see the function's own docs)
+ *      before the decoder allocates (see the function's own docs)
  */
 export class MessagePackSerializer implements Serializer {
   private readonly config: SerializerConfig;
@@ -716,7 +715,7 @@ export function decodeCounted<T>(
   }
 
   // Bound nesting depth before the decoder eagerly preallocates per-header
-  // collections (LAB-2487) — the per-collection cap alone lets nested headers
+  // collections — the per-collection cap alone lets nested headers
   // stack preallocations disproportionate to input size.
   const counted = assertDecodeDepth(data, config.maxDepth);
 

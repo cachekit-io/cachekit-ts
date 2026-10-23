@@ -9,7 +9,7 @@ import type { SerializerConfig } from '../serialization/serializer.js';
  * Structural view of the Redis Pub/Sub surface the invalidation channel
  * drives — an `ioredis` `Redis` instance satisfies it as-is.
  *
- * Structural on purpose (LAB-1388): a nominal `import type { Redis } from
+ * Structural on purpose: a nominal `import type { Redis } from
  * 'ioredis'` here would pull ioredis's Node-typed declarations into the
  * shared type closure, forcing every Workers consumer without @types/node
  * into `skipLibCheck` over dozens of `Cannot find name 'Buffer'` errors.
@@ -155,7 +155,7 @@ export interface EncryptionConfig {
  * punishes), and distinct-key miss floods are bounded by backend timeouts
  * plus the circuit breaker. A global semaphore would add queueing latency
  * and a tuning knob without a failure mode it prevents; revisit only with
- * evidence of backend connection exhaustion. (LAB-519)
+ * evidence of backend connection exhaustion.
  */
 export interface StampedeConfig {
   /**
@@ -165,7 +165,7 @@ export interface StampedeConfig {
    * after a clean L2 miss (nobody held the lock when we asked; a fill racing
    * the grant is recomputed, last write wins). cachekit-py skips it on
    * CachekitIO only; ts skips it on every lockable backend. When contested, re-try the lock on an
-   * interval up to `lockWaitMs` (acquireLock never blocks — LAB-240), read
+   * interval up to `lockWaitMs` (acquireLock never blocks), read
    * L2 once more, then compute anyway: the lease is best-effort stampede
    * mitigation, never a correctness gate.
    *

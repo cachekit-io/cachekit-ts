@@ -25,7 +25,7 @@ export interface RefreshOptions {
  *
  * Wrapped rather than returned bare because a cached value may legitimately be
  * null or undefined — the wrapper is what distinguishes "store this" from
- * "there is nothing to store" (LAB-238).
+ * "there is nothing to store".
  */
 export interface L1Write {
   readonly l1: unknown;
@@ -104,7 +104,7 @@ export class BackgroundRefreshManager {
 
         // Update L2 FIRST (before version check). The write hands back what L1
         // should hold — for a secure cache the ciphertext it just produced,
-        // never the plaintext `result` computed above (LAB-238).
+        // never the plaintext `result` computed above.
         const persisted = await persistToL2(key, result, options);
 
         // Then complete L1 refresh with version check

@@ -345,7 +345,7 @@ describe('Intent-based Cache API', () => {
   });
 
   // ========================================================================
-  // Backend instances through the storage-agnostic intents (LAB-750)
+  // Backend instances through the storage-agnostic intents
   // ========================================================================
   describe('backend instances in minimal/production/secure', () => {
     const instanceBackend = {
@@ -394,7 +394,7 @@ describe('Intent-based Cache API', () => {
   });
 
   // ========================================================================
-  // Options a preset does not apply are rejected, never dropped (LAB-8218)
+  // Options a preset does not apply are rejected, never dropped
   // ========================================================================
   describe('options a preset does not apply', () => {
     const MASTER_KEY = 'a'.repeat(64);

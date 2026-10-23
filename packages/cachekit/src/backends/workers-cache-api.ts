@@ -126,7 +126,7 @@ export class CacheAPIBackend implements Backend {
    * get(); the remaining lifetime comes from the stored response's own
    * freshness headers (the `Cache-Control: max-age` this backend wrote,
    * minus the `Age` the Cloudflare edge reports). Lets CacheImpl cap L1
-   * re-population at the entry's remaining lifetime (LAB-1388).
+   * re-population at the entry's remaining lifetime.
    */
   async getWithTtl(key: string): Promise<GetWithTtlResult | null> {
     this.ensureNotClosed();

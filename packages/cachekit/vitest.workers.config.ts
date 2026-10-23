@@ -52,7 +52,7 @@ function createMockCachekitIO() {
 const mockCachekitIOService = createMockCachekitIO();
 
 /**
- * Workers test lane (LAB-595): runs test/workers/** inside real workerd via
+ * Workers test lane: runs test/workers/** inside real workerd via
  * @cloudflare/vitest-pool-workers — protocol vector suites against the wasm
  * bindings, plus a CachekitIO backend smoke test. The default vitest config
  * (Node lane) excludes these tests.
@@ -88,7 +88,7 @@ export default defineConfig({
         // (real Request/Response marshalling, binary-safe bodies). Unknown
         // hosts 502 so tests can never reach the network.
         outboundService: mockCachekitIOService,
-        // Real KV binding for the Workers KV backend tests (LAB-750).
+        // Real KV binding for the Workers KV backend tests.
         kvNamespaces: ['TEST_KV'],
       },
     }),

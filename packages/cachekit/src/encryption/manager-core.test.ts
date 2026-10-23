@@ -1,7 +1,7 @@
 /**
  * EncryptionManagerCore contract tests over mock bindings — the logic here
  * is shared verbatim by the Node (NAPI) and Workers (wasm) entrypoints.
- * Covers the LAB-595 panel findings: single-derive under concurrent first
+ * Covers single-derive under concurrent first
  * use, deterministic zeroize on dispose (including dispose racing init),
  * and the nonce-exhaustion error-message classification contract.
  */
@@ -146,7 +146,7 @@ describe('EncryptionManagerCore', () => {
     return new TextDecoder().decode(aad.slice(5, 5 + len));
   }
 
-  it('LAB-4668: HKDF derivation and AAD construction resolve the identical tenant_id', async () => {
+  it('HKDF derivation and AAD construction resolve the identical tenant_id', async () => {
     // Regression for the mismatch: manager-core.ts used `tenantId ?? 'default'`
     // for HKDF but `tenantId ?? ''` for AAD, so an unset tenant derived keys
     // for "default" while binding AAD to "" — ciphertext could never
@@ -163,7 +163,7 @@ describe('EncryptionManagerCore', () => {
     manager.dispose();
   });
 
-  it('LAB-4668: with a configured tenantId, HKDF and AAD both use it', async () => {
+  it('with a configured tenantId, HKDF and AAD both use it', async () => {
     const { bindings } = mockBindings();
     const manager = new TestManager(async () => bindings, 'acme-corp');
 

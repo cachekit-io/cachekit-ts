@@ -1,5 +1,5 @@
 /**
- * Encryption Protocol Vectors — Workers lane (LAB-595)
+ * Encryption Protocol Vectors — Workers lane
  *
  * Byte-verifies the wasm32 cachekit-core bindings and the Workers
  * EncryptionManager against protocol/test-vectors/encryption.json (Python
@@ -446,13 +446,13 @@ describe('encryption vectors — default tenant (protocol 1.2.0)', () => {
 // spans 12 full blocks plus an 8 B partial, produced by OpenSSL (python
 // cryptography AESGCM) under the HKDF key for the fixture's master key and
 // tenant, so the multi-block CTR/GHASH path of the wasm build is pinned to an
-// independent implementation (LAB-7083).
+// independent implementation.
 describe('multi-block AES-GCM (independent reference)', () => {
   const CIPHERTEXT_200_HEX =
     '000102030405060708090a0b8097c102501a4144c6382413769eb585cf2d43ce4f64e557d38ce9086cc8cac41621d10bf0bd7c7d7752d18e' + // pragma: allowlist secret
     '465742004ab74b4e91ec2397f36a3904ac308f7e4a63ad361ad37676b3b38d45ad8344d9e331e74b22f13cd0ed4e1595ff119e9fbcc7c8d4aa0c' + // pragma: allowlist secret
     '9cef10a154cd41967d071c56c1cb65ceef6c8046789996347cdd54ebcbe2a04cc9ba099eddddb6c53a56eb48d1dcf9791ab5cd69cfecdae0ea7b' + // pragma: allowlist secret
-    'fd936ef96c09cde07961f14fb55bdfb118ee40436ebdfc59ba5cb8561b4d0162719e9f53a3909a1ff92889f5519798ef8d4f13f25a8c0ef9'; // pragma: allowlist secret
+    'fd936ef96c09cde07961f14fb55bdfb118ee40436ebdfc59ba5cb8561b4d0162719e9f53a3909a1fc8a21eb98d637e01ce1655e9ed194a72'; // pragma: allowlist secret
 
   it('decrypts a 200 B OpenSSL ciphertext', () => {
     ensureInitialized();
@@ -460,7 +460,7 @@ describe('multi-block AES-GCM (independent reference)', () => {
     try {
       const plaintext = decryptWithTenantKeys(
         hexToBytes(CIPHERTEXT_200_HEX),
-        new TextEncoder().encode('lab-7083 multi-block aad'),
+        new TextEncoder().encode('cachekit multi-block aad'),
         tk
       );
       expect(plaintext).toEqual(Uint8Array.from({ length: 200 }, (_, i) => (i * 7 + 1) & 0xff));

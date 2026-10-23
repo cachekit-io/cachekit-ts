@@ -1,5 +1,5 @@
 /**
- * End-to-end master-key rotation round-trip (LAB-685).
+ * End-to-end master-key rotation round-trip.
  *
  * Exercises the full operator flow from protocol decisions/key-rotation.md:
  * a value written under k₁ stays readable after k₂ is promoted to masterKey
@@ -110,7 +110,7 @@ describe('E2E key rotation round-trip', () => {
   });
 
   it('serves a previous-key entry from L1 during the grace window', async () => {
-    // L1 holds ciphertext for a secure cache (LAB-238), so an L2 read under a
+    // L1 holds ciphertext for a secure cache, so an L2 read under a
     // previous key repopulates L1 with bytes the CURRENT key cannot open —
     // every subsequent hit has to run the keyring loop again. If it did not,
     // decodeL1Entry would drop the entry and fall through to L2 on every read

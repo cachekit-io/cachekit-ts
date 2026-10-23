@@ -1,5 +1,5 @@
 # simd128 switches xxhash-rust to its hand-written wasm SIMD xxh3 path and lets
-# LLVM auto-vectorise elsewhere (LAB-7083). workerd's V8 supports wasm SIMD, and
+# LLVM auto-vectorise elsewhere. workerd's V8 supports wasm SIMD, and
 # this package is Workers-only. build.sh's wasm-opt must pass --enable-simd to
 # match. An exported RUSTFLAGS overrides this file and silently drops SIMD
 # (slower, not incorrect).

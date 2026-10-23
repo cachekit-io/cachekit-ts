@@ -82,7 +82,7 @@ const LOCK_FALLTHROUGH = Symbol('cachekit.lock-fallthrough');
  * "no entry". getEntry returns null for a miss and for an absorbed read
  * failure alike; the lock path needs the difference, because after a failed
  * read the entry may still be live and the post-grant double-check is its
- * only retry (LAB-7119, cachekit-py's probe_l2_miss).
+ * only retry (cachekit-py's probe_l2_miss).
  */
 interface L2ReadProbe {
   cleanMiss: boolean;
@@ -266,7 +266,7 @@ export class CacheImpl implements SecureCache {
   private readonly byteStorage: ByteStorageLike | null;
   private readonly createByteStorage: () => ByteStorageLike;
   /** Lazily-created codec for envelope-tolerant reads on unencrypted
-   * compression-off caches (LAB-1388) — see decodeEntry. */
+   * compression-off caches — see decodeEntry. */
   private envelopeReader: ByteStorageLike | null = null;
   private readonly serializerConfig: SerializerConfig;
   private readonly defaultTtl: number;
@@ -284,7 +284,7 @@ export class CacheImpl implements SecureCache {
    */
   private readonly degradationEnabled: boolean;
   private closed = false;
-  /** One in-flight cold-miss resolution per cache key (single-flight, LAB-519). */
+  /** One in-flight cold-miss resolution per cache key (single-flight). */
   private readonly inflight = new Map<string, Promise<unknown>>();
   private readonly stampede: Required<StampedeConfig>;
   private readonly lockable: LockableBackend | null;
@@ -381,7 +381,7 @@ export class CacheImpl implements SecureCache {
     this.swrRequiresWaitUntil = runtime.swrRequiresWaitUntil ?? false;
 
     // Initialize ByteStorage (LZ4 compression + xxHash3-64 integrity). The
-    // default honors the backend's advertised preference (LAB-1388), else
+    // default honors the backend's advertised preference, else
     // true. An explicit option wins.
     const compressionEnabled = options.compression ?? this.backend.compressionDefault ?? true;
     this.byteStorage = compressionEnabled ? runtime.createByteStorage() : null;
@@ -483,7 +483,7 @@ export class CacheImpl implements SecureCache {
     // loudly (through getEntry's decode-failure path: counted, then a miss or
     // a rethrow per degradation), not be conflated with "not
     // an envelope" — that would silently serve raw envelope tuples, the
-    // exact corruption this path exists to prevent (LAB-1768).
+    // exact corruption this path exists to prevent.
     //
     // After close() the cached reader has already been freed — an in-flight
     // read resuming post-shutdown must not resurrect the cache (close() will
@@ -536,9 +536,9 @@ export class CacheImpl implements SecureCache {
    * One-line, greppable, rate-limited report of a set() whose value failed to
    * encode — the only reliable signal of the rejection when degradation or a
    * consumer catch-block absorbs the error itself. Covers every encode error,
-   * not just size (LAB-1388): depth, collection-size and binary-type
+   * not just size: depth, collection-size and binary-type
    * rejections, and the plain Error @msgpack/msgpack throws for a function or
-   * BigInt, were all dropped silently before (LAB-4845).
+   * BigInt, were all dropped silently before.
    */
   private warnSetRejected(key: string, error: unknown, interop: boolean): void {
     const now = Date.now();
@@ -546,8 +546,7 @@ export class CacheImpl implements SecureCache {
     this.lastSetRejectedWarnAt = now;
     // Only a size rejection is fixed by raising a limit, and interop caps are
     // protocol constants serializer config does not govern — the remediation
-    // hint only holds for a size rejection on the serializer path
-    // (LAB-1768).
+    // hint only holds for a size rejection on the serializer path.
     const hint =
       error instanceof ValueTooLargeError && !interop
         ? ' Raise serializer.maxEncodedSize / maxDecodedSize if values this large are expected.'
@@ -561,7 +560,7 @@ export class CacheImpl implements SecureCache {
     // the value runs caller code inside the encoder, and that code can throw
     // any error — the SDK's own classes included — with the value or the key
     // in its message. The class only picks a fixed reason, so a spoofed class
-    // can at worst mislabel the rejection, never leak through it (LAB-4845).
+    // can at worst mislabel the rejection, never leak through it.
     const reason =
       error instanceof ValueTooLargeError
         ? 'encoded value exceeds the size limit'
@@ -714,8 +713,8 @@ export class CacheImpl implements SecureCache {
    * What L1 should hold for an entry: the same ciphertext L2 holds when the
    * cache is encrypted, the decoded value otherwise.
    *
-   * Zero-knowledge is a property of every layer, not just the backend
-   * (LAB-238) — it is what cachekit-py does (its L1Cache stores bytes and
+   * Zero-knowledge is a property of every layer, not just the backend:
+   * it is what cachekit-py does (its L1Cache stores bytes and
    * decrypts at read time) and cachekit-rs with it. Holding post-decrypt
    * plaintext here would put the entire L1 working set into any heap dump,
    * core dump, or Node diagnostic report for the full TTL, and that plaintext
@@ -784,7 +783,7 @@ export class CacheImpl implements SecureCache {
       }
       plaintext = this.withEnvelopeCodec((codec) => codec.unpack(plaintext));
     } else if (!interop && !this.encryption && looksLikeEnvelope(plaintext)) {
-      // Envelope tolerance (LAB-1388): a compression-off cache can read
+      // Envelope tolerance: a compression-off cache can read
       // entries a compression-on writer stored — same store, older SDK
       // default, or a mixed-version fleet mid-rollout. This is NOT optional
       // hygiene: the envelope is itself valid MessagePack (a positional
@@ -793,7 +792,7 @@ export class CacheImpl implements SecureCache {
       // degradation. The unpack's xxHash3 check rejects ACCIDENTAL
       // look-alikes; it is keyless, so it is not a defense against an
       // adversarial writer deliberately crafting a valid envelope as its
-      // cached value (accepted eyes-open in LAB-1388/LAB-1768). Its blast
+      // cached value (an accepted risk). Its blast
       // radius is maxDecodedSize: envelopeVerdict bounds what unpack may
       // allocate before it runs, and maxDepth bounds the decode after it.
       // Bytes that are not an envelope core would accept, or that core
@@ -872,9 +871,9 @@ export class CacheImpl implements SecureCache {
    * its declared TTL in L1 long after L2 and the other SDKs expired it.
    * On backends that surface the remaining TTL on read (getWithTtl), the
    * bound tightens to the entry's actual remaining lifetime — a plain get()
-   * at t=29s of a 30s entry re-populates L1 for 1s, not defaultTtl
-   * (LAB-1388). On CachekitIO the server's freshness headers bound it the
-   * same way, and a stale read never re-populates L1 (LAB-7883).
+   * at t=29s of a 30s entry re-populates L1 for 1s, not defaultTtl.
+   * On CachekitIO the server's freshness headers bound it the
+   * same way, and a stale read never re-populates L1.
    */
   private async getEntry<T>(
     key: string,
@@ -910,7 +909,7 @@ export class CacheImpl implements SecureCache {
     // corrupt entry): retrying re-fetches the same bytes and sleeps the backoff
     // for nothing, and the circuit breaker would count it as a backend failure
     // — five poisoned reads in a window would open the breaker and degrade
-    // every key on this cache (LAB-7079, the read-side mirror of LAB-5139).
+    // every key on this cache (the read-side mirror of set()'s encode bypass).
     // A first-use native-binding load failure inside decrypt is no longer
     // retried either; it self-heals on the next read (initPromise resets).
     const fetched = await this.run('get', key, null, async () => {
@@ -965,10 +964,10 @@ export class CacheImpl implements SecureCache {
     // through wrap(). The lifetime is the declared TTL (or defaultTtl on a
     // plain get), capped at the L2 entry's remaining TTL when the backend
     // surfaced it — so the L1 copy never outlives the entry it was read
-    // from (LAB-1388) — and at the server's remaining freshness. A stale read
+    // from — and at the server's remaining freshness. A stale read
     // or a zero bound is never backfilled: the spec forbids local service of
     // it in any form, and L1's hard expiry is what keeps getWithSwr inside the
-    // bound too (protocol spec/saas-api.md § Remaining Freshness, LAB-7883).
+    // bound too (protocol spec/saas-api.md § Remaining Freshness).
     // The bound decays by the time spent since receipt: a slow decode (a cold
     // native load, a decrypt) must not restart the server's clock.
     if (this.l1 && !isStale) {
@@ -978,15 +977,14 @@ export class CacheImpl implements SecureCache {
       // as infinite here so Math.min still caps to a real l1Bound
       // when the backend reports one, instead of collapsing to 0 and
       // tripping the skip-guard below for an entry that should never
-      // expire in L1 (LAB-1388).
+      // expire in L1.
       const capOrForever = capSeconds > 0 ? capSeconds : Infinity;
       const l1TtlSeconds = Math.min(capOrForever, l1Bound - (Date.now() - receivedAt) / 1000);
       if (l1TtlSeconds > 0) {
         // Hand L1 its own canonical no-expiry encoding (ttl <= 0), never
         // Infinity ms: an Infinity originalTtl turns getWithSwr's
         // freshness check into `Infinity > Infinity` — permanently stale,
-        // arming a spurious background refresh per marker window, forever
-        // (LAB-1768).
+        // arming a spurious background refresh per marker window, forever.
         const l1TtlMs = Number.isFinite(l1TtlSeconds) ? l1TtlSeconds * 1000 : 0;
         this.l1.set(key, this.l1Payload(value, data), l1TtlMs, namespace, serializedSize, count);
         this.publishL1Stats();
@@ -1047,7 +1045,7 @@ export class CacheImpl implements SecureCache {
     // deterministic caller error: retrying it re-encodes the same value for
     // nothing, and the circuit breaker would count it as a backend failure —
     // five oversized values in a window would open the breaker and degrade
-    // every key on this cache (LAB-5139). Interop rejection always throws
+    // every key on this cache. Interop rejection always throws
     // (spec: values outside the data model MUST error). Auto-mode rejection
     // keeps the degradation contract it had inside the executor: counted,
     // then thrown with degradation off, absorbed with it on — never written
@@ -1057,7 +1055,7 @@ export class CacheImpl implements SecureCache {
     // most often rejects (too many entries, too deep), and a refill would keep
     // renewing it for as long as reads keep it stale. An auto-mode
     // rejection, or an interop size rejection, emits one rate-limited warning
-    // either way (LAB-1388, LAB-4845).
+    // either way.
     // Normalizing (auto mode) and the header encoders (interop) count the
     // heap objects and values on the way, so L1 can charge for them without
     // another walk.
@@ -1361,7 +1359,7 @@ export class CacheImpl implements SecureCache {
       // Cold path (L1 miss): single-flight per key per process. The flight
       // covers the L2 read too, not just the compute — the L2 GET-miss is
       // the billed event under metered-misses, so N concurrent cold callers
-      // must share one read, one compute, and one write (LAB-519).
+      // must share one read, one compute, and one write.
       const existing = this.inflight.get(cacheKey);
       if (existing) {
         return existing as Promise<TResult>;
@@ -1428,7 +1426,7 @@ export class CacheImpl implements SecureCache {
    * and our grant is recomputed; last write wins (spec saas-api.md:
    * duplicate fills are benign). After a waited grant or a failed first read
    * the double-check stays. cachekit-py skips it on CachekitIO only; ts skips
-   * it on every lockable backend, Redis included. acquireLock never blocks on contention (LAB-240), so
+   * it on every lockable backend, Redis included. acquireLock never blocks on contention, so
    * "waiting" is retrying the lock on an interval bounded by lockWaitMs —
    * deliberately NOT polling get(), because on a metered-misses backend
    * every poll GET against a still-cold key is itself a billed miss,
@@ -1476,7 +1474,7 @@ export class CacheImpl implements SecureCache {
           // Double-check: the holder we waited on may have written
           // between our miss and this grant — one GET that hits, instead
           // of a duplicate compute + write. Skipped after an uncontended
-          // grant on a clean miss (LAB-7119, see above).
+          // grant on a clean miss (see above).
           if (attempt > 0 || !cleanMiss) {
             const filled = await this.getEntry<TResult>(cacheKey, interop, options.ttl);
             if (filled !== null) {
@@ -1538,8 +1536,8 @@ export class CacheImpl implements SecureCache {
    * Both `secure.wrap` sites (instance and `withExecutionContext` view) route
    * here. Fails closed at wrap time: every intent is typed `SecureCache`, so
    * `.secure` exists on caches with no `encryption` configured, and this guard
-   * is all that stands between a "secure" registration and plaintext at rest
-   * (LAB-513). Deliberately no opt-in to run unencrypted — an escape hatch
+   * is all that stands between a "secure" registration and plaintext at rest.
+   * Deliberately no opt-in to run unencrypted — an escape hatch
    * under a security-labelled path is the downgrade this closes. Plaintext
    * callers use `wrap()`.
    */
