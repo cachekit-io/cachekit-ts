@@ -4,8 +4,8 @@
  * Executes protocol/test-vectors/decode-bounds.json (vendored in ./fixtures/,
  * sha256-pinned below) against every untrusted MessagePack decode site in this
  * package: the auto-mode serializer, the interop/v1 value decoder and the
- * invalidation-event decoder. Spec: protocol/spec/interop-mode.md#decode-bounds
- * (LAB-2503); the bounds themselves are `assertDecodeDepth` (LAB-2487). The
+ * invalidation-event decoder. Spec: protocol/spec/interop-mode.md#decode-bounds.
+ * The bounds themselves are `assertDecodeDepth`. The
  * ByteStorage envelope is decoded in Rust instead: `unpack` reaches
  * cachekit-core's `ByteStorage::retrieve`, which pre-scans the envelope bytes
  * before decoding them (cachekit-core 0.7.0 and later). The envelope entry
