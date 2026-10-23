@@ -100,7 +100,7 @@ const sites: Site[] = [
  * The error class alone is a false green: with the pre-scan deleted, the
  * decoder still throws (wrapped as SerializationError) when it runs out of
  * input — after allocating ~33 MB for nested_array16_depth_2048, the exact
- * amplification LAB-2487 closed. Only assertDecodeDepth's message proves the
+ * amplification assertDecodeDepth closes. Only assertDecodeDepth's message proves the
  * rejection happened before any allocation.
  *
  * Naming the guard per vector rather than accepting "any pre-scan message"
@@ -158,8 +158,8 @@ describe('Protocol decode-bounds vectors (spec/interop-mode.md#decode-bounds)', 
     // Deliberately below the rules.depth floor of 32: an invalidation event is a
     // flat map of scalars, so depth 3 is least privilege, not a decode bug. The
     // fixture's `scope` still names invalidation events, so the deviation is
-    // tracked as LAB-4032 rather than silently blessed here — pinned so
-    // that changing it is a decision, not a side effect.
+    // pinned here rather than silently blessed: changing it is a decision, not a
+    // side effect.
     expect(MAX_INVALIDATION_EVENT_DEPTH).toBe(3);
     expect(MAX_INVALIDATION_EVENT_DEPTH).toBeLessThanOrEqual(1024);
     expect(DEFAULT_MAX_INVALIDATION_EVENT_SIZE).toBe(4096);
@@ -256,7 +256,7 @@ describe('Protocol decode-bounds vectors (spec/interop-mode.md#decode-bounds)', 
      * depth cap is tighter than the spec's >= 32 floor for general values: an
      * accept vector nested deeper than that MUST be rejected there by the
      * pre-scan. A shallower one is well-formed MessagePack but not an event
-     * (no `l`/`ts`/`src` map), so the shape check rejects it (LAB-3477).
+     * (no `l`/`ts`/`src` map), so the shape check rejects it.
      * Either way: fail-closed, SerializationError, never an abort and never an
      * event assembled from undefined fields.
      */

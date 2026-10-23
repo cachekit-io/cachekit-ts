@@ -3,7 +3,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { setLogger, logError } from './logger.js';
 import { BackgroundRefreshManager } from './cache/background-refresh.js';
 
-describe('pluggable logger (LAB-517)', () => {
+describe('pluggable logger', () => {
   afterEach(() => {
     setLogger(null);
     vi.restoreAllMocks();

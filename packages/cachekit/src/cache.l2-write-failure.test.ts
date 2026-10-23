@@ -1,7 +1,7 @@
 /**
- * LAB-7157: a failed L2 write must still fill L1 when degradation absorbs it.
+ * A failed L2 write must still fill L1 when degradation absorbs it.
  *
- * Before the fix the L1 write sat inside the reliability executor, after
+ * The L1 write used to sit inside the reliability executor, after
  * backend.set, so any rejected PUT — a revoked key (401/403), an outage, a
  * timeout — skipped it. Every repeat wrap() then re-ran the origin and
  * re-paid the GET+PUT, and nothing was logged. cachekit-py's sync path keeps
@@ -24,7 +24,7 @@ import type { Backend } from './backends/types.js';
 import type { L1Cache } from './l1/lru-cache.js';
 import type { ReliabilityExecutor } from './reliability/executor.js';
 
-const MASTER_KEY = createHash('sha256').update('cachekit LAB-7157 test fixture').digest('hex');
+const MASTER_KEY = createHash('sha256').update('cachekit L2-fail test fixture').digest('hex');
 const CANARY = 'ssn-000-00-0000-do-not-leak';
 
 /** A backend whose reads miss and whose writes and deletes reject with `classification`. */
@@ -89,13 +89,15 @@ function makeCache(
       retry: { baseDelay: 1 },
       ...(opts.failureThreshold && { circuitBreaker: { failureThreshold: opts.failureThreshold } }),
     },
-    ...(opts.encrypted ? { encryption: { masterKey: MASTER_KEY, tenantId: 'lab-7157' } } : {}),
+    ...(opts.encrypted
+      ? { encryption: { masterKey: MASTER_KEY, tenantId: 'l2-write-failure' } }
+      : {}),
   });
   caches.push(cache);
   return cache;
 }
 
-describe('a failed L2 write still fills L1 (LAB-7157)', () => {
+describe('a failed L2 write still fills L1', () => {
   afterEach(async () => {
     setLogger(null);
     vi.restoreAllMocks();

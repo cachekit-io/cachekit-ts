@@ -42,7 +42,7 @@ describe('generateKey', () => {
     expect(key1).toBe(key2); // Object keys are sorted
   });
 
-  it('hashes a Uint8Array argument as msgpack bin, not as an index map (LAB-4839)', () => {
+  it('hashes a Uint8Array argument as msgpack bin, not as an index map', () => {
     const bin = generateKey('test', [Uint8Array.of(1, 2, 3)]);
     expect(bin).not.toBe(generateKey('test', [{ 0: 1, 1: 2, 2: 3 }]));
     expect(generateKey('test', [Buffer.from([1, 2, 3])])).toBe(bin);
@@ -50,7 +50,7 @@ describe('generateKey', () => {
     expect(() => generateKey('test', [new Uint8Array(20_000)])).not.toThrow();
   });
 
-  it('hashes any other binary argument by its type and bytes (LAB-4839)', () => {
+  it('hashes any other binary argument by its type and bytes', () => {
     expect(key(new Float32Array([1.5, -2]))).toBe(key(Float32Array.of(1.5, -2)));
     expect(key(new Float32Array([1.5]))).not.toBe(key(new Float32Array([2.5])));
     // Same bytes, different type: distinct keys.
@@ -76,7 +76,7 @@ describe('generateKey', () => {
     expect(key(tagged(1))).not.toBe(key(tagged(2)));
   });
 
-  it('hashes a detached binary argument as empty instead of throwing (LAB-4839)', () => {
+  it('hashes a detached binary argument as empty instead of throwing', () => {
     const detached = <T extends object>(view: (buf: ArrayBuffer) => T): T => {
       const buf = new ArrayBuffer(4);
       const result = view(buf);
@@ -88,7 +88,7 @@ describe('generateKey', () => {
     expect(key(detached((buf) => new DataView(buf)))).toBe(key(new DataView(new ArrayBuffer(0))));
   });
 
-  it('keys a large non-Uint8Array binary argument by digest, without throwing (LAB-4839)', () => {
+  it('keys a large non-Uint8Array binary argument by digest, without throwing', () => {
     // A request body well past the 64 KiB key limit: main hashed it as {}.
     const big = (b: number) => {
       const buf = new ArrayBuffer(1 << 20);
@@ -103,7 +103,7 @@ describe('generateKey', () => {
     expect(() => key(new Float64Array(10_000).fill(0.5))).not.toThrow();
   });
 
-  it('hashes an object whose tag read throws by its keys (LAB-4839)', () => {
+  it('hashes an object whose tag read throws by its keys', () => {
     const strict = new Proxy(
       { a: 1 },
       {
@@ -122,13 +122,13 @@ describe('generateKey', () => {
     expect(key(throwingTag)).toBe(key({ a: 1 }));
   });
 
-  it('never gives a binary argument the key of an ordinary object (LAB-4839)', () => {
+  it('never gives a binary argument the key of an ordinary object', () => {
     expect(key(Int8Array.of(-1))).not.toBe(key({ Int8Array: Uint8Array.of(255) }));
     expect(key(Int8Array.of(-1))).not.toBe(key({ Int8Array: Int8Array.of(-1) }));
     expect(key(new ArrayBuffer(1))).not.toBe(key({ ArrayBuffer: new Uint8Array(1) }));
   });
 
-  it('reads binary bytes from internal slots, not shadowable properties (LAB-4839)', () => {
+  it('reads binary bytes from internal slots, not shadowable properties', () => {
     const shadowed = Object.defineProperty(Uint8Array.of(1, 2, 3), 'byteLength', { value: 0 });
     expect(key(shadowed)).toBe(key(Uint8Array.of(1, 2, 3)));
     const retagged = (b: number) =>

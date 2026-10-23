@@ -382,7 +382,7 @@ describe('RedisInvalidationChannel', () => {
     });
   });
 
-  describe('LAB-2487: oversized event on publish', () => {
+  describe('oversized event on publish', () => {
     it('publish() never throws and never transmits an event serializeEvent rejects', () => {
       const mockRedis = createMockRedis();
       const channel = new RedisInvalidationChannel(mockRedis);

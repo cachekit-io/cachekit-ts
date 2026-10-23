@@ -105,7 +105,7 @@ describe('CachekitIO call shape: requests per op', () => {
     expect(seen).toEqual(Array.from({ length: N }, () => SHAPES['wrap L2 hit']));
   });
 
-  // An uncontended grant after a clean miss skips the double-check GET (LAB-7119):
+  // An uncontended grant after a clean miss skips the double-check GET:
   // 5 requests to 4. The unlock is sent in the background, off the caller's path.
   it('locked wrap miss is GET, lock, PUT, unlock', async () => {
     const cache = cacheFor({ stampede: { distributedLock: true } });

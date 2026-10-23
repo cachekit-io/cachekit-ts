@@ -1,5 +1,5 @@
 /**
- * Wire Format (ByteStorage envelope) — Workers lane (LAB-595)
+ * Wire Format (ByteStorage envelope) — Workers lane
  *
  * Verifies the wasm-backed ByteStorage against
  * protocol/test-vectors/wire-format.json (vendored in ./fixtures/ and
@@ -189,7 +189,7 @@ describe('wire-format vectors (wasm ByteStorage)', () => {
 
 // The vendored vectors stop at 1 KB, but xxh3 runs its scramble step only on
 // longer inputs, and under simd128 that step is xxhash-rust's hand-written
-// wasm SIMD path (LAB-7083). Pin it to an independent xxh3 (python-xxhash,
+// wasm SIMD path. Pin it to an independent xxh3 (python-xxhash,
 // C reference): a same-build round-trip cannot catch a wrong checksum.
 describe('xxh3 checksum above 1 KB (independent reference)', () => {
   it('4 KB envelope carries the reference xxh3_64 digest', () => {

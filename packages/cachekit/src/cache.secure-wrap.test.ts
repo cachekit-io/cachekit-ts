@@ -1,5 +1,5 @@
 /**
- * LAB-513 regression: `secure.wrap()` must never cache plaintext.
+ * `secure.wrap()` must never cache plaintext.
  *
  * Both `cache.secure.wrap` and the request-scoped
  * `cache.withExecutionContext(ctx).secure.wrap` used to be bare delegates to
@@ -21,7 +21,7 @@ import type { Backend } from './backends/types.js';
 
 // Derived at runtime from a public fixture string — not a key literal a
 // secret scanner should match. No assertion depends on its value.
-const MASTER_KEY = createHash('sha256').update('cachekit LAB-513 test fixture').digest('hex');
+const MASTER_KEY = createHash('sha256').update('cachekit secure-wrap test fixture').digest('hex');
 /** Distinctive enough that a substring search over stored bytes is conclusive. */
 const CANARY = 'ssn-000-00-0000-do-not-leak';
 const OPTIONS = { namespace: 'patients:records', ttl: 300 };
@@ -57,7 +57,7 @@ function viewOf(
   return cache.withExecutionContext(ctx);
 }
 
-describe('secure.wrap() fails closed without encryption (LAB-513)', () => {
+describe('secure.wrap() fails closed without encryption', () => {
   const caches: SecureCache[] = [];
 
   function makeCache(
@@ -115,7 +115,7 @@ describe('secure.wrap() fails closed without encryption (LAB-513)', () => {
   });
 
   it('hands the SWR refresh to the request waitUntil through view.secure.wrap (Workers contract)', async () => {
-    // Before LAB-513 the view's secure.wrap WAS wrapWith and inherited its
+    // Previously the view's secure.wrap WAS wrapWith and inherited its
     // waitUntil plumbing; now it is its own closure, so drive the real
     // stale-while-revalidate path and observe the handle being used.
     const { cache } = makeCache(true, ALWAYS_STALE_L1);

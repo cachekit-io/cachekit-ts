@@ -1,7 +1,7 @@
 // Deliberately NOT `import type { Redis } from 'ioredis'`: this module's
 // types flow into InvalidationConfig, which sits in the shared type closure
 // re-exported by the workers entry — nominal ioredis types would drag
-// @types/node requirements onto every Workers consumer (LAB-1388). The
+// @types/node requirements onto every Workers consumer. The
 // structural RedisPubSubLike covers exactly the Pub/Sub surface used here,
 // and a real ioredis client satisfies it as-is.
 import type { RedisPubSubLike } from '../types/cache.js';
@@ -68,7 +68,7 @@ export class RedisInvalidationChannel {
     try {
       data = serializeEvent(event);
     } catch (err) {
-      // serializeEvent throws on an oversized event (LAB-2487) — every
+      // serializeEvent throws on an oversized event — every
       // subscriber would reject it anyway, so log loudly here rather than let
       // the invalidation vanish downstream. publish() stays never-throw: a
       // failed best-effort invalidation must not fail the caller's write.

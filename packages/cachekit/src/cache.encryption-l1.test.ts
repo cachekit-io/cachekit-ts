@@ -1,5 +1,5 @@
 /**
- * LAB-238 regression: L1 must never hold plaintext for an encrypted cache.
+ * L1 must never hold plaintext for an encrypted cache.
  *
  * Zero-knowledge is a property of every layer. cachekit-py's L1Cache stores
  * bytes (`get() -> tuple[bool, Optional[bytes]]`) and decrypts at read time;
@@ -26,8 +26,8 @@ import type { L1Cache } from './l1/lru-cache.js';
 // Deterministic (reproducible runs, no random source) yet derived at runtime
 // from a public fixture string — not a hardcoded key literal a secret scanner
 // should ever match. No assertion depends on the key's value.
-const MASTER_KEY = createHash('sha256').update('cachekit LAB-238 test fixture').digest('hex');
-const TENANT = 'lab-238';
+const MASTER_KEY = createHash('sha256').update('cachekit L1-ZK test fixture').digest('hex');
+const TENANT = 'l1-zero-knowledge';
 
 /** Distinctive enough that a substring search over any dump is conclusive. */
 const LEAK_CANARY = 'ssn-000-00-0000-do-not-leak';
@@ -76,7 +76,7 @@ function expectCiphertext(stored: unknown, backendBytes: Uint8Array | undefined)
   expect(new TextDecoder().decode(stored)).not.toContain(LEAK_CANARY);
 }
 
-describe('L1 zero-knowledge for encrypted caches (LAB-238)', () => {
+describe('L1 zero-knowledge for encrypted caches', () => {
   const caches: SecureCache[] = [];
 
   function makeCache(backend: Backend, encrypted = true): SecureCache {

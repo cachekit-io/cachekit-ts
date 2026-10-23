@@ -182,7 +182,7 @@ describe('Cache Integration', () => {
       // Note: Backend still has data, but L1 is invalidated
     });
 
-    it('reports invalidate("namespace") with no namespace at the caller (LAB-4336)', async () => {
+    it('reports invalidate("namespace") with no namespace at the caller', async () => {
       // Nothing can carry this out, so it must not go on the wire: every peer
       // would discard it and log a mistake it cannot fix. The report belongs
       // in the process that made the call.
@@ -277,7 +277,7 @@ describe('Cache Integration', () => {
       await retryCache.close();
     });
 
-    // LAB-239 regression: a backend's TTL rejection (Backend.validateTtl,
+    // A backend's TTL rejection (Backend.validateTtl,
     // e.g. CachekitIO's protocol bounds) is a deterministic caller error and
     // must surface to the caller — default-on degradation swallows anything
     // thrown inside the executor, which would turn set(ttl: 0) into a cache
@@ -310,7 +310,7 @@ describe('Cache Integration', () => {
       await boundedCache.close();
     });
 
-    // LAB-2877 regression: a backend's key rejection (Backend.validateKey —
+    // A backend's key rejection (Backend.validateKey —
     // CachekitIO's reserved path segments) is the same kind of deterministic
     // caller error: inside the executor it would be retried, counted by the
     // circuit breaker, and swallowed by degradation into a silent miss or a
@@ -565,7 +565,7 @@ describe('Cache Integration', () => {
       await cache.close();
     });
 
-    // The pre-LAB-1388 version of this test closed the writer BEFORE the
+    // An earlier version of this test closed the writer BEFORE the
     // read — InMemoryBackend.close() clears the shared store, so it
     // "verified" a degradation-to-null that never actually happened. The
     // envelope is itself valid MessagePack, so without envelope tolerance a
@@ -641,7 +641,7 @@ describe('Cache Integration', () => {
       // Same in-flight-across-close() interleaving as above, but on the
       // DEFAULT compression-on path: close() frees this.byteStorage, so the
       // resumed read must not unpack with the freed codec (a use-after-free
-      // on the wasm binding) — it gets a throwaway instead (LAB-1768).
+      // on the wasm binding) — it gets a throwaway instead.
       const { pending, counts, writer } = await startPostCloseRead({
         key: 'test:postclose-on',
         value: { data: 'enveloped' },
@@ -1324,9 +1324,7 @@ describe('Cache Integration', () => {
     });
   });
 
-  // ── LAB-1388 dogfooding fixes ─────────────────────────────────────────
-
-  describe('L1 re-population TTL cap (LAB-1388)', () => {
+  describe('L1 re-population TTL cap', () => {
     /** In-memory backend that tracks expiry and surfaces remaining TTL on
      * read — the getWithTtl capability (Cache API / Redis shape). */
     class TtlAwareBackend implements Backend {
@@ -1439,7 +1437,7 @@ describe('Cache Integration', () => {
       await reader.close();
     });
 
-    it('repopulates L1 forever when defaultTtl is 0 and the entry has no expiry (LAB-1388)', async () => {
+    it('repopulates L1 forever when defaultTtl is 0 and the entry has no expiry', async () => {
       const shared = new TtlAwareBackend();
       const writer = createCache({ backend: shared, defaultTtl: 0 });
       const reader = createCache({ backend: shared, defaultTtl: 0 });
@@ -1457,7 +1455,7 @@ describe('Cache Integration', () => {
       await reader.close();
     });
 
-    it('keeps a no-expiry L1 re-population SWR-fresh (no phantom refresh loop, LAB-1768)', async () => {
+    it('keeps a no-expiry L1 re-population SWR-fresh (no phantom refresh loop)', async () => {
       const shared = new TtlAwareBackend();
       const writer = createCache({ backend: shared, defaultTtl: 0 });
       const reader = createCache({
@@ -1501,7 +1499,7 @@ describe('Cache Integration', () => {
   // ~2 MiB of unique-ish content — over the 1 MiB default maxEncodedSize.
   const oversized = () => 'x'.repeat(2 * 1024 * 1024);
 
-  describe('oversized-value set() warning (LAB-1388)', () => {
+  describe('oversized-value set() warning', () => {
     afterEach(() => {
       setLogger(null);
       vi.useRealTimers();
@@ -1573,7 +1571,7 @@ describe('Cache Integration', () => {
     });
   });
 
-  describe('rejected-value set() warning beyond size (LAB-4845)', () => {
+  describe('rejected-value set() warning beyond size', () => {
     afterEach(() => {
       setLogger(null);
       vi.useRealTimers();
@@ -1670,7 +1668,7 @@ describe('Cache Integration', () => {
     });
   });
 
-  describe('encode rejections bypass retry and the circuit breaker (LAB-5139)', () => {
+  describe('encode rejections bypass retry and the circuit breaker', () => {
     afterEach(() => {
       setLogger(null);
       vi.restoreAllMocks();
@@ -1743,7 +1741,7 @@ describe('Cache Integration', () => {
     });
   });
 
-  describe('L2 decode failures bypass retry and the circuit breaker (LAB-7079)', () => {
+  describe('L2 decode failures bypass retry and the circuit breaker', () => {
     afterEach(() => {
       vi.restoreAllMocks();
     });
@@ -1756,7 +1754,7 @@ describe('Cache Integration', () => {
       createIntentCache.secure({
         backend,
         masterKey,
-        tenantId: 'lab-7079',
+        tenantId: 'decode-failure',
         l1: { enabled: false },
         metrics: false,
         reliability: { degradation },
@@ -1868,12 +1866,12 @@ describe('Cache Integration', () => {
     });
   });
 
-  describe('secure keys over the AAD limit are rejected before the reliability executor (LAB-5142)', () => {
+  describe('secure keys over the AAD limit are rejected before the reliability executor', () => {
     afterEach(() => {
       vi.restoreAllMocks();
     });
 
-    const TENANT = 'lab-5142';
+    const TENANT = 'aad-limit';
     const MAX_AAD = 64 * 1024;
     // v0x03 AAD = version byte + four 4-byte length prefixes + tenant id + key
     // + 'msgpack' + 'True'/'False' (the compressed flag). Written out rather
@@ -2064,7 +2062,7 @@ describe('Cache Integration', () => {
     );
   });
 
-  describe('backend-advertised compression default (LAB-1388)', () => {
+  describe('backend-advertised compression default', () => {
     /** Plain MessagePack view of raw backend bytes ('decode failed' when the
      * envelope bytes aren't even valid MessagePack). */
     const plainDecode = (bytes: Uint8Array): unknown => {
@@ -2125,10 +2123,10 @@ describe('Cache Integration', () => {
   });
 });
 
-// LAB-4839: normalize() used to send Uint8Array down the plain-object branch —
+// normalize() used to send Uint8Array down the plain-object branch —
 // under 10,000 bytes it came back as {"0":…}, over that it threw on the
 // collection cap. Real File backend, L1 off, so every get() decodes from L2.
-describe('Binary values (LAB-4839)', () => {
+describe('Binary values', () => {
   let dir: string;
   const bytes = (n: number) => Uint8Array.from({ length: n }, (_, i) => (i * 31 + 7) & 0xff);
   // `got` is unknown on purpose: the bug returned a plain object, so this must

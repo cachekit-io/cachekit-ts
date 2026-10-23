@@ -10,7 +10,7 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 /**
  * In-memory backend with operation counters. `gets` on a cold key is the
  * billed-miss count under metered-misses — the number these tests exist to
- * pin down (LAB-519).
+ * pin down.
  */
 class CountingBackend implements Backend {
   store = new Map<string, Uint8Array>();
@@ -91,7 +91,7 @@ class ContestedBackend extends CountingBackend implements LockableBackend {
   }
 }
 
-describe('Cold-miss single-flight (LAB-519)', () => {
+describe('Cold-miss single-flight', () => {
   const caches: SecureCache[] = [];
 
   const make = (options: Parameters<typeof createCache>[0]): SecureCache => {
@@ -261,7 +261,7 @@ describe('Cold-miss single-flight (LAB-519)', () => {
       await expect(wrapped()).resolves.toBe('still-works');
       expect(calls).toBe(1);
       expect(backend.sets).toBe(1);
-      expect(backend.gets).toBe(1); // straight after our own miss: no re-read (LAB-7119)
+      expect(backend.gets).toBe(1); // straight after our own miss: no re-read
     });
 
     it('releases the lock even when the compute throws', async () => {
@@ -279,7 +279,7 @@ describe('Cold-miss single-flight (LAB-519)', () => {
       expect(backend.heldLocks()).toBe(0);
     });
 
-    describe('post-grant double-check and fall-through re-check (LAB-7119)', () => {
+    describe('post-grant double-check and fall-through re-check', () => {
       const wrapCounting = (cache: SecureCache, namespace: string) => {
         const counter = { calls: 0 };
         const wrapped = cache.wrap(

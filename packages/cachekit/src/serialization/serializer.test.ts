@@ -81,7 +81,7 @@ describe('MessagePackSerializer', () => {
       expect(decoded).toEqual([1, 2, 3]); // sorted values
     });
 
-    it('encodes Uint8Array and Buffer as msgpack bin, decodes to Uint8Array (LAB-4839)', () => {
+    it('encodes Uint8Array and Buffer as msgpack bin, decodes to Uint8Array', () => {
       const bin = Uint8Array.of(0xc4, 0x03, 1, 2, 3);
       expect(serializer.encode(Uint8Array.of(1, 2, 3))).toEqual(bin);
       expect(serializer.encode(Buffer.from([1, 2, 3]))).toEqual(bin);
@@ -103,29 +103,29 @@ describe('MessagePackSerializer', () => {
       // Retagged: the brand, not Symbol.toStringTag, decides the type.
       ['Float64Array', retag(new Float64Array([1.5]), 'Uint8Array')],
       ['ArrayBuffer', retag(new ArrayBuffer(2), 'Object')],
-    ])('rejects %s rather than map-encoding it (LAB-4839)', (name, value) => {
+    ])('rejects %s rather than map-encoding it', (name, value) => {
       expect(() => serializer.encode(value)).toThrow(SerializationError);
       expect(() => serializer.encode({ nested: value })).toThrow(`Cannot serialize ${name}`);
     });
 
-    it('encodes a Uint8Array by its internal slots, not shadowable properties (LAB-4839)', () => {
+    it('encodes a Uint8Array by its internal slots, not shadowable properties', () => {
       const shadowed = Object.defineProperty(Uint8Array.of(1, 2, 3), 'byteLength', { value: 0 });
       expect(serializer.encode(shadowed)).toEqual(Uint8Array.of(0xc4, 0x03, 1, 2, 3));
     });
 
-    it('encodes a detached Uint8Array as empty bin (LAB-4839)', () => {
+    it('encodes a detached Uint8Array as empty bin', () => {
       const buf = new ArrayBuffer(4);
       const view = new Uint8Array(buf);
       detach(buf);
       expect(serializer.encode(view)).toEqual(Uint8Array.of(0xc4, 0));
     });
 
-    it('encodes a plain object tagged as a buffer as a map (LAB-4839)', () => {
+    it('encodes a plain object tagged as a buffer as a map', () => {
       const encoded = serializer.encode(retag({ a: 1 }, 'ArrayBuffer'));
       expect(serializer.decode(encoded)).toEqual({ a: 1 });
     });
 
-    it('fails at load when an intrinsic getter is missing, not by keying all binary alike (LAB-4839)', async () => {
+    it('fails at load when an intrinsic getter is missing, not by keying all binary alike', async () => {
       const original = Object.getOwnPropertyDescriptor(DataView.prototype, 'byteOffset');
       Reflect.deleteProperty(DataView.prototype, 'byteOffset');
       vi.resetModules();
@@ -324,7 +324,7 @@ describe('MessagePackSerializer', () => {
     );
   });
 
-  describe('LAB-281: DoS protection - forged collection headers on decode', () => {
+  describe('DoS protection - forged collection headers on decode', () => {
     it('rejects a forged giant collection header before preallocating (DoS)', () => {
       // array32 claiming 2^32-1 elements in 5 bytes — must fail on the length
       // cap, not attempt new Array(4294967295).
@@ -403,7 +403,7 @@ describe('MessagePackSerializer', () => {
     });
   });
 
-  describe('LAB-2487: DoS protection - nested collection-header amplification', () => {
+  describe('DoS protection - nested collection-header amplification', () => {
     const serializer = new MessagePackSerializer();
 
     // Build N nested `array16` headers each claiming 10000 elements (3 bytes

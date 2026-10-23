@@ -443,7 +443,7 @@ describe('CachekitIO Backend', () => {
       await cache.close();
     });
 
-    // LAB-517: the SaaS telemetry headers are auto-wired from the cache's
+    // The SaaS telemetry headers are auto-wired from the cache's
     // live hit/miss counters — no user-supplied metricsProvider needed.
     it('auto-wires X-CacheKit-L1-* telemetry headers from live cache counters', async () => {
       const { createCache } = await import('../cache.js');

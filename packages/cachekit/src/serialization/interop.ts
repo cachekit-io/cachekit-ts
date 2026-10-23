@@ -892,7 +892,7 @@ export function decodeInteropValueCounted<T>(data: Uint8Array, count?: ObjectCou
     );
   }
   // Bound nesting depth before the decoder eagerly preallocates per-header
-  // collections (LAB-2487, full rationale: assertDecodeDepth in serializer.ts).
+  // collections (full rationale: assertDecodeDepth in serializer.ts).
   const counted = assertDecodeDepth(data, DEFAULT_MAX_DEPTH);
   let decoded: unknown;
   try {

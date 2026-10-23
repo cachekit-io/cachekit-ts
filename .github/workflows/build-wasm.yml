@@ -1,7 +1,7 @@
 name: Build Wasm
 
 # One deterministic wasm32 target — the deliberate contrast to the NAPI
-# per-platform matrix in build-native.yml (see cachekit-ts#63 / LAB-595).
+# per-platform matrix in build-native.yml (see cachekit-ts#63).
 #
 # Tags only: the ci.yml `workers` job (required via ci-success) already runs
 # the identical build:wasm — size budget, version pin, drift check — on every
@@ -12,7 +12,7 @@ name: Build Wasm
 # trusted publishing): normal releases via release-please outputs, and
 # recovery of an existing tag via the `wasm_tag` workflow_dispatch input.
 # Do not re-add a publish job here: the repo has no NPM_TOKEN secret, and
-# npm-token auth from this workflow dies ENEEDAUTH (LAB-831 — its single
+# npm-token auth from this workflow dies ENEEDAUTH (its single
 # lifetime run, on manually pushed tag cachekit-core-wasm-v0.1.1, failed
 # exactly that way; the package actually published via release-please.yml).
 # GitHub App-created release tags do not trigger this workflow; what remains
