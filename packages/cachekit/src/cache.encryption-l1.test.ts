@@ -1,5 +1,5 @@
 /**
- * Regression: L1 must never hold plaintext for an encrypted cache.
+ * L1 must never hold plaintext for an encrypted cache.
  *
  * Zero-knowledge is a property of every layer. cachekit-py's L1Cache stores
  * bytes (`get() -> tuple[bool, Optional[bytes]]`) and decrypts at read time;

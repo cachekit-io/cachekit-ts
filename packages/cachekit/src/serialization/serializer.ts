@@ -570,8 +570,7 @@ export function normalize(
  *
  * Features:
  * - Deterministic output (sorted keys, normalized values)
- * - Five-layer DoS protection (C4 fix, plus decode bounds and a
- *   pre-decode depth bound):
+ * - Five-layer DoS protection:
  *   1. maxDecodedSize - limit input size to decode() and str/bin lengths inside it
  *   2. maxEncodedSize - limit output size from encode()
  *   3. maxDepth - limit nesting depth (at encode time, and pre-decode via

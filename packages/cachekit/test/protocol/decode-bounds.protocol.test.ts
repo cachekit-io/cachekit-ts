@@ -195,8 +195,8 @@ describe('Protocol decode-bounds vectors (spec/interop-mode.md#decode-bounds)', 
     // Deliberately below the rules.depth floor of 32: an invalidation event is a
     // flat map of scalars, so depth 3 is least privilege, not a decode bug. The
     // fixture's `scope` still names invalidation events, so the deviation is
-    // tracked as an open deviation rather than silently blessed here — pinned so
-    // that changing it is a decision, not a side effect.
+    // pinned here rather than silently blessed: changing it is a decision, not a
+    // side effect.
     expect(MAX_INVALIDATION_EVENT_DEPTH).toBe(3);
     expect(MAX_INVALIDATION_EVENT_DEPTH).toBeLessThanOrEqual(1024);
     expect(DEFAULT_MAX_INVALIDATION_EVENT_SIZE).toBe(4096);

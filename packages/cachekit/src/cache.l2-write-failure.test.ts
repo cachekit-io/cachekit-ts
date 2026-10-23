@@ -1,7 +1,7 @@
 /**
  * A failed L2 write must still fill L1 when degradation absorbs it.
  *
- * Before the fix the L1 write sat inside the reliability executor, after
+ * The L1 write used to sit inside the reliability executor, after
  * backend.set, so any rejected PUT — a revoked key (401/403), an outage, a
  * timeout — skipped it. Every repeat wrap() then re-ran the origin and
  * re-paid the GET+PUT, and nothing was logged. cachekit-py's sync path keeps

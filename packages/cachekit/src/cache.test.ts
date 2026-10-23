@@ -277,7 +277,7 @@ describe('Cache Integration', () => {
       await retryCache.close();
     });
 
-    // Regression: a backend's TTL rejection (Backend.validateTtl,
+    // A backend's TTL rejection (Backend.validateTtl,
     // e.g. CachekitIO's protocol bounds) is a deterministic caller error and
     // must surface to the caller — default-on degradation swallows anything
     // thrown inside the executor, which would turn set(ttl: 0) into a cache
@@ -310,7 +310,7 @@ describe('Cache Integration', () => {
       await boundedCache.close();
     });
 
-    // Regression: a backend's key rejection (Backend.validateKey —
+    // A backend's key rejection (Backend.validateKey —
     // CachekitIO's reserved path segments) is the same kind of deterministic
     // caller error: inside the executor it would be retried, counted by the
     // circuit breaker, and swallowed by degradation into a silent miss or a
@@ -1323,8 +1323,6 @@ describe('Cache Integration', () => {
       }
     });
   });
-
-  // ── Dogfooding fixes ──────────────────────────────────────────────────
 
   describe('L1 re-population TTL cap', () => {
     /** In-memory backend that tracks expiry and surfaces remaining TTL on

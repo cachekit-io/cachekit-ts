@@ -1,5 +1,5 @@
 /**
- * Regression: `secure.wrap()` must never cache plaintext.
+ * `secure.wrap()` must never cache plaintext.
  *
  * Both `cache.secure.wrap` and the request-scoped
  * `cache.withExecutionContext(ctx).secure.wrap` used to be bare delegates to
@@ -115,7 +115,7 @@ describe('secure.wrap() fails closed without encryption', () => {
   });
 
   it('hands the SWR refresh to the request waitUntil through view.secure.wrap (Workers contract)', async () => {
-    // Before secure.wrap failed closed, the view's secure.wrap WAS wrapWith and inherited its
+    // Previously the view's secure.wrap WAS wrapWith and inherited its
     // waitUntil plumbing; now it is its own closure, so drive the real
     // stale-while-revalidate path and observe the handle being used.
     const { cache } = makeCache(true, ALWAYS_STALE_L1);

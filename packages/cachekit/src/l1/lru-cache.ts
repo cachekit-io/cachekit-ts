@@ -546,7 +546,7 @@ export class L1Cache<T = unknown> {
         // Nothing consumes this. No higher layer picks it up, and the `ph` on
         // the wire is a digest of the key string rather than the canonical
         // params hash, so it cannot be matched here: a remote instance keeps
-        // serving the invalidated key until TTL. A known, tracked gap.
+        // serving the invalidated key until TTL.
         break;
     }
   }

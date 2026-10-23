@@ -130,7 +130,7 @@ describe('Cache API backend inside workerd', () => {
     await backend.close();
   });
 
-  // Regression (panel MAJ, CWE-41): path-borne keys '.', '..' (and their
+  // Regression (CWE-41): path-borne keys '.', '..' (and their
   // %2E escapes) get dot-normalized by the URL parser — '.' aliased '' and
   // '..' escaped the key prefix. Keys ride a query parameter now, which is
   // never normalized.

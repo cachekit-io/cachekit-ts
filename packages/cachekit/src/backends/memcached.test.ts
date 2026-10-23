@@ -7,7 +7,7 @@ import { setLogger } from '../logger.js';
 /**
  * MemcachedBackend unit tests against a mocked memjs client.
  *
- * This mock IS the documented CI strategy for this backend: unit tests exercise
+ * This mock IS the CI strategy for this backend: unit tests exercise
  * every code path against a protocol-faithful fake (get returns
  * `{value, flags}`, set/delete/touch return booleans — the real memjs
  * promise API), while test/integration/memcached-backend.integration.test.ts

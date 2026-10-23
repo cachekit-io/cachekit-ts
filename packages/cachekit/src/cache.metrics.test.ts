@@ -6,7 +6,7 @@ import type { Backend } from './backends/types.js';
 import { InMemoryBackend, metricValue } from '../test/fixtures/metrics.js';
 
 /**
- * Regression tests: `metrics` must actually work, not be silently
+ * `metrics` must actually work, not be silently
  * accepted. These drive the REAL prom-client (devDependency) through
  * CacheImpl end-to-end — no mocks on the metrics path.
  */
