@@ -25,11 +25,11 @@ wasm-bindgen --target web --out-dir pkg \
 
 # Rust emits bulk-memory / nontrapping-fptoint ops by default, and
 # .cargo/config.toml enables simd128; workerd supports all three, wasm-opt just
-# needs them enabled to validate. -O3 matches the crate's opt-level (LAB-7083).
+# needs them enabled to validate. -O3 matches the crate's opt-level.
 wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-simd \
   -o pkg/cachekit_core_wasm_bg.wasm pkg/cachekit_core_wasm_bg.wasm
 
-# Size budget (LAB-595 acceptance criterion): gzipped wasm < 100 KB.
+# Size budget: gzipped wasm < 100 KB.
 RAW=$(wc -c < pkg/cachekit_core_wasm_bg.wasm)
 GZ=$(gzip -9 -c pkg/cachekit_core_wasm_bg.wasm | wc -c)
 echo "wasm artifact: ${RAW} bytes raw, ${GZ} bytes gzipped"

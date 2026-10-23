@@ -4,8 +4,8 @@
  *
  * Workers-safe surface: no node:* builtins (no nodejs_compat required), no
  * ioredis, no NAPI addon, no prom-client — in the runtime module graph AND
- * the published .d.ts closure (both CI-guarded by check-workers-bundle;
- * LAB-1388), so consumers typecheck without @types/node and without
+ * the published .d.ts closure (both CI-guarded by check-workers-bundle),
+ * so consumers typecheck without @types/node and without
  * skipLibCheck. Crypto and the ByteStorage wire envelope run on the wasm32
  * build of cachekit-core (@cachekit-io/cachekit-core-wasm, ~64 KB gzipped).
  *

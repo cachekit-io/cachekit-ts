@@ -239,7 +239,7 @@ export class EncryptionManagerCore {
       // Attest the keyring survived the FFI boundary. NAPI silently ignores
       // extra arguments, so a version-skewed native binary that predates
       // previousMasterKeys would build a single-key handle and every
-      // pre-rotation entry would silently degrade to a miss (LAB-241 class).
+      // pre-rotation entry would silently degrade to a miss.
       // Absence of keyringEntryCount on the handle is itself the skew signal.
       if (previousKeyBytes.length > 0) {
         const built = tenantKeys.keyringEntryCount?.() ?? 1;

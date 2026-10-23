@@ -61,7 +61,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
 
       # outputs.pr is only prs[0]; under separate-pull-requests a cycle can
-      # open one PR per package, so iterate outputs.prs (all of them, LAB-898).
+      # open one PR per package, so iterate outputs.prs (all of them).
       - name: Assign release PRs
         if: ${{ steps.release.outputs.prs_created == 'true' }}
         env:
@@ -216,7 +216,7 @@ jobs:
         run: .github/scripts/verify-tarball.sh "$RUNNER_TEMP/package.tgz" "$MANIFEST" "$SHA256"
 
       # Auth is npm OIDC trusted publishing via a package-level trusted
-      # publisher on npmjs.com — the repo has NO npm token secret (LAB-831).
+      # publisher on npmjs.com — the repo has NO npm token secret.
       - name: Publish to npm
         run: pnpm publish "$RUNNER_TEMP/package.tgz" --access public --provenance --no-git-checks
 
@@ -343,8 +343,8 @@ jobs:
         run: .release-scripts/.github/scripts/verify-tarball.sh "$RUNNER_TEMP/package.tgz" "$MANIFEST" "$SHA256"
 
       # Auth is npm OIDC trusted publishing — the repo has NO NPM_TOKEN secret
-      # (the old token-auth steps resolved an empty token and died ENEEDAUTH,
-      # LAB-831). Node 22's bundled npm 10 cannot do OIDC; pnpm 11 can, and
+      # (the old token-auth steps resolved an empty token and died ENEEDAUTH).
+      # Node 22's bundled npm 10 cannot do OIDC; pnpm 11 can, and
       # this is the exact invocation publish-cachekit uses.
       # Bootstrapping a NEW package: trusted publishers are package-level and
       # can only be configured once the package exists (npm/cli#8544), so the

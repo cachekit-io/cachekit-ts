@@ -29,7 +29,9 @@ Of these hooks, CI re-runs only ESLint and the type-check (alongside its own bui
 User-facing docs (the READMEs and `docs/`) follow CacheKit's shared rule on what belongs in them:
 [What belongs in these docs](https://docs.cachekit.io/contributing/#what-belongs-in-these-docs).
 `prek install` (or `pre-commit install`) sets up hooks that reject internal references in README
-files, `docs/` and commit messages.
+files, `docs/` and commit messages. Another hook, `no-ticket-ids`, rejects internal ticket ids, with
+or without the hyphen, in every tracked text file except the packages' `CHANGELOG.md` files and
+`.github/workflows/pr-title-lint.yml`.
 
 ## How to send a change
 

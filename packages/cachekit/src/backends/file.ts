@@ -36,7 +36,7 @@ const DEFAULT_MAX_VALUE_BYTES = 100 * 1024 * 1024; // py: max_value_mb = 100
  * read. Symlinks are rejected with O_NOFOLLOW on every open.
  *
  * Deliberate deltas from py (documented, not accidental):
- * - No LRU size eviction / max_entry_count: LAB-430 scopes parity to
+ * - No LRU size eviction / max_entry_count: parity is scoped to
  *   directory layout + TTL semantics. Size caps beyond maxValueBytes are a
  *   follow-up; until then the directory grows unbounded like any disk cache
  *   without a sweeper.

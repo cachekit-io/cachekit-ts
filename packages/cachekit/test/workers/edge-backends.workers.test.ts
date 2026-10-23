@@ -1,5 +1,5 @@
 /**
- * Native edge storage backends (LAB-750) — runs inside real workerd.
+ * Native edge storage backends — runs inside real workerd.
  *
  * - Workers KV backend against a real miniflare KVNamespace binding
  *   (TEST_KV, vitest.workers.config.ts): round-trip, TTL semantics
@@ -8,8 +8,8 @@
  *   exists.
  * - Cache API backend against workerd's real caches.default / named caches:
  *   round-trip, real TTL expiry (no KV-style floor), delete, exists.
- * - Secure-cache path over both: same master-key fixture as the LAB-595
- *   suites — ciphertext at rest, plaintext never reaches the store.
+ * - Secure-cache path over both: same master-key fixture as the other
+ *   Workers suites — ciphertext at rest, plaintext never reaches the store.
  * - Intent factories with a backend instance and explicit config
  *   (no process.env).
  */
@@ -28,7 +28,7 @@ import {
 } from '../../src/workers/index.js';
 
 // Public protocol test-vector key (32 bytes of 0x61) — the same fixture the
-// LAB-595 suites and protocol/test-vectors use. Not a credential.
+// other Workers suites and protocol/test-vectors use. Not a credential.
 const MASTER_KEY_HEX = '61'.repeat(32); // pragma: allowlist secret
 
 /** The real miniflare binding, widened with the list() the tests use to
@@ -169,7 +169,7 @@ describe('Cache API backend inside workerd', () => {
 });
 
 describe('secure-cache path: ciphertext at rest in the edge stores', () => {
-  // Same shape as the LAB-595 full-stack test: wrap() through serialize →
+  // Same shape as the Workers full-stack test: wrap() through serialize →
   // envelope → encrypt → backend, then read the raw stored bytes via the
   // canonical key and assert no plaintext reached the store.
   async function assertCiphertextAtRest(

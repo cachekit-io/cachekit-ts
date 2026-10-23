@@ -26,7 +26,7 @@ end`;
 
 // Compile-time proof that a real ioredis client satisfies the structural
 // RedisPubSubLike that replaced the nominal ioredis type in
-// InvalidationConfig (LAB-1388). Anchored here because this is the one
+// InvalidationConfig. Anchored here because this is the one
 // type-checked src module that already imports ioredis (tests are excluded
 // from `tsc --noEmit`; this module is Node-closure-only, so the ioredis
 // types never reach the workers type surface). Type-only — erased at
@@ -220,12 +220,12 @@ export class RedisBackend implements LockableBackend, TTLBackend {
     }
   }
 
-  /** One-shot latch for reporting a failing TTL pipeline leg (LAB-1388). */
+  /** One-shot latch for reporting a failing TTL pipeline leg. */
   private ttlLegFailureLogged = false;
 
   /**
-   * See {@link Backend.getWithTtl}: GET + TTL pipelined onto one round trip
-   * (LAB-1388), so CacheImpl can cap L1 re-population at the entry's
+   * See {@link Backend.getWithTtl}: GET + TTL pipelined onto one round trip,
+   * so CacheImpl can cap L1 re-population at the entry's
    * remaining lifetime without a second network hop.
    *
    * TTL result mapping: -1 (no expiry) → null; 0 (sub-second remainder) and

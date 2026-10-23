@@ -1,7 +1,7 @@
 /**
- * SWR on Workers via ctx.waitUntil (LAB-751) — runs inside real workerd.
+ * SWR on Workers via ctx.waitUntil — runs inside real workerd.
  *
- * Phase 1 (LAB-595) forced SWR off on Workers: workerd cancels
+ * Phase 1 forced SWR off on Workers: workerd cancels
  * fire-and-forget work at response return, so a background refresh died
  * mid-flight and left its key wedged in a permanent "refreshing" state.
  * Phase 2 re-enables it behind a per-request binding —

@@ -6,7 +6,7 @@ import type { Backend } from './backends/types.js';
 import { InMemoryBackend, metricValue } from '../test/fixtures/metrics.js';
 
 /**
- * LAB-517 regression tests: `metrics` must actually work, not be silently
+ * Regression tests: `metrics` must actually work, not be silently
  * accepted. These drive the REAL prom-client (devDependency) through
  * CacheImpl end-to-end — no mocks on the metrics path.
  */
@@ -27,7 +27,7 @@ class FailingBackend implements Backend {
   async close(): Promise<void> {}
 }
 
-describe('Cache metrics wiring (LAB-517)', () => {
+describe('Cache metrics wiring', () => {
   const caches: SecureCache[] = [];
 
   function makeCache(

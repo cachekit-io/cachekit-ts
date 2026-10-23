@@ -1,5 +1,5 @@
 /**
- * Workers bundle guard (LAB-595 acceptance criterion).
+ * Workers bundle guard.
  *
  * Bundles the built workers entrypoint with the `workerd` condition and
  * fails if anything Node-only leaks into the module graph: node:* builtins
@@ -70,7 +70,7 @@ console.log(
   'bundle guard OK: workers entry graph is free of node:*, .node, NAPI, ioredis, prom-client'
 );
 
-// ── Type-closure guard (LAB-1388) ──────────────────────────────────────────
+// ── Type-closure guard ─────────────────────────────────────────────────────
 // Same invariant at the type level: build a program over the workers entry's
 // published declaration closure and fail if any Node-typed declarations get
 // pulled in (ioredis, prom-client, @types/node). On 0.1.5, a nominal

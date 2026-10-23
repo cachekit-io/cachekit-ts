@@ -88,7 +88,7 @@ describe('L1Cache', () => {
       expect(cache.get('key')).toBeNull();
     });
 
-    it('ttl <= 0 never expires (LAB-1388: matches the ts-wide "no expiry" contract)', () => {
+    it('ttl <= 0 never expires (matches the ts-wide "no expiry" contract)', () => {
       vi.useFakeTimers();
       cache.set('zero', 'value', 0, 'test');
       cache.set('negative', 'value', -1, 'test');
@@ -213,7 +213,7 @@ describe('L1Cache', () => {
       expect(smallCache.stats.memoryUsed).toBeLessThanOrEqual(2000);
     });
 
-    it('sizes byte payloads by their buffer, not their JSON form (LAB-238)', () => {
+    it('sizes byte payloads by their buffer, not their JSON form', () => {
       // Secure caches store the L2 ciphertext here. JSON.stringify of a
       // Uint8Array yields {"0":12,"1":34,…} — roughly 14x the real size — so
       // measuring that way would evict most of L1 on the first entry.
@@ -958,7 +958,7 @@ describe('L1Cache', () => {
       expect(cache.get('ns2:c')).toBe('value3');
     });
 
-    it('handleInvalidationEvent - reports a namespace event with no namespace (LAB-4336)', () => {
+    it('handleInvalidationEvent - reports a namespace event with no namespace', () => {
       // It invalidates nothing, so the publisher's intent is lost. That must
       // not vanish: before nil was accepted, such an event failed to
       // deserialize and the channel logged it. Accepting it must not cost
@@ -991,7 +991,7 @@ describe('L1Cache', () => {
       );
     });
 
-    it('handleInvalidationEvent - escapes the DEL/C1 and U+2028/U+2029 characters JSON.stringify leaves raw (LAB-4522)', () => {
+    it('handleInvalidationEvent - escapes the DEL/C1 and U+2028/U+2029 characters JSON.stringify leaves raw', () => {
       // JSON.stringify passes these through untouched. NEL (U+0085) and
       // U+2028/U+2029 can break a log line; CSI (U+009B) opens a terminal
       // control sequence; DEL is a control character like the rest.
@@ -1012,7 +1012,7 @@ describe('L1Cache', () => {
       expect(reported[0]).toContain('sourceInstance="a\\u0085b\\u009bc\\u2028d\\u2029e\\u007ff"');
     });
 
-    it('handleInvalidationEvent - the report is total and bounded (LAB-4336)', () => {
+    it('handleInvalidationEvent - the report is total and bounded', () => {
       // Why this exists next to the test above: that fixture is a short
       // string, so it passes with both the typeof guard and the bound deleted.
       const reported: string[] = [];

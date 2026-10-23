@@ -121,7 +121,7 @@ describe.skipIf(!dockerAvailable)('RedisBackend Integration (Testcontainers)', (
     }
   });
 
-  describe('getWithTtl (LAB-1388)', () => {
+  describe('getWithTtl', () => {
     it('returns the value and remaining TTL in one round trip', async () => {
       await backend.set('gwt-key', new Uint8Array([7, 8]), 60);
       const result = await backend.getWithTtl?.('gwt-key');
@@ -208,7 +208,7 @@ describe.skipIf(!dockerAvailable)('RedisBackend Integration (Testcontainers)', (
       expect(pttl).toBeLessThanOrEqual(5000);
     });
 
-    it('acquireLock returns null when contested (never blocks, never throws — LAB-240 shape)', async () => {
+    it('acquireLock returns null when contested (never blocks, never throws)', async () => {
       const first = await backend.acquireLock('contested-key', 5000);
       expect(first).toBeTruthy();
 

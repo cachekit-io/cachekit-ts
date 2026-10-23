@@ -1,5 +1,5 @@
 /**
- * Workers entrypoint smoke tests (LAB-595) — runs inside real workerd.
+ * Workers entrypoint smoke tests — runs inside real workerd.
  *
  * - CachekitIO backend over workerd's fetch, against the in-memory
  *   cachekit.io emulation configured as the miniflare outboundService
@@ -171,7 +171,7 @@ describe('createCache full stack inside workerd', () => {
 
   it('wrap() with L1 enabled works without a bound context (fail-safe no-SWR)', async () => {
     const backend = memoryBackend();
-    // swrEnabled is honored on Workers since LAB-751, but refreshes only
+    // swrEnabled is honored on Workers, but refreshes only
     // schedule through cache.withExecutionContext(ctx) — without a bound
     // request context, reads fall back to plain L1 gets (see
     // swr.workers.test.ts for the full SWR lane).
@@ -194,13 +194,13 @@ describe('createCache full stack inside workerd', () => {
   });
 });
 
-describe('secure keys at the AAD limit through the wasm binding (LAB-9108)', () => {
-  const TENANT = 'lab-9108';
+describe('secure keys at the AAD limit through the wasm binding', () => {
+  const TENANT = 'aad-limit-wasm';
   const KEY_PREFIX = 'wk:';
   const MAX_AAD = 64 * 1024;
   // v0x03 AAD = version byte + four 4-byte length prefixes + tenant id +
   // keyPrefix + key + 'msgpack' + 'True'/'False' (the compressed flag), written
-  // out as in the cache.test.ts LAB-5142 block. The at-limit key round-trips
+  // out as in cache.test.ts's AAD-limit block. The at-limit key round-trips
   // through the wasm encrypt/decrypt, so the TS pre-flight and the wasm
   // MAX_AAD_SIZE must agree byte for byte.
   const keyBudget = (compressed: boolean) =>

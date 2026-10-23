@@ -28,7 +28,7 @@ export interface Backend {
 
   /**
    * Retrieve a value together with its remaining TTL — in the SAME storage
-   * round trip as a plain get (LAB-1388). Optional capability: implement it
+   * round trip as a plain get. Optional capability: implement it
    * only when the store surfaces the expiry on read for free (Cache API
    * response headers, Redis GET+TTL pipeline). Do NOT implement it as
    * get + a second TTL request — CacheImpl calls this on every L2 hit when
@@ -168,7 +168,7 @@ export interface Backend {
 
   /**
    * The backend's preferred default for the ByteStorage compression
-   * envelope (LAB-1388). Left unset, the cache-level default stays `true`;
+   * envelope. Left unset, the cache-level default stays `true`;
    * no built-in backend sets it. A custom backend whose store already
    * compresses the bytes it is given can advertise `false` so the default
    * configuration doesn't compress twice. An explicit `compression:` option
@@ -369,7 +369,7 @@ export interface L1Metrics {
 export interface LockableBackend extends Backend {
   /**
    * Acquire the lock, or return null when another client holds it
-   * (contested — never blocks, retries, or throws for contention; LAB-240).
+   * (contested — never blocks, retries, or throws for contention).
    *
    * @param timeoutMs - Lease duration in milliseconds before auto-release
    *   (default 5000)

@@ -111,7 +111,7 @@ function buildAAD(
   return aad;
 }
 
-// LAB-7084: every byte-returning export hands back a plain Uint8Array (not a
+// Every byte-returning export hands back a plain Uint8Array (not a
 // Buffer, whose .slice and toJSON differ) that owns its whole ArrayBuffer. The
 // L1 ciphertext guard (cache-core l1Payload) stores without copying only when
 // the result owns its whole ArrayBuffer, so a pooled or offset view must never

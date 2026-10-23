@@ -119,7 +119,7 @@ describe('BackgroundRefreshManager', () => {
       expect(cached).toEqual({ data: 'refreshed' });
     });
 
-    it('stores what the L2 write returned, not the plaintext it computed (LAB-238)', async () => {
+    it('stores what the L2 write returned, not the plaintext it computed', async () => {
       // A secure cache's persist callback returns the ciphertext it wrote to
       // L2. That, and never the factory's plaintext result, is what lands in
       // L1 — otherwise the SWR refresh re-poisons L1 on every revalidation.

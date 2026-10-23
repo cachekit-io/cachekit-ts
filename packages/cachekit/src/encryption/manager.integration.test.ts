@@ -300,7 +300,7 @@ describe('Nonce Exhaustion Error Path (Gap 2 - lines 125-137)', () => {
 
 describe('EncryptionManager with empty tenant ID (Edge Case)', () => {
   it('an unset tenant ID is interchangeable with an explicit "default"', async () => {
-    // LAB-4668: a same-instance round-trip cannot catch an HKDF/AAD tenant
+    // A same-instance round-trip cannot catch an HKDF/AAD tenant
     // mismatch — both sides share it. Crossing to an explicit 'default'
     // manager (what py/rs write) exercises the real AAD in both directions.
     const unset = new EncryptionManager(VALID_HEX_KEY);

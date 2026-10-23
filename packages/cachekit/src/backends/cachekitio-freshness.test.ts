@@ -10,7 +10,7 @@ import type { Backend, CachekitIOBackendConfig } from './types.js';
 import { createCache } from '../cache.js';
 import { CacheImpl } from '../cache-core.js';
 
-// LAB-7883: the L1 backfill honours X-CacheKit-Freshness and X-CacheKit-Fresh-For
+// The L1 backfill honours X-CacheKit-Freshness and X-CacheKit-Fresh-For
 // (protocol spec/saas-api.md § Remaining Freshness, § Reading a stale entry).
 
 const config: CachekitIOBackendConfig = {

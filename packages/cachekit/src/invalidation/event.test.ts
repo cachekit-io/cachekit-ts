@@ -44,7 +44,7 @@ describe('InvalidationEvent serialization', () => {
     expect(serialized.length).toBeLessThan(50);
   });
 
-  it('rejects a forged giant collection header before preallocating (LAB-281 DoS)', () => {
+  it('rejects a forged giant collection header before preallocating (DoS)', () => {
     // array32 claiming 2^32-1 elements in 5 bytes — must fail on the length
     // cap, not attempt new Array(4294967295). Pub/sub bytes are untrusted.
     expect(() => deserializeEvent(Uint8Array.of(0xdd, 0xff, 0xff, 0xff, 0xff))).toThrow();
@@ -52,7 +52,7 @@ describe('InvalidationEvent serialization', () => {
     expect(() => deserializeEvent(Uint8Array.of(0xde, 0xff, 0xff))).toThrow();
   });
 
-  it('rejects an oversized event at the PUBLISHER, not just the subscriber (LAB-2487)', () => {
+  it('rejects an oversized event at the PUBLISHER, not just the subscriber', () => {
     // If only deserializeEvent enforced the cap, an oversized event would be
     // silently rejected by every subscriber — invalidation lost, stale L1
     // served — with no signal to the publisher. serializeEvent must throw so
@@ -72,7 +72,7 @@ describe('InvalidationEvent serialization', () => {
     expect(deserializeEvent(serializeEvent(atSanityEdge)).namespace).toBe('n'.repeat(1000));
   });
 
-  it('wraps a decoder failure in SerializationError with cause (LAB-3477)', () => {
+  it('wraps a decoder failure in SerializationError with cause', () => {
     // fixext1 with an unrecognised timestamp payload: passes the size and depth
     // checks (3 bytes, no collections) and fails INSIDE @msgpack's decoder.
     const run = (): unknown => deserializeEvent(Uint8Array.of(0xd4, 0xff, 0x00));
@@ -87,7 +87,7 @@ describe('InvalidationEvent serialization', () => {
     expect(cause).toBeInstanceOf(DecodeError);
   });
 
-  it('rejects a well-formed payload that is not a map (LAB-3477)', () => {
+  it('rejects a well-formed payload that is not a map', () => {
     for (const notAMap of [[], 'global', null]) {
       const run = (): unknown => deserializeEvent(encode(notAMap));
       expect(run).toThrow(SerializationError);
@@ -95,7 +95,7 @@ describe('InvalidationEvent serialization', () => {
     }
   });
 
-  it('rejects a map missing or mistyping a required key (LAB-3477)', () => {
+  it('rejects a map missing or mistyping a required key', () => {
     const valid = { l: 'global', ts: 1, src: 'i' };
     const bad: unknown[] = [
       { ts: 1, src: 'i' },
@@ -122,7 +122,7 @@ describe('InvalidationEvent serialization', () => {
     });
   });
 
-  it('reads an empty-string optional as absent, keeping the pair inverse (LAB-4336)', () => {
+  it('reads an empty-string optional as absent, keeping the pair inverse', () => {
     expect(
       deserializeEvent(encode({ l: 'namespace', ts: 1, src: 'i', ns: '', ph: '' }))
     ).toStrictEqual({
@@ -134,7 +134,7 @@ describe('InvalidationEvent serialization', () => {
     });
   });
 
-  it('accepts nil-encoded optionals and normalizes them to undefined (LAB-4336)', () => {
+  it('accepts nil-encoded optionals and normalizes them to undefined', () => {
     // A struct/dict encoder emits nil for an unset field instead of omitting
     // the key — msgpack.packb({'ns': None}) in Python does. Rejecting this
     // payload would drop a whole-cache invalidation and leave L1 stale until

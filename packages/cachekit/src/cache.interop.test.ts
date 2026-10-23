@@ -183,7 +183,7 @@ describe('cache.wrap interop mode', () => {
     cache = createCache({ backend, l1: { enabled: false } });
 
     // Interop keys must reach the wire byte-identical to py/rs's bare keys —
-    // fail closed at registration (Ray's call on LAB-247, mirroring
+    // fail closed at registration (a deliberate choice, mirroring
     // cachekit-rs); see Backend.keyPrefix.
     expect(() =>
       cache!.wrap(async (id: number) => ({ id }), {

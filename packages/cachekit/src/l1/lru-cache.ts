@@ -410,7 +410,7 @@ export class L1Cache<T = unknown> {
     const node: Node<T> = {
       key,
       value,
-      // ttl <= 0 means "no expiry" (ts-wide Backend contract, LAB-1388) —
+      // ttl <= 0 means "no expiry" (ts-wide Backend contract) —
       // without this guard `now + 0` expires the entry on the very next
       // millisecond instead of caching it forever.
       expiresAt: ttl > 0 ? Date.now() + ttl : Infinity,
@@ -546,7 +546,7 @@ export class L1Cache<T = unknown> {
         // Nothing consumes this. No higher layer picks it up, and the `ph` on
         // the wire is a digest of the key string rather than the canonical
         // params hash, so it cannot be matched here: a remote instance keeps
-        // serving the invalidated key until TTL. Tracked in LAB-4359.
+        // serving the invalidated key until TTL. A known, tracked gap.
         break;
     }
   }
@@ -647,7 +647,7 @@ export class L1Cache<T = unknown> {
     serializedSize: number | undefined,
     count: ObjectCount | undefined
   ): number {
-    // Secure caches store the L2 ciphertext here (LAB-238), so the common
+    // Secure caches store the L2 ciphertext here, so the common
     // entry is a Uint8Array. JSON.stringify turns one into {"0":12,"1":34,…} —
     // roughly 14x its real size — which would blow the memory budget and evict
     // most of L1 on the first encrypted entry. Count the buffer instead.

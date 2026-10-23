@@ -13,7 +13,7 @@ import {
 /**
  * Deterministic MessagePack of key arguments, with strict limits. Not the value
  * serializer: key arguments are hashed, never decoded, so any binary argument
- * (typed array, DataView, ArrayBuffer) hashes by its type and bytes (LAB-4839).
+ * (typed array, DataView, ArrayBuffer) hashes by its type and bytes.
  */
 function encodeArgs(args: unknown[]): Uint8Array {
   const encoded = encode(
