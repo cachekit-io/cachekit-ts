@@ -56,7 +56,8 @@ export function build(v: Vector): Uint8Array {
  * then carries the pre-scan's own tag, then the reason.
  */
 const DESERIALIZATION_FAILED = 'deserialization failed: ';
-const ENVELOPE_PRE_SCAN = `${DESERIALIZATION_FAILED}decode pre-scan: `;
+const PRE_SCAN_TAG = 'decode pre-scan: ';
+const ENVELOPE_PRE_SCAN = `${DESERIALIZATION_FAILED}${PRE_SCAN_TAG}`;
 
 /**
  * The error a reject vector must raise at `unpack`, matched from its start: a
@@ -65,11 +66,12 @@ const ENVELOPE_PRE_SCAN = `${DESERIALIZATION_FAILED}decode pre-scan: `;
  *
  * The prefix alone is not enough. The pre-scan's own end-of-input rejection
  * carries it too, so with the slot check deleted the overclaim-only vectors it
- * guards still fail with the prefix, once the walk runs out of input. Depth-only and
- * overclaim-only vectors therefore pin their rule's reason, as cachekit-core's
- * own tests/decode_bounds_vectors.rs does: overclaim-only ones the byte or slot
- * budget, depth-only ones (structurally complete, so nothing else can reject
- * them) the depth bound itself, which is cachekit-core's, not this package's.
+ * guards still fail with the prefix, once the walk runs out of input.
+ * Depth-only and overclaim-only vectors therefore pin their rule's reason, as
+ * cachekit-core's own tests/decode_bounds_vectors.rs does: overclaim-only ones
+ * the byte or slot budget, depth-only ones (structurally complete, so nothing
+ * else can reject them) the depth bound itself, which is cachekit-core's, not
+ * this package's.
  */
 function envelopeRejection(v: Vector): RegExp {
   switch (v.reject_reasons?.join()) {
@@ -104,6 +106,6 @@ export function expectEnvelopePreScanAccepts(
   v: Vector
 ): void {
   expect(() => unpack(build(v))).toThrow(
-    new RegExp(`^${DESERIALIZATION_FAILED}(?!decode pre-scan: )`)
+    new RegExp(`^${DESERIALIZATION_FAILED}(?!${PRE_SCAN_TAG})`)
   );
 }
