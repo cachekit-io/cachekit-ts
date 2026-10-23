@@ -10,7 +10,7 @@ Backend-agnostic caching for TypeScript/Node.js — works with Redis, Memcached,
 
 ## Features
 
-- **Dual-layer caching**: L1 in-memory (~50ns) + pluggable L2 (Redis, CachekitIO, Memcached, Workers KV, local File)
+- **Dual-layer caching**: L1 in-memory + pluggable L2 (Redis, CachekitIO, Memcached, Workers KV, local File); see [Performance](#performance) for what a hit costs
 - **Stale-while-revalidate**: Serve stale data while refreshing in background
 - **Stampede protection**: Cold-miss single-flight per process (always on) + opt-in cross-process distributed locks
 - **Zero-knowledge encryption**: Optional AES-256-GCM client-side encryption
@@ -877,6 +877,25 @@ reported through the library logger by key digest.
   still zeroizes deterministically.
 - **Startup**: wasm instantiation is a small one-time cost per isolate
   (~150 KB module, no I/O).
+
+## Performance
+
+What one call costs in the client, on an in-memory backend, so no figure includes network time. Each cell is the median of five processes, measured on a GitHub-hosted `ubuntu-latest` runner (AMD EPYC 7763, 4 vCPUs) with Node.js 24.21.0. The cached value is an object of rows (`{ id, name, score, tags, ok }`) sized to about 100 B or 10 KB.
+
+| Operation                        |   100 B |  10 KB |
+| :------------------------------- | ------: | -----: |
+| `wrap()` call, L1 hit            |  7.2 µs | 6.4 µs |
+| `wrap()` call, L1 hit, encrypted | 18.3 µs | 158 µs |
+| `get`, L2 hit                    |  5.9 µs | 143 µs |
+| `get`, L2 hit, encrypted         | 12.1 µs | 151 µs |
+| `set`                            |  7.1 µs | 190 µs |
+| Key generation (`generateKey`)   |  6.2 µs |      — |
+
+- **`wrap()` L1 hit**: key generation, then the L1 lookup, which returns the stored object as it is. Key generation encodes the arguments and hashes them with BLAKE2b, and is most of the cost, so the value's size barely matters.
+- **Encrypted L1 hit**: L1 holds the same ciphertext as L2, so every hit also decrypts, verifies the AAD and decodes the value. That cost grows with the value.
+- **L2 hit and `set`**: L1 is off, so each call reads or writes the backend and decodes or encodes the value. A real backend adds its round trip, which for Redis or cachekit.io is a network call.
+
+To print this table for your own machine, run `pnpm install` and `pnpm build`, then `node packages/cachekit/bench/readme.mjs`, from a clone of the repository, or run the **Bench** workflow from its Actions tab. Two runs on this CPU model agreed within about 3%. Hosted runners also come with other CPU models (an EPYC 9V74 run took 72-84% as long), and other machines give other figures.
 
 ## Requirements
 

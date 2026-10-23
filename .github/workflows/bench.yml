@@ -1,0 +1,61 @@
+name: Bench
+
+# Prints the package README's Performance table into the job summary, measured
+# on a GitHub-hosted runner. Run it from the Actions tab to refresh the README.
+# A PR that changes the bench scripts runs it as well, so the figures a PR
+# quotes come from the code it ships. Informational only: nothing here gates a
+# merge.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - packages/cachekit/bench/readme.mjs
+      - packages/cachekit/bench/runtime/probe.mjs
+      - .github/workflows/bench.yml
+
+permissions:
+  contents: read
+
+# No concurrency group: GitHub keeps at most one run of a group pending and
+# cancels it when the next one queues, and several manual runs are how the
+# spread between runs is measured.
+
+# bash -eo pipefail, so a failing benchmark is not hidden by the tee after it.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  readme-table:
+    name: README table
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-pnpm-node
+        with:
+          node-version: '24'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Record the machine
+        run: |
+          {
+            echo '```text'
+            echo "node $(node --version)"
+            lscpu | grep -E '^(Model name|CPU\(s\)):'
+            echo '```'
+            echo
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Run the README benchmark
+        run: node packages/cachekit/bench/readme.mjs | tee -a "$GITHUB_STEP_SUMMARY"

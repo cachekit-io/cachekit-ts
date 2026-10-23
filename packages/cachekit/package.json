@@ -67,7 +67,8 @@
     "bench:ir": "node bench/ir.mjs",
     "bench:cold-start": "node bench/cold-start.mjs",
     "bench:runtime": "node bench/runtime/run.mjs",
-    "bench:live": "node bench/live/wall-time-probe.mjs"
+    "bench:live": "node bench/live/wall-time-probe.mjs",
+    "bench:readme": "node bench/readme.mjs"
   },
   "keywords": [
     "cache",
