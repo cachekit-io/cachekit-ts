@@ -8,8 +8,7 @@
 
 import { expect } from 'vitest';
 import fixture from '../protocol/fixtures/decode-bounds.json' with { type: 'json' };
-import { assertFixture, table, type ObjectShape } from './fixture-shape.js';
-import { hexToBytes } from './wire-vectors.js';
+import { construct } from './wire-vectors.js';
 
 export interface Vector {
   name: string;
@@ -26,46 +25,38 @@ interface VectorFile {
   accept_vectors: Vector[];
 }
 
-const VECTOR_SHAPE: ObjectShape = {
-  name: 'string',
-  construction: { repeat_hex: 'string', count: 'number', suffix_hex: 'string' },
-  input_hex: 'string',
-  nesting_depth: 'number',
-  declared_slots: 'number',
-  reject_reasons: [table('string'), 'undefined'],
-};
+// Annotated, not cast: `pnpm type-check:tests` then checks every entry of the
+// JSON import against the interface, where a cast lets a short entry through.
+export const vectors: VectorFile = fixture;
 
-function assertVectorFile(value: unknown): asserts value is VectorFile {
-  assertFixture(
-    value,
-    { spec: 'string', reject_vectors: table(VECTOR_SHAPE), accept_vectors: table(VECTOR_SHAPE) },
-    'decode-bounds.json'
-  );
-}
+/** Bytes either side of a built input; see build(). */
+const GUARD = 8;
 
-const parsed: unknown = fixture;
-assertVectorFile(parsed);
-export const vectors: VectorFile = parsed;
-
-/** field_notes.construction: input = fromhex(repeat_hex) * count + fromhex(suffix_hex). */
+/**
+ * field_notes.construction: input = fromhex(repeat_hex) * count + fromhex(suffix_hex).
+ *
+ * Returned as a view at a non-zero offset into a larger buffer, as a pooled
+ * Node Buffer or a network read arrives, with the reserved marker 0xc1 on both
+ * sides: a decoder that ignores byteOffset, or reads past byteLength, sees
+ * bytes that are not the input.
+ */
 export function build(v: Vector): Uint8Array {
-  const unit = hexToBytes(v.construction.repeat_hex);
-  const suffix = hexToBytes(v.construction.suffix_hex);
-  const bytes = new Uint8Array(unit.length * v.construction.count + suffix.length);
-  for (let i = 0; i < v.construction.count; i++) bytes.set(unit, i * unit.length);
-  bytes.set(suffix, unit.length * v.construction.count);
-  return bytes;
+  const input = construct([
+    { hex: v.construction.repeat_hex, count: v.construction.count },
+    { hex: v.construction.suffix_hex, count: 1 },
+  ]);
+  const padded = new Uint8Array(input.length + 2 * GUARD).fill(0xc1);
+  padded.set(input, GUARD);
+  return padded.subarray(GUARD, GUARD + input.length);
 }
 
 /**
- * How both `unpack` bindings surface a cachekit-core envelope pre-scan
- * rejection: `ByteStorageError::DeserializationFailed`'s display, then the
- * pre-scan's own tag, then the reason.
+ * How both `unpack` bindings surface a cachekit-core envelope decode failure:
+ * `ByteStorageError::DeserializationFailed`'s display. A pre-scan rejection
+ * then carries the pre-scan's own tag, then the reason.
  */
-const ENVELOPE_PRE_SCAN = 'deserialization failed: decode pre-scan: ';
-
-/** cachekit-core's nesting bound for the envelope decode (not this package's). */
-const ENVELOPE_MAX_DEPTH = 100;
+const DESERIALIZATION_FAILED = 'deserialization failed: ';
+const ENVELOPE_PRE_SCAN = `${DESERIALIZATION_FAILED}decode pre-scan: `;
 
 /**
  * The error a reject vector must raise at `unpack`, matched from its start: a
@@ -73,20 +64,24 @@ const ENVELOPE_MAX_DEPTH = 100;
  * match is unforgeable.
  *
  * The prefix alone is not enough. The pre-scan's own end-of-input rejection
- * carries it too, so with the slot check deleted every overclaim-only vector
- * still fails with the prefix, once the walk runs out of input. Vectors that
- * break one rule alone therefore pin that rule's reason, as cachekit-core's
+ * carries it too, so with the slot check deleted the overclaim-only vectors it
+ * guards still fail with the prefix, once the walk runs out of input. Depth-only and
+ * overclaim-only vectors therefore pin their rule's reason, as cachekit-core's
  * own tests/decode_bounds_vectors.rs does: overclaim-only ones the byte or slot
  * budget, depth-only ones (structurally complete, so nothing else can reject
- * them) the depth bound itself.
+ * them) the depth bound itself, which is cachekit-core's, not this package's.
  */
 function envelopeRejection(v: Vector): RegExp {
   switch (v.reject_reasons?.join()) {
     case 'depth':
-      return new RegExp(`^${ENVELOPE_PRE_SCAN}nests deeper than ${ENVELOPE_MAX_DEPTH} levels$`);
+      return new RegExp(`^${ENVELOPE_PRE_SCAN}nests deeper than 100 levels$`);
     case 'overclaim':
       return new RegExp(`^${ENVELOPE_PRE_SCAN}declares more `);
     default:
+      // A vector that breaks several rules can trip any of them first. An
+      // incomplete-only vector fits the spec's slot budget but not core's
+      // stricter running one, so core rejects it there rather than at end of
+      // input. Either is the pre-scan, so only the prefix is pinned.
       return new RegExp(`^${ENVELOPE_PRE_SCAN}`);
   }
 }
@@ -100,17 +95,15 @@ export function expectEnvelopePreScanRejects(
 
 /**
  * An accept vector is not an envelope, so the typed decode after the pre-scan
- * may still refuse it; the pre-scan itself must not.
+ * refuses it, and that refusal is required: an error that is not core's
+ * decode failure (a wasm trap, say) would otherwise pass for "past the
+ * pre-scan" without showing the pre-scan ran to completion.
  */
 export function expectEnvelopePreScanAccepts(
   unpack: (bytes: Uint8Array) => unknown,
   v: Vector
 ): void {
-  let message = '';
-  try {
-    unpack(build(v));
-  } catch (error) {
-    message = error instanceof Error ? error.message : String(error);
-  }
-  expect(message).not.toContain('decode pre-scan: ');
+  expect(() => unpack(build(v))).toThrow(
+    new RegExp(`^${DESERIALIZATION_FAILED}(?!decode pre-scan: )`)
+  );
 }

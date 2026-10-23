@@ -230,11 +230,6 @@ describe('Protocol decode-bounds vectors (spec/interop-mode.md#decode-bounds)', 
     });
   });
 
-  /**
-   * The ByteStorage envelope entry point: cachekit-core pre-scans the envelope
-   * bytes before its typed decode, so each vector arrives there as a forged
-   * envelope. The Workers lane runs the same assertions through the wasm build.
-   */
   describe('ByteStorage.unpack (NAPI)', () => {
     const storage = new ByteStorage();
 
