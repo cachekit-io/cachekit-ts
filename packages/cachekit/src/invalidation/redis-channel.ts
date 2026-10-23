@@ -95,13 +95,13 @@ export class RedisInvalidationChannel {
   /**
    * Start listening for invalidation events.
    *
-   * M8 Fix: If a subscriber already exists, it is cleaned up before creating a new one.
+   * If a subscriber already exists, it is cleaned up before creating a new one.
    * This prevents connection leaks if start() is called multiple times.
    */
   async start(): Promise<void> {
     if (this.running) return;
 
-    // M8 Fix: Clean up any existing subscriber before creating new one
+    // Clean up any existing subscriber before creating new one
     await this.cleanupSubscriber();
 
     // Create a dedicated subscriber connection (ioredis requires this for pub/sub)

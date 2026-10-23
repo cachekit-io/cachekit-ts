@@ -7,7 +7,7 @@
  * - Full createCache stack (serialize → envelope → encrypt → backend and
  *   back) against an in-memory Backend instance.
  * - Intent factories with explicit config (no process.env), and the
- *   documented phase-1 failures: Redis-URL backends and invalidation config.
+ *   documented unsupported configurations: Redis-URL backends and invalidation config.
  */
 
 import { describe, it, expect } from 'vitest';

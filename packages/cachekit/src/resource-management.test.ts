@@ -1,5 +1,5 @@
 /**
- * Wave 2: Resource Management Bug Fixes - TDD Tests
+ * Resource Management Bug Fixes - TDD Tests
  *
  * Each test reproduces a specific bug before the fix is applied.
  */
@@ -134,9 +134,9 @@ describe('config errors throw before the backend is resolved', () => {
   });
 });
 
-// ========== m1: InvalidationChannel Never Initialized ==========
+// ========== InvalidationChannel Never Initialized ==========
 
-describe('m1: InvalidationChannel Initialization', () => {
+describe('InvalidationChannel Initialization', () => {
   it('should initialize invalidationChannel when invalidation config is provided', async () => {
     const mockRedis = createMockRedis();
 
@@ -378,9 +378,9 @@ describe('invalidate("params") failure reporting', () => {
   );
 });
 
-// ========== m3: RetryPolicy Sleep Not Cancellable ==========
+// ========== RetryPolicy Sleep Not Cancellable ==========
 
-describe('m3: RetryPolicy Cancellable Sleep', () => {
+describe('RetryPolicy Cancellable Sleep', () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -440,12 +440,12 @@ describe('m3: RetryPolicy Cancellable Sleep', () => {
   });
 });
 
-// ========== m4: Missing Cleanup of refreshingKeys on Close ==========
+// ========== Missing Cleanup of refreshingKeys on Close ==========
 
-describe('m4: refreshingKeys Cleanup on Close', () => {
+describe('refreshingKeys Cleanup on Close', () => {
   afterEach(() => {
     // A failure between useFakeTimers/useRealTimers below must not leak a
-    // frozen clock into the m5 suite.
+    // frozen clock into the CacheMetrics suite.
     vi.useRealTimers();
   });
 
@@ -490,9 +490,9 @@ describe('m4: refreshingKeys Cleanup on Close', () => {
   });
 });
 
-// ========== m5: CacheMetrics Swallows Async Errors ==========
+// ========== CacheMetrics Swallows Async Errors ==========
 
-describe('m5: CacheMetrics Error Handling', () => {
+describe('CacheMetrics Error Handling', () => {
   it('should log errors from async metric operations', async () => {
     // Spy on console.error
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});

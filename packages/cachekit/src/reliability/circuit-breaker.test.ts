@@ -145,7 +145,7 @@ describe('CircuitBreaker', () => {
     expect(breaker2.state).toBe('closed');
   });
 
-  it('M6: concurrent requests in half-open must not exceed halfOpenMaxCalls limit', async () => {
+  it('concurrent requests in half-open must not exceed halfOpenMaxCalls limit', async () => {
     vi.useFakeTimers();
 
     // Create breaker with halfOpenMaxCalls = 2
@@ -202,7 +202,7 @@ describe('CircuitBreaker', () => {
     expect(rejectedCount).toBeGreaterThanOrEqual(8);
   });
 
-  it('M6: tryAcquireHalfOpenSlot returns false when limit reached', async () => {
+  it('tryAcquireHalfOpenSlot returns false when limit reached', async () => {
     vi.useFakeTimers();
 
     const breaker3 = new CircuitBreaker({

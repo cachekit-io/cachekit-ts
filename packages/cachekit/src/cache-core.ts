@@ -393,7 +393,7 @@ export class CacheImpl implements SecureCache {
     // Default TTL
     this.defaultTtl = options.defaultTtl ?? DEFAULT_TTL_SECONDS;
 
-    // m1 Fix: Initialize invalidation channel if config provided
+    // Initialize invalidation channel if config provided
     if (options.invalidation && runtime.createInvalidationChannel) {
       this.invalidationChannel = this.initializeInvalidationChannel(
         options.invalidation,

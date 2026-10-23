@@ -150,7 +150,7 @@ describe('L1Cache', () => {
       expect(smallCache.get('d')).toBe(4);
     });
 
-    it('C1 fix: cleans entryVersion on eviction', () => {
+    it('cleans entryVersion on eviction', () => {
       const smallCache = new L1Cache<number>({ maxEntries: 2 });
       smallCache.set('a', 1, 10000, 'test');
       smallCache.set('b', 2, 10000, 'test');
@@ -165,8 +165,8 @@ describe('L1Cache', () => {
       expect(smallCache.get('a')).toBeNull();
       expect(smallCache.stats.entries).toBe(2);
 
-      // C1 fix verification: entryVersion Map should not grow unbounded
-      // If C1 fix works, evicting 'a' also cleaned its version token
+      // Verify: entryVersion Map should not grow unbounded
+      // If eviction cleanup works, evicting 'a' also cleaned its version token
       // We can't directly test this without exposing internals,
       // but we can verify the cache still works correctly after many evictions
       for (let i = 0; i < 100; i++) {
@@ -712,7 +712,7 @@ describe('L1Cache', () => {
       }
     });
 
-    it('C3 fix: limits concurrent refreshes', () => {
+    it('limits concurrent refreshes', () => {
       const limitedCache = new L1Cache<number>({
         maxEntries: 100,
         maxConcurrentRefreshes: 2,

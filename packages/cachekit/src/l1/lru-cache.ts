@@ -91,8 +91,8 @@ interface Node<T> extends CacheEntry<T> {
  * - Stale-while-revalidate (SWR) with jitter
  * - Version tokens to prevent stale data resurrection
  * - Namespace-level invalidation (O(n) with namespace index)
- * - C1 fix: entryVersion cleaned up on LRU eviction
- * - C3 fix: maxConcurrentRefreshes limit enforced
+ * - entryVersion cleaned up on LRU eviction
+ * - maxConcurrentRefreshes limit enforced
  */
 export class L1Cache<T = unknown> {
   private readonly config: L1Config;
@@ -118,7 +118,7 @@ export class L1Cache<T = unknown> {
   // Memory tracking
   private currentMemory = 0;
 
-  // Instance ID for invalidation echo detection (m10 Fix: already readonly)
+  // Instance ID for invalidation echo detection (already readonly)
   private readonly instanceId = crypto.randomUUID();
 
   constructor(config: Partial<L1Config> = {}) {
@@ -193,7 +193,7 @@ export class L1Cache<T = unknown> {
     this.touch(entry);
 
     // Calculate SWR threshold with jitter (±10%)
-    // m7 Fix: Use crypto PRNG instead of Math.random for unpredictable timing
+    // Use crypto PRNG instead of Math.random for unpredictable timing
     const jitter = SWR_JITTER_MIN + secureRandomFloat() * SWR_JITTER_RANGE;
     const swrThreshold = entry.originalTtl * this.config.swrThresholdRatio * jitter;
     const remainingTtl = entry.expiresAt - now;
@@ -206,7 +206,7 @@ export class L1Cache<T = unknown> {
       entry.value !== null &&
       entry.refreshHeldUntil <= now &&
       !this.isRefreshInFlight(key, now) &&
-      this.hasRefreshSlot(now); // C3 fix
+      this.hasRefreshSlot(now); // enforce maxConcurrentRefreshes
 
     if (shouldRefresh) {
       this.refreshingKeys.set(key, now + SWR_REFRESH_MARKER_TTL_MS);
@@ -574,7 +574,7 @@ export class L1Cache<T = unknown> {
 
   /**
    * Evict the least recently used entry.
-   * C1 FIX: Also cleans up entryVersion to prevent memory leak.
+   * Also cleans up entryVersion to prevent memory leak.
    */
   private evictLRU(): void {
     const oldest = this.head;
@@ -582,7 +582,7 @@ export class L1Cache<T = unknown> {
 
     this.remove(oldest);
 
-    // C1 FIX: Clean up entryVersion - safe because no in-flight refresh for evicted entry
+    // Clean up entryVersion - safe because no in-flight refresh for evicted entry
     this.entryVersion.delete(oldest.key);
     this.refreshingKeys.delete(oldest.key);
   }
@@ -671,7 +671,7 @@ export class L1Cache<T = unknown> {
 
   private estimateSize(value: unknown): number {
     // Rough estimation - JSON stringify length as proxy
-    // m2 Fix: Track visited objects to prevent infinite recursion on circular refs
+    // Track visited objects to prevent infinite recursion on circular refs
     const visited = new WeakSet<object>();
 
     const estimate = (val: unknown): number => {

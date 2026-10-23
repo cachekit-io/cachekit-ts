@@ -11,7 +11,7 @@
  *
  * Deltas vs the Node entrypoint:
  * - Backends: CachekitIO (`createCache.io` / `backend: { apiKey }`), the
- *   native edge stores added in phase 2 — Workers KV (`workersKV`) and the
+ *   native edge stores — Workers KV (`workersKV`) and the
  *   Cache API (`workersCacheAPI`), both passed as `backend:` instances to
  *   createCache or any intent — or a custom Backend instance. Redis-URL
  *   intents (minimal / production / secure with `url`) throw
@@ -76,7 +76,7 @@ export { EncryptionManager, ByteStorage } from './runtime.js';
 export type { WorkersCache } from './runtime.js';
 export type { ExecutionContextLike, WaitUntil } from '../cache-core.js';
 
-// Native edge storage backends (phase 2): Workers KV and the Cache API.
+// Native edge storage backends: Workers KV and the Cache API.
 export {
   workersKV,
   WorkersKVBackend,

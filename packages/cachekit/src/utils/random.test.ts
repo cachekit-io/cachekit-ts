@@ -66,7 +66,7 @@ describe('secureRandomFloat', () => {
   });
 });
 
-describe('m7: PRNG usage in caching code', () => {
+describe('PRNG usage in caching code', () => {
   it('L1Cache should use secureRandomFloat for SWR jitter', async () => {
     // This is a code inspection test - verify the import
     const { L1Cache } = await import('../l1/lru-cache.js');
@@ -79,7 +79,7 @@ describe('m7: PRNG usage in caching code', () => {
     const mathRandomSpy = vi.spyOn(Math, 'random');
     cache.getWithSwr('key');
 
-    // m7 fix: Math.random should NOT be called
+    // Math.random should NOT be called
     expect(mathRandomSpy).not.toHaveBeenCalled();
   });
 
@@ -102,7 +102,7 @@ describe('m7: PRNG usage in caching code', () => {
       return 'ok';
     });
 
-    // m7 fix: Math.random should NOT be called during jitter calculation
+    // Math.random should NOT be called during jitter calculation
     expect(mathRandomSpy).not.toHaveBeenCalled();
   });
 });
