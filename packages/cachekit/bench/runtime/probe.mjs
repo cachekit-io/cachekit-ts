@@ -9,8 +9,8 @@
 //                                 after each idle gap (seconds)
 //   wall   {port, ctlPort}        warm per-op wall time (median) for get, set, exists()->get
 //   cpu    {}                     per-op time of the SDK's CPU paths on an in-memory backend
-//                                 (no transport): key generation, L1 hit, encode/decode,
-//                                 encrypted get
+//                                 (no transport): key generation, L1 hit (plain and
+//                                 encrypted), encode/decode, encrypted get
 //   import {}                     cold import of the root entry in this fresh process
 //   load   {entry: root|workers}  which file the package's exports resolve to under this
 //                                 runtime, and which core (NAPI or wasm) an encrypted round
@@ -197,22 +197,28 @@ async function cpu() {
   });
   const us = {};
   us.keygen = await bench(() => generateKey('svc:getThing', ['user-42', 7, true]), { k: 2000 });
-  {
-    const c = createCache({ backend: new MemoryBackend(), metrics: false });
-    const f = c.wrap(async (id) => ({ id, pad: 'y'.repeat(200) }), {
-      namespace: 'svc:getThing',
-      ttl: 3600,
+  // A wrap() L1 hit: key generation, the L1 lookup and the L1 decode. Encrypted L1
+  // holds ciphertext, so its hits also decrypt and verify the AAD.
+  const wrapHit = async (v, k, encryption) => {
+    const c = createCache({
+      backend: new MemoryBackend(),
+      metrics: false,
+      ...(encryption ? { encryption } : {}),
     });
+    const f = c.wrap(async () => v, { namespace: 'svc:getThing', ttl: 3600 });
     for (let i = 0; i < 64; i++) await f(i);
     let i = 0;
-    us.wrap_l1_hit = await bench(() => f(i++ & 63), { k: 2000 });
+    const perCall = await bench(() => f(i++ & 63), { k });
     await c.close();
-  }
+    return perCall;
+  };
   for (const [label, bytes, k] of [
     ['100B', 100, 2000],
     ['10KB', 10_000, 200],
   ]) {
     const v = value(bytes);
+    us[`wrap_l1_hit_${label}`] = await wrapHit(v, k);
+    us[`secure_wrap_l1_hit_${label}`] = await wrapHit(v, k, { masterKey: 'a'.repeat(64) });
     const plain = createCache({
       backend: new MemoryBackend(),
       metrics: false,
