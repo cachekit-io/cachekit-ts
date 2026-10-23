@@ -6,13 +6,12 @@
  * package: the auto-mode serializer, the interop/v1 value decoder and the
  * invalidation-event decoder. Spec: protocol/spec/interop-mode.md#decode-bounds
  * (LAB-2503); the bounds themselves are `assertDecodeDepth` (LAB-2487). The
- * ByteStorage envelope is decoded in Rust (cachekit-core, reached via NAPI
- * `unpack` / wasm), not here. cachekit-io/cachekit-core#80 adds the envelope
- * pre-scan to `ByteStorage::retrieve` and runs the protocol's
- * decode-bounds.json 1.1.0 through it in
- * core CI. The cachekit-core 0.6.0 this repo pins has no envelope pre-scan, so
- * `unpack` gains the guard only when the pin moves to a core release that
- * carries it.
+ * ByteStorage envelope is decoded in Rust instead: `unpack` reaches
+ * cachekit-core's `ByteStorage::retrieve`, which pre-scans the envelope bytes
+ * before decoding them (cachekit-core 0.7.0 and later). The envelope entry
+ * point is covered in both lanes: the NAPI `unpack` here, and the wasm
+ * `unpack` inside workerd in test/workers/decode-bounds.workers.test.ts. Both
+ * share their assertions through test/fixtures/decode-bounds-vectors.ts.
  *
  * Provenance: cachekit-io/protocol @ 42ea601f (the merge of
  * cachekit-io/protocol#164, the revision that last touched the fixture;
@@ -30,6 +29,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
+import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 import { MessagePackSerializer, assertDecodeDepth } from '../../src/serialization/serializer.js';
 import { decodeInteropValue } from '../../src/serialization/interop.js';
 import { deserializeEvent } from '../../src/invalidation/event.js';
@@ -39,59 +39,22 @@ import {
   MAX_INVALIDATION_EVENT_DEPTH,
 } from '../../src/constants.js';
 import { SerializationError } from '../../src/errors.js';
-import { assertFixture, table, type ObjectShape } from '../fixtures/fixture-shape.js';
+import {
+  build,
+  expectEnvelopePreScanAccepts,
+  expectEnvelopePreScanRejects,
+  vectors,
+  type Vector,
+} from '../fixtures/decode-bounds-vectors.js';
 
 /** sha256 of test-vectors/decode-bounds.json at the provenance above. */
 const FIXTURE_SHA256 = 'c52c27f724fe138e63440dc0306936b48fe389e2bd823c058b86b30d854e2e2e'; // pragma: allowlist secret
 
-interface Vector {
-  name: string;
-  construction: { repeat_hex: string; count: number; suffix_hex: string };
-  input_hex: string;
-  nesting_depth: number;
-  declared_slots: number;
-  reject_reasons?: string[];
-}
-
-interface VectorFile {
-  spec: string;
-  reject_vectors: Vector[];
-  accept_vectors: Vector[];
-}
-
+// Raw bytes of the same file the shared module imports: the pin covers every
+// byte, not a re-serialisation.
 const raw = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'decode-bounds.json')
 );
-
-const VECTOR_SHAPE: ObjectShape = {
-  name: 'string',
-  construction: { repeat_hex: 'string', count: 'number', suffix_hex: 'string' },
-  input_hex: 'string',
-  nesting_depth: 'number',
-  declared_slots: 'number',
-  reject_reasons: [table('string'), 'undefined'],
-};
-
-function assertVectorFile(value: unknown): asserts value is VectorFile {
-  assertFixture(
-    value,
-    { spec: 'string', reject_vectors: table(VECTOR_SHAPE), accept_vectors: table(VECTOR_SHAPE) },
-    'decode-bounds.json'
-  );
-}
-
-const parsed: unknown = JSON.parse(raw.toString('utf8'));
-assertVectorFile(parsed);
-const vectors: VectorFile = parsed;
-
-/** field_notes.construction: input = fromhex(repeat_hex) * count + fromhex(suffix_hex). */
-function build(v: Vector): Buffer {
-  const unit = Buffer.from(v.construction.repeat_hex, 'hex');
-  return Buffer.concat([
-    Buffer.alloc(unit.length * v.construction.count, unit),
-    Buffer.from(v.construction.suffix_hex, 'hex'),
-  ]);
-}
 
 const serializer = new MessagePackSerializer();
 
@@ -204,7 +167,7 @@ describe('Protocol decode-bounds vectors (spec/interop-mode.md#decode-bounds)', 
 
   it('every construction reproduces its input_hex', () => {
     for (const v of [...vectors.reject_vectors, ...vectors.accept_vectors]) {
-      expect(build(v).toString('hex'), v.name).toBe(v.input_hex);
+      expect(Buffer.from(build(v)).toString('hex'), v.name).toBe(v.input_hex);
     }
   });
 
@@ -264,6 +227,23 @@ describe('Protocol decode-bounds vectors (spec/interop-mode.md#decode-bounds)', 
           expectedRejection(v, { ...site, sizeCap: undefined })
         );
       }
+    });
+  });
+
+  /**
+   * The ByteStorage envelope entry point: cachekit-core pre-scans the envelope
+   * bytes before its typed decode, so each vector arrives there as a forged
+   * envelope. The Workers lane runs the same assertions through the wasm build.
+   */
+  describe('ByteStorage.unpack (NAPI)', () => {
+    const storage = new ByteStorage();
+
+    it.each(vectors.reject_vectors)('rejects $name at the envelope pre-scan', (v) => {
+      expectEnvelopePreScanRejects((b) => storage.unpack(b), v);
+    });
+
+    it.each(vectors.accept_vectors)('gets $name past the envelope pre-scan', (v) => {
+      expectEnvelopePreScanAccepts((b) => storage.unpack(b), v);
     });
   });
 
