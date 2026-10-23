@@ -895,7 +895,7 @@ What one call costs in the client, on an in-memory backend, so no figure include
 - **Encrypted L1 hit**: L1 holds the same ciphertext as L2, so every hit also decrypts, verifies the AAD and decodes the value. That cost grows with the value.
 - **L2 hit and `set`**: L1 is off, so each call reads or writes the backend and decodes or encodes the value. A real backend adds its round trip, which for Redis or cachekit.io is a network call.
 
-To print this table for your own machine, run `pnpm build` and then `node packages/cachekit/bench/readme.mjs` from a clone of the repository, or run the **Bench** workflow from its Actions tab. Wall time moves between machines and between runs on shared runners.
+To print this table for your own machine, run `pnpm build` and then `node packages/cachekit/bench/readme.mjs` from a clone of the repository, or run the **Bench** workflow from its Actions tab. Two runs on this CPU model agreed within 3%. Hosted runners also come with other CPU models (an EPYC 9V74 run took 72-82% as long), and other machines give other figures.
 
 ## Requirements
 
