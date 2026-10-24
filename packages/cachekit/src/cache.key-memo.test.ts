@@ -273,9 +273,15 @@ describe('wrap() key memo', () => {
           cache.wrap(async (id: number) => ({ id }), { namespace: 'dropped', ttl: 60 });
         }
         expect(registry.size).toBe(dropped + 1);
-        // WeakRef targets live until the current job ends.
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        gc();
+        // A WeakRef target lives until the current job ends, and one collection is
+        // not bound to clear every WeakRef: collect, a bounded number of times, until
+        // only the held function's memo is left.
+        const live = () => [...registry].filter((ref) => ref instanceof WeakRef && ref.deref());
+        for (let attempt = 0; attempt < 10 && live().length > 1; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          gc();
+        }
+        expect(live()).toHaveLength(1);
         return { cache, registry, held };
       }
 
