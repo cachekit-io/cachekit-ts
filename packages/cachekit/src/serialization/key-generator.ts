@@ -22,6 +22,26 @@ const KEY_ENCODER_BUFFER = 2048;
  */
 let keyEncoder = new Encoder({ initialBufferSize: KEY_ENCODER_BUFFER });
 
+const HEX_DIGITS = new TextEncoder().encode('0123456789abcdef');
+const hexBytes = new Uint8Array(CACHE_KEY_HASH_LENGTH);
+const hexDecoder = new TextDecoder();
+const nativeHex = typeof (Uint8Array.prototype as { toHex?: unknown }).toHex === 'function';
+
+/**
+ * Lowercase hex of a 32-byte digest, as one string. Without a native
+ * Uint8Array.prototype.toHex (Node.js 24 and earlier), bytesToHex appends two
+ * digits at a time, and V8 keeps every intermediate string inside the result:
+ * about 800 bytes more for each key that L1 or a key memo holds.
+ */
+function digestHex(digest: Uint8Array): string {
+  if (nativeHex) return bytesToHex(digest);
+  for (let i = 0; i < digest.length; i++) {
+    hexBytes[2 * i] = HEX_DIGITS[digest[i] >> 4];
+    hexBytes[2 * i + 1] = HEX_DIGITS[digest[i] & 15];
+  }
+  return hexDecoder.decode(hexBytes);
+}
+
 /**
  * BLAKE2b-256 of the key arguments' deterministic MessagePack, with strict
  * limits. Not the value serializer: key arguments are hashed, never decoded, so
@@ -93,7 +113,7 @@ export function generateKey(namespace: string, args: unknown[]): string {
  * @returns 64-character hex hash string
  */
 export function generateParamsHash(args: unknown[]): string {
-  return bytesToHex(digestArgs(args));
+  return digestHex(digestArgs(args));
 }
 
 /**

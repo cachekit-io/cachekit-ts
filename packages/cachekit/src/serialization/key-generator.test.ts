@@ -176,6 +176,31 @@ describe('generateKey', () => {
     });
   });
 
+  it.each([
+    ['without', undefined],
+    [
+      'with',
+      function (this: Uint8Array) {
+        return Array.from(this, (b) => b.toString(16).padStart(2, '0')).join('');
+      },
+    ],
+  ])('keeps the pinned keys %s a native Uint8Array.prototype.toHex', async (_, toHex) => {
+    const proto = Uint8Array.prototype as { toHex?: unknown };
+    const native = Object.getOwnPropertyDescriptor(proto, 'toHex');
+    delete proto.toHex;
+    if (toHex) proto.toHex = toHex;
+    try {
+      vi.resetModules();
+      const fresh = await import('./key-generator.js');
+      for (const { args, key } of [...MEMOISABLE_KEYS, ...FULL_PATH_KEYS]) {
+        expect(fresh.generateKey(PINNED_NAMESPACE, [...args])).toBe(key);
+      }
+    } finally {
+      delete proto.toHex;
+      if (native) Object.defineProperty(proto, 'toHex', native);
+    }
+  });
+
   it('keeps rejecting bigint, symbol and function arguments', () => {
     for (const arg of [1n, Symbol('s'), () => 1]) {
       expect(() => generateKey(PINNED_NAMESPACE, [arg])).toThrow(/^Unrecognized object/);
