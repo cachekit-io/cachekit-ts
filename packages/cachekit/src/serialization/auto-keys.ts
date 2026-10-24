@@ -105,40 +105,37 @@ function memoisable(arg: unknown): boolean {
 
 /**
  * The memo key of a call with no argument or two to eight, or undefined if it
- * must take the full path. Each argument becomes a field that starts with its
- * type and ends where the field says, so no two different tuples share one:
- * `s<length>:<string>`, `n<number>;`, `t`, `f`, `l` (null) and `u` (undefined).
- * A number is written in its shortest round-trip form, which differs between
- * any two numbers except 0 and -0.
+ * must take the full path. It is checked in full before any of it is built, so
+ * a call that passes an object pays only for the check. Each argument becomes a
+ * field that starts with its type and ends where the field says, so no two
+ * different tuples share one: `s<length>:<string>`, `n<number>;`, `t`, `f`, `l`
+ * (null) and `u` (undefined). A number is written in its shortest round-trip
+ * form, which differs between any two numbers except 0 and -0.
  */
 function tupleOf(args: unknown[]): string | undefined {
   if (args.length > MEMO_MAX_ARGS) return undefined;
-  let tuple = '';
   let chars = 0;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (typeof arg === 'string') chars += arg.length;
+    else if (!memoisable(arg)) return undefined;
+  }
+  if (chars > MEMO_MAX_STRING_LENGTH) return undefined;
+  let tuple = '';
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     switch (typeof arg) {
       case 'string':
-        chars += arg.length;
-        if (chars > MEMO_MAX_STRING_LENGTH) return undefined;
         tuple += `s${arg.length}:${arg}`;
         break;
       case 'number':
-        if (arg !== arg) return undefined; // NaN
         tuple += `n${arg};`;
         break;
       case 'boolean':
         tuple += arg ? 't' : 'f';
         break;
-      case 'undefined':
-        tuple += 'u';
-        break;
-      case 'object':
-        if (arg !== null) return undefined;
-        tuple += 'l';
-        break;
       default:
-        return undefined;
+        tuple += arg === null ? 'l' : 'u';
     }
   }
   return tuple;
