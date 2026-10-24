@@ -8,7 +8,11 @@ license = "MIT"
 crate-type = ["cdylib"]
 
 [dependencies]
-napi = { version = "3", features = ["napi6"] }
+# No napi4 or higher: under napi4, napi-rs registers a process-lifetime
+# threadsafe function (its custom GC) as the module loads, and that function
+# keeps the AsyncLocalStorage context of whatever first loads the addon. The
+# binding runs every call on the JS thread and needs none of napi4's features.
+napi = { version = "3", default-features = false, features = ["napi3", "dyn-symbols"] }
 napi-derive = "3"
 cachekit-core = { version = "0.7.0", features = ["encryption"] }
 
