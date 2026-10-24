@@ -145,6 +145,35 @@ describe('wrap() key memo', () => {
     await cache.close();
   });
 
+  describe('on a closed cache', () => {
+    const OPTIONS = { namespace: 'svc:getThing', ttl: 60 };
+
+    it('rejects a call before keying it', async () => {
+      const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
+      const fn = cache.wrap(async (id: string) => ({ id }), OPTIONS);
+      await fn('before-close');
+      await cache.close();
+      const keyed = vi.spyOn(AutoKeys.prototype, 'key');
+      await expect(fn('after-close')).rejects.toThrow('Cache has been closed');
+      expect(keyed).not.toHaveBeenCalled();
+    });
+
+    it('rejects a call made while close() runs, as get() does, although L1 still holds it', async () => {
+      const { cache } = cacheWithChannel();
+      const fn = cache.wrap(async (id: string) => ({ id }), OPTIONS);
+      await fn('held');
+      const keyed = vi.spyOn(AutoKeys.prototype, 'key');
+      // close() awaits the invalidation channel before it clears L1.
+      const closing = cache.close();
+      await expect(fn('held')).rejects.toThrow('Cache has been closed');
+      await expect(cache.get(generateKey(OPTIONS.namespace, ['held']))).rejects.toThrow(
+        'Cache has been closed'
+      );
+      expect(keyed).not.toHaveBeenCalled();
+      await closing;
+    });
+  });
+
   it('keeps no memo for a call that skips L1', async () => {
     const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
     const options = { namespace: 'svc:getThing', ttl: 60, skipL1: true };

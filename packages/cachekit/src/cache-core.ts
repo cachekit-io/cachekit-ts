@@ -1281,6 +1281,9 @@ export class CacheImpl implements SecureCache {
     const autoKeys = new AutoKeys(!interop && !this.encryption && this.l1 !== null);
     if (autoKeys.memoising) this.trackKeyMemo(autoKeys);
     return async (...args: TArgs): Promise<TResult> => {
+      // First, and before keying in particular: keying puts the arguments in the
+      // key memo, which close() has emptied, and nothing empties it again.
+      this.ensureNotClosed();
       // Interop arity contract, call side: the flat argument array must
       // match the declared contract exactly — a short or long call would
       // hash a different array than Python/Rust bind and silently miss
