@@ -231,6 +231,21 @@ export const WORKLOADS = {
       };
     },
   },
+  // the README benchmark's hit (bench/runtime/probe.mjs): one integer argument,
+  // cycling over 64 values that are all in L1
+  'wrap-l1-hit-int': {
+    n: 20_000,
+    setup: async () => {
+      const { createCache } = await load('index.js');
+      const cache = createCache({ backend: new MemoryBackend(), metrics: false });
+      const getThing = cache.wrap(async (id) => ({ id }), { namespace: 'bench', ttl: 3600 });
+      for (let i = 0; i < 64; i++) await getThing(i);
+      let i = 0;
+      return async () => {
+        sink += (await getThing(i++ & 63)).id;
+      };
+    },
+  },
 };
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

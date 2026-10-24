@@ -1,4 +1,4 @@
-import { encode } from '@msgpack/msgpack';
+import { Encoder } from '@msgpack/msgpack';
 import { blake2b } from '@noble/hashes/blake2.js';
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 import { normalize } from './serializer.js';
@@ -10,23 +10,74 @@ import {
   CACHE_KEY_HASH_LENGTH,
 } from '../constants.js';
 
+/** The key encoder's buffer, in bytes: room for the arguments of almost any key. */
+const KEY_ENCODER_BUFFER = 2048;
+
+/** Every key encoder comes from here, so none can encode differently from the first. */
+const newKeyEncoder = (): Encoder => new Encoder({ initialBufferSize: KEY_ENCODER_BUFFER });
+
 /**
- * Deterministic MessagePack of key arguments, with strict limits. Not the value
- * serializer: key arguments are hashed, never decoded, so any binary argument
- * (typed array, DataView, ArrayBuffer) hashes by its type and bytes.
+ * One encoder for every key, because building one per call (its buffer and two
+ * views over it) cost more than encoding the arguments. The bytes a call writes
+ * are wiped once hashed, so the buffer never holds an earlier call's
+ * arguments, and an encoder an outsize argument has grown is replaced rather
+ * than kept at that size.
  */
-function encodeArgs(args: unknown[]): Uint8Array {
-  const encoded = encode(
-    normalize(args, 0, KEY_GEN_MAX_DEPTH, DEFAULT_MAX_COLLECTION_SIZE, {
-      forKey: true,
-      objects: 0,
-      values: 0,
-    })
-  );
-  if (encoded.length > KEY_GEN_MAX_SIZE) {
-    throw new ValueTooLargeError(`Encoded size ${encoded.length} exceeds max ${KEY_GEN_MAX_SIZE}`);
+let keyEncoder = newKeyEncoder();
+
+const HEX_DIGITS = new TextEncoder().encode('0123456789abcdef');
+const hexBytes = new Uint8Array(CACHE_KEY_HASH_LENGTH);
+const hexDecoder = new TextDecoder();
+const nativeHex = typeof (Uint8Array.prototype as { toHex?: unknown }).toHex === 'function';
+
+/**
+ * Lowercase hex of a 32-byte digest, as one string. Without a native
+ * Uint8Array.prototype.toHex (Node.js 24 and earlier), bytesToHex appends two
+ * digits at a time, and V8 keeps every intermediate string inside the result:
+ * about 800 bytes more for each key that L1 or a key memo holds.
+ */
+function digestHex(digest: Uint8Array): string {
+  if (nativeHex) return bytesToHex(digest);
+  for (let i = 0; i < digest.length; i++) {
+    hexBytes[2 * i] = HEX_DIGITS[digest[i] >> 4];
+    hexBytes[2 * i + 1] = HEX_DIGITS[digest[i] & 15];
   }
-  return encoded;
+  return hexDecoder.decode(hexBytes);
+}
+
+/**
+ * BLAKE2b-256 of the key arguments' deterministic MessagePack, with strict
+ * limits. Not the value serializer: key arguments are hashed, never decoded, so
+ * any binary argument (typed array, DataView, ArrayBuffer) hashes by its type
+ * and bytes.
+ */
+function digestArgs(args: unknown[]): Uint8Array {
+  const normalized = normalize(args, 0, KEY_GEN_MAX_DEPTH, DEFAULT_MAX_COLLECTION_SIZE, {
+    forKey: true,
+    objects: 0,
+    values: 0,
+  });
+  let encoded: Uint8Array;
+  try {
+    encoded = keyEncoder.encodeSharedRef(normalized);
+  } catch (error) {
+    // The buffer holds whatever was written before the throw: drop it.
+    keyEncoder = newKeyEncoder();
+    throw error;
+  }
+  try {
+    if (encoded.length > KEY_GEN_MAX_SIZE) {
+      throw new ValueTooLargeError(
+        `Encoded size ${encoded.length} exceeds max ${KEY_GEN_MAX_SIZE}`
+      );
+    }
+    return blake2b(encoded, { dkLen: 32 });
+  } finally {
+    encoded.fill(0);
+    if (encoded.buffer.byteLength > KEY_ENCODER_BUFFER) {
+      keyEncoder = newKeyEncoder();
+    }
+  }
 }
 
 /**
@@ -50,17 +101,8 @@ function encodeArgs(args: unknown[]): Uint8Array {
  * ```
  */
 export function generateKey(namespace: string, args: unknown[]): string {
-  // Serialize arguments deterministically (sorted keys, normalized values)
-  const serialized = encodeArgs(args);
-
-  // Hash with Blake2b-256
-  const hash = blake2b(serialized, { dkLen: 32 }); // 32 bytes = 256 bits
-
-  // Convert to hex string
-  const hexHash = bytesToHex(hash);
-
-  // Combine namespace and hash
-  return `${namespace}:${hexHash}`;
+  const hash = generateParamsHash(args);
+  return `${namespace}:${hash}`;
 }
 
 /**
@@ -74,9 +116,7 @@ export function generateKey(namespace: string, args: unknown[]): string {
  * @returns 64-character hex hash string
  */
 export function generateParamsHash(args: unknown[]): string {
-  const serialized = encodeArgs(args);
-  const hash = blake2b(serialized, { dkLen: 32 });
-  return bytesToHex(hash);
+  return digestHex(digestArgs(args));
 }
 
 /**

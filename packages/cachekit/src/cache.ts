@@ -12,6 +12,7 @@ import { EncryptionManager } from './encryption/manager.js';
 import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 import { RedisInvalidationChannel } from './invalidation/redis-channel.js';
 import { CacheImpl, type CacheRuntime } from './cache-core.js';
+import timers from 'node:timers';
 
 /**
  * Node runtime: Redis + CachekitIO backends, NAPI bindings for the
@@ -51,6 +52,13 @@ const nodeRuntime: CacheRuntime = {
     new EncryptionManager(config.masterKey, config.tenantId, config.previousMasterKeys),
   createInvalidationChannel: (config: InvalidationConfig) =>
     new RedisInvalidationChannel(config.redis, { channelName: config.channelName }),
+  // node:timers, not the globals: a test environment such as Jest's jsdom swaps in
+  // a setTimeout that returns a number, which has no unref().
+  setUnrefTimeout: (callback, ms) => {
+    const timer = timers.setTimeout(callback, ms);
+    timer.unref();
+    return () => timers.clearTimeout(timer);
+  },
 };
 
 /**

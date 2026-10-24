@@ -33,11 +33,11 @@ import {
   maxEnvelopeInputSize,
 } from './serialization/envelope.js';
 import {
-  generateKey,
   generateParamsHash,
   extractNamespace,
   blake2b16Hex,
 } from './serialization/key-generator.js';
+import { AutoKeys, type UnrefTimeout } from './serialization/auto-keys.js';
 import {
   generateInteropKey,
   validateInteropSegment,
@@ -233,6 +233,14 @@ export interface CacheRuntime {
    * wedging. Unset on Node, where fire-and-forget is safe.
    */
   swrRequiresWaitUntil?: boolean;
+  /**
+   * Run `callback` once, `ms` milliseconds from now, without holding the
+   * process open, and return a function that cancels it. A wrapped function's
+   * key memo needs one to empty itself on time (see AutoKeys), so a runtime
+   * without one keeps no memo: Workers, which can cancel a timer when the
+   * request that set it ends.
+   */
+  setUnrefTimeout?: UnrefTimeout;
 }
 
 /**
@@ -277,6 +285,7 @@ export class CacheImpl implements SecureCache {
   // l1Telemetry hook below).
   private readonly telemetry = { l1Hits: 0, l2Hits: 0, misses: 0 };
   private readonly swrRequiresWaitUntil: boolean;
+  private readonly setUnrefTimeout: UnrefTimeout | undefined;
   /**
    * Mirrors ReliabilityExecutor's own default. Read directly by the
    * decode/encode paths that run outside the executor (L1 decrypt, L2 decode,
@@ -286,6 +295,13 @@ export class CacheImpl implements SecureCache {
   private closed = false;
   /** One in-flight cold-miss resolution per cache key (single-flight). */
   private readonly inflight = new Map<string, Promise<unknown>>();
+  /**
+   * The key memos of this cache's wrapped functions (see AutoKeys), held weakly
+   * so that a wrapped function nobody holds takes its memo with it.
+   */
+  private readonly keyMemos = new Set<WeakRef<AutoKeys>>();
+  /** keyMemos size at which wrap() next drops the references to collected memos. */
+  private keyMemosPruneAt = 64;
   private readonly stampede: Required<StampedeConfig>;
   private readonly lockable: LockableBackend | null;
 
@@ -379,6 +395,7 @@ export class CacheImpl implements SecureCache {
     // Initialize background refresh manager (SWR)
     this.backgroundRefresh = new BackgroundRefreshManager();
     this.swrRequiresWaitUntil = runtime.swrRequiresWaitUntil ?? false;
+    this.setUnrefTimeout = runtime.setUnrefTimeout;
 
     // Initialize ByteStorage (LZ4 compression + xxHash3-64 integrity). The
     // default honors the backend's advertised preference, else
@@ -415,6 +432,7 @@ export class CacheImpl implements SecureCache {
     if (this.l1) {
       channel.subscribe((event) => {
         this.l1?.handleInvalidationEvent(event);
+        this.forgetKeyArguments();
       });
     }
 
@@ -1150,6 +1168,7 @@ export class CacheImpl implements SecureCache {
         this.l1.invalidateByKey(key);
         this.publishL1Stats();
       }
+      this.forgetKeyArguments();
     }
   }
 
@@ -1267,7 +1286,20 @@ export class CacheImpl implements SecureCache {
       }
     }
 
+    // A cache that encrypts keeps no plaintext argument, and with L1 off a
+    // memoised key would save nothing a network call does not dwarf. A memo also
+    // needs the runtime's timer to empty itself on time; without one it keeps none.
+    const autoKeys = new AutoKeys(
+      !interop && !this.encryption && this.l1 !== null ? this.setUnrefTimeout : undefined
+    );
+    if (autoKeys.memoising) this.trackKeyMemo(autoKeys);
     return async (...args: TArgs): Promise<TResult> => {
+      // First, and before keying in particular: keying puts the arguments in the
+      // key memo, which close() has emptied, and only the timer of a new window
+      // would empty it again. The flag is read here because calling
+      // ensureNotClosed() on every call cost an L1 hit about 100 instructions,
+      // measured.
+      if (this.closed) this.ensureNotClosed();
       // Interop arity contract, call side: the flat argument array must
       // match the declared contract exactly — a short or long call would
       // hash a different array than Python/Rust bind and silently miss
@@ -1292,7 +1324,7 @@ export class CacheImpl implements SecureCache {
       }
       const cacheKey = interop
         ? generateInteropKey(options.namespace, interopOperation, args)
-        : generateKey(options.namespace, args);
+        : autoKeys.key(options.namespace, args, !options.skipL1, options.ttl ?? this.defaultTtl);
 
       // Check L1 with SWR. On platforms that cancel fire-and-forget work at
       // response return (Workers), SWR only runs when a per-request
@@ -1617,6 +1649,8 @@ export class CacheImpl implements SecureCache {
       return;
     }
 
+    this.forgetKeyArguments();
+
     // Invalidate L1
     if (this.l1) {
       switch (level) {
@@ -1689,6 +1723,10 @@ export class CacheImpl implements SecureCache {
     // error)
     attempt(() => this.inflight.clear());
 
+    // Before the first await: a channel that stalls on stop must not keep the
+    // arguments the key memos hold. `closed` stops any call from adding one.
+    attempt(() => this.forgetKeyArguments());
+
     // Stop invalidation channel
     if (this.invalidationChannel) {
       try {
@@ -1726,6 +1764,28 @@ export class CacheImpl implements SecureCache {
 
     if (errors.length === 1) throw errors[0];
     if (errors.length > 1) throw new AggregateError(errors, 'cache.close() failed');
+  }
+
+  private trackKeyMemo(keys: AutoKeys): void {
+    if (this.keyMemos.size >= this.keyMemosPruneAt) {
+      for (const ref of this.keyMemos) if (ref.deref() === undefined) this.keyMemos.delete(ref);
+      this.keyMemosPruneAt = Math.max(64, 2 * this.keyMemos.size);
+    }
+    this.keyMemos.add(new WeakRef(keys));
+  }
+
+  /**
+   * Empty every key memo of this cache. A removal on request (delete,
+   * invalidate, an invalidation event from another instance, close) must not
+   * leave behind the arguments of the calls it removes; the memos are emptied
+   * whole because a key does not say which arguments built it.
+   */
+  private forgetKeyArguments(): void {
+    for (const ref of this.keyMemos) {
+      const keys = ref.deref();
+      if (keys === undefined) this.keyMemos.delete(ref);
+      else keys.forget();
+    }
   }
 
   private ensureNotClosed(): void {

@@ -197,8 +197,9 @@ async function cpu() {
   });
   const us = {};
   us.keygen = await bench(() => generateKey('svc:getThing', ['user-42', 7, true]), { k: 2000 });
-  // A wrap() L1 hit: key generation and the L1 lookup, which returns the stored object.
-  // Encrypted L1 holds ciphertext, so its hits also decrypt, verify the AAD and decode.
+  // A wrap() L1 hit: the call's memoised key and the L1 lookup, which returns the stored
+  // object. Encrypted L1 holds ciphertext and keeps no key memo, so its hits also generate
+  // the key, decrypt, verify the AAD and decode.
   const wrapHit = async (v, k, encryption) => {
     const c = createCache({
       backend: new MemoryBackend(),
