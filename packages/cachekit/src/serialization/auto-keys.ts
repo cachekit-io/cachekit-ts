@@ -59,7 +59,7 @@ export class AutoKeys {
     if (!this.memoising || !useMemo) return this.prefix + generateParamsHash(args);
     if (args.length === 1) {
       const arg = args[0];
-      if (!memoisable(arg)) return this.prefix + generateParamsHash(args);
+      if (!isMemoArg(arg) || !withinBudget(arg)) return this.prefix + generateParamsHash(args);
       let key = this.one.get(arg);
       if (key === undefined) {
         key = this.prefix + generateParamsHash(args);
@@ -103,16 +103,11 @@ function ownString(s: string): string {
   return String.fromCharCode(...units);
 }
 
-/**
- * May this argument key the memo? A string past the length budget may not,
- * although it is a MemoArg: a false result says nothing about the type.
- */
-function memoisable(arg: unknown): arg is MemoArg {
+/** Is this argument of a type the memo takes? It says nothing of the budget. */
+function isMemoArg(arg: unknown): arg is MemoArg {
   switch (typeof arg) {
     case 'string':
-      return arg.length <= MEMO_MAX_STRING_LENGTH;
     case 'number':
-      return arg === arg; // not NaN
     case 'boolean':
     case 'undefined':
       return true;
@@ -121,6 +116,11 @@ function memoisable(arg: unknown): arg is MemoArg {
     default:
       return false;
   }
+}
+
+/** Neither NaN nor a string past the budget. */
+function withinBudget(arg: MemoArg): boolean {
+  return typeof arg === 'string' ? arg.length <= MEMO_MAX_STRING_LENGTH : arg === arg;
 }
 
 /**
@@ -137,8 +137,8 @@ function tupleOf(args: unknown[]): string | undefined {
   let chars = 0;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+    if (!isMemoArg(arg) || arg !== arg) return undefined; // arg !== arg: NaN
     if (typeof arg === 'string') chars += arg.length;
-    else if (!memoisable(arg)) return undefined;
   }
   if (chars > MEMO_MAX_STRING_LENGTH) return undefined;
   let tuple = '';

@@ -13,6 +13,9 @@ import {
 /** The key encoder's buffer, in bytes: room for the arguments of almost any key. */
 const KEY_ENCODER_BUFFER = 2048;
 
+/** Every key encoder comes from here, so none can encode differently from the first. */
+const newKeyEncoder = (): Encoder => new Encoder({ initialBufferSize: KEY_ENCODER_BUFFER });
+
 /**
  * One encoder for every key, because building one per call (its buffer and two
  * views over it) cost more than encoding the arguments. The bytes a call writes
@@ -20,7 +23,7 @@ const KEY_ENCODER_BUFFER = 2048;
  * arguments, and an encoder an outsize argument has grown is replaced rather
  * than kept at that size.
  */
-let keyEncoder = new Encoder({ initialBufferSize: KEY_ENCODER_BUFFER });
+let keyEncoder = newKeyEncoder();
 
 const HEX_DIGITS = new TextEncoder().encode('0123456789abcdef');
 const hexBytes = new Uint8Array(CACHE_KEY_HASH_LENGTH);
@@ -59,7 +62,7 @@ function digestArgs(args: unknown[]): Uint8Array {
     encoded = keyEncoder.encodeSharedRef(normalized);
   } catch (error) {
     // The buffer holds whatever was written before the throw: drop it.
-    keyEncoder = new Encoder({ initialBufferSize: KEY_ENCODER_BUFFER });
+    keyEncoder = newKeyEncoder();
     throw error;
   }
   try {
@@ -72,7 +75,7 @@ function digestArgs(args: unknown[]): Uint8Array {
   } finally {
     encoded.fill(0);
     if (encoded.buffer.byteLength > KEY_ENCODER_BUFFER) {
-      keyEncoder = new Encoder({ initialBufferSize: KEY_ENCODER_BUFFER });
+      keyEncoder = newKeyEncoder();
     }
   }
 }
