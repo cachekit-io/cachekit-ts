@@ -286,6 +286,13 @@ export class CacheImpl implements SecureCache {
   private closed = false;
   /** One in-flight cold-miss resolution per cache key (single-flight). */
   private readonly inflight = new Map<string, Promise<unknown>>();
+  /**
+   * The key memos of this cache's wrapped functions (see AutoKeys), held weakly
+   * so that a wrapped function nobody holds takes its memo with it.
+   */
+  private readonly keyMemos = new Set<WeakRef<AutoKeys>>();
+  /** keyMemos size at which wrap() next drops the references to collected memos. */
+  private keyMemosPruneAt = 64;
   private readonly stampede: Required<StampedeConfig>;
   private readonly lockable: LockableBackend | null;
 
@@ -415,6 +422,7 @@ export class CacheImpl implements SecureCache {
     if (this.l1) {
       channel.subscribe((event) => {
         this.l1?.handleInvalidationEvent(event);
+        this.forgetKeyArguments();
       });
     }
 
@@ -1150,6 +1158,7 @@ export class CacheImpl implements SecureCache {
         this.l1.invalidateByKey(key);
         this.publishL1Stats();
       }
+      this.forgetKeyArguments();
     }
   }
 
@@ -1267,7 +1276,10 @@ export class CacheImpl implements SecureCache {
       }
     }
 
-    const autoKeys = new AutoKeys();
+    // A cache that encrypts keeps no plaintext argument, and with L1 off a
+    // memoised key would save nothing a network call does not dwarf.
+    const autoKeys = new AutoKeys(!interop && !this.encryption && this.l1 !== null);
+    if (autoKeys.memoising) this.trackKeyMemo(autoKeys);
     return async (...args: TArgs): Promise<TResult> => {
       // Interop arity contract, call side: the flat argument array must
       // match the declared contract exactly — a short or long call would
@@ -1293,7 +1305,7 @@ export class CacheImpl implements SecureCache {
       }
       const cacheKey = interop
         ? generateInteropKey(options.namespace, interopOperation, args)
-        : autoKeys.key(options.namespace, args);
+        : autoKeys.key(options.namespace, args, !options.skipL1);
 
       // Check L1 with SWR. On platforms that cancel fire-and-forget work at
       // response return (Workers), SWR only runs when a per-request
@@ -1618,6 +1630,8 @@ export class CacheImpl implements SecureCache {
       return;
     }
 
+    this.forgetKeyArguments();
+
     // Invalidate L1
     if (this.l1) {
       switch (level) {
@@ -1717,6 +1731,7 @@ export class CacheImpl implements SecureCache {
 
     // Clear L1 (this also clears L1's internal refreshingKeys)
     attempt(() => this.l1?.clear());
+    attempt(() => this.forgetKeyArguments());
 
     // Close backend
     try {
@@ -1727,6 +1742,28 @@ export class CacheImpl implements SecureCache {
 
     if (errors.length === 1) throw errors[0];
     if (errors.length > 1) throw new AggregateError(errors, 'cache.close() failed');
+  }
+
+  private trackKeyMemo(keys: AutoKeys): void {
+    if (this.keyMemos.size >= this.keyMemosPruneAt) {
+      for (const ref of this.keyMemos) if (ref.deref() === undefined) this.keyMemos.delete(ref);
+      this.keyMemosPruneAt = Math.max(64, 2 * this.keyMemos.size);
+    }
+    this.keyMemos.add(new WeakRef(keys));
+  }
+
+  /**
+   * Empty every key memo of this cache. A removal on request (delete,
+   * invalidate, an invalidation event from another instance, close) must not
+   * leave behind the arguments of the calls it removes; the memos are emptied
+   * whole because a key does not say which arguments built it.
+   */
+  private forgetKeyArguments(): void {
+    for (const ref of this.keyMemos) {
+      const keys = ref.deref();
+      if (keys === undefined) this.keyMemos.delete(ref);
+      else keys.forget();
+    }
   }
 
   private ensureNotClosed(): void {
