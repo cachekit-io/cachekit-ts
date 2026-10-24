@@ -1,5 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { runInNewContext } from 'node:vm';
+import { Encoder } from '@msgpack/msgpack';
+import { ValueTooLargeError } from '../errors.js';
 import { generateKey, generateParamsHash, extractNamespace } from './key-generator.js';
 import {
   FULL_PATH_KEYS,
@@ -177,6 +179,77 @@ describe('generateKey', () => {
   it('keeps rejecting bigint, symbol and function arguments', () => {
     for (const arg of [1n, Symbol('s'), () => 1]) {
       expect(() => generateKey(PINNED_NAMESPACE, [arg])).toThrow(/^Unrecognized object/);
+    }
+  });
+});
+
+describe('the shared key encoder', () => {
+  /** Each encodeSharedRef call's encoder and the bytes it handed back. */
+  const recordEncodes = () => {
+    const calls: { encoder: Encoder; bytes: Uint8Array }[] = [];
+    const real = Encoder.prototype.encodeSharedRef;
+    const spy = vi.spyOn(Encoder.prototype, 'encodeSharedRef').mockImplementation(function (
+      this: Encoder,
+      value: unknown
+    ) {
+      const bytes = real.call(this, value);
+      calls.push({ encoder: this, bytes });
+      return bytes;
+    });
+    return { calls, restore: () => spy.mockRestore() };
+  };
+  const zeroed = (bytes: Uint8Array) => bytes.every((b) => b === 0);
+
+  it('wipes the bytes it wrote once they are hashed', () => {
+    const { calls, restore } = recordEncodes();
+    try {
+      generateKey('test', ['secret-argument', 42]);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].bytes.length).toBeGreaterThan(0);
+      expect(zeroed(new Uint8Array(calls[0].bytes.buffer))).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('is reused while it keeps its size, and replaced once an argument grows it', () => {
+    const { calls, restore } = recordEncodes();
+    try {
+      generateKey('test', [1]);
+      generateKey('test', [2]);
+      generateKey('test', ['x'.repeat(5_000)]);
+      generateKey('test', [3]);
+      const [first, second, big, after] = calls;
+      expect(second.encoder).toBe(first.encoder);
+      expect(big.encoder).toBe(first.encoder);
+      expect(big.bytes.buffer.byteLength).toBeGreaterThan(2048);
+      expect(zeroed(new Uint8Array(big.bytes.buffer))).toBe(true);
+      expect(after.encoder).not.toBe(first.encoder);
+      expect(after.bytes.buffer.byteLength).toBe(2048);
+    } finally {
+      restore();
+    }
+  });
+
+  it('is replaced when the arguments fail to encode or exceed the key size limit', () => {
+    const { calls, restore } = recordEncodes();
+    try {
+      generateKey('test', [1]);
+      expect(() => generateKey('test', ['partial', 1n])).toThrow(/^Unrecognized object/);
+      generateKey('test', [2]);
+      expect(() => generateKey('test', ['x'.repeat(70_000)])).toThrow(ValueTooLargeError);
+      generateKey('test', [3]);
+      const encoders = calls.map((c) => c.encoder);
+      // The failed encode returned nothing, so it has no entry.
+      expect(encoders).toHaveLength(4);
+      expect(encoders[1]).not.toBe(encoders[0]);
+      expect(encoders[3]).not.toBe(encoders[2]);
+      expect(zeroed(new Uint8Array(calls[2].bytes.buffer))).toBe(true);
+      for (const { args, key } of MEMOISABLE_KEYS) {
+        expect(generateKey(PINNED_NAMESPACE, [...args])).toBe(key);
+      }
+    } finally {
+      restore();
     }
   });
 });

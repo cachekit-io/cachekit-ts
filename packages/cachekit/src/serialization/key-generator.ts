@@ -1,4 +1,4 @@
-import { encode } from '@msgpack/msgpack';
+import { Encoder } from '@msgpack/msgpack';
 import { blake2b } from '@noble/hashes/blake2.js';
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 import { normalize } from './serializer.js';
@@ -10,23 +10,51 @@ import {
   CACHE_KEY_HASH_LENGTH,
 } from '../constants.js';
 
+/** The key encoder's buffer, in bytes: room for the arguments of almost any key. */
+const KEY_ENCODER_BUFFER = 2048;
+
 /**
- * Deterministic MessagePack of key arguments, with strict limits. Not the value
- * serializer: key arguments are hashed, never decoded, so any binary argument
- * (typed array, DataView, ArrayBuffer) hashes by its type and bytes.
+ * One encoder for every key, because building one per call (its buffer and two
+ * views over it) cost more than encoding the arguments. The bytes a call writes
+ * are wiped once hashed, so the buffer never holds an earlier call's
+ * arguments, and an encoder an outsize argument has grown is replaced rather
+ * than kept at that size.
  */
-function encodeArgs(args: unknown[]): Uint8Array {
-  const encoded = encode(
-    normalize(args, 0, KEY_GEN_MAX_DEPTH, DEFAULT_MAX_COLLECTION_SIZE, {
-      forKey: true,
-      objects: 0,
-      values: 0,
-    })
-  );
-  if (encoded.length > KEY_GEN_MAX_SIZE) {
-    throw new ValueTooLargeError(`Encoded size ${encoded.length} exceeds max ${KEY_GEN_MAX_SIZE}`);
+let keyEncoder = new Encoder({ initialBufferSize: KEY_ENCODER_BUFFER });
+
+/**
+ * BLAKE2b-256 of the key arguments' deterministic MessagePack, with strict
+ * limits. Not the value serializer: key arguments are hashed, never decoded, so
+ * any binary argument (typed array, DataView, ArrayBuffer) hashes by its type
+ * and bytes.
+ */
+function digestArgs(args: unknown[]): Uint8Array {
+  const normalized = normalize(args, 0, KEY_GEN_MAX_DEPTH, DEFAULT_MAX_COLLECTION_SIZE, {
+    forKey: true,
+    objects: 0,
+    values: 0,
+  });
+  let encoded: Uint8Array;
+  try {
+    encoded = keyEncoder.encodeSharedRef(normalized);
+  } catch (error) {
+    // The buffer holds whatever was written before the throw: drop it.
+    keyEncoder = new Encoder({ initialBufferSize: KEY_ENCODER_BUFFER });
+    throw error;
   }
-  return encoded;
+  try {
+    if (encoded.length > KEY_GEN_MAX_SIZE) {
+      throw new ValueTooLargeError(
+        `Encoded size ${encoded.length} exceeds max ${KEY_GEN_MAX_SIZE}`
+      );
+    }
+    return blake2b(encoded, { dkLen: 32 });
+  } finally {
+    encoded.fill(0);
+    if (encoded.buffer.byteLength > KEY_ENCODER_BUFFER) {
+      keyEncoder = new Encoder({ initialBufferSize: KEY_ENCODER_BUFFER });
+    }
+  }
 }
 
 /**
@@ -50,17 +78,8 @@ function encodeArgs(args: unknown[]): Uint8Array {
  * ```
  */
 export function generateKey(namespace: string, args: unknown[]): string {
-  // Serialize arguments deterministically (sorted keys, normalized values)
-  const serialized = encodeArgs(args);
-
-  // Hash with Blake2b-256
-  const hash = blake2b(serialized, { dkLen: 32 }); // 32 bytes = 256 bits
-
-  // Convert to hex string
-  const hexHash = bytesToHex(hash);
-
-  // Combine namespace and hash
-  return `${namespace}:${hexHash}`;
+  const hash = generateParamsHash(args);
+  return `${namespace}:${hash}`;
 }
 
 /**
@@ -74,9 +93,7 @@ export function generateKey(namespace: string, args: unknown[]): string {
  * @returns 64-character hex hash string
  */
 export function generateParamsHash(args: unknown[]): string {
-  const serialized = encodeArgs(args);
-  const hash = blake2b(serialized, { dkLen: 32 });
-  return bytesToHex(hash);
+  return bytesToHex(digestArgs(args));
 }
 
 /**

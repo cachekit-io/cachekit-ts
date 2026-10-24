@@ -33,11 +33,11 @@ import {
   maxEnvelopeInputSize,
 } from './serialization/envelope.js';
 import {
-  generateKey,
   generateParamsHash,
   extractNamespace,
   blake2b16Hex,
 } from './serialization/key-generator.js';
+import { AutoKeys } from './serialization/auto-keys.js';
 import {
   generateInteropKey,
   validateInteropSegment,
@@ -1267,6 +1267,7 @@ export class CacheImpl implements SecureCache {
       }
     }
 
+    const autoKeys = new AutoKeys();
     return async (...args: TArgs): Promise<TResult> => {
       // Interop arity contract, call side: the flat argument array must
       // match the declared contract exactly — a short or long call would
@@ -1292,7 +1293,7 @@ export class CacheImpl implements SecureCache {
       }
       const cacheKey = interop
         ? generateInteropKey(options.namespace, interopOperation, args)
-        : generateKey(options.namespace, args);
+        : autoKeys.key(options.namespace, args);
 
       // Check L1 with SWR. On platforms that cancel fire-and-forget work at
       // response return (Workers), SWR only runs when a per-request
