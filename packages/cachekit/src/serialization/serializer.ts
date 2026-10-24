@@ -437,7 +437,7 @@ function binary(value: object): [type: string, bytes: Uint8Array] | undefined {
  * - Convert -0 to 0
  * - Convert undefined to null
  * - Track depth to prevent stack overflow
- * - M9 Fix: Check collection size to prevent DoS via large collections
+ * - Check collection size to prevent DoS via large collections
  * - Pass Uint8Array (incl. Buffer) through as msgpack bin; reject other binary
  *   values, but hash any binary key argument (`walk.forKey`) by its bytes
  * - Count arrays, Maps, Sets, plain objects and binary values into `walk.objects`,
@@ -473,7 +473,7 @@ export function normalize(
   }
 
   if (Array.isArray(value)) {
-    // M9 Fix: Check array size
+    // Check array size
     if (value.length > maxCollectionSize) {
       throw new SerializationError(
         `Array size ${value.length} exceeds max collection size ${maxCollectionSize}`
@@ -489,7 +489,7 @@ export function normalize(
   }
 
   if (value instanceof Map) {
-    // M9 Fix: Check Map size
+    // Check Map size
     if (value.size > maxCollectionSize) {
       throw new SerializationError(
         `Map size ${value.size} exceeds max collection size ${maxCollectionSize}`
@@ -508,7 +508,7 @@ export function normalize(
   }
 
   if (value instanceof Set) {
-    // M9 Fix: Check Set size
+    // Check Set size
     if (value.size > maxCollectionSize) {
       throw new SerializationError(
         `Set size ${value.size} exceeds max collection size ${maxCollectionSize}`
@@ -548,7 +548,7 @@ export function normalize(
   const obj = value as Record<string, unknown>;
   const keys = Object.keys(obj);
 
-  // M9 Fix: Check object key count
+  // Check object key count
   if (keys.length > maxCollectionSize) {
     throw new SerializationError(
       `Object key count ${keys.length} exceeds max collection size ${maxCollectionSize}`

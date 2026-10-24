@@ -13,7 +13,7 @@ let next = POOL_SIZE;
  * Uses crypto.getRandomValues() instead of Math.random() for unpredictable timing jitter.
  * This prevents timing-based attacks where an attacker could predict cache refresh windows.
  *
- * m7 Fix: Replace Math.random() with secure PRNG for all timing-related randomness.
+ * Replaces Math.random() with secure PRNG for all timing-related randomness.
  */
 export function secureRandomFloat(): number {
   if (next === POOL_SIZE) {

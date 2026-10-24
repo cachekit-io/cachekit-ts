@@ -42,7 +42,7 @@ export interface L1Config {
 
   /**
    * Maximum concurrent SWR refreshes (default: 10)
-   * C3 FIX: Prevents SWR cascade when L2 is slow
+   * Prevents SWR cascade when L2 is slow
    */
   maxConcurrentRefreshes: number;
 

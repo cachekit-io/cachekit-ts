@@ -350,7 +350,7 @@ describe('MessagePackSerializer', () => {
     });
   });
 
-  describe('M9: DoS protection - maxCollectionSize', () => {
+  describe('DoS protection - maxCollectionSize', () => {
     it('throws SerializationError for oversized Map', () => {
       const serializer = new MessagePackSerializer({ maxCollectionSize: 100 });
       const largeMap = new Map<number, number>();

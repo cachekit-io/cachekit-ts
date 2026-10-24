@@ -69,7 +69,7 @@ export class CircuitBreaker {
   private callsInHalfOpen = 0;
   private halfOpenRound = 0; // bumped on each entry to half-open; tags probe slots
   private openedAt: number | null = null;
-  // m10 Fix: config is already readonly (set in constructor)
+  // config is already readonly (set in constructor)
 
   constructor(config: Partial<CircuitBreakerConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -123,7 +123,7 @@ export class CircuitBreaker {
     // The round this call's probe slot belongs to, or null when it took none.
     const probeRound = currentState === 'half-open' ? this.halfOpenRound : null;
     if (probeRound !== null) {
-      // M6 Fix: Use atomic slot acquisition to prevent race condition
+      // Use atomic slot acquisition to prevent race condition
       if (!this.tryAcquireHalfOpenSlot()) {
         throw new CircuitBreakerOpenError('Circuit breaker half-open limit reached');
       }

@@ -28,7 +28,7 @@ describe('RedisInvalidationChannel', () => {
     } as unknown as Redis;
   };
 
-  describe('M8: subscriber leak prevention', () => {
+  describe('subscriber leak prevention', () => {
     it('should not leak connections when start() is called multiple times', async () => {
       const mockRedis = createMockRedis();
       const channel = new RedisInvalidationChannel(mockRedis);

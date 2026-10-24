@@ -56,7 +56,7 @@ const DEFAULT_CONFIG: RetryConfig = {
  */
 export class RetryPolicy {
   private readonly config: RetryConfig;
-  // m10 Fix: config is already readonly (set in constructor)
+  // config is already readonly (set in constructor)
 
   constructor(config: Partial<RetryConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -76,7 +76,7 @@ export class RetryPolicy {
       this.config.deadline === undefined ? Infinity : Date.now() + this.config.deadline;
 
     for (let attempt = 0; attempt < this.config.maxAttempts; attempt++) {
-      // m3 Fix: Check if aborted before each attempt
+      // Check if aborted before each attempt
       if (signal?.aborted) {
         throw new DOMException('Retry aborted', 'AbortError');
       }
@@ -103,7 +103,7 @@ export class RetryPolicy {
           if (Date.now() + delay >= deadlineAt) {
             throw lastError;
           }
-          // m3 Fix: Pass signal to sleep for cancellable delays
+          // Pass signal to sleep for cancellable delays
           await this.sleep(delay, signal);
         }
       }
@@ -120,7 +120,7 @@ export class RetryPolicy {
     delay = Math.min(delay, this.config.maxDelay);
 
     // Add jitter if enabled (0.5 to 1.5 multiplier)
-    // m7 Fix: Use crypto PRNG instead of Math.random for unpredictable timing
+    // Use crypto PRNG instead of Math.random for unpredictable timing
     if (this.config.jitter) {
       delay *= RETRY_JITTER_MIN + secureRandomFloat();
     }
@@ -131,7 +131,7 @@ export class RetryPolicy {
   /**
    * Sleep for the specified duration, supporting cancellation via AbortSignal.
    *
-   * m3 Fix: Made sleep cancellable to prevent resource waste on shutdown.
+   * Made sleep cancellable to prevent resource waste on shutdown.
    */
   private sleep(ms: number, signal?: AbortSignal): Promise<void> {
     return new Promise((resolve, reject) => {

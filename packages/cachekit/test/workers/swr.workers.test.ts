@@ -6,8 +6,8 @@
  * mid-flight and left its key wedged in a permanent "refreshing" state.
  * It is now re-enabled behind a per-request binding —
  * `cache.withExecutionContext(ctx)` — that registers each refresh with the
- * platform via `ctx.waitUntil`. These tests prove the acceptance criteria
- * against real ExecutionContexts (`createExecutionContext` /
+ * platform via `ctx.waitUntil`. These tests prove, against real
+ * ExecutionContexts (`createExecutionContext` /
  * `waitOnExecutionContext` from cloudflare:test):
  *
  * - a stale L1 hit serves immediately and the refresh completes under

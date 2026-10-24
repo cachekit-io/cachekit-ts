@@ -39,7 +39,7 @@ export interface MetricsConfig {
   defaultLabels?: Record<string, string>;
   /** Custom registry (default: prom-client default registry) */
   registry?: Registry;
-  /** Error handler for async metrics errors (m5 fix) */
+  /** Error handler for async metrics errors */
   onError?: (error: Error) => void;
 }
 
@@ -138,7 +138,7 @@ export class CacheMetrics implements MetricsCollector {
 
   /**
    * Register an error handler for async metrics errors.
-   * m5 Fix: Allows applications to handle metrics errors instead of silent failures.
+   * Allows applications to handle metrics errors instead of silent failures.
    */
   onError(handler: (error: Error) => void): void {
     (this as unknown as { errorHandler: (error: Error) => void }).errorHandler = handler;
@@ -245,7 +245,7 @@ export class CacheMetrics implements MetricsCollector {
     const err = this.initError;
     if (err) {
       this.initError = null;
-      // m5 Fix: Log error instead of silently swallowing
+      // Log error instead of silently swallowing
       if (!this.invokeErrorHandler(err)) {
         logError(
           '[cachekit] metrics are enabled but failed to initialize — install the optional ' +
@@ -276,7 +276,7 @@ export class CacheMetrics implements MetricsCollector {
 
   /**
    * Handle errors from async metric operations.
-   * m5 Fix: Proper error handling instead of silent failures.
+   * Proper error handling instead of silent failures.
    */
   private handleError(error: unknown, context: string): void {
     const err = error instanceof Error ? error : new Error(String(error));
