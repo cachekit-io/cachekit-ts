@@ -38,7 +38,7 @@ export class AutoKeys {
    * equal to -0 (one key).
    */
   private readonly one = new Map<unknown, string>();
-  /** Calls with no argument or two to eight, keyed by tuple(). */
+  /** Calls with no argument or two to eight, keyed by tupleOf(). */
   private readonly many = new Map<string, string>();
 
   constructor(readonly memoising: boolean) {}
