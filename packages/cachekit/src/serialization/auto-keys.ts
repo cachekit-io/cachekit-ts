@@ -52,11 +52,13 @@ type MemoArg = string | number | boolean | null | undefined;
  * entries on request. It also empties itself one ttl, the wrap's, after its
  * first entry, so it holds an argument no longer than L1 serves a value stored
  * with that ttl, even when a removal on another instance never reaches this
- * one. The timer empties it then, though the function is not called again; and
- * a call at or past that time empties it before anything else, so while a busy
- * event loop holds the timer back, no older entry is served. A call under
- * another ttl empties it too, as a change of namespace does, and a call under a
- * ttl of 0, which never expires, stores no entry.
+ * one. A timer empties it then, though the function is not called again: late
+ * only by as long as the event loop is busy or the process is suspended (Node.js
+ * timers keep the monotonic clock, which stops while a host sleeps). A call at or
+ * past that time that comes before the timer runs empties it first, so no entry
+ * is served past its ttl. A call under another ttl empties it too, as a change of
+ * namespace does, and a call under a ttl of 0, which never expires, stores no
+ * entry.
  */
 export class AutoKeys {
   private namespace: string | undefined;
@@ -71,8 +73,8 @@ export class AutoKeys {
   private readonly many = new Map<string, string>();
   /**
    * When the memo empties itself, in Date.now() milliseconds, the clock L1
-   * expires entries by. Infinity while it is empty, and then a call reads no
-   * clock.
+   * expires entries by. Infinity while it is empty, and then a call that stores
+   * no entry reads no clock.
    */
   private until = Infinity;
   /** The ttl, in seconds, the running window was started under. */
@@ -147,11 +149,13 @@ export class AutoKeys {
     if (this.one.size + this.many.size >= MEMO_MAX_ENTRIES) this.forget();
     if (this.until === Infinity) {
       const ms = Math.min(ttlSeconds * 1000, MEMO_MAX_WINDOW_MS);
-      this.until = Date.now() + ms;
-      this.windowTtl = ttlSeconds;
       // Held weakly: a pending timer must not keep a dropped function's memo.
       const memo = new WeakRef(this);
+      // The window opens only once its timer is set, so a timer that cannot be
+      // set leaves no window without one.
       const cancel = setTimer(() => memo.deref()?.forget(), ms);
+      this.until = Date.now() + ms;
+      this.windowTtl = ttlSeconds;
       this.cancelTimer = cancel;
       timersOfCollectedMemos ??= new FinalizationRegistry((cancelTimer) => cancelTimer());
       timersOfCollectedMemos.register(this, cancel, this);

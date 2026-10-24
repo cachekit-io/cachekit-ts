@@ -387,6 +387,21 @@ describe('AutoKeys memo window', () => {
     expect(fullPath(() => keys.key(NS, [-1], true, 10))).toBe(true);
   });
 
+  it('leaves no window behind when its timer cannot be set', () => {
+    let failing = true;
+    let armed = 0;
+    const keys = new AutoKeys(() => {
+      if (failing) throw new Error('no timer');
+      armed++;
+      return () => {};
+    });
+    expect(() => keys.key(NS, [1], true, 10)).toThrow('no timer');
+    failing = false;
+    keys.key(NS, [1], true, 10);
+    // The next entry opens the window the failed one could not, timer and all.
+    expect(armed).toBe(1);
+  });
+
   it('ends a window no later than the longest delay a timer takes, about 24.8 days', () => {
     const { keys, live } = withTimers();
     const month = 30 * 24 * 3600;

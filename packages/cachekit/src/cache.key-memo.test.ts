@@ -8,6 +8,7 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
+import timers from 'node:timers';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -174,14 +175,6 @@ describe('wrap() key memo', () => {
       () => new CacheImpl({ backend: new InMemoryBackend(), metrics: false }, bareRuntime()),
       (cache) => cache.wrap(async (id: number) => ({ id }), OPTIONS),
     ],
-    [
-      'wrap where WeakRef does not exist',
-      () => {
-        vi.stubGlobal('WeakRef', undefined);
-        return createCache({ backend: new InMemoryBackend(), metrics: false });
-      },
-      (cache) => cache.wrap(async (id: number) => ({ id }), OPTIONS),
-    ],
   ])('keeps no memo: %s', async (_, build, wrapped) => {
     const cache = build();
     const memos = vi.spyOn(AutoKeys.prototype, 'key');
@@ -290,48 +283,37 @@ describe('wrap() key memo', () => {
   });
 
   it('empties the memo of a function that is not called again, one ttl after its first entry', async () => {
-    vi.useFakeTimers();
+    // Real timers, a 50 ms ttl: the memo's timer comes from node:timers, which
+    // vi.useFakeTimers() does not replace.
     const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
-    const fn = cache.wrap(async (id: number) => ({ id }), { namespace: 'a', ttl: 10 });
+    const fn = cache.wrap(async (id: number) => ({ id }), { namespace: 'a', ttl: 0.05 });
     await fn(1);
     await fn(2);
     const forget = vi.spyOn(AutoKeys.prototype, 'forget');
-    vi.advanceTimersByTime(9_999);
-    expect(forget).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1);
+    for (let waited = 0; waited < 2_000 && forget.mock.calls.length === 0; waited += 10) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     expect(forget).toHaveBeenCalledOnce();
     await cache.close();
   });
 
+  it('sets its timer through node:timers, so a global setTimeout returning a number breaks nothing', async () => {
+    vi.stubGlobal('setTimeout', () => 0); // as Jest's jsdom environment does
+    const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
+    const fn = cache.wrap(async (id: number) => ({ id }), { namespace: 'a', ttl: 60 });
+    await fn(1);
+    expect(await encodesDuring(() => fn(1))).toBe(0);
+    await cache.close();
+  });
+
   it('does not hold the process open with that timer', async () => {
-    const timeouts = vi.spyOn(globalThis, 'setTimeout');
+    const timeouts = vi.spyOn(timers, 'setTimeout');
     const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
     const fn = cache.wrap(async (id: number) => ({ id }), { namespace: 'a', ttl: 10 });
     await fn(1);
     const memoTimers = timersOf(timeouts, 10_000);
     expect(memoTimers).toHaveLength(1);
     expect(memoTimers[0]?.hasRef()).toBe(false);
-    await cache.close();
-  });
-
-  it("cancels a dropped function's timer once its memo is collected", async () => {
-    const gc = exposeGc();
-    const timeouts = vi.spyOn(globalThis, 'setTimeout');
-    const cleared = vi.spyOn(globalThis, 'clearTimeout');
-    const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
-    for (let i = 0; i < 20; i++) {
-      await cache.wrap(async (id: number) => ({ id }), { namespace: 'dropped', ttl: 60 })(i);
-    }
-    const memoTimers = new Set(timersOf(timeouts, 60_000));
-    expect(memoTimers.size).toBe(20);
-    const cancelled = () =>
-      cleared.mock.calls.filter(([timer]) => isTimeout(timer) && memoTimers.has(timer)).length;
-    // Each memo must be collected first, and its finalizer runs in a later task.
-    for (let attempt = 0; attempt < 20 && cancelled() < 20; attempt++) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      gc();
-    }
-    expect(cancelled()).toBe(20);
     await cache.close();
   });
 
@@ -358,8 +340,8 @@ describe('wrap() key memo', () => {
 
     it('so a dropped function that context holds is collected, and its timer cancelled', async () => {
       const gc = exposeGc();
-      const timeouts = vi.spyOn(globalThis, 'setTimeout');
-      const cleared = vi.spyOn(globalThis, 'clearTimeout');
+      const timeouts = vi.spyOn(timers, 'setTimeout');
+      const cleared = vi.spyOn(timers, 'clearTimeout');
       const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
       const als = new AsyncLocalStorage<{ fn?: (id: number) => Promise<{ id: number }> }>();
       await (async () => {
@@ -455,9 +437,14 @@ describe('wrap() key memo', () => {
     });
 
     describe('and drops its references to the memos of functions nobody holds', () => {
-      /** A cache with `dropped` wrapped functions nobody holds, collected, and one held. */
+      /**
+       * A cache with `dropped` wrapped functions nobody holds, collected with their
+       * timers cancelled, and one held.
+       */
       async function withCollected(dropped: number) {
         const gc = exposeGc();
+        const timeouts = vi.spyOn(timers, 'setTimeout');
+        const cleared = vi.spyOn(timers, 'clearTimeout');
         const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
         const registry: unknown = Reflect.get(cache, 'keyMemos');
         if (!(registry instanceof Set)) throw new Error('CacheImpl keeps no keyMemos set');
@@ -467,15 +454,25 @@ describe('wrap() key memo', () => {
           await cache.wrap(async (id: number) => ({ id }), { namespace: 'dropped', ttl: 60 })(i);
         }
         expect(registry.size).toBe(dropped + 1);
-        // A WeakRef target lives until the current job ends, and one collection is
-        // not bound to clear every WeakRef: collect, a bounded number of times, until
-        // only the held function's memo is left.
+        const memoTimers = new Set(timersOf(timeouts, 60_000));
+        expect(memoTimers.size).toBe(dropped);
+        // A WeakRef target lives until the current job ends, one collection is not
+        // bound to clear every WeakRef, and a finalizer runs in a later task: collect,
+        // a bounded number of times, until only the held function's memo is left and
+        // every dropped one's timer is cancelled.
         const live = () => [...registry].filter((ref) => ref instanceof WeakRef && ref.deref());
-        for (let attempt = 0; attempt < 10 && live().length > 1; attempt++) {
+        const cancelled = () =>
+          cleared.mock.calls.filter(([timer]) => isTimeout(timer) && memoTimers.has(timer)).length;
+        for (
+          let attempt = 0;
+          attempt < 20 && (live().length > 1 || cancelled() < dropped);
+          attempt++
+        ) {
           await new Promise((resolve) => setTimeout(resolve, 0));
           gc();
         }
         expect(live()).toHaveLength(1);
+        expect(cancelled()).toBe(dropped);
         return { cache, registry, held };
       }
 

@@ -13,6 +13,7 @@ import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 import { RedisInvalidationChannel } from './invalidation/redis-channel.js';
 import { CacheImpl, type CacheRuntime } from './cache-core.js';
 import { AsyncResource } from 'node:async_hooks';
+import timers from 'node:timers';
 
 /**
  * The async context the key memo's timers are set in: the one this module loaded
@@ -64,10 +65,12 @@ const nodeRuntime: CacheRuntime = {
     new EncryptionManager(config.masterKey, config.tenantId, config.previousMasterKeys),
   createInvalidationChannel: (config: InvalidationConfig) =>
     new RedisInvalidationChannel(config.redis, { channelName: config.channelName }),
+  // node:timers, not the globals: a test environment such as Jest's jsdom swaps in
+  // a setTimeout that returns a number, which has no unref().
   setUnrefTimeout: (callback, ms) => {
-    const timer = keyMemoTimerScope.runInAsyncScope(() => setTimeout(callback, ms));
+    const timer = keyMemoTimerScope.runInAsyncScope(() => timers.setTimeout(callback, ms));
     timer.unref();
-    return () => clearTimeout(timer);
+    return () => timers.clearTimeout(timer);
   },
 };
 

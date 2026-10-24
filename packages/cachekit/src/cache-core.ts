@@ -1288,17 +1288,15 @@ export class CacheImpl implements SecureCache {
 
     // A cache that encrypts keeps no plaintext argument, and with L1 off a
     // memoised key would save nothing a network call does not dwarf. A memo also
-    // needs WeakRef, to be held weakly, and the runtime's timer, to empty itself
-    // on time; without either it keeps none.
+    // needs the runtime's timer to empty itself on time; without one it keeps none.
     const autoKeys = new AutoKeys(
-      !interop && !this.encryption && this.l1 !== null && typeof WeakRef === 'function'
-        ? this.setUnrefTimeout
-        : undefined
+      !interop && !this.encryption && this.l1 !== null ? this.setUnrefTimeout : undefined
     );
     if (autoKeys.memoising) this.trackKeyMemo(autoKeys);
     return async (...args: TArgs): Promise<TResult> => {
       // First, and before keying in particular: keying puts the arguments in the
-      // key memo, which close() has emptied, and nothing empties it again. The
+      // key memo, which close() has emptied, and only a new timer, a full ttl
+      // later, would empty it again. The
       // flag is read here because calling ensureNotClosed() on every call cost an
       // L1 hit about 100 instructions, measured.
       if (this.closed) this.ensureNotClosed();
