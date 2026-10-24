@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { runInNewContext } from 'node:vm';
 import { generateKey, generateParamsHash, extractNamespace } from './key-generator.js';
+import {
+  FULL_PATH_KEYS,
+  MEMOISABLE_KEYS,
+  PINNED_NAMESPACE,
+} from '../../test/fixtures/auto-mode-keys.js';
 
 /** The key for a single binary or object argument. */
 const key = (arg: object) => generateKey('test', [arg]);
@@ -157,6 +162,22 @@ describe('generateKey', () => {
     expect(generateKey('test', args)).toBe(
       'test:0c0e00c359985743c94e25e7898c35885ee325a08553315d6f79c1f8ab39fc24'
     );
+  });
+
+  describe.each([
+    ['memoisable', MEMOISABLE_KEYS],
+    ['full-path', FULL_PATH_KEYS],
+  ])('keeps the pinned %s keys', (_, corpus) => {
+    it.each(corpus)('$name', ({ args, key }) => {
+      expect(generateKey(PINNED_NAMESPACE, [...args])).toBe(key);
+      expect(generateParamsHash([...args])).toBe(key.slice(PINNED_NAMESPACE.length + 1));
+    });
+  });
+
+  it('keeps rejecting bigint, symbol and function arguments', () => {
+    for (const arg of [1n, Symbol('s'), () => 1]) {
+      expect(() => generateKey(PINNED_NAMESPACE, [arg])).toThrow(/^Unrecognized object/);
+    }
   });
 });
 
