@@ -409,18 +409,22 @@ describe('AutoKeys memo window', () => {
   });
 
   it('leaves no window behind when its timer cannot be set', () => {
-    let failing = true;
+    let failing = false;
     let armed = 0;
     const keys = new AutoKeys(() => {
       if (failing) throw new Error('no timer');
       armed++;
       return () => {};
     });
+    // A window under the same ttl first, so what a failed one left would pass for it.
+    keys.key(NS, [1], true, TTL);
+    keys.forget();
+    failing = true;
     expect(() => keys.key(NS, [1], true, TTL)).toThrow('no timer');
     failing = false;
     keys.key(NS, [1], true, TTL);
     // The next entry opens the window the failed one could not, timer and all.
-    expect(armed).toBe(1);
+    expect(armed).toBe(2);
   });
 
   it.each([0, -1, NaN, Infinity])('keeps no entry under a ttl of %s', (ttl) => {
