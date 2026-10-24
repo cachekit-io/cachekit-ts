@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.2](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.2.1...cachekit-v0.2.2) (2026-10-24)
+
+
+### Bug Fixes
+
+* **readme:** replace the unmeasured L1 latency figure with measured ones (LAB-10638) ([#243](https://github.com/cachekit-io/cachekit-ts/issues/243)) ([78811ec](https://github.com/cachekit-io/cachekit-ts/commit/78811ec44bb2625a1de749d21668fccd9b815ef4))
+
+
+### Performance Improvements
+
+* **cachekit:** memoise wrap() keys so an L1 hit skips key generation (LAB-10664) ([#254](https://github.com/cachekit-io/cachekit-ts/issues/254)) ([959464f](https://github.com/cachekit-io/cachekit-ts/commit/959464f507119d6359374bb818fde9d126502c8a))
+
 ## [0.2.1](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.2.0...cachekit-v0.2.1) (2026-10-22)
 
 
