@@ -52,6 +52,16 @@ const encodesDuring = async (call: () => Promise<unknown>): Promise<number> => {
 
 const lastL1Key = (): unknown => lookups.mock.calls.at(-1)?.[0];
 
+/** A Node.js Timeout, which setTimeout returns there. */
+const isTimeout = (value: unknown): value is NodeJS.Timeout =>
+  typeof value === 'object' && value !== null && 'hasRef' in value;
+
+/** The timers a setTimeout spy saw set for `ms`. */
+const timersOf = (timeouts: ReturnType<typeof vi.spyOn>, ms: number): NodeJS.Timeout[] =>
+  timeouts.mock.calls.flatMap(([, delay]: unknown[], i: number) =>
+    delay === ms ? [timeouts.mock.results[i]?.value].filter(isTimeout) : []
+  );
+
 /** The Node runtime's memo timer: unref'd, so a pending one never holds the process open. */
 const unrefTimeout: UnrefTimeout = (callback, ms) => {
   const timer = setTimeout(callback, ms);
@@ -245,17 +255,12 @@ describe('wrap() key memo', () => {
     let clock = Date.now();
     vi.spyOn(Date, 'now').mockImplementation(() => clock);
     const cache = createCache({ backend: new InMemoryBackend(), metrics: false, defaultTtl: 30 });
-    const fns: [number, string, (id: number) => Promise<unknown>][] = [
+    // As a JavaScript caller can, leave ttl out of b's options.
+    const untimed = { namespace: 'b', ttl: 30 };
+    Reflect.deleteProperty(untimed, 'ttl');
+    const fns: [number, string, (id: number) => Promise<{ id: number }>][] = [
       [10, 'a', cache.wrap(async (id: number) => ({ id }), { namespace: 'a', ttl: 10 })],
-      // A JavaScript caller can leave ttl out.
-      [
-        30,
-        'b',
-        cache.wrap(async (id: number) => ({ id }), { namespace: 'b' } as {
-          namespace: string;
-          ttl: number;
-        }),
-      ],
+      [30, 'b', cache.wrap(async (id: number) => ({ id }), untimed)],
     ];
     for (const [ttl, namespace, fn] of fns) {
       const end = clock + ttl * 1000;
@@ -291,11 +296,45 @@ describe('wrap() key memo', () => {
     const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
     const fn = cache.wrap(async (id: number) => ({ id }), { namespace: 'a', ttl: 10 });
     await fn(1);
-    const memoTimers = timeouts.mock.calls.flatMap(([, ms], i) =>
-      ms === 10_000 ? [timeouts.mock.results[i]?.value as NodeJS.Timeout] : []
-    );
+    const memoTimers = timersOf(timeouts, 10_000);
     expect(memoTimers).toHaveLength(1);
     expect(memoTimers[0]?.hasRef()).toBe(false);
+    await cache.close();
+  });
+
+  it("cancels a dropped function's timer once its memo is collected", async () => {
+    setFlagsFromString('--expose-gc');
+    const gc: unknown = runInNewContext('gc');
+    if (typeof gc !== 'function') throw new Error('gc is not exposed');
+    const timeouts = vi.spyOn(globalThis, 'setTimeout');
+    const cleared = vi.spyOn(globalThis, 'clearTimeout');
+    const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
+    for (let i = 0; i < 20; i++) {
+      await cache.wrap(async (id: number) => ({ id }), { namespace: 'dropped', ttl: 60 })(i);
+    }
+    const memoTimers = new Set(timersOf(timeouts, 60_000));
+    expect(memoTimers.size).toBe(20);
+    const cancelled = () =>
+      cleared.mock.calls.filter(([timer]) => isTimeout(timer) && memoTimers.has(timer)).length;
+    // Each memo must be collected first, and its finalizer runs in a later task.
+    for (let attempt = 0; attempt < 20 && cancelled() < 20; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      gc();
+    }
+    expect(cancelled()).toBe(20);
+    await cache.close();
+  });
+
+  it('empties when the ttl its options hold changes', async () => {
+    const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
+    const options = { namespace: 'a', ttl: 60 };
+    const fn = cache.wrap(async (id: number) => ({ id }), options);
+    await fn(1);
+    expect(await encodesDuring(() => fn(1))).toBe(0);
+    options.ttl = 30;
+    // Still an L1 hit, keyed in full because the memo emptied with the change.
+    expect(await encodesDuring(() => fn(1))).toBe(1);
+    expect(await encodesDuring(() => fn(1))).toBe(0);
     await cache.close();
   });
 

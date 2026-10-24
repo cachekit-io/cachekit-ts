@@ -21,6 +21,13 @@ const MEMO_MAX_WINDOW_MS = 2 ** 31 - 1;
  */
 export type UnrefTimeout = (callback: () => void, ms: number) => () => void;
 
+/**
+ * Cancels the pending timer of a memo collected before it fired. The timer holds
+ * its memo weakly, so a function wrapped and dropped per request would otherwise
+ * leave a timer behind for up to a ttl. Built on first use, where a memo is kept.
+ */
+let timersOfCollectedMemos: FinalizationRegistry<() => void> | undefined;
+
 /** The argument types the memo takes. */
 type MemoArg = string | number | boolean | null | undefined;
 
@@ -47,8 +54,9 @@ type MemoArg = string | number | boolean | null | undefined;
  * with that ttl, even when a removal on another instance never reaches this
  * one. The timer empties it then, though the function is not called again; and
  * a call at or past that time empties it before anything else, so while a busy
- * event loop holds the timer back, no older entry is served. A call under a ttl
- * of 0, which never expires, stores no entry.
+ * event loop holds the timer back, no older entry is served. A call under
+ * another ttl empties it too, as a change of namespace does, and a call under a
+ * ttl of 0, which never expires, stores no entry.
  */
 export class AutoKeys {
   private namespace: string | undefined;
@@ -67,6 +75,8 @@ export class AutoKeys {
    * clock.
    */
   private until = Infinity;
+  /** The ttl, in seconds, the running window was started under. */
+  private windowTtl = 0;
   /** Cancels the timer that empties the memo at `until`. */
   private cancelTimer: (() => void) | undefined;
   readonly memoising: boolean;
@@ -88,7 +98,9 @@ export class AutoKeys {
       this.prefix = `${namespace}:`;
       this.forget(); // every entry holds the old prefix
     }
-    if (this.until !== Infinity && Date.now() >= this.until) this.forget();
+    if (this.until !== Infinity && (ttlSeconds !== this.windowTtl || Date.now() >= this.until)) {
+      this.forget();
+    }
     if (!this.memoising || !useMemo) return this.prefix + generateParamsHash(args);
     if (args.length === 1) {
       const arg = args[0];
@@ -117,8 +129,11 @@ export class AutoKeys {
     this.one.clear();
     this.many.clear();
     this.until = Infinity;
-    this.cancelTimer?.();
-    this.cancelTimer = undefined;
+    if (this.cancelTimer !== undefined) {
+      this.cancelTimer();
+      this.cancelTimer = undefined;
+      timersOfCollectedMemos?.unregister(this);
+    }
   }
 
   /**
@@ -133,9 +148,13 @@ export class AutoKeys {
     if (this.until === Infinity) {
       const ms = Math.min(ttlSeconds * 1000, MEMO_MAX_WINDOW_MS);
       this.until = Date.now() + ms;
+      this.windowTtl = ttlSeconds;
       // Held weakly: a pending timer must not keep a dropped function's memo.
       const memo = new WeakRef(this);
-      this.cancelTimer = setTimer(() => memo.deref()?.forget(), ms);
+      const cancel = setTimer(() => memo.deref()?.forget(), ms);
+      this.cancelTimer = cancel;
+      timersOfCollectedMemos ??= new FinalizationRegistry((cancelTimer) => cancelTimer());
+      timersOfCollectedMemos.register(this, cancel, this);
     }
     return true;
   }

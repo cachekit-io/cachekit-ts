@@ -415,24 +415,54 @@ describe('AutoKeys memo window', () => {
     expect(now).not.toHaveBeenCalled();
   });
 
-  it("lets a dropped function's memo be collected while its timer is pending", async () => {
+  it('empties when the ttl changes, as it does when the namespace changes', () => {
+    const { keys, live } = withTimers();
+    keys.key(NS, [1], true, 10);
+    expect(fullPath(() => keys.key(NS, [1], true, 5))).toBe(true);
+    expect(live().map((timer) => timer.ms)).toEqual([5_000]);
+    clock += 4_999;
+    expect(fullPath(() => keys.key(NS, [1], true, 5))).toBe(false);
+    clock += 1;
+    expect(fullPath(() => keys.key(NS, [1], true, 5))).toBe(true);
+  });
+
+  it('drops its finalizer registration whenever it empties', () => {
+    // A registration left behind would hold a spent timer for as long as the
+    // memo lives: one more for every window.
+    const unregister = vi.spyOn(FinalizationRegistry.prototype, 'unregister');
+    try {
+      const { keys } = withTimers();
+      keys.key(NS, [1], true, 10);
+      keys.forget();
+      expect(unregister).toHaveBeenCalledWith(keys);
+    } finally {
+      unregister.mockRestore();
+    }
+  });
+
+  it("lets a dropped function's memo be collected, then cancels its timer", async () => {
     let fire: () => void = () => {};
+    let cancelled = false;
     // Built and used in a function of its own, so nothing here holds it after.
     const memo = ((): WeakRef<AutoKeys> => {
       const keys = new AutoKeys((callback) => {
         fire = callback; // held, as a pending timer holds its callback
-        return () => {};
+        return () => {
+          cancelled = true;
+        };
       });
       keys.key(NS, [1], true, 10);
       return new WeakRef(keys);
     })();
-    // A WeakRef target lives until the current job ends, and one collection is not
-    // bound to clear every WeakRef: collect, a bounded number of times.
-    for (let attempt = 0; attempt < 10 && memo.deref() !== undefined; attempt++) {
+    // A WeakRef target lives until the current job ends, one collection is not
+    // bound to clear every WeakRef, and a finalizer runs in a later task: collect,
+    // a bounded number of times, until the timer is cancelled.
+    for (let attempt = 0; attempt < 10 && !cancelled; attempt++) {
       await new Promise((resolve) => setImmediate(resolve));
       collectGarbage();
     }
     expect(memo.deref()).toBeUndefined();
-    fire(); // and when the timer fires, it finds nothing to empty
+    expect(cancelled).toBe(true);
+    fire(); // a timer that fires anyway finds nothing to empty
   });
 });
