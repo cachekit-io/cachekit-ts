@@ -1295,10 +1295,10 @@ export class CacheImpl implements SecureCache {
     if (autoKeys.memoising) this.trackKeyMemo(autoKeys);
     return async (...args: TArgs): Promise<TResult> => {
       // First, and before keying in particular: keying puts the arguments in the
-      // key memo, which close() has emptied, and only a new timer, a full ttl
-      // later, would empty it again. The
-      // flag is read here because calling ensureNotClosed() on every call cost an
-      // L1 hit about 100 instructions, measured.
+      // key memo, which close() has emptied, and only the timer of a new window
+      // would empty it again. The flag is read here because calling
+      // ensureNotClosed() on every call cost an L1 hit about 100 instructions,
+      // measured.
       if (this.closed) this.ensureNotClosed();
       // Interop arity contract, call side: the flat argument array must
       // match the declared contract exactly — a short or long call would

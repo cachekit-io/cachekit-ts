@@ -12,20 +12,7 @@ import { EncryptionManager } from './encryption/manager.js';
 import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 import { RedisInvalidationChannel } from './invalidation/redis-channel.js';
 import { CacheImpl, type CacheRuntime } from './cache-core.js';
-import { AsyncResource } from 'node:async_hooks';
 import timers from 'node:timers';
-
-/**
- * The async context the key memo's timers are set in: the one this module loaded
- * in, never a caller's. Node.js gives a timer the context it was set in, so a
- * timer set inside a caller's AsyncLocalStorage context would hold that context,
- * a whole request perhaps, until it fired. A module first loaded inside such a
- * context (a lazy import in a request handler) keeps that one context for the
- * life of the process: Node.js can make a resource outside one storage's context
- * (exit()), but not outside every application's, so the README asks for the
- * package to be imported at startup.
- */
-const keyMemoTimerScope = new AsyncResource('cachekit.keyMemoTimer');
 
 /**
  * Node runtime: Redis + CachekitIO backends, NAPI bindings for the
@@ -68,7 +55,7 @@ const nodeRuntime: CacheRuntime = {
   // node:timers, not the globals: a test environment such as Jest's jsdom swaps in
   // a setTimeout that returns a number, which has no unref().
   setUnrefTimeout: (callback, ms) => {
-    const timer = keyMemoTimerScope.runInAsyncScope(() => timers.setTimeout(callback, ms));
+    const timer = timers.setTimeout(callback, ms);
     timer.unref();
     return () => timers.clearTimeout(timer);
   },

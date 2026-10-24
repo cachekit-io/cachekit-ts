@@ -11,18 +11,26 @@ import {
 } from '../../test/fixtures/auto-mode-keys.js';
 
 const NS = PINNED_NAMESPACE;
-/** An hour, in seconds: no test outside the window tests runs to the end of one. */
+/** An hour, in seconds: past the one-second cap, so a window runs the whole second. */
 const TTL = 3600;
 /** The memo's timer, for the tests that never reach the end of a window. */
 const neverFires: UnrefTimeout = () => () => {};
 
+/**
+ * Date.now() is the clock L1 expires entries by, and the memo reads it too. It
+ * stands still unless a test moves it, so a window ends only where a test says.
+ */
+let clock: number;
+let now: ReturnType<typeof vi.spyOn>;
 /** Counts full-path key generations: each one encodes the arguments once. */
 let encodes: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
+  clock = 1_700_000_000_000;
+  now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
   encodes = vi.spyOn(Encoder.prototype, 'encodeSharedRef');
 });
 afterEach(() => {
-  encodes.mockRestore();
+  vi.restoreAllMocks();
 });
 
 /** Runs `call` and reports whether it took the full key path. */
@@ -287,17 +295,6 @@ describe('AutoKeys', () => {
 });
 
 describe('AutoKeys memo window', () => {
-  // Date.now() is the clock L1 expires entries by, and the memo reads it too.
-  let clock: number;
-  let now: ReturnType<typeof vi.spyOn>;
-  beforeEach(() => {
-    clock = 1_700_000_000_000;
-    now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
-  });
-  afterEach(() => {
-    now.mockRestore();
-  });
-
   /** A memo whose timers the test fires by hand. */
   function withTimers() {
     const timers: { fire: () => void; ms: number; live: boolean }[] = [];
@@ -312,79 +309,103 @@ describe('AutoKeys memo window', () => {
   }
 
   it('serves its entries until one ttl after the first, then empties', () => {
+    const { keys, live } = withTimers();
+    keys.key(NS, [1], true, 0.5);
+    expect(live().map((timer) => timer.ms)).toEqual([500]);
+    clock += 300;
+    keys.key(NS, [1, 'x'], true, 0.5); // a later entry does not move the end
+    clock += 199;
+    expect(fullPath(() => keys.key(NS, [1], true, 0.5))).toBe(false);
+    expect(fullPath(() => keys.key(NS, [1, 'x'], true, 0.5))).toBe(false);
+    clock += 1;
+    expect(fullPath(() => keys.key(NS, [1, 'x'], true, 0.5))).toBe(true);
+    expect(fullPath(() => keys.key(NS, [1], true, 0.5))).toBe(true);
+  });
+
+  it.each([TTL, 30 * 24 * 3600])(
+    'ends a window with a timer one second after its first entry under a ttl of %s',
+    (ttl) => {
+      const { keys, live } = withTimers();
+      keys.key(NS, [1], true, ttl);
+      expect(live().map((timer) => timer.ms)).toEqual([1_000]);
+      // An entry the timer has not yet removed still serves: it has not expired.
+      clock += 1_000;
+      expect(fullPath(() => keys.key(NS, [1], true, ttl))).toBe(false);
+      live()[0].fire();
+      expect(fullPath(() => keys.key(NS, [1], true, ttl))).toBe(true);
+    }
+  );
+
+  it('empties on a call one ttl after its first entry, if its timer has not run', () => {
     const { keys } = withTimers();
     keys.key(NS, [1], true, 10);
-    clock += 6_000;
-    keys.key(NS, [1, 'x'], true, 10); // a later entry does not move the end
-    clock += 3_999;
+    clock += 9_999;
     expect(fullPath(() => keys.key(NS, [1], true, 10))).toBe(false);
-    expect(fullPath(() => keys.key(NS, [1, 'x'], true, 10))).toBe(false);
     clock += 1;
-    expect(fullPath(() => keys.key(NS, [1, 'x'], true, 10))).toBe(true);
     expect(fullPath(() => keys.key(NS, [1], true, 10))).toBe(true);
   });
 
   it('empties when its timer fires, though the function is not called again', () => {
     const { keys, live } = withTimers();
-    keys.key(NS, [1], true, 10);
-    keys.key(NS, [1, 'x'], true, 10);
-    expect(live().map((timer) => timer.ms)).toEqual([10_000]);
+    keys.key(NS, [1], true, TTL);
+    keys.key(NS, [1, 'x'], true, TTL);
+    expect(live().map((timer) => timer.ms)).toEqual([1_000]);
     live()[0].fire();
     // Still inside the window by the clock, so only the timer can have emptied it.
-    expect(fullPath(() => keys.key(NS, [1], true, 10))).toBe(true);
-    expect(fullPath(() => keys.key(NS, [1, 'x'], true, 10))).toBe(true);
+    expect(fullPath(() => keys.key(NS, [1], true, TTL))).toBe(true);
+    expect(fullPath(() => keys.key(NS, [1, 'x'], true, TTL))).toBe(true);
   });
 
   it.each<[string, (keys: AutoKeys) => unknown]>([
-    ['an object argument', (keys) => keys.key(NS, [{ id: 1 }], true, 10)],
-    ['a call that opts out', (keys) => keys.key(NS, [2], false, 10)],
-  ])('empties on any call past its end, before its timer, even one with %s', (_, call) => {
+    ['an object argument', (keys) => keys.key(NS, [{ id: 1 }], true, 0.5)],
+    ['a call that opts out', (keys) => keys.key(NS, [2], false, 0.5)],
+  ])('empties on any call past its ttl, before its timer, even one with %s', (_, call) => {
     const { keys } = withTimers();
-    keys.key(NS, [1], true, 10);
-    clock += 10_000;
+    keys.key(NS, [1], true, 0.5);
+    clock += 500;
     call(keys);
     // Back inside the old window, an entry the call left behind would serve.
-    clock -= 5_000;
-    expect(fullPath(() => keys.key(NS, [1], true, 10))).toBe(true);
+    clock -= 250;
+    expect(fullPath(() => keys.key(NS, [1], true, 0.5))).toBe(true);
   });
 
   it('runs one timer per window, and cancels it when the memo empties first', () => {
     const { keys, timers, live } = withTimers();
-    keys.key(NS, [1], true, 10);
-    keys.key(NS, [2], true, 10);
+    keys.key(NS, [1], true, 0.5);
+    keys.key(NS, [2], true, 0.5);
     expect(timers).toHaveLength(1);
     keys.forget();
     expect(live()).toHaveLength(0);
-    keys.key(NS, [1], true, 10);
-    clock += 10_000;
-    keys.key(NS, [1], true, 10); // ends the second window, and starts a third
+    keys.key(NS, [1], true, 0.5);
+    clock += 500;
+    keys.key(NS, [1], true, 0.5); // ends the second window, and starts a third
     expect(timers).toHaveLength(3);
     expect(live()).toEqual([timers[2]]);
   });
 
   it('starts a new window with the first entry after forget()', () => {
     const { keys } = withTimers();
-    keys.key(NS, [1], true, 10);
-    clock += 5_000;
+    keys.key(NS, [1], true, 0.5);
+    clock += 300;
     keys.forget();
-    clock += 1_000;
-    keys.key(NS, [1], true, 10);
-    clock += 9_999;
-    expect(fullPath(() => keys.key(NS, [1], true, 10))).toBe(false);
+    clock += 100;
+    keys.key(NS, [1], true, 0.5);
+    clock += 499;
+    expect(fullPath(() => keys.key(NS, [1], true, 0.5))).toBe(false);
     clock += 1;
-    expect(fullPath(() => keys.key(NS, [1], true, 10))).toBe(true);
+    expect(fullPath(() => keys.key(NS, [1], true, 0.5))).toBe(true);
   });
 
   it('starts a new window with the entry that empties a full memo', () => {
     const { keys, live } = withTimers();
-    for (let i = 0; i < 1024; i++) keys.key(NS, [i], true, 10);
-    clock += 5_000;
-    keys.key(NS, [-1], true, 10);
+    for (let i = 0; i < 1024; i++) keys.key(NS, [i], true, 0.5);
+    clock += 300;
+    keys.key(NS, [-1], true, 0.5);
     expect(live()).toHaveLength(1);
-    clock += 9_999;
-    expect(fullPath(() => keys.key(NS, [-1], true, 10))).toBe(false);
+    clock += 499;
+    expect(fullPath(() => keys.key(NS, [-1], true, 0.5))).toBe(false);
     clock += 1;
-    expect(fullPath(() => keys.key(NS, [-1], true, 10))).toBe(true);
+    expect(fullPath(() => keys.key(NS, [-1], true, 0.5))).toBe(true);
   });
 
   it('leaves no window behind when its timer cannot be set', () => {
@@ -395,22 +416,11 @@ describe('AutoKeys memo window', () => {
       armed++;
       return () => {};
     });
-    expect(() => keys.key(NS, [1], true, 10)).toThrow('no timer');
+    expect(() => keys.key(NS, [1], true, TTL)).toThrow('no timer');
     failing = false;
-    keys.key(NS, [1], true, 10);
+    keys.key(NS, [1], true, TTL);
     // The next entry opens the window the failed one could not, timer and all.
     expect(armed).toBe(1);
-  });
-
-  it('ends a window no later than the longest delay a timer takes, about 24.8 days', () => {
-    const { keys, live } = withTimers();
-    const month = 30 * 24 * 3600;
-    keys.key(NS, [1], true, month);
-    expect(live().map((timer) => timer.ms)).toEqual([2 ** 31 - 1]);
-    clock += 2 ** 31 - 2;
-    expect(fullPath(() => keys.key(NS, [1], true, month))).toBe(false);
-    clock += 1;
-    expect(fullPath(() => keys.key(NS, [1], true, month))).toBe(true);
   });
 
   it.each([0, -1, NaN, Infinity])('keeps no entry under a ttl of %s', (ttl) => {
@@ -432,52 +442,12 @@ describe('AutoKeys memo window', () => {
 
   it('empties when the ttl changes, as it does when the namespace changes', () => {
     const { keys, live } = withTimers();
-    keys.key(NS, [1], true, 10);
-    expect(fullPath(() => keys.key(NS, [1], true, 5))).toBe(true);
-    expect(live().map((timer) => timer.ms)).toEqual([5_000]);
-    clock += 4_999;
-    expect(fullPath(() => keys.key(NS, [1], true, 5))).toBe(false);
+    keys.key(NS, [1], true, 0.5);
+    expect(fullPath(() => keys.key(NS, [1], true, 0.25))).toBe(true);
+    expect(live().map((timer) => timer.ms)).toEqual([250]);
+    clock += 249;
+    expect(fullPath(() => keys.key(NS, [1], true, 0.25))).toBe(false);
     clock += 1;
-    expect(fullPath(() => keys.key(NS, [1], true, 5))).toBe(true);
-  });
-
-  it('drops its finalizer registration whenever it empties', () => {
-    // A registration left behind would hold a spent timer for as long as the
-    // memo lives: one more for every window.
-    const unregister = vi.spyOn(FinalizationRegistry.prototype, 'unregister');
-    try {
-      const { keys } = withTimers();
-      keys.key(NS, [1], true, 10);
-      keys.forget();
-      expect(unregister).toHaveBeenCalledWith(keys);
-    } finally {
-      unregister.mockRestore();
-    }
-  });
-
-  it("lets a dropped function's memo be collected, then cancels its timer", async () => {
-    let fire: () => void = () => {};
-    let cancelled = false;
-    // Built and used in a function of its own, so nothing here holds it after.
-    const memo = ((): WeakRef<AutoKeys> => {
-      const keys = new AutoKeys((callback) => {
-        fire = callback; // held, as a pending timer holds its callback
-        return () => {
-          cancelled = true;
-        };
-      });
-      keys.key(NS, [1], true, 10);
-      return new WeakRef(keys);
-    })();
-    // A WeakRef target lives until the current job ends, one collection is not
-    // bound to clear every WeakRef, and a finalizer runs in a later task: collect,
-    // a bounded number of times, until the timer is cancelled.
-    for (let attempt = 0; attempt < 10 && !cancelled; attempt++) {
-      await new Promise((resolve) => setImmediate(resolve));
-      collectGarbage();
-    }
-    expect(memo.deref()).toBeUndefined();
-    expect(cancelled).toBe(true);
-    fire(); // a timer that fires anyway finds nothing to empty
+    expect(fullPath(() => keys.key(NS, [1], true, 0.25))).toBe(true);
   });
 });
