@@ -2,22 +2,35 @@
 // first import in a request handler does, and calls a function wrapped there;
 // then reports whether that context outlived the request:
 //
-//   node --expose-gc first-load-context-probe.cjs <path to dist/cjs/index.js> <ttl> <wait ms>
+//   node --expose-gc first-load-context-probe.cjs <path to dist/cjs/index.js> <ttl> <wait ms> [cold]
 //
-// The entry is loaded once outside the context and its own modules (those in
-// its directory) are then dropped from the module cache, so the load inside
-// the context runs only the package's own code; its dependencies stay loaded.
+// By default the entry is loaded once outside the context and its own modules
+// (those in its directory) are then dropped from the module cache, so the load
+// inside the context runs only the package's own code; its dependencies stay
+// loaded. With `cold`, nothing is loaded beforehand, so the load inside the
+// context also runs every dependency's, the native core's included. The one
+// exception is Node.js 22, where `@noble/hashes` is preloaded: Node 22's ES
+// module loader keeps the context of any ES module first loaded inside one,
+// which is Node's behaviour, not the package's.
 // The context's store holds a 1 MiB body that the wrapped function never sees.
 // After the request, the probe collects garbage every 20 ms for up to
 // <wait ms>, stopping once the store is gone.
 const { AsyncLocalStorage } = require('node:async_hooks');
 const path = require('node:path');
 
-const [entry, ttl, wait] = process.argv.slice(2);
-const own = path.dirname(path.resolve(entry)) + path.sep;
-require(entry);
-for (const file of Object.keys(require.cache)) {
-  if (file.startsWith(own)) delete require.cache[file];
+const [entry, ttl, wait, mode] = process.argv.slice(2);
+if (mode === 'cold') {
+  if (process.versions.node.split('.')[0] === '22') {
+    for (const sub of ['@noble/hashes/blake2.js', '@noble/hashes/utils.js']) {
+      require(require.resolve(sub, { paths: [path.dirname(entry)] }));
+    }
+  }
+} else {
+  const own = path.dirname(path.resolve(entry)) + path.sep;
+  require(entry);
+  for (const file of Object.keys(require.cache)) {
+    if (file.startsWith(own)) delete require.cache[file];
+  }
 }
 
 const storage = new AsyncLocalStorage();
