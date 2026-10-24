@@ -1725,6 +1725,10 @@ export class CacheImpl implements SecureCache {
     // error)
     attempt(() => this.inflight.clear());
 
+    // Before the first await: a channel that stalls on stop must not keep the
+    // arguments the key memos hold. `closed` stops any call from adding one.
+    attempt(() => this.forgetKeyArguments());
+
     // Stop invalidation channel
     if (this.invalidationChannel) {
       try {
@@ -1752,7 +1756,6 @@ export class CacheImpl implements SecureCache {
 
     // Clear L1 (this also clears L1's internal refreshingKeys)
     attempt(() => this.l1?.clear());
-    attempt(() => this.forgetKeyArguments());
 
     // Close backend
     try {

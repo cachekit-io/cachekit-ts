@@ -77,8 +77,11 @@ const bareRuntime = (setUnrefTimeout?: UnrefTimeout): CacheRuntime => ({
   setUnrefTimeout,
 });
 
-/** A cache whose invalidation channel the test drives by hand. */
-function cacheWithChannel(options: Omit<CacheOptions, 'backend'> = {}) {
+/** A cache whose invalidation channel the test drives by hand, and which stops as `stop` does. */
+function cacheWithChannel(
+  options: Omit<CacheOptions, 'backend'> = {},
+  stop: () => Promise<void> = async () => {}
+) {
   let deliver: (event: InvalidationEvent) => void = () => {
     throw new Error('the cache never subscribed');
   };
@@ -88,7 +91,7 @@ function cacheWithChannel(options: Omit<CacheOptions, 'backend'> = {}) {
       deliver = callback;
     },
     start: async () => {},
-    stop: async () => {},
+    stop,
   };
   const runtime: CacheRuntime = {
     ...bareRuntime(unrefTimeout),
@@ -374,6 +377,20 @@ describe('wrap() key memo', () => {
       await remove(cache);
       expect(new Set(forget.mock.contexts)).toHaveProperty('size', 2);
       await cache.close();
+    });
+
+    it('on close, before it waits for the invalidation channel to stop', async () => {
+      let stopped: () => void = () => {};
+      const { cache } = cacheWithChannel(
+        {},
+        () => new Promise<void>((resolve) => (stopped = resolve))
+      );
+      await filled(cache);
+      const forget = vi.spyOn(AutoKeys.prototype, 'forget');
+      const closing = cache.close();
+      expect(new Set(forget.mock.contexts)).toHaveProperty('size', 2);
+      stopped();
+      await closing;
     });
 
     it("on another instance's invalidation event", async () => {
