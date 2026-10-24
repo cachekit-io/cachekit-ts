@@ -10,6 +10,9 @@ const MEMO_MAX_STRING_LENGTH = 256;
 /** Entries per wrapped function. A full memo is emptied, so a hit writes nothing. */
 const MEMO_MAX_ENTRIES = 1024;
 
+/** The argument types the memo takes. */
+type MemoArg = string | number | boolean | null | undefined;
+
 /**
  * The auto-mode keys of one wrapped function, `{namespace}:{hash}` exactly as
  * generateKey builds them. The `{namespace}:` prefix is the part that does not
@@ -37,7 +40,7 @@ export class AutoKeys {
    * SameValueZero: by type and value, with NaN equal to itself (kept out) and 0
    * equal to -0 (one key).
    */
-  private readonly one = new Map<unknown, string>();
+  private readonly one = new Map<MemoArg, string>();
   /** Calls with no argument or two to eight, keyed by tupleOf(). */
   private readonly many = new Map<string, string>();
 
@@ -86,8 +89,11 @@ export class AutoKeys {
   }
 }
 
-/** One argument, alone: may it key the single-argument memo? */
-function memoisable(arg: unknown): boolean {
+/**
+ * May this argument key the memo? A string past the length budget may not,
+ * although it is a MemoArg: a false result says nothing about the type.
+ */
+function memoisable(arg: unknown): arg is MemoArg {
   switch (typeof arg) {
     case 'string':
       return arg.length <= MEMO_MAX_STRING_LENGTH;

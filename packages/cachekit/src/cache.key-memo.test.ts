@@ -137,7 +137,9 @@ describe('wrap() key memo', () => {
     const fn = wrapped(cache);
     await fn(7);
     await fn(7);
-    expect((memos.mock.contexts[0] as AutoKeys).memoising).toBe(false);
+    const [memo] = memos.mock.contexts;
+    if (!(memo instanceof AutoKeys)) throw new Error('wrap() did not key through AutoKeys');
+    expect(memo.memoising).toBe(false);
     // Each call keys in full: the third, an L1 or L2 hit, still encodes.
     expect(await encodesDuring(() => fn(7))).toBeGreaterThan(0);
     await cache.close();
@@ -218,25 +220,43 @@ describe('wrap() key memo', () => {
       await cache.close();
     });
 
-    it('and drops its reference to the memo of a function nobody holds', async () => {
-      setFlagsFromString('--expose-gc');
-      const gc = runInNewContext('gc') as () => void;
-      const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
-      const registry = (cache as unknown as { keyMemos: Set<unknown> }).keyMemos;
-      const held = cache.wrap(async (id: number) => ({ id }), { namespace: 'held', ttl: 60 });
-      for (let i = 0; i < 200; i++) {
-        cache.wrap(async (id: number) => ({ id }), { namespace: 'dropped', ttl: 60 });
+    describe('and drops its references to the memos of functions nobody holds', () => {
+      /** A cache with `dropped` wrapped functions nobody holds, collected, and one held. */
+      async function withCollected(dropped: number) {
+        setFlagsFromString('--expose-gc');
+        const gc: unknown = runInNewContext('gc');
+        if (typeof gc !== 'function') throw new Error('gc is not exposed');
+        const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
+        const registry: unknown = Reflect.get(cache, 'keyMemos');
+        if (!(registry instanceof Set)) throw new Error('CacheImpl keeps no keyMemos set');
+        const held = cache.wrap(async (id: number) => ({ id }), { namespace: 'held', ttl: 60 });
+        for (let i = 0; i < dropped; i++) {
+          cache.wrap(async (id: number) => ({ id }), { namespace: 'dropped', ttl: 60 });
+        }
+        expect(registry.size).toBe(dropped + 1);
+        // WeakRef targets live until the current job ends.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        gc();
+        return { cache, registry, held };
       }
-      expect(registry.size).toBe(201);
-      // WeakRef targets live until the current job ends.
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      gc();
-      for (let i = 0; i < 60; i++) {
-        cache.wrap(async (id: number) => ({ id }), { namespace: 'dropped', ttl: 60 });
-      }
-      expect(registry.size).toBeLessThan(100);
-      await held(1);
-      await cache.close();
+
+      it('when wrap() finds the set grown', async () => {
+        const { cache, registry, held } = await withCollected(200);
+        for (let i = 0; i < 60; i++) {
+          cache.wrap(async (id: number) => ({ id }), { namespace: 'dropped', ttl: 60 });
+        }
+        expect(registry.size).toBeLessThan(100);
+        await held(1);
+        await cache.close();
+      });
+
+      it('when it forgets', async () => {
+        const { cache, registry, held } = await withCollected(20);
+        await cache.invalidate('global');
+        expect(registry.size).toBe(1);
+        await held(1);
+        await cache.close();
+      });
     });
   });
 });
