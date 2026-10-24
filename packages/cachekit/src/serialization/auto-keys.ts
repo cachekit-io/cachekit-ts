@@ -16,7 +16,7 @@ const MEMO_MAX_ENTRIES = 1024;
  * offers no way to set a timer outside every context, so the window is kept
  * short: its timer holds that context for one second at most, late only as
  * AutoKeys says. A function called again and again with the same arguments
- * keys them in full once a second.
+ * keys them in full about once a second, or once per ttl if that is shorter.
  */
 const MEMO_MAX_WINDOW_MS = 1000;
 
