@@ -13,6 +13,9 @@ import { promisify } from 'node:util';
  * until its window ends. These tests run the BUILT CommonJS entry (`pnpm build`
  * first), whose module cache lets a fresh process load the package's own
  * modules again inside a request; the ES module build compiles the same source.
+ * The cold case loads the dependencies there too, the native core included:
+ * napi-rs built with `napi4` makes a process-lifetime threadsafe function as
+ * the core registers, and that function keeps the context it was made in.
  */
 
 const run = promisify(execFile);
@@ -24,7 +27,7 @@ beforeAll(() => {
 });
 
 /** Whether the request's context could still be reached after `waitMs` of collecting. */
-async function retained(ttl: number, waitMs: number): Promise<boolean> {
+async function retained(ttl: number, waitMs: number, mode = 'warm'): Promise<boolean> {
   const { stdout } = await run(
     process.execPath,
     [
@@ -33,6 +36,7 @@ async function retained(ttl: number, waitMs: number): Promise<boolean> {
       entry,
       String(ttl),
       String(waitMs),
+      mode,
     ],
     { timeout: 20_000 }
   );
@@ -48,5 +52,9 @@ describe('the package loaded first inside a request', () => {
   it('keeps the request only until the window of the memo it filled ends', async () => {
     // A window runs one second at most.
     expect(await retained(60, 5_000)).toBe(false);
+  });
+
+  it('keeps no part of the request when its dependencies load there too', async () => {
+    expect(await retained(0, 300, 'cold')).toBe(false);
   });
 });
