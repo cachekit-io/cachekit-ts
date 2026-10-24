@@ -165,7 +165,7 @@ jobs:
           pnpm pack --out "$RUNNER_TEMP/package.tgz"
           echo "sha256=$(sha256sum "$RUNNER_TEMP/package.tgz" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: cachekit-tarball
           path: ${{ runner.temp }}/package.tgz
@@ -283,7 +283,7 @@ jobs:
           pnpm pack --out "$RUNNER_TEMP/package.tgz"
           echo "sha256=$(sha256sum "$RUNNER_TEMP/package.tgz" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: cachekit-core-wasm-tarball
           path: ${{ runner.temp }}/package.tgz
@@ -469,7 +469,7 @@ jobs:
       # 30 days, not 7: GitHub allows re-running a run for 30 days, and a
       # re-run of a publish that stopped partway needs these exact bytes (a
       # rebuild's binaries differ, and the publish job refuses them).
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: cachekit-core-ts-tarballs
           path: ${{ runner.temp }}/core-ts
