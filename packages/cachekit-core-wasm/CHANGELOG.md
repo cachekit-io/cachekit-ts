@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-core-wasm-v0.2.0...cachekit-core-wasm-v0.2.1) (2026-10-24)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate cachekit-core to 0.7.0 ([52823b0](https://github.com/cachekit-io/cachekit-ts/commit/52823b0bb76e157e3430af76a60de42835b14801))
+
 ## [0.2.0](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-core-wasm-v0.1.2...cachekit-core-wasm-v0.2.0) (2026-10-16)
 
 
