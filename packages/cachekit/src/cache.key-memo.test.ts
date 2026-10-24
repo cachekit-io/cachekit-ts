@@ -371,7 +371,7 @@ describe('wrap() key memo', () => {
       })();
       const [timer] = timersOf(timeouts, 60_000);
       expect(timer).toBeDefined();
-      const cancelled = () => cleared.mock.calls.some(([cleared]) => cleared === timer);
+      const cancelled = () => cleared.mock.calls.some(([handle]) => handle === timer);
       for (let attempt = 0; attempt < 20 && !cancelled(); attempt++) {
         await new Promise((resolve) => setTimeout(resolve, 0));
         gc();

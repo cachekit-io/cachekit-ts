@@ -18,7 +18,11 @@ import { AsyncResource } from 'node:async_hooks';
  * The async context the key memo's timers are set in: the one this module loaded
  * in, never a caller's. Node.js gives a timer the context it was set in, so a
  * timer set inside a caller's AsyncLocalStorage context would hold that context,
- * a whole request perhaps, until it fired.
+ * a whole request perhaps, until it fired. A module first loaded inside such a
+ * context (a lazy import in a request handler) keeps that one context for the
+ * life of the process: Node.js can make a resource outside one storage's context
+ * (exit()), but not outside every application's, so the README asks for the
+ * package to be imported at startup.
  */
 const keyMemoTimerScope = new AsyncResource('cachekit.keyMemoTimer');
 
