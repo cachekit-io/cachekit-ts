@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { Encoder } from '@msgpack/msgpack';
 import { AutoKeys } from './auto-keys.js';
 import { generateKey, generateParamsHash } from './key-generator.js';
@@ -25,6 +27,27 @@ const fullPath = (call: () => unknown): boolean => {
   call();
   return encodes.mock.calls.length > before;
 };
+
+/** Heap in use after full collections. */
+const heapAfterGc = (): number => {
+  setFlagsFromString('--expose-gc');
+  const gc: unknown = runInNewContext('gc');
+  if (typeof gc !== 'function') throw new Error('gc is not exposed');
+  for (let i = 0; i < 3; i++) gc();
+  return process.memoryUsage().heapUsed;
+};
+
+/**
+ * Keys eight calls, each passing a 128-character ID sliced from its own 4 MiB
+ * body, and returns once nothing but the memo can reach a body or an ID. V8
+ * holds such an ID as a slice that keeps the whole body alive.
+ */
+function keySlices(keys: AutoKeys, argsOf: (id: string, i: number) => unknown[]): void {
+  for (let i = 0; i < 8; i++) {
+    const body = `${String(i).padStart(3, '0')}:` + 'x'.repeat(4 << 20);
+    keys.key(NS, argsOf(body.slice(0, 128), i), true);
+  }
+}
 
 /** A NaN whose bits differ from the NaN literal's. */
 const payloadNaN = (): number => {
@@ -177,6 +200,23 @@ describe('AutoKeys', () => {
     keys.forget();
     expect(fullPath(() => keys.key(NS, [1], true))).toBe(true);
     expect(fullPath(() => keys.key(NS, [1, 2], true))).toBe(true);
+  });
+
+  it.each<[string, (id: string, i: number) => unknown[]]>([
+    ['one argument', (id) => [id]],
+    ['several arguments', (id, i) => [id, i]],
+  ])('keeps no larger string an argument was sliced from: %s', async (_, argsOf) => {
+    const keys = new AutoKeys(true);
+    const before = heapAfterGc();
+    keySlices(keys, argsOf);
+    encodes.mockClear(); // the spy's record of each call holds its arguments
+    await new Promise((resolve) => setImmediate(resolve));
+    // The eight bodies are 32 MiB; the eight entries are a few KiB.
+    expect(heapAfterGc() - before).toBeLessThan(4 << 20);
+    // And the entries are there, keyed by value.
+    const args = argsOf(`000:${'x'.repeat(124)}`, 0);
+    const key = generateKey(NS, args);
+    expect(fullPath(() => expect(keys.key(NS, args, true)).toBe(key))).toBe(false);
   });
 
   it('matches generateKey on random primitive tuples', () => {

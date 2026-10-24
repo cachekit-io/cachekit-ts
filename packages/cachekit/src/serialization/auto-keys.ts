@@ -29,8 +29,9 @@ type MemoArg = string | number | boolean | null | undefined;
  * different bits compare equal. Any other argument, or a call past the budget,
  * takes the full path every time.
  *
- * The memo holds those arguments in memory, so a cache that encrypts keeps
- * none, and forget() empties it whenever the cache removes entries on request.
+ * The memo holds copies of those arguments (see ownString), so a cache that
+ * encrypts keeps none, and forget() empties it whenever the cache removes
+ * entries on request.
  */
 export class AutoKeys {
   private namespace: string | undefined;
@@ -63,7 +64,7 @@ export class AutoKeys {
       if (key === undefined) {
         key = this.prefix + generateParamsHash(args);
         this.makeRoom();
-        this.one.set(arg, key);
+        this.one.set(typeof arg === 'string' ? ownString(arg) : arg, key);
       }
       return key;
     }
@@ -73,7 +74,7 @@ export class AutoKeys {
     if (key === undefined) {
       key = this.prefix + generateParamsHash(args);
       this.makeRoom();
-      this.many.set(tuple, key);
+      this.many.set(ownString(tuple), key);
     }
     return key;
   }
@@ -87,6 +88,19 @@ export class AutoKeys {
   private makeRoom(): void {
     if (this.one.size + this.many.size >= MEMO_MAX_ENTRIES) this.forget();
   }
+}
+
+/**
+ * A copy of `s` that shares no memory with it. V8 can hold a string as a slice
+ * of a larger string, or as a tree of the strings it was joined from, and keeps
+ * whatever it points into alive: a 128-character ID sliced from a 4 MiB request
+ * body keeps the whole body. Built from the code units, the copy points into
+ * nothing, so an entry costs what its own characters do.
+ */
+function ownString(s: string): string {
+  const units = new Array<number>(s.length);
+  for (let i = 0; i < s.length; i++) units[i] = s.charCodeAt(i);
+  return String.fromCharCode(...units);
 }
 
 /**
