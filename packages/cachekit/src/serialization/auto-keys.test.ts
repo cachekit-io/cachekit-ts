@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
 import { Encoder } from '@msgpack/msgpack';
-import { AutoKeys } from './auto-keys.js';
+import { AutoKeys, type UnrefTimeout } from './auto-keys.js';
 import { generateKey, generateParamsHash } from './key-generator.js';
 import {
   FULL_PATH_KEYS,
@@ -13,6 +13,8 @@ import {
 const NS = PINNED_NAMESPACE;
 /** An hour, in seconds: no test outside the window tests runs to the end of one. */
 const TTL = 3600;
+/** The memo's timer, for the tests that never reach the end of a window. */
+const neverFires: UnrefTimeout = () => () => {};
 
 /** Counts full-path key generations: each one encodes the arguments once. */
 let encodes: ReturnType<typeof vi.spyOn>;
@@ -30,12 +32,17 @@ const fullPath = (call: () => unknown): boolean => {
   return encodes.mock.calls.length > before;
 };
 
-/** Heap in use after full collections. */
-const heapAfterGc = (): number => {
+/** Runs full collections. */
+const collectGarbage = (): void => {
   setFlagsFromString('--expose-gc');
   const gc: unknown = runInNewContext('gc');
   if (typeof gc !== 'function') throw new Error('gc is not exposed');
   for (let i = 0; i < 3; i++) gc();
+};
+
+/** Heap in use after full collections. */
+const heapAfterGc = (): number => {
+  collectGarbage();
   return process.memoryUsage().heapUsed;
 };
 
@@ -62,7 +69,7 @@ describe('AutoKeys', () => {
     const corpus = [...MEMOISABLE_KEYS, ...FULL_PATH_KEYS];
     // One memo for the whole corpus: two calls that shared an entry they
     // should not would read back the wrong key on one of the passes.
-    for (const keys of [new AutoKeys(true), new AutoKeys(false)]) {
+    for (const keys of [new AutoKeys(neverFires), new AutoKeys(undefined)]) {
       for (let pass = 0; pass < 2; pass++) {
         for (const { args, key } of corpus) {
           expect(keys.key(NS, [...args], true, TTL)).toBe(key);
@@ -72,7 +79,7 @@ describe('AutoKeys', () => {
   });
 
   it('memoises every call in the memoisable corpus, and no other', () => {
-    const keys = new AutoKeys(true);
+    const keys = new AutoKeys(neverFires);
     for (const { name, args } of MEMOISABLE_KEYS) {
       keys.key(NS, [...args], true, TTL);
       expect(
@@ -90,7 +97,7 @@ describe('AutoKeys', () => {
   });
 
   it('keys 1, true and 1 as a string apart, and 0 and -0 as one', () => {
-    const keys = new AutoKeys(true);
+    const keys = new AutoKeys(neverFires);
     const one = keys.key(NS, [1], true, TTL);
     expect(keys.key(NS, [true], true, TTL)).not.toBe(one);
     expect(keys.key(NS, ['1'], true, TTL)).not.toBe(one);
@@ -103,7 +110,7 @@ describe('AutoKeys', () => {
   });
 
   it('keys every NaN in full, so NaNs with different bits keep their own keys', () => {
-    const keys = new AutoKeys(true);
+    const keys = new AutoKeys(neverFires);
     const nan = payloadNaN();
     expect(keys.key(NS, [NaN], true, TTL)).toBe(generateKey(NS, [NaN]));
     expect(keys.key(NS, [nan], true, TTL)).toBe(generateKey(NS, [nan]));
@@ -114,7 +121,7 @@ describe('AutoKeys', () => {
   });
 
   it('keeps apart strings that would run together without their lengths', () => {
-    const keys = new AutoKeys(true);
+    const keys = new AutoKeys(neverFires);
     for (const args of [
       ['a', 'sb'],
       ['as', 'b'],
@@ -128,7 +135,7 @@ describe('AutoKeys', () => {
   });
 
   it('keeps to the argument and length budget', () => {
-    const keys = new AutoKeys(true);
+    const keys = new AutoKeys(neverFires);
     const repeatIsFull = (args: unknown[]) => {
       keys.key(NS, args, true, TTL);
       return fullPath(() => keys.key(NS, args, true, TTL));
@@ -145,7 +152,7 @@ describe('AutoKeys', () => {
   });
 
   it('keys every other argument in full, and still rejects what it rejected', () => {
-    const keys = new AutoKeys(true);
+    const keys = new AutoKeys(neverFires);
     for (const arg of [{}, [], new Date(0), Object(1), Object('a'), Uint8Array.of(1)]) {
       keys.key(NS, [arg], true, TTL);
       expect(fullPath(() => keys.key(NS, [arg], true, TTL))).toBe(true);
@@ -160,7 +167,7 @@ describe('AutoKeys', () => {
   });
 
   it('holds at most 1,024 entries, and is emptied when full', () => {
-    const keys = new AutoKeys(true);
+    const keys = new AutoKeys(neverFires);
     for (let i = 0; i < 512; i++) keys.key(NS, [i], true, TTL);
     for (let i = 0; i < 512; i++) keys.key(NS, [i, 'x'], true, TTL);
     // 1,024 entries across both shapes, all still held.
@@ -174,7 +181,7 @@ describe('AutoKeys', () => {
   });
 
   it('empties the memo when the namespace changes', () => {
-    const keys = new AutoKeys(true);
+    const keys = new AutoKeys(neverFires);
     expect(keys.key('a', [1], true, TTL)).toBe(generateKey('a', [1]));
     expect(keys.key('b', [1], true, TTL)).toBe(generateKey('b', [1]));
     const a = generateKey('a', [1]);
@@ -182,7 +189,7 @@ describe('AutoKeys', () => {
   });
 
   it('neither reads nor writes the memo for a call that opts out', () => {
-    const keys = new AutoKeys(true);
+    const keys = new AutoKeys(neverFires);
     keys.key(NS, [1], false, TTL);
     expect(fullPath(() => keys.key(NS, [1], true, TTL))).toBe(true);
     expect(fullPath(() => keys.key(NS, [1], false, TTL))).toBe(true);
@@ -190,13 +197,13 @@ describe('AutoKeys', () => {
   });
 
   it('memoises nothing unless built to', () => {
-    const keys = new AutoKeys(false);
+    const keys = new AutoKeys(undefined);
     keys.key(NS, [1], true, TTL);
     expect(fullPath(() => keys.key(NS, [1], true, TTL))).toBe(true);
   });
 
   it('forgets every entry on forget()', () => {
-    const keys = new AutoKeys(true);
+    const keys = new AutoKeys(neverFires);
     keys.key(NS, [1], true, TTL);
     keys.key(NS, [1, 2], true, TTL);
     keys.forget();
@@ -208,7 +215,7 @@ describe('AutoKeys', () => {
     ['one argument', (id) => [id]],
     ['several arguments', (id, i) => [id, i]],
   ])('keeps no larger string an argument was sliced from: %s', async (_, argsOf) => {
-    const keys = new AutoKeys(true);
+    const keys = new AutoKeys(neverFires);
     const before = heapAfterGc();
     keySlices(keys, argsOf);
     encodes.mockClear(); // the spy's record of each call holds its arguments
@@ -259,7 +266,7 @@ describe('AutoKeys', () => {
     ];
     let seed = 1;
     const next = () => (seed = (seed * 48271) % 2147483647);
-    const keys = new AutoKeys(true);
+    const keys = new AutoKeys(neverFires);
     for (let i = 0; i < 5_000; i++) {
       const args = Array.from({ length: next() % 5 }, () => pool[next() % pool.length]);
       expect(keys.key(NS, args, true, TTL)).toBe(generateKey(NS, args));
@@ -267,7 +274,7 @@ describe('AutoKeys', () => {
   });
 
   it('keys a namespace that is not a string as generateKey does, on every call', () => {
-    const keys = new AutoKeys(true);
+    const keys = new AutoKeys(neverFires);
     const hash = generateParamsHash([1]);
     expect(keys.key(42 as unknown as string, [1], true, TTL)).toBe(`42:${hash}`);
     expect(keys.key(undefined as unknown as string, [1], true, TTL)).toBe(`undefined:${hash}`);
@@ -291,8 +298,21 @@ describe('AutoKeys memo window', () => {
     now.mockRestore();
   });
 
+  /** A memo whose timers the test fires by hand. */
+  function withTimers() {
+    const timers: { fire: () => void; ms: number; live: boolean }[] = [];
+    const keys = new AutoKeys((callback, ms) => {
+      const timer = { fire: callback, ms, live: true };
+      timers.push(timer);
+      return () => {
+        timer.live = false;
+      };
+    });
+    return { keys, timers, live: () => timers.filter((timer) => timer.live) };
+  }
+
   it('serves its entries until one ttl after the first, then empties', () => {
-    const keys = new AutoKeys(true);
+    const { keys } = withTimers();
     keys.key(NS, [1], true, 10);
     clock += 6_000;
     keys.key(NS, [1, 'x'], true, 10); // a later entry does not move the end
@@ -304,11 +324,22 @@ describe('AutoKeys memo window', () => {
     expect(fullPath(() => keys.key(NS, [1], true, 10))).toBe(true);
   });
 
+  it('empties when its timer fires, though the function is not called again', () => {
+    const { keys, live } = withTimers();
+    keys.key(NS, [1], true, 10);
+    keys.key(NS, [1, 'x'], true, 10);
+    expect(live().map((timer) => timer.ms)).toEqual([10_000]);
+    live()[0].fire();
+    // Still inside the window by the clock, so only the timer can have emptied it.
+    expect(fullPath(() => keys.key(NS, [1], true, 10))).toBe(true);
+    expect(fullPath(() => keys.key(NS, [1, 'x'], true, 10))).toBe(true);
+  });
+
   it.each<[string, (keys: AutoKeys) => unknown]>([
     ['an object argument', (keys) => keys.key(NS, [{ id: 1 }], true, 10)],
     ['a call that opts out', (keys) => keys.key(NS, [2], false, 10)],
-  ])('empties on any call past its end, even one with %s', (_, call) => {
-    const keys = new AutoKeys(true);
+  ])('empties on any call past its end, before its timer, even one with %s', (_, call) => {
+    const { keys } = withTimers();
     keys.key(NS, [1], true, 10);
     clock += 10_000;
     call(keys);
@@ -317,8 +348,22 @@ describe('AutoKeys memo window', () => {
     expect(fullPath(() => keys.key(NS, [1], true, 10))).toBe(true);
   });
 
+  it('runs one timer per window, and cancels it when the memo empties first', () => {
+    const { keys, timers, live } = withTimers();
+    keys.key(NS, [1], true, 10);
+    keys.key(NS, [2], true, 10);
+    expect(timers).toHaveLength(1);
+    keys.forget();
+    expect(live()).toHaveLength(0);
+    keys.key(NS, [1], true, 10);
+    clock += 10_000;
+    keys.key(NS, [1], true, 10); // ends the second window, and starts a third
+    expect(timers).toHaveLength(3);
+    expect(live()).toEqual([timers[2]]);
+  });
+
   it('starts a new window with the first entry after forget()', () => {
-    const keys = new AutoKeys(true);
+    const { keys } = withTimers();
     keys.key(NS, [1], true, 10);
     clock += 5_000;
     keys.forget();
@@ -331,31 +376,63 @@ describe('AutoKeys memo window', () => {
   });
 
   it('starts a new window with the entry that empties a full memo', () => {
-    const keys = new AutoKeys(true);
+    const { keys, live } = withTimers();
     for (let i = 0; i < 1024; i++) keys.key(NS, [i], true, 10);
     clock += 5_000;
     keys.key(NS, [-1], true, 10);
+    expect(live()).toHaveLength(1);
     clock += 9_999;
     expect(fullPath(() => keys.key(NS, [-1], true, 10))).toBe(false);
     clock += 1;
     expect(fullPath(() => keys.key(NS, [-1], true, 10))).toBe(true);
   });
 
-  it('keeps its entries under a ttl of 0, which never expires, and reads no clock', () => {
-    const keys = new AutoKeys(true);
-    keys.key(NS, [1], true, 0);
-    keys.key(NS, [1, 2], true, 0);
-    clock += 10 ** 12;
-    expect(fullPath(() => keys.key(NS, [1], true, 0))).toBe(false);
-    expect(fullPath(() => keys.key(NS, [1, 2], true, 0))).toBe(false);
-    expect(now).not.toHaveBeenCalled();
+  it('ends a window no later than the longest delay a timer takes, about 24.8 days', () => {
+    const { keys, live } = withTimers();
+    const month = 30 * 24 * 3600;
+    keys.key(NS, [1], true, month);
+    expect(live().map((timer) => timer.ms)).toEqual([2 ** 31 - 1]);
+    clock += 2 ** 31 - 2;
+    expect(fullPath(() => keys.key(NS, [1], true, month))).toBe(false);
+    clock += 1;
+    expect(fullPath(() => keys.key(NS, [1], true, month))).toBe(true);
   });
 
-  it.each([NaN, -1, Infinity])('memoises nothing under a ttl of %s', (ttl) => {
-    const keys = new AutoKeys(true);
+  it.each([0, -1, NaN, Infinity])('keeps no entry under a ttl of %s', (ttl) => {
+    const { keys, timers } = withTimers();
     for (const args of [[1], [1, 2]]) {
       keys.key(NS, args, true, ttl);
       expect(fullPath(() => keys.key(NS, args, true, ttl))).toBe(true);
     }
+    expect(timers).toHaveLength(0);
+  });
+
+  it('reads no clock while it is empty', () => {
+    const { keys } = withTimers();
+    keys.key(NS, [{ id: 1 }], true, 10);
+    keys.key(NS, [1], false, 10);
+    keys.key(NS, [1], true, 0);
+    expect(now).not.toHaveBeenCalled();
+  });
+
+  it("lets a dropped function's memo be collected while its timer is pending", async () => {
+    let fire: () => void = () => {};
+    // Built and used in a function of its own, so nothing here holds it after.
+    const memo = ((): WeakRef<AutoKeys> => {
+      const keys = new AutoKeys((callback) => {
+        fire = callback; // held, as a pending timer holds its callback
+        return () => {};
+      });
+      keys.key(NS, [1], true, 10);
+      return new WeakRef(keys);
+    })();
+    // A WeakRef target lives until the current job ends, and one collection is not
+    // bound to clear every WeakRef: collect, a bounded number of times.
+    for (let attempt = 0; attempt < 10 && memo.deref() !== undefined; attempt++) {
+      await new Promise((resolve) => setImmediate(resolve));
+      collectGarbage();
+    }
+    expect(memo.deref()).toBeUndefined();
+    fire(); // and when the timer fires, it finds nothing to empty
   });
 });

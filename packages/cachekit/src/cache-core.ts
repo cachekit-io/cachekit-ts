@@ -37,7 +37,7 @@ import {
   extractNamespace,
   blake2b16Hex,
 } from './serialization/key-generator.js';
-import { AutoKeys } from './serialization/auto-keys.js';
+import { AutoKeys, type UnrefTimeout } from './serialization/auto-keys.js';
 import {
   generateInteropKey,
   validateInteropSegment,
@@ -233,6 +233,14 @@ export interface CacheRuntime {
    * wedging. Unset on Node, where fire-and-forget is safe.
    */
   swrRequiresWaitUntil?: boolean;
+  /**
+   * Run `callback` once, `ms` milliseconds from now, without holding the
+   * process open, and return a function that cancels it. A wrapped function's
+   * key memo needs one to empty itself on time (see AutoKeys), so a runtime
+   * without one keeps no memo: Workers, which can cancel a timer when the
+   * request that set it ends.
+   */
+  setUnrefTimeout?: UnrefTimeout;
 }
 
 /**
@@ -277,6 +285,7 @@ export class CacheImpl implements SecureCache {
   // l1Telemetry hook below).
   private readonly telemetry = { l1Hits: 0, l2Hits: 0, misses: 0 };
   private readonly swrRequiresWaitUntil: boolean;
+  private readonly setUnrefTimeout: UnrefTimeout | undefined;
   /**
    * Mirrors ReliabilityExecutor's own default. Read directly by the
    * decode/encode paths that run outside the executor (L1 decrypt, L2 decode,
@@ -386,6 +395,7 @@ export class CacheImpl implements SecureCache {
     // Initialize background refresh manager (SWR)
     this.backgroundRefresh = new BackgroundRefreshManager();
     this.swrRequiresWaitUntil = runtime.swrRequiresWaitUntil ?? false;
+    this.setUnrefTimeout = runtime.setUnrefTimeout;
 
     // Initialize ByteStorage (LZ4 compression + xxHash3-64 integrity). The
     // default honors the backend's advertised preference, else
@@ -1277,11 +1287,13 @@ export class CacheImpl implements SecureCache {
     }
 
     // A cache that encrypts keeps no plaintext argument, and with L1 off a
-    // memoised key would save nothing a network call does not dwarf. Without
-    // WeakRef (Workers before the 2025-05-05 compatibility date, or with
-    // disable_weak_ref) the cache cannot hold a memo weakly, so it keeps none.
+    // memoised key would save nothing a network call does not dwarf. A memo also
+    // needs WeakRef, to be held weakly, and the runtime's timer, to empty itself
+    // on time; without either it keeps none.
     const autoKeys = new AutoKeys(
       !interop && !this.encryption && this.l1 !== null && typeof WeakRef === 'function'
+        ? this.setUnrefTimeout
+        : undefined
     );
     if (autoKeys.memoising) this.trackKeyMemo(autoKeys);
     return async (...args: TArgs): Promise<TResult> => {

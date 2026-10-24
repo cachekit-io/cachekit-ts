@@ -14,7 +14,7 @@ import { Encoder } from '@msgpack/msgpack';
 import { createCache } from './cache.js';
 import { CacheImpl, type CacheRuntime, type InvalidationChannelLike } from './cache-core.js';
 import { L1Cache } from './l1/lru-cache.js';
-import { AutoKeys } from './serialization/auto-keys.js';
+import { AutoKeys, type UnrefTimeout } from './serialization/auto-keys.js';
 import { generateKey } from './serialization/key-generator.js';
 import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 import { EncryptionManager } from './encryption/manager.js';
@@ -40,6 +40,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 /** MessagePack encodes during `call`: a key generation, or a value written. */
@@ -50,6 +51,21 @@ const encodesDuring = async (call: () => Promise<unknown>): Promise<number> => {
 };
 
 const lastL1Key = (): unknown => lookups.mock.calls.at(-1)?.[0];
+
+/** The Node runtime's memo timer: unref'd, so a pending one never holds the process open. */
+const unrefTimeout: UnrefTimeout = (callback, ms) => {
+  const timer = setTimeout(callback, ms);
+  timer.unref();
+  return () => clearTimeout(timer);
+};
+
+/** A runtime with no invalidation channel and, unless given one, no memo timer. */
+const bareRuntime = (setUnrefTimeout?: UnrefTimeout): CacheRuntime => ({
+  resolveBackend: () => new InMemoryBackend(),
+  createByteStorage: () => new ByteStorage(),
+  createEncryption: (config) => new EncryptionManager(config.masterKey, config.tenantId),
+  setUnrefTimeout,
+});
 
 /** A cache whose invalidation channel the test drives by hand. */
 function cacheWithChannel(options: Omit<CacheOptions, 'backend'> = {}) {
@@ -65,9 +81,7 @@ function cacheWithChannel(options: Omit<CacheOptions, 'backend'> = {}) {
     stop: async () => {},
   };
   const runtime: CacheRuntime = {
-    resolveBackend: () => new InMemoryBackend(),
-    createByteStorage: () => new ByteStorage(),
-    createEncryption: (config) => new EncryptionManager(config.masterKey, config.tenantId),
+    ...bareRuntime(unrefTimeout),
     createInvalidationChannel: () => channel,
   };
   const cache = new CacheImpl(
@@ -133,7 +147,12 @@ describe('wrap() key memo', () => {
       (cache) => cache.wrap(async (id: number) => ({ id }), OPTIONS),
     ],
     [
-      // Workers before the 2025-05-05 compatibility date, or with disable_weak_ref
+      // Workers, which can cancel a timer when the request that set it ends
+      'wrap on a runtime without an unref timer',
+      () => new CacheImpl({ backend: new InMemoryBackend(), metrics: false }, bareRuntime()),
+      (cache) => cache.wrap(async (id: number) => ({ id }), OPTIONS),
+    ],
+    [
       'wrap where WeakRef does not exist',
       () => {
         vi.stubGlobal('WeakRef', undefined);
@@ -182,6 +201,15 @@ describe('wrap() key memo', () => {
       expect(keyed).not.toHaveBeenCalled();
       await closing;
     });
+  });
+
+  it('keeps no entry for a wrap whose ttl is 0, which never expires', async () => {
+    const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
+    const fn = cache.wrap(async (id: number) => ({ id }), { namespace: 'svc:getThing', ttl: 0 });
+    await fn(7);
+    // An L1 hit, still keyed in full.
+    expect(await encodesDuring(() => fn(7))).toBe(1);
+    await cache.close();
   });
 
   it('keeps no memo for a call that skips L1', async () => {
@@ -244,6 +272,33 @@ describe('wrap() key memo', () => {
     await cache.close();
   });
 
+  it('empties the memo of a function that is not called again, one ttl after its first entry', async () => {
+    vi.useFakeTimers();
+    const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
+    const fn = cache.wrap(async (id: number) => ({ id }), { namespace: 'a', ttl: 10 });
+    await fn(1);
+    await fn(2);
+    const forget = vi.spyOn(AutoKeys.prototype, 'forget');
+    vi.advanceTimersByTime(9_999);
+    expect(forget).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(forget).toHaveBeenCalledOnce();
+    await cache.close();
+  });
+
+  it('does not hold the process open with that timer', async () => {
+    const timeouts = vi.spyOn(globalThis, 'setTimeout');
+    const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
+    const fn = cache.wrap(async (id: number) => ({ id }), { namespace: 'a', ttl: 10 });
+    await fn(1);
+    const memoTimers = timeouts.mock.calls.flatMap(([, ms], i) =>
+      ms === 10_000 ? [timeouts.mock.results[i]?.value as NodeJS.Timeout] : []
+    );
+    expect(memoTimers).toHaveLength(1);
+    expect(memoTimers[0]?.hasRef()).toBe(false);
+    await cache.close();
+  });
+
   describe('forgets the arguments it holds', () => {
     /** Two memoised functions in two namespaces, each with an entry. */
     async function filled(cache: SecureCache) {
@@ -301,7 +356,8 @@ describe('wrap() key memo', () => {
         if (!(registry instanceof Set)) throw new Error('CacheImpl keeps no keyMemos set');
         const held = cache.wrap(async (id: number) => ({ id }), { namespace: 'held', ttl: 60 });
         for (let i = 0; i < dropped; i++) {
-          cache.wrap(async (id: number) => ({ id }), { namespace: 'dropped', ttl: 60 });
+          // Called once, so a timer to empty its memo is pending when it is dropped.
+          await cache.wrap(async (id: number) => ({ id }), { namespace: 'dropped', ttl: 60 })(i);
         }
         expect(registry.size).toBe(dropped + 1);
         // A WeakRef target lives until the current job ends, and one collection is

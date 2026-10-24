@@ -51,6 +51,11 @@ const nodeRuntime: CacheRuntime = {
     new EncryptionManager(config.masterKey, config.tenantId, config.previousMasterKeys),
   createInvalidationChannel: (config: InvalidationConfig) =>
     new RedisInvalidationChannel(config.redis, { channelName: config.channelName }),
+  setUnrefTimeout: (callback, ms) => {
+    const timer = setTimeout(callback, ms);
+    timer.unref();
+    return () => clearTimeout(timer);
+  },
 };
 
 /**

@@ -9,6 +9,17 @@ const MEMO_MAX_ARGS = 8;
 const MEMO_MAX_STRING_LENGTH = 256;
 /** Entries per wrapped function. A full memo is emptied, so a hit writes nothing. */
 const MEMO_MAX_ENTRIES = 1024;
+/**
+ * The longest delay setTimeout takes, 2^31 - 1 ms (about 24.8 days); it runs a
+ * longer one at once. A memo under a longer ttl empties this soon, never later.
+ */
+const MEMO_MAX_WINDOW_MS = 2 ** 31 - 1;
+
+/**
+ * Runs `callback` once, `ms` milliseconds from now, without holding the process
+ * open, and returns a function that cancels it.
+ */
+export type UnrefTimeout = (callback: () => void, ms: number) => () => void;
 
 /** The argument types the memo takes. */
 type MemoArg = string | number | boolean | null | undefined;
@@ -19,7 +30,7 @@ type MemoArg = string | number | boolean | null | undefined;
  * depend on the arguments, so it is built once and rebuilt only when the
  * namespace changes: wrap() reads the namespace from its options on every call.
  *
- * When `memoising`, it also remembers the key of each call whose every argument
+ * Given a timer, it also remembers the key of each call whose every argument
  * is a string, number, boolean, null or undefined, within the budget above, so
  * a repeat call skips normalisation, MessagePack and BLAKE2b. Two calls share
  * an entry only when their arguments have the same types and values, and then
@@ -32,13 +43,12 @@ type MemoArg = string | number | boolean | null | undefined;
  * The memo holds copies of those arguments (see ownString), so a cache that
  * encrypts keeps none, and forget() empties it whenever the cache removes
  * entries on request. It also empties itself one ttl, the wrap's, after its
- * first entry: the first call at or past that time empties it before anything
- * else, whatever the call passes. So it serves a key no longer than L1 serves a
- * value stored with that ttl, even when a removal on another instance never
- * reaches this one. Like L1's expiry, this happens on a call, not on a timer,
- * so a function that is not called again keeps its entries until it is
- * garbage-collected or forget() runs. Under a ttl of 0, which never expires,
- * only forget() and a full memo empty it.
+ * first entry, so it holds an argument no longer than L1 serves a value stored
+ * with that ttl, even when a removal on another instance never reaches this
+ * one. The timer empties it then, though the function is not called again; and
+ * a call at or past that time empties it before anything else, so while a busy
+ * event loop holds the timer back, no older entry is served. A call under a ttl
+ * of 0, which never expires, stores no entry.
  */
 export class AutoKeys {
   private namespace: string | undefined;
@@ -53,12 +63,18 @@ export class AutoKeys {
   private readonly many = new Map<string, string>();
   /**
    * When the memo empties itself, in Date.now() milliseconds, the clock L1
-   * expires entries by. Infinity while it is empty or its ttl is 0, and then a
-   * call reads no clock.
+   * expires entries by. Infinity while it is empty, and then a call reads no
+   * clock.
    */
   private until = Infinity;
+  /** Cancels the timer that empties the memo at `until`. */
+  private cancelTimer: (() => void) | undefined;
+  readonly memoising: boolean;
 
-  constructor(readonly memoising: boolean) {}
+  /** Without a timer to empty it on time, it keeps no memo. */
+  constructor(private readonly setTimer: UnrefTimeout | undefined) {
+    this.memoising = setTimer !== undefined;
+  }
 
   /**
    * With `useMemo` false the call is keyed in full and nothing of it is kept.
@@ -101,17 +117,26 @@ export class AutoKeys {
     this.one.clear();
     this.many.clear();
     this.until = Infinity;
+    this.cancelTimer?.();
+    this.cancelTimer = undefined;
   }
 
   /**
-   * Makes room for one more entry, emptying a full memo, and starts the window
-   * if none is running. False for a ttl that set() rejects (negative, NaN or
-   * infinite), and then the entry is not stored.
+   * Makes room for one more entry, emptying a full memo, and starts a window if
+   * none is running. False when the entry must not be stored: a ttl of 0 never
+   * expires, and set() rejects a negative, NaN or infinite one.
    */
   private admit(ttlSeconds: number): boolean {
-    if (!Number.isFinite(ttlSeconds) || ttlSeconds < 0) return false;
+    const setTimer = this.setTimer;
+    if (setTimer === undefined || !Number.isFinite(ttlSeconds) || ttlSeconds <= 0) return false;
     if (this.one.size + this.many.size >= MEMO_MAX_ENTRIES) this.forget();
-    if (this.until === Infinity && ttlSeconds > 0) this.until = Date.now() + ttlSeconds * 1000;
+    if (this.until === Infinity) {
+      const ms = Math.min(ttlSeconds * 1000, MEMO_MAX_WINDOW_MS);
+      this.until = Date.now() + ms;
+      // Held weakly: a pending timer must not keep a dropped function's memo.
+      const memo = new WeakRef(this);
+      this.cancelTimer = setTimer(() => memo.deref()?.forget(), ms);
+    }
     return true;
   }
 }
