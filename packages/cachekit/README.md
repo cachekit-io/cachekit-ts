@@ -884,18 +884,19 @@ What one call costs in the client, on an in-memory backend, so no figure include
 
 | Operation                        |   100 B |  10 KB |
 | :------------------------------- | ------: | -----: |
-| `wrap()` call, L1 hit            |  7.2 µs | 6.4 µs |
-| `wrap()` call, L1 hit, encrypted | 18.3 µs | 158 µs |
-| `get`, L2 hit                    |  5.9 µs | 143 µs |
-| `get`, L2 hit, encrypted         | 12.1 µs | 151 µs |
-| `set`                            |  7.1 µs | 190 µs |
-| Key generation (`generateKey`)   |  6.2 µs |      — |
+| `wrap()` call, L1 hit            |  560 ns | 400 ns |
+| `wrap()` call, L1 hit, encrypted | 16.2 µs | 161 µs |
+| `get`, L2 hit                    |  5.9 µs | 146 µs |
+| `get`, L2 hit, encrypted         | 12.2 µs | 154 µs |
+| `set`                            |  7.2 µs | 188 µs |
+| Key generation (`generateKey`)   |  5.3 µs |      — |
 
-- **`wrap()` L1 hit**: key generation, then the L1 lookup, which returns the stored object as it is. Key generation encodes the arguments and hashes them with BLAKE2b, and is most of the cost, so the value's size barely matters.
-- **Encrypted L1 hit**: L1 holds the same ciphertext as L2, so every hit also decrypts, verifies the AAD and decodes the value. That cost grows with the value.
+- **`wrap()` L1 hit**: the call's key, then the L1 lookup, which returns the stored object as it is, so the value's size barely matters. A wrapped function remembers the key of each call whose arguments are all strings, numbers, booleans, `null` or `undefined`, so a repeat call does not generate it again. It remembers a call only if it has at most 8 arguments, no `NaN`, and strings whose `length` adds up to 256 or less. Every other call generates its key, which adds about the cost of the key generation row: an object, array, `Date`, `Map`, `Set` or binary argument, a call past those limits, a call with `skipL1`, and every call on a cache that encrypts or has L1 off.
+- **Key memo**: a wrapped function remembers at most 1,024 keys and starts again when full: about 160 KiB when each call passes one number, and at most about 1.2 MiB. It holds the arguments as well, so a cache that encrypts keeps no memo, and `delete()`, `invalidate()`, an invalidation event from another instance and `close()` empty every memo of the cache.
+- **Encrypted L1 hit**: L1 holds the same ciphertext as L2, so every hit also generates the key, decrypts, verifies the AAD and decodes the value. That cost grows with the value.
 - **L2 hit and `set`**: L1 is off, so each call reads or writes the backend and decodes or encodes the value. A real backend adds its round trip, which for Redis or cachekit.io is a network call.
 
-To print this table for your own machine, run `pnpm install` and `pnpm build`, then `node packages/cachekit/bench/readme.mjs`, from a clone of the repository, or run the **Bench** workflow from its Actions tab. Two runs on this CPU model agreed within about 3%. Hosted runners also come with other CPU models (an EPYC 9V74 run took 72-84% as long), and other machines give other figures.
+To print this table for your own machine, run `pnpm install` and `pnpm build`, then `node packages/cachekit/bench/readme.mjs`, from a clone of the repository, or run the **Bench** workflow from its Actions tab. Two runs on this CPU model agreed within about 4%. Hosted runners also come with other CPU models (an EPYC 9V45 run took 49-70% as long), and other machines give other figures.
 
 ## Requirements
 
