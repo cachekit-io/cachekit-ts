@@ -14,9 +14,10 @@ const MEMO_MAX_ENTRIES = 1024;
  * that ends it, and Node.js keeps the async context a timer was set in until it
  * fires: the caller's AsyncLocalStorage stores, a whole request perhaps. Node.js
  * offers no way to set a timer outside every context, so the window is kept
- * short: its timer holds that context for one second at most, late only as
- * AutoKeys says. A function called again and again with the same arguments
- * keys them in full once a second.
+ * short: its timer is set to release that context within one second, though
+ * it can run late (see AutoKeys). A function called again and again with the
+ * same arguments keys them in full about once a second, or once per ttl if
+ * that is shorter.
  */
 const MEMO_MAX_WINDOW_MS = 1000;
 
@@ -49,15 +50,16 @@ type MemoArg = string | number | boolean | null | undefined;
  * encrypts keeps none, and forget() empties it whenever the cache removes
  * entries on request. A timer also empties it one ttl, the wrap's, after its
  * first entry, or one second after it if that is sooner (see
- * MEMO_MAX_WINDOW_MS), though the function is not called again; so it holds an
- * argument no longer than L1 serves a value stored with that ttl, even when a
- * removal on another instance never reaches this one. The timer runs late only
- * by as long as the event loop is busy or the process is suspended (Node.js
- * timers keep the monotonic clock, which stops while a host sleeps), and a call
- * that comes one ttl or more after the first entry, before the timer has run,
+ * MEMO_MAX_WINDOW_MS), though the function is not called again; so it is set
+ * to drop an argument no later than L1 stops serving a value stored with that
+ * ttl, even when a removal on another instance never reaches this one. The
+ * timer can run late, for example when the event loop is busy or the process
+ * is suspended (Node.js timers keep the monotonic clock, which stops while a
+ * host sleeps), and the memo keeps its arguments until it runs. A call that
+ * comes one ttl or more after the first entry, before the timer has run,
  * empties the memo first, so no entry is served past its ttl. A call under
- * another ttl empties it too, as a change of namespace does, and a call under a
- * ttl of 0, which never expires, stores no entry.
+ * another ttl empties it too, as a change of namespace does, and a call under
+ * a ttl of 0, which never expires, stores no entry.
  */
 export class AutoKeys {
   private namespace: string | undefined;
