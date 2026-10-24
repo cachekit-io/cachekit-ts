@@ -12,6 +12,15 @@ import { EncryptionManager } from './encryption/manager.js';
 import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 import { RedisInvalidationChannel } from './invalidation/redis-channel.js';
 import { CacheImpl, type CacheRuntime } from './cache-core.js';
+import { AsyncResource } from 'node:async_hooks';
+
+/**
+ * The async context the key memo's timers are set in: the one this module loaded
+ * in, never a caller's. Node.js gives a timer the context it was set in, so a
+ * timer set inside a caller's AsyncLocalStorage context would hold that context,
+ * a whole request perhaps, until it fired.
+ */
+const keyMemoTimerScope = new AsyncResource('cachekit.keyMemoTimer');
 
 /**
  * Node runtime: Redis + CachekitIO backends, NAPI bindings for the
@@ -52,7 +61,7 @@ const nodeRuntime: CacheRuntime = {
   createInvalidationChannel: (config: InvalidationConfig) =>
     new RedisInvalidationChannel(config.redis, { channelName: config.channelName }),
   setUnrefTimeout: (callback, ms) => {
-    const timer = setTimeout(callback, ms);
+    const timer = keyMemoTimerScope.runInAsyncScope(() => setTimeout(callback, ms));
     timer.unref();
     return () => clearTimeout(timer);
   },

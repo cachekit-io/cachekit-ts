@@ -6,6 +6,7 @@
  * memo; and every removal on request empties every memo of the cache.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
@@ -51,6 +52,14 @@ const encodesDuring = async (call: () => Promise<unknown>): Promise<number> => {
 };
 
 const lastL1Key = (): unknown => lookups.mock.calls.at(-1)?.[0];
+
+/** V8's gc(), for the tests of what can be collected. */
+function exposeGc(): () => void {
+  setFlagsFromString('--expose-gc');
+  const gc: unknown = runInNewContext('gc');
+  if (typeof gc !== 'function') throw new Error('gc is not exposed');
+  return () => gc();
+}
 
 /** A Node.js Timeout, which setTimeout returns there. */
 const isTimeout = (value: unknown): value is NodeJS.Timeout =>
@@ -306,9 +315,7 @@ describe('wrap() key memo', () => {
   });
 
   it("cancels a dropped function's timer once its memo is collected", async () => {
-    setFlagsFromString('--expose-gc');
-    const gc: unknown = runInNewContext('gc');
-    if (typeof gc !== 'function') throw new Error('gc is not exposed');
+    const gc = exposeGc();
     const timeouts = vi.spyOn(globalThis, 'setTimeout');
     const cleared = vi.spyOn(globalThis, 'clearTimeout');
     const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
@@ -326,6 +333,52 @@ describe('wrap() key memo', () => {
     }
     expect(cancelled()).toBe(20);
     await cache.close();
+  });
+
+  describe("sets that timer outside the caller's AsyncLocalStorage context", () => {
+    it('so a pending timer keeps no request alive', async () => {
+      const gc = exposeGc();
+      const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
+      const fn = cache.wrap(async (id: number) => ({ id }), { namespace: 'a', ttl: 60 });
+      const als = new AsyncLocalStorage<{ body: Uint8Array }>();
+      // A request whose store the wrapped function never sees.
+      const request = await (async () => {
+        const store = { body: new Uint8Array(1 << 20) };
+        await als.run(store, () => fn(1));
+        return new WeakRef(store);
+      })();
+      for (let attempt = 0; attempt < 10 && request.deref() !== undefined; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        gc();
+      }
+      expect(request.deref()).toBeUndefined();
+      expect(await encodesDuring(() => fn(1))).toBe(0); // and the memo still holds the call
+      await cache.close();
+    });
+
+    it('so a dropped function that context holds is collected, and its timer cancelled', async () => {
+      const gc = exposeGc();
+      const timeouts = vi.spyOn(globalThis, 'setTimeout');
+      const cleared = vi.spyOn(globalThis, 'clearTimeout');
+      const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
+      const als = new AsyncLocalStorage<{ fn?: (id: number) => Promise<{ id: number }> }>();
+      await (async () => {
+        const store: { fn?: (id: number) => Promise<{ id: number }> } = {};
+        await als.run(store, async () => {
+          store.fn = cache.wrap(async (id: number) => ({ id }), { namespace: 'held', ttl: 60 });
+          await store.fn(1);
+        });
+      })();
+      const [timer] = timersOf(timeouts, 60_000);
+      expect(timer).toBeDefined();
+      const cancelled = () => cleared.mock.calls.some(([cleared]) => cleared === timer);
+      for (let attempt = 0; attempt < 20 && !cancelled(); attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        gc();
+      }
+      expect(cancelled()).toBe(true);
+      await cache.close();
+    });
   });
 
   it('empties when the ttl its options hold changes', async () => {
@@ -404,9 +457,7 @@ describe('wrap() key memo', () => {
     describe('and drops its references to the memos of functions nobody holds', () => {
       /** A cache with `dropped` wrapped functions nobody holds, collected, and one held. */
       async function withCollected(dropped: number) {
-        setFlagsFromString('--expose-gc');
-        const gc: unknown = runInNewContext('gc');
-        if (typeof gc !== 'function') throw new Error('gc is not exposed');
+        const gc = exposeGc();
         const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
         const registry: unknown = Reflect.get(cache, 'keyMemos');
         if (!(registry instanceof Set)) throw new Error('CacheImpl keeps no keyMemos set');
