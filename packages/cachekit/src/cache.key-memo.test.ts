@@ -283,22 +283,29 @@ describe('wrap() key memo', () => {
   });
 
   it('empties the memo of a function that is not called again, one ttl after its first entry', async () => {
-    // Real timers, a 50 ms ttl: the memo's timer comes from node:timers, which
-    // vi.useFakeTimers() does not replace.
+    // The memo's timer comes from node:timers, which vi.useFakeTimers() does not
+    // replace: capture it and fire it by hand, so no clock is involved.
+    const armed: { fire: () => void; ms: number | undefined }[] = [];
+    const realSetTimeout = timers.setTimeout;
+    vi.spyOn(timers, 'setTimeout').mockImplementation((callback, ms) => {
+      armed.push({ fire: () => callback(), ms });
+      return realSetTimeout(() => {}, 0).unref();
+    });
     const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
-    const fn = cache.wrap(async (id: number) => ({ id }), { namespace: 'a', ttl: 0.05 });
+    const fn = cache.wrap(async (id: number) => ({ id }), { namespace: 'a', ttl: 10 });
     await fn(1);
     await fn(2);
-    const forget = vi.spyOn(AutoKeys.prototype, 'forget');
-    for (let waited = 0; waited < 2_000 && forget.mock.calls.length === 0; waited += 10) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    expect(forget).toHaveBeenCalledOnce();
+    expect(armed.map((timer) => timer.ms)).toEqual([10_000]);
+    // Until the timer fires, the memo serves; after it, the call keys in full,
+    // though L1 still holds its value.
+    expect(await encodesDuring(() => fn(1))).toBe(0);
+    armed[0]?.fire();
+    expect(await encodesDuring(() => fn(1))).toBe(1);
     await cache.close();
   });
 
   it('sets its timer through node:timers, so a global setTimeout returning a number breaks nothing', async () => {
-    vi.stubGlobal('setTimeout', () => 0); // as Jest's jsdom environment does
+    vi.stubGlobal('setTimeout', () => 0); // what Jest's jsdom environment hands out
     const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
     const fn = cache.wrap(async (id: number) => ({ id }), { namespace: 'a', ttl: 60 });
     await fn(1);
