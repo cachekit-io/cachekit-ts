@@ -884,19 +884,19 @@ What one call costs in the client, on an in-memory backend, so no figure include
 
 | Operation                        |   100 B |  10 KB |
 | :------------------------------- | ------: | -----: |
-| `wrap()` call, L1 hit            |  600 ns | 440 ns |
-| `wrap()` call, L1 hit, encrypted | 16.6 µs | 163 µs |
-| `get`, L2 hit                    |  6.0 µs | 147 µs |
-| `get`, L2 hit, encrypted         | 12.4 µs | 155 µs |
-| `set`                            |  7.3 µs | 190 µs |
-| Key generation (`generateKey`)   |  5.5 µs |      — |
+| `wrap()` call, L1 hit            |  600 ns | 430 ns |
+| `wrap()` call, L1 hit, encrypted | 16.7 µs | 159 µs |
+| `get`, L2 hit                    |  6.0 µs | 143 µs |
+| `get`, L2 hit, encrypted         | 12.2 µs | 154 µs |
+| `set`                            |  7.2 µs | 190 µs |
+| Key generation (`generateKey`)   |  5.3 µs |      — |
 
 - **`wrap()` L1 hit**: the call's key, then the L1 lookup, which returns the stored object as it is, so the value's size barely matters. A wrapped function remembers the key of each call whose arguments are all strings, numbers, booleans, `null` or `undefined`, so a repeat call does not generate it again. It remembers a call only if it has at most 8 arguments, no `NaN`, and strings whose `length` adds up to 256 or less. Every other call generates its key, which adds about the cost of the key generation row: an object, array, `Date`, `Map`, `Set` or binary argument, a call past those limits, a call with `skipL1` or under `ttl: 0`, every `interop` call, and every call on a cache that encrypts or has L1 off, or on Cloudflare Workers.
 - **Key memo**: a wrapped function remembers at most 1,024 keys and starts again when full: about 160 KiB when each call passes one number, and at most about 1 MiB. It holds copies of the arguments, so a cache that encrypts keeps no memo, and `delete()`, `invalidate()`, `close()` and, with `invalidation` configured, an invalidation event from another instance empty every memo of the cache. A memo also empties one `ttl` after its first key, so it holds an argument no longer than L1 serves a value stored with that `ttl`. A timer empties it then, even if the function is not called again, and a call that comes before the timer runs empties it first, so it never serves an older key. A wrap under `ttl: 0`, which never expires, keeps no memo, and nor does a Worker, where a timer can be cancelled when its request ends.
 - **Encrypted L1 hit**: L1 holds the same ciphertext as L2, so every hit also generates the key, decrypts, verifies the AAD and decodes the value. That cost grows with the value.
 - **L2 hit and `set`**: L1 is off, so each call reads or writes the backend and decodes or encodes the value. A real backend adds its round trip, which for Redis or cachekit.io is a network call.
 
-To print this table for your own machine, run `pnpm install` and `pnpm build`, then `node packages/cachekit/bench/readme.mjs`, from a clone of the repository, or run the **Bench** workflow from its Actions tab. Five runs on this CPU model put the 100 B hit at 590-790 ns and agreed on every other cell within about 5%. Hosted runners also come with other CPU models, which took from 46% (an EPYC 9V45) to 119% (an Intel Xeon Platinum 8370C) as long, and other machines give other figures.
+To print this table for your own machine, run `pnpm install` and `pnpm build`, then `node packages/cachekit/bench/readme.mjs`, from a clone of the repository, or run the **Bench** workflow from its Actions tab. Four runs on this CPU model put the 100 B hit at 600-740 ns and agreed on every other cell within about 5%. Hosted runners also come with other CPU models, which took from 49% (an EPYC 9V45) to 116% (an Intel Xeon Platinum 8573C) as long, and other machines give other figures.
 
 ## Requirements
 
