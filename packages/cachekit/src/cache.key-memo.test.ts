@@ -39,6 +39,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 /** MessagePack encodes during `call`: a key generation, or a value written. */
@@ -129,6 +130,15 @@ describe('wrap() key memo', () => {
     [
       'wrap on a cache without L1',
       () => createCache({ backend: new InMemoryBackend(), l1: { enabled: false } }),
+      (cache) => cache.wrap(async (id: number) => ({ id }), OPTIONS),
+    ],
+    [
+      // Workers before the 2025-05-05 compatibility date, or with disable_weak_ref
+      'wrap where WeakRef does not exist',
+      () => {
+        vi.stubGlobal('WeakRef', undefined);
+        return createCache({ backend: new InMemoryBackend(), metrics: false });
+      },
       (cache) => cache.wrap(async (id: number) => ({ id }), OPTIONS),
     ],
   ])('keeps no memo: %s', async (_, build, wrapped) => {

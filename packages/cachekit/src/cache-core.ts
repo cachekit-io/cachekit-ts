@@ -1277,8 +1277,12 @@ export class CacheImpl implements SecureCache {
     }
 
     // A cache that encrypts keeps no plaintext argument, and with L1 off a
-    // memoised key would save nothing a network call does not dwarf.
-    const autoKeys = new AutoKeys(!interop && !this.encryption && this.l1 !== null);
+    // memoised key would save nothing a network call does not dwarf. Without
+    // WeakRef (Workers before the 2025-05-05 compatibility date, or with
+    // disable_weak_ref) the cache cannot hold a memo weakly, so it keeps none.
+    const autoKeys = new AutoKeys(
+      !interop && !this.encryption && this.l1 !== null && typeof WeakRef === 'function'
+    );
     if (autoKeys.memoising) this.trackKeyMemo(autoKeys);
     return async (...args: TArgs): Promise<TResult> => {
       // First, and before keying in particular: keying puts the arguments in the
