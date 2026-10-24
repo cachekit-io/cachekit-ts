@@ -31,7 +31,14 @@ type MemoArg = string | number | boolean | null | undefined;
  *
  * The memo holds copies of those arguments (see ownString), so a cache that
  * encrypts keeps none, and forget() empties it whenever the cache removes
- * entries on request.
+ * entries on request. It also empties itself one ttl, the wrap's, after its
+ * first entry: the first call at or past that time empties it before anything
+ * else, whatever the call passes. So it serves a key no longer than L1 serves a
+ * value stored with that ttl, even when a removal on another instance never
+ * reaches this one. Like L1's expiry, this happens on a call, not on a timer,
+ * so a function that is not called again keeps its entries until it is
+ * garbage-collected or forget() runs. Under a ttl of 0, which never expires,
+ * only forget() and a full memo empty it.
  */
 export class AutoKeys {
   private namespace: string | undefined;
@@ -44,11 +51,20 @@ export class AutoKeys {
   private readonly one = new Map<MemoArg, string>();
   /** Calls with no argument or two to eight, keyed by tupleOf(). */
   private readonly many = new Map<string, string>();
+  /**
+   * When the memo empties itself, in Date.now() milliseconds, the clock L1
+   * expires entries by. Infinity while it is empty or its ttl is 0, and then a
+   * call reads no clock.
+   */
+  private until = Infinity;
 
   constructor(readonly memoising: boolean) {}
 
-  /** With `useMemo` false the call is keyed in full and nothing of it is kept. */
-  key(namespace: string, args: unknown[], useMemo: boolean): string {
+  /**
+   * With `useMemo` false the call is keyed in full and nothing of it is kept.
+   * `ttlSeconds` is the wrap's ttl.
+   */
+  key(namespace: string, args: unknown[], useMemo: boolean, ttlSeconds: number): string {
     // A JavaScript caller can pass any namespace: key it as generateKey does.
     if (typeof namespace !== 'string') return generateKey(namespace, args);
     if (namespace !== this.namespace) {
@@ -56,6 +72,7 @@ export class AutoKeys {
       this.prefix = `${namespace}:`;
       this.forget(); // every entry holds the old prefix
     }
+    if (this.until !== Infinity && Date.now() >= this.until) this.forget();
     if (!this.memoising || !useMemo) return this.prefix + generateParamsHash(args);
     if (args.length === 1) {
       const arg = args[0];
@@ -63,8 +80,9 @@ export class AutoKeys {
       let key = this.one.get(arg);
       if (key === undefined) {
         key = this.prefix + generateParamsHash(args);
-        this.makeRoom();
-        this.one.set(typeof arg === 'string' ? ownString(arg) : arg, key);
+        if (this.admit(ttlSeconds)) {
+          this.one.set(typeof arg === 'string' ? ownString(arg) : arg, key);
+        }
       }
       return key;
     }
@@ -73,8 +91,7 @@ export class AutoKeys {
     let key = this.many.get(tuple);
     if (key === undefined) {
       key = this.prefix + generateParamsHash(args);
-      this.makeRoom();
-      this.many.set(ownString(tuple), key);
+      if (this.admit(ttlSeconds)) this.many.set(ownString(tuple), key);
     }
     return key;
   }
@@ -83,10 +100,19 @@ export class AutoKeys {
   forget(): void {
     this.one.clear();
     this.many.clear();
+    this.until = Infinity;
   }
 
-  private makeRoom(): void {
+  /**
+   * Makes room for one more entry, emptying a full memo, and starts the window
+   * if none is running. False for a ttl that set() rejects (negative, NaN or
+   * infinite), and then the entry is not stored.
+   */
+  private admit(ttlSeconds: number): boolean {
+    if (!Number.isFinite(ttlSeconds) || ttlSeconds < 0) return false;
     if (this.one.size + this.many.size >= MEMO_MAX_ENTRIES) this.forget();
+    if (this.until === Infinity && ttlSeconds > 0) this.until = Date.now() + ttlSeconds * 1000;
+    return true;
   }
 }
 

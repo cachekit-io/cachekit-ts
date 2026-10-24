@@ -213,6 +213,37 @@ describe('wrap() key memo', () => {
     await cache.close();
   });
 
+  it("empties one ttl after its first entry: the wrap's ttl, or else the cache's default", async () => {
+    let clock = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const cache = createCache({ backend: new InMemoryBackend(), metrics: false, defaultTtl: 30 });
+    const fns: [number, string, (id: number) => Promise<unknown>][] = [
+      [10, 'a', cache.wrap(async (id: number) => ({ id }), { namespace: 'a', ttl: 10 })],
+      // A JavaScript caller can leave ttl out.
+      [
+        30,
+        'b',
+        cache.wrap(async (id: number) => ({ id }), { namespace: 'b' } as {
+          namespace: string;
+          ttl: number;
+        }),
+      ],
+    ];
+    for (const [ttl, namespace, fn] of fns) {
+      const end = clock + ttl * 1000;
+      await fn(1);
+      clock = end - 2;
+      await fn(2); // L1 holds it for one more ttl
+      clock = end - 1;
+      expect(await encodesDuring(() => fn(2))).toBe(0);
+      clock = end;
+      // The memo has emptied while L1 still serves fn(2), so only its key is generated.
+      expect(await encodesDuring(() => fn(2))).toBe(1);
+      expect(lastL1Key()).toBe(generateKey(namespace, [2]));
+    }
+    await cache.close();
+  });
+
   describe('forgets the arguments it holds', () => {
     /** Two memoised functions in two namespaces, each with an entry. */
     async function filled(cache: SecureCache) {

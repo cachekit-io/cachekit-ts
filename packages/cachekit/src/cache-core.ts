@@ -1314,7 +1314,7 @@ export class CacheImpl implements SecureCache {
       }
       const cacheKey = interop
         ? generateInteropKey(options.namespace, interopOperation, args)
-        : autoKeys.key(options.namespace, args, !options.skipL1);
+        : autoKeys.key(options.namespace, args, !options.skipL1, options.ttl ?? this.defaultTtl);
 
       // Check L1 with SWR. On platforms that cancel fire-and-forget work at
       // response return (Workers), SWR only runs when a per-request
