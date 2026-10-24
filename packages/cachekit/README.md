@@ -896,7 +896,7 @@ What one call costs in the client, on an in-memory backend, so no figure include
 - **Encrypted L1 hit**: L1 holds the same ciphertext as L2, so every hit also generates the key, decrypts, verifies the AAD and decodes the value. That cost grows with the value.
 - **L2 hit and `set`**: L1 is off, so each call reads or writes the backend and decodes or encodes the value. A real backend adds its round trip, which for Redis or cachekit.io is a network call.
 
-To print this table for your own machine, run `pnpm install` and `pnpm build`, then `node packages/cachekit/bench/readme.mjs`, from a clone of the repository, or run the **Bench** workflow from its Actions tab. Four runs on this CPU model put the 100 B hit at 600-740 ns and agreed on every other cell within about 5%. Hosted runners also come with other CPU models, which took from 49% (an EPYC 9V45) to 116% (an Intel Xeon Platinum 8573C) as long, and other machines give other figures.
+To print this table for your own machine, run `pnpm install` and `pnpm build`, then `node packages/cachekit/bench/readme.mjs`, from a clone of the repository, or run the **Bench** workflow from its Actions tab. Across 21 runs on this CPU model, the 100 B hit took 580-810 ns, 620 ns at the median, and every other cell agreed within 9%. Hosted runners also come with other CPU models, which took from 49% (an EPYC 9V45) to 116% (an Intel Xeon Platinum 8573C) as long, and other machines give other figures.
 
 ## Requirements
 
