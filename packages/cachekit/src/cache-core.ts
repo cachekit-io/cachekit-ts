@@ -298,7 +298,8 @@ export class CacheImpl implements SecureCache {
   /**
    * The key memos of this cache's wrapped functions (see AutoKeys), held weakly
    * so that a wrapped function nobody holds takes its memo with it, once the
-   * memo's pending timer, at most a second away, has run.
+   * memo's pending timer has run: one second or less after it was set, late
+   * only as AutoKeys says.
    */
   private readonly keyMemos = new Set<WeakRef<AutoKeys>>();
   /** keyMemos size at which wrap() next drops the references to collected memos. */
