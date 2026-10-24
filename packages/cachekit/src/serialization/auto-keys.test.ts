@@ -336,6 +336,14 @@ describe('AutoKeys memo window', () => {
     }
   );
 
+  it('runs one timer per window under a ttl too long to count in milliseconds', () => {
+    const { keys, timers } = withTimers();
+    keys.key(NS, [1], true, Number.MAX_VALUE);
+    keys.key(NS, [2], true, Number.MAX_VALUE);
+    expect(timers.map((timer) => timer.ms)).toEqual([1_000]);
+    expect(fullPath(() => keys.key(NS, [1], true, Number.MAX_VALUE))).toBe(false);
+  });
+
   it('empties on a call one ttl after its first entry, if its timer has not run', () => {
     const { keys } = withTimers();
     keys.key(NS, [1], true, 10);

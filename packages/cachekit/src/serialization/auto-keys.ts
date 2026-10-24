@@ -148,7 +148,9 @@ export class AutoKeys {
       // The window opens only once its timer is set, so a timer that cannot be
       // set leaves no window without one.
       const cancel = setTimer(() => this.forget(), Math.min(ttlSeconds * 1000, MEMO_MAX_WINDOW_MS));
-      this.until = Date.now() + ttlSeconds * 1000;
+      // A ttl too long to count in milliseconds would make this Infinity, which
+      // marks an empty memo, so it counts as the longest finite one.
+      this.until = Date.now() + Math.min(ttlSeconds * 1000, Number.MAX_VALUE);
       this.windowTtl = ttlSeconds;
       this.cancelTimer = cancel;
     }
