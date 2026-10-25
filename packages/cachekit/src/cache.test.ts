@@ -1971,6 +1971,48 @@ describe('Cache Integration', () => {
       }
     );
 
+    // validateKey skips encoding for keys that fit at 3 bytes per UTF-16 unit,
+    // so every row here is near the limit and takes the measured path. Each
+    // width is the UTF-8 size of one unit's worth of the character; a lone
+    // surrogate encodes as the 3-byte U+FFFD. The backend's keyPrefix counts.
+    describe.each([
+      { char: 'k', width: 1 },
+      { char: 'é', width: 2 },
+      { char: '€', width: 3 },
+      { char: '😀', width: 4 },
+      { char: '\uD800', width: 3 },
+    ])('key of $char ($width UTF-8 bytes each) behind keyPrefix app1:', ({ char, width }) => {
+      class PrefixedBackend extends InMemoryBackend {
+        readonly keyPrefix = 'app1:';
+      }
+      /** A key whose UTF-8 form is exactly `bytes`, mostly `char`. */
+      const keyOf = (bytes: number) => {
+        const body = bytes - 'ns:'.length;
+        const count = Math.floor(body / width);
+        return `ns:${char.repeat(count)}${'k'.repeat(body - count * width)}`;
+      };
+
+      it.each([
+        { compression: true, delta: -1 },
+        { compression: true, delta: 0 },
+        { compression: true, delta: 1 },
+        { compression: false, delta: -1 },
+        { compression: false, delta: 0 },
+        { compression: false, delta: 1 },
+      ])(
+        'AAD of MAX_AAD_SIZE $delta bytes (compression=$compression)',
+        async ({ compression, delta }) => {
+          const c = secureCache(new PrefixedBackend(), compression);
+          const key = keyOf(keyBudget(compression) - 'app1:'.length + delta);
+
+          if (delta > 0) await expect(c.set(key, 'v')).rejects.toThrow(ConfigurationError);
+          else await expect(c.set(key, 'v')).resolves.toBeUndefined();
+
+          await c.close();
+        }
+      );
+    });
+
     it('a cache without encryption stores the same key as before', async () => {
       const backend = new InMemoryBackend();
       const c = createIntentCache.production({ backend, metrics: false });
@@ -2060,6 +2102,20 @@ describe('Cache Integration', () => {
         await c.close();
       }
     );
+    it('a secure set and a secure L1-miss read each build the AAD once', async () => {
+      const buildAAD = vi.spyOn(
+        EncryptionManagerCore.prototype as unknown as { buildAAD(...args: unknown[]): Uint8Array },
+        'buildAAD'
+      );
+      const c = secureOver(new PrefixingBackend('app1:', new Map()));
+
+      await c.set('k1', 'v');
+      expect(buildAAD).toHaveBeenCalledTimes(1);
+      expect(await c.get('k1')).toBe('v');
+      expect(buildAAD).toHaveBeenCalledTimes(2);
+
+      await c.close();
+    });
   });
 
   describe('backend-advertised compression default', () => {

@@ -7,6 +7,27 @@ import {
   MASTER_KEY_HEX_LENGTH,
 } from '../constants.js';
 
+const utf8 = new TextEncoder();
+
+/** One v0x03 AAD component: a 4-byte big-endian length, then the bytes. */
+function aadComponent(text: string): Uint8Array {
+  const bytes = utf8.encode(text);
+  const component = new Uint8Array(4 + bytes.length);
+  new DataView(component.buffer).setUint32(0, bytes.length, false);
+  component.set(bytes, 4);
+  return component;
+}
+
+function concatBytes(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((sum, p) => sum + p.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
+
 /**
  * Tenant keys handle exposed by a bindings implementation (NAPI or wasm).
  * Keys stay inside the binding's memory (Rust heap under NAPI, wasm linear
@@ -107,6 +128,12 @@ export class EncryptionManagerCore {
   private initPromise: Promise<void> | null = null;
   /** Single source of truth for tenant_id — read by both HKDF derivation and AAD construction. */
   private readonly effectiveTenantId: string;
+  // The AAD's parts other than the cache key, encoded once (see buildAAD):
+  // the version byte and tenant id before the key, and the format and
+  // compressed flag after it, one tail per flag value.
+  private readonly aadHead: Uint8Array;
+  private readonly aadTailCompressed: Uint8Array;
+  private readonly aadTailUncompressed: Uint8Array;
   // Note: Nonce tracking is done in Rust via getNonceCounter().
   // The Rust encryptor throws NonceCounterExhausted when the limit is reached.
 
@@ -156,6 +183,10 @@ export class EncryptionManagerCore {
       throw new ConfigurationError('tenantId must not be empty; omit it for the default tenant');
     }
     this.effectiveTenantId = tenantId ?? 'default';
+    this.aadHead = concatBytes(Uint8Array.of(AAD_VERSION), aadComponent(this.effectiveTenantId));
+    // Python str(bool) format for the compressed flag.
+    this.aadTailCompressed = concatBytes(aadComponent('msgpack'), aadComponent('True'));
+    this.aadTailUncompressed = concatBytes(aadComponent('msgpack'), aadComponent('False'));
     if (previousMasterKeys.length > MAX_PREVIOUS_MASTER_KEYS) {
       throw new ConfigurationError(
         `previousMasterKeys accepts at most ${MAX_PREVIOUS_MASTER_KEYS} keys, got ${previousMasterKeys.length} — drop retired keys explicitly, the list is never truncated`
@@ -286,7 +317,7 @@ export class EncryptionManagerCore {
     await this.ensureInitialized();
 
     try {
-      const aad = this.buildAAD(cacheKey, 'msgpack', compressed);
+      const aad = this.buildAAD(cacheKey, compressed);
       return this.native!.encryptWithTenantKeys(data, aad, this.tenantKeys!);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
@@ -326,7 +357,7 @@ export class EncryptionManagerCore {
     await this.ensureInitialized();
 
     try {
-      const aad = this.buildAAD(cacheKey, 'msgpack', compressed);
+      const aad = this.buildAAD(cacheKey, compressed);
       return this.native!.decryptWithTenantKeys(ciphertext, aad, this.tenantKeys!);
     } catch (error) {
       throw new EncryptionError(
@@ -397,19 +428,22 @@ export class EncryptionManagerCore {
    * pointless and counting it would let a handful of long keys open the
    * circuit breaker for every key on the cache.
    *
-   * Measures the real AAD rather than re-deriving its length, so the check
-   * cannot drift from buildAAD. A key longer than MAX_AAD_SIZE UTF-16 units is
-   * rejected without that measurement: UTF-8 never takes fewer bytes than
-   * UTF-16 units, so it is over the limit whatever it holds, and encoding it
-   * would allocate its whole UTF-8 form and AAD only to throw.
+   * Counts with buildAAD's own length function, so the check cannot drift
+   * from the AAD it guards. Most keys need no encoding: UTF-8 takes at most 3
+   * bytes per UTF-16 unit (a lone surrogate becomes the 3-byte U+FFFD), so a
+   * key whose AAD fits at 3 bytes per unit fits whatever it holds. A key
+   * longer than MAX_AAD_SIZE UTF-16 units is rejected unencoded too: UTF-8
+   * never takes fewer bytes than UTF-16 units, so it is over the limit
+   * whatever it holds. Only a key between the two is encoded and measured.
    *
    * @throws {ConfigurationError} if the AAD for `cacheKey` exceeds MAX_AAD_SIZE
    */
   validateKey(cacheKey: string, compressed = false): void {
+    if (this.aadLength(cacheKey.length * 3, compressed) <= MAX_AAD_SIZE) return;
     const aadAtLeast =
       cacheKey.length > MAX_AAD_SIZE
         ? cacheKey.length
-        : this.buildAAD(cacheKey, 'msgpack', compressed).length;
+        : this.aadLength(utf8.encode(cacheKey).length, compressed);
     if (aadAtLeast <= MAX_AAD_SIZE) return;
     throw new ConfigurationError(
       `Cache key too long for an encrypted cache: its AAD is at least ${aadAtLeast} bytes, over ` +
@@ -432,41 +466,32 @@ export class EncryptionManagerCore {
    * AAD binding prevents ciphertext substitution attacks by cryptographically
    * binding the encryption to specific tenant/key pairs.
    *
+   * Only the cache key is encoded per call; the other parts are encoded once,
+   * in the constructor. The format is always "msgpack": the manager encrypts
+   * only MessagePack payloads.
+   *
    * @param cacheKey - Cache key to bind in AAD
-   * @param format - Serialization format (default: "msgpack")
    * @param compressed - Whether data is compressed (default: false)
    * @returns Serialized AAD buffer for AES-GCM operations
    */
-  private buildAAD(cacheKey: string, format = 'msgpack', compressed = false): Uint8Array {
-    const encoder = new TextEncoder();
-
-    // Encode all components as UTF-8 (matches Python exactly)
-    const components = [
-      encoder.encode(this.effectiveTenantId),
-      encoder.encode(cacheKey),
-      encoder.encode(format),
-      encoder.encode(compressed ? 'True' : 'False'), // Python str(bool) format
-    ];
-
-    // Calculate total length: version byte + (4-byte length + data) for each component
-    const totalLength = 1 + components.reduce((sum, c) => sum + 4 + c.length, 0);
-    const aad = new Uint8Array(totalLength);
-    const view = new DataView(aad.buffer);
-
+  private buildAAD(cacheKey: string, compressed = false): Uint8Array {
+    const key = utf8.encode(cacheKey);
+    const aad = new Uint8Array(this.aadLength(key.length, compressed));
     let offset = 0;
-
-    // Version byte (0x03)
-    aad[offset++] = AAD_VERSION;
-
-    // Each component: 4-byte big-endian length + data
-    for (const component of components) {
-      view.setUint32(offset, component.length, false); // false = big-endian
-      offset += 4;
-      aad.set(component, offset);
-      offset += component.length;
-    }
-
+    aad.set(this.aadHead, offset);
+    offset += this.aadHead.length;
+    new DataView(aad.buffer).setUint32(offset, key.length, false);
+    offset += 4;
+    aad.set(key, offset);
+    offset += key.length;
+    aad.set(compressed ? this.aadTailCompressed : this.aadTailUncompressed, offset);
     return aad;
+  }
+
+  /** Length in bytes of the AAD for a cache key of `keyBytes` UTF-8 bytes. */
+  private aadLength(keyBytes: number, compressed: boolean): number {
+    const tail = compressed ? this.aadTailCompressed : this.aadTailUncompressed;
+    return this.aadHead.length + 4 + keyBytes + tail.length;
   }
 
   private hexToBytes(hex: string): Uint8Array {
