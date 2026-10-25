@@ -744,7 +744,7 @@ bundle contains no `node:*` builtins, no native addons, no ioredis, and no
 prom-client. Crypto (AES-256-GCM + HKDF-SHA256, counter nonces) and the
 ByteStorage wire envelope (LZ4 + xxHash3-64) run on a wasm32 build of the
 same audited Rust core the Node SDK uses (`@cachekit-io/cachekit-core-wasm`,
-~64 KB gzipped), so ciphertexts and envelopes are byte-compatible across
+~66 KB gzipped), so ciphertexts and envelopes are byte-compatible across
 Node, Workers, Python, and Rust.
 
 ```typescript
@@ -876,7 +876,9 @@ reported through the library logger by key digest.
   this roughly JS-heap-equivalent in threat model; `dispose()`/`close()`
   still zeroizes deterministically.
 - **Startup**: wasm instantiation is a small one-time cost per isolate
-  (~150 KB module, no I/O).
+  (~186 KB module, no I/O). A cache with compression off and no encryption
+  never needs the module, so its keys are hashed in JS; once any cache has
+  instantiated it, keys are hashed in wasm, with the same result.
 
 ## Performance
 

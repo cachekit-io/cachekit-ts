@@ -15,8 +15,8 @@ import { CacheImpl, type CacheRuntime } from './cache-core.js';
 import { setKeyHashBinding } from './serialization/blake2b.js';
 import timers from 'node:timers';
 
-// The NAPI binding is loaded by the import above, so cache keys hash in Rust
-// from here on: about a tenth of the JS hash's cost per key.
+// The import above loads the NAPI binding, so cache keys hash in Rust from here
+// on rather than in JS.
 setKeyHashBinding(blake2b256Hex);
 
 /**

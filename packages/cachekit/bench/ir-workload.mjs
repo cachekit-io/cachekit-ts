@@ -112,6 +112,28 @@ const plaintextSet = (rows, n) => ({
 });
 
 /**
+ * generateKey(args) as wrap() runs it: after the Node entry has loaded, or, with
+ * `wasm`, after Workers has instantiated its module. workers/runtime.js imports
+ * the .wasm, which only workerd resolves, so the wasm hash is bound here as it
+ * binds it. A build whose binding has no blake2b256Hex hashes keys in JS.
+ */
+const keygen = (args, n, wasmHash = false) => ({
+  n,
+  setup: async () => {
+    if (wasmHash) {
+      const { blake2b256Hex } = await wasm();
+      if (blake2b256Hex) (await load('serialization/blake2b.js')).setKeyHashBinding(blake2b256Hex);
+    } else {
+      await load('index.js');
+    }
+    const { generateKey } = await load('serialization/key-generator.js');
+    return () => {
+      sink += generateKey('bench', args).length;
+    };
+  },
+});
+
+/**
  * Each workload's setup(n) gets the n the run executes and returns its op: one
  * call on the path its name gives. The default n is sized so n x Ir/op dwarfs
  * the noise of the fixed part, and of a GC cycle that lands in one run's
@@ -152,16 +174,15 @@ export const WORKLOADS = {
       };
     },
   },
-  // wrap(): every call hashes its arguments before L1 is consulted
-  keygen: {
-    n: 20_000,
-    setup: async () => {
-      const { generateKey } = await load('serialization/key-generator.js');
-      return () => {
-        sink += generateKey('bench', ARGS).length;
-      };
-    },
-  },
+  // wrap(): every call hashes its arguments before L1 is consulted, through
+  // the NAPI binding once the Node entry has loaded it
+  keygen: keygen(ARGS, 20_000),
+  // 1 KB of arguments: here the hash, not the encoding, is most of the cost
+  'keygen-1kb': keygen([VALUE], 5_000),
+  // the same on Workers, where the wasm binding hashes keys once its module is
+  // instantiated
+  'keygen-wasm': keygen(ARGS, 20_000, true),
+  'keygen-wasm-1kb': keygen([VALUE], 5_000, true),
   // set encodes, an L2 hit decodes (normalize + msgpack + depth bounds)
   'serializer-roundtrip': {
     n: 10_000,

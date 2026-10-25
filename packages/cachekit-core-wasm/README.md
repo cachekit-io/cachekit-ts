@@ -2,16 +2,17 @@
 
 wasm32 build of [cachekit-core](https://github.com/cachekit-io/cachekit-core)
 for Cloudflare Workers — LZ4 compression + xxHash3-64 integrity (the
-ByteStorage wire envelope) and AES-256-GCM + HKDF-SHA256 zero-knowledge
-encryption with counter nonces, byte-compatible with every other CacheKit SDK.
+ByteStorage wire envelope), AES-256-GCM + HKDF-SHA256 zero-knowledge
+encryption with counter nonces, and the BLAKE2b-256 cache-key hash,
+byte-compatible with every other CacheKit SDK.
 
 This is the Workers sibling of
 [`@cachekit-io/cachekit-core-ts`](../cachekit-core-ts) (the NAPI binding for
 Node): same pinned Rust crate, same API surface (`deriveTenantKeys`,
-`encryptWithTenantKeys`, `decryptWithTenantKeys`, `ByteStorage`), one
-deterministic `wasm32-unknown-unknown` target instead of a per-platform
-native matrix. The artifact is ~177 KB raw / ~64 KB gzipped plus ~26 KB of
-wasm-bindgen glue.
+`encryptWithTenantKeys`, `decryptWithTenantKeys`, `ByteStorage`,
+`blake2b256Hex`), one deterministic `wasm32-unknown-unknown` target instead
+of a per-platform native matrix. The artifact is ~186 KB raw / ~66 KB gzipped
+plus ~27 KB of wasm-bindgen glue.
 
 It is built for speed, not size: `opt-level = 3` with wasm `simd128`
 (`.cargo/config.toml`) and `wasm-opt -O3`, for ~7 KB more gzip than a
@@ -59,6 +60,9 @@ rotating.free(); // zeroize the whole keyring when the grace window ends
   Linear memory is a host-readable `ArrayBuffer`, so this is weaker isolation
   than the NAPI binding's Rust heap — on Workers the host is your own
   isolate, making it roughly JS-heap-equivalent in threat model.
+- `blake2b256Hex` copies its input (a cache key's encoded arguments) into
+  linear memory and wipes that copy before freeing it. Linear memory never
+  shrinks, so the SDK hashes inputs over 64 KiB in JS instead.
 - Each `TenantKeys` handle owns one encryptor with a counter nonce (unique
   instance id + monotonic counter, exhaustion at 2^32) — the same
   nonce-reuse guarantees as the native core. Reuse one handle per key; do
