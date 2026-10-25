@@ -85,6 +85,14 @@ export declare function decryptWithTenantKeys(
   tenantKeys: TenantKeys
 ): Uint8Array;
 
+/**
+ * Unkeyed BLAKE2b-256 of `data`, as 64 lowercase hex characters (the
+ * cache-key hash). The bytes are copied into wasm memory, and that copy is
+ * wiped before it is freed; the hasher's last block of up to 128 bytes stays
+ * in linear memory until later calls overwrite it.
+ */
+export declare function blake2b256Hex(data: Uint8Array): string;
+
 /** cachekit-core-wasm crate version. */
 export declare function version(): string;
 

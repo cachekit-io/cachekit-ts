@@ -23,10 +23,15 @@ wasm-bindgen = "=0.2.121"
 # to the release paired with wasm-bindgen 0.2.121 above.
 js-sys = "=0.3.98"
 cachekit-core = { version = "0.7.0", features = ["encryption"] }
-# Wipes the owned previous-master-key staging buffers on drop (the NAPI crate
-# borrows and never copies; this crate must copy out of JS memory). Already in
-# the tree transitively via cachekit-core — same resolved version.
+# Wipes the owned previous-master-key staging buffers and the cache-key hash
+# input on drop (the NAPI crate borrows and never copies; this crate must copy
+# out of JS memory). Already in the tree transitively via cachekit-core — same
+# resolved version.
 zeroize = "1"
+# Cache-key BLAKE2b-256 (blake2b256Hex), the same version as the NAPI crate:
+# the 0.10 line builds on the digest 0.10 that cachekit-core's sha2 and hmac
+# already bring in, so it adds this one crate.
+blake2 = { version = "0.10.6", default-features = false }
 
 # Standalone crate — never join an enclosing cargo workspace.
 [workspace]

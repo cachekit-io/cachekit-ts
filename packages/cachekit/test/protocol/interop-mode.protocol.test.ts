@@ -33,6 +33,7 @@ import { EncryptionManager } from '../../src/encryption/manager.js';
 import { AAD_VERSION } from '../../src/constants.js';
 import { SerializationError } from '../../src/errors.js';
 import { assertFixture, table, type ObjectShape } from '../fixtures/fixture-shape.js';
+import { KEY_HASH_LANES, useKeyHashLane } from '../fixtures/key-hash-lanes.js';
 
 interface KeyVector {
   name: string;
@@ -346,7 +347,9 @@ describe('interop/v1 vector fixture', () => {
   });
 });
 
-describe('interop/v1 key vectors', () => {
+describe.each(KEY_HASH_LANES)('interop/v1 key vectors, hashed through the %s', (_, hash) => {
+  useKeyHashLane(hash);
+
   it.each(vectors.key_vectors)(
     '$name',
     ({ namespace, operation, args, canonical_args_hex, args_hash, expected_key }) => {

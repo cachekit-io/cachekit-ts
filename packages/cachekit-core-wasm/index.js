@@ -8,6 +8,7 @@ import { initSync } from './pkg/cachekit_core_wasm.js';
 export {
   ByteStorage,
   TenantKeys,
+  blake2b256Hex,
   deriveKey,
   deriveTenantKeys,
   encryptWithTenantKeys,
@@ -22,7 +23,7 @@ let initialized = false;
  * Instantiate the bundled wasm module (synchronous, idempotent).
  *
  * Must be called before any other export is used. Instantiation is a
- * one-time cost per isolate (~177 KB module); Workers permits synchronous
+ * one-time cost per isolate (~186 KB module); Workers permits synchronous
  * `new WebAssembly.Instance` on precompiled modules.
  */
 export function ensureInitialized() {

@@ -34,6 +34,9 @@ Public exports (consumed by `@cachekit-io/cachekit`):
 - `TenantKeys` — HKDF-SHA256 per-tenant derived keys with `ZeroizeOnDrop`;
   optionally holds a decrypt-only keyring (max 3 previous master keys) for
   key-rotation grace windows — sequential decrypt attempts, current key first
+- `blake2b256Hex` — unkeyed BLAKE2b-256 as 64 lowercase hex characters, the
+  SDK's cache-key hash; reads the caller's bytes in place, buffering only the
+  hasher's last block (up to 128 bytes) on the native stack
 - `deriveKey` — single-domain HKDF key derivation
 - `encrypt` / `decrypt` — AES-256-GCM with AAD binding
 - `version` — version string from the underlying Cargo crate

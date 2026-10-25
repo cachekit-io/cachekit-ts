@@ -1,5 +1,5 @@
 import { ExtData, encode, decode } from '@msgpack/msgpack';
-import { blake2b } from '@noble/hashes/blake2.js';
+import { blake2b256 } from './blake2b.js';
 import { ConfigurationError, SerializationError, ValueTooLargeError } from '../errors.js';
 import {
   DEFAULT_MAX_ENCODED_SIZE,
@@ -535,7 +535,7 @@ export function normalize(
     // 64 KiB key limit nor gets copied before it is checked. As a msgpack ext,
     // which no ordinary argument normalizes to, it cannot collide with an object
     // of that shape, e.g. { Int8Array: Uint8Array.of(255) }.
-    if (walk.forKey) return new ExtData(0, encode([type, blake2b(bytes, { dkLen: 32 })]));
+    if (walk.forKey) return new ExtData(0, encode([type, blake2b256(bytes)]));
     // A value would decode as a Uint8Array — a silent type change — so reject
     // it with the fix instead.
     throw new SerializationError(

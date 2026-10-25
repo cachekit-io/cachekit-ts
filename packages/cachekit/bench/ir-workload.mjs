@@ -112,6 +112,33 @@ const plaintextSet = (rows, n) => ({
 });
 
 /**
+ * generateKey(args) as wrap() runs it: after the Node entry has loaded, or, with
+ * `wasmHash`, after Workers has instantiated its module. workers/runtime.js
+ * imports the .wasm, which only workerd resolves, so this binds the wasm export
+ * itself; the runtime's 64 KiB cutover to JS never applies at these sizes. A
+ * build from before the key hash moved into the bindings has no
+ * serialization/blake2b.js and hashes keys in JS: the base side of a compare.
+ */
+const keygen = (args, n, wasmHash = false) => ({
+  n,
+  setup: async () => {
+    const hashing = existsSync(new URL('serialization/blake2b.js', dist))
+      ? await load('serialization/blake2b.js')
+      : null;
+    if (!wasmHash) await load('index.js');
+    else if (hashing) hashing.setKeyHashBinding((await wasm()).blake2b256Hex);
+    // A stale binding without the export would measure JS under this name.
+    if (hashing && !hashing.usingKeyHashBinding()) {
+      throw new Error('keys are not hashed through the binding: rebuild it');
+    }
+    const { generateKey } = await load('serialization/key-generator.js');
+    return () => {
+      sink += generateKey('bench', args).length;
+    };
+  },
+});
+
+/**
  * Each workload's setup(n) gets the n the run executes and returns its op: one
  * call on the path its name gives. The default n is sized so n x Ir/op dwarfs
  * the noise of the fixed part, and of a GC cycle that lands in one run's
@@ -152,16 +179,15 @@ export const WORKLOADS = {
       };
     },
   },
-  // wrap(): every call hashes its arguments before L1 is consulted
-  keygen: {
-    n: 20_000,
-    setup: async () => {
-      const { generateKey } = await load('serialization/key-generator.js');
-      return () => {
-        sink += generateKey('bench', ARGS).length;
-      };
-    },
-  },
+  // wrap(): a call that misses the key memo hashes its arguments before L1 is
+  // consulted, through the NAPI binding once the Node entry has loaded it
+  keygen: keygen(ARGS, 20_000),
+  // 1 KB of arguments, where the hash's share of the cost grows with the bytes
+  'keygen-1kb': keygen([VALUE], 5_000),
+  // the same on Workers, where the wasm binding hashes keys once its module is
+  // instantiated
+  'keygen-wasm': keygen(ARGS, 20_000, true),
+  'keygen-wasm-1kb': keygen([VALUE], 5_000, true),
   // set encodes, an L2 hit decodes (normalize + msgpack + depth bounds)
   'serializer-roundtrip': {
     n: 10_000,

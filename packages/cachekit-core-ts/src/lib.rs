@@ -1,5 +1,7 @@
 #![deny(clippy::all)]
 
+use blake2::digest::consts::U32;
+use blake2::{Blake2b, Digest};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -76,6 +78,25 @@ fn validate_decryption_input(ciphertext_len: usize, aad_len: usize) -> Result<()
 #[napi]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Unkeyed BLAKE2b-256 of `data`, as 64 lowercase hex characters: the cache-key
+/// hash, which the SDK otherwise computes in JS with identical output.
+///
+/// `data` is read in place from the JS Uint8Array; only the hasher's last block
+/// (up to 128 bytes) is buffered, unwiped, on the native stack. The hex is built
+/// here because a string costs less to return than a Uint8Array would to return
+/// and hex-encode in JS.
+#[napi(js_name = "blake2b256Hex")]
+pub fn blake2b256_hex(data: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let digest = Blake2b::<U32>::digest(data);
+    let mut hex = String::with_capacity(2 * digest.len());
+    for byte in digest {
+        hex.push(DIGITS[usize::from(byte >> 4)] as char);
+        hex.push(DIGITS[usize::from(byte & 15)] as char);
+    }
+    hex
 }
 
 /// ByteStorage provides LZ4 compression with xxHash3-64 integrity verification.

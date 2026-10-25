@@ -10,9 +10,17 @@ import { cachekitio, cachekitioWithLocking } from './backends/cachekitio-factory
 import { createMetrics } from './metrics/prometheus.js';
 import { EncryptionManager } from './encryption/manager.js';
 import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
+import * as core from '@cachekit-io/cachekit-core-ts';
 import { RedisInvalidationChannel } from './invalidation/redis-channel.js';
 import { CacheImpl, type CacheRuntime } from './cache-core.js';
+import { setKeyHashBinding, type Blake2b256Hex } from './serialization/blake2b.js';
 import timers from 'node:timers';
+
+// The imports above load the NAPI binding, so cache keys hash in Rust from here
+// on rather than in JS. The hash is read off the namespace, never imported by
+// name: a core-ts published before it lacks the export, and a named import of
+// a missing export fails the whole entry. Without it, keys stay in JS.
+setKeyHashBinding((core as { blake2b256Hex?: Blake2b256Hex }).blake2b256Hex);
 
 /**
  * Node runtime: Redis + CachekitIO backends, NAPI bindings for the
