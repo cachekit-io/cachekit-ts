@@ -1,6 +1,6 @@
 import { ExtensionCodec } from '@msgpack/msgpack';
-import { blake2b } from '@noble/hashes/blake2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
+import { blake2b256Hex } from './blake2b.js';
 import { ConfigurationError, SerializationError, ValueTooLargeError } from '../errors.js';
 import { assertDecodeDepth, type ObjectCount } from './serializer.js';
 import {
@@ -600,7 +600,7 @@ export function encodeInteropArgs(args: readonly unknown[]): Uint8Array {
 
 /** Blake2b-256 (unkeyed, lowercase hex) over the canonical argument array. */
 export function interopArgsHash(args: readonly unknown[]): string {
-  return bytesToHex(blake2b(encodeInteropArgs(args), { dkLen: 32 }));
+  return blake2b256Hex(encodeInteropArgs(args));
 }
 
 /**

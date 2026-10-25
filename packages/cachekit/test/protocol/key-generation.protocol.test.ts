@@ -1,5 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import { generateKey, generateParamsHash } from '../../src/serialization/key-generator.js';
+import { FULL_PATH_KEYS, MEMOISABLE_KEYS, PINNED_NAMESPACE } from '../fixtures/auto-mode-keys.js';
+import { KEY_HASH_LANES, useKeyHashLane } from '../fixtures/key-hash-lanes.js';
+
+describe.each(KEY_HASH_LANES)('pinned cache keys, hashed through the %s', (_, hash) => {
+  useKeyHashLane(hash);
+
+  it.each([...MEMOISABLE_KEYS, ...FULL_PATH_KEYS])('$name', ({ args, key }) => {
+    expect(generateKey(PINNED_NAMESPACE, [...args])).toBe(key);
+    expect(generateParamsHash([...args])).toBe(key.slice(PINNED_NAMESPACE.length + 1));
+  });
+});
 
 /**
  * Protocol v1.0 Key Generation Test Vectors

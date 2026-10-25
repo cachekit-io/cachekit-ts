@@ -18,6 +18,7 @@ import {
   ensureInitialized,
   ByteStorage as WasmByteStorage,
   TenantKeys as WasmTenantKeys,
+  blake2b256Hex,
   deriveTenantKeys,
   encryptWithTenantKeys,
   decryptWithTenantKeys,
@@ -28,9 +29,35 @@ import { cachekitio } from '../backends/cachekitio-factory.js';
 import { CacheImpl, type CacheRuntime, type ExecutionContextLike } from '../cache-core.js';
 import { EncryptionManagerCore, type EncryptionBindings } from '../encryption/manager-core.js';
 import { ConfigurationError } from '../errors.js';
+import { KEY_GEN_MAX_SIZE } from '../constants.js';
+import { nobleBlake2b256Hex, setKeyHashBinding } from '../serialization/blake2b.js';
+
+/**
+ * The cache-key hash through wasm. The binding copies its input into wasm
+ * memory, which never shrinks, so input past the key size limit (a large
+ * interop argument list, or a large binary argument's bytes) is hashed in JS
+ * instead.
+ */
+function wasmKeyHash(data: Uint8Array): string {
+  return data.length <= KEY_GEN_MAX_SIZE ? blake2b256Hex(data) : nobleBlake2b256Hex(data);
+}
+
+let keyHashBound = false;
+
+/**
+ * Instantiate the wasm module, and hash cache keys through it from then on.
+ * Until something here first needs the module (a compression-on cache, or
+ * encryption), keys are hashed in JS, with the same result.
+ */
+function initWasm(): void {
+  ensureInitialized();
+  if (keyHashBound) return;
+  keyHashBound = true;
+  setKeyHashBinding(wasmKeyHash);
+}
 
 function wasmEncryptionBindings(): EncryptionBindings {
-  ensureInitialized();
+  initWasm();
   return {
     deriveTenantKeys,
     encryptWithTenantKeys: (plaintext, aad, tenantKeys) =>
@@ -68,7 +95,7 @@ export class EncryptionManager extends EncryptionManagerCore {
  */
 export class ByteStorage extends WasmByteStorage {
   constructor() {
-    ensureInitialized();
+    initWasm();
     super();
   }
 }

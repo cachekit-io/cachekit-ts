@@ -109,6 +109,16 @@ export declare class TenantKeys {
 }
 
 /**
+ * Unkeyed BLAKE2b-256 of `data`, as 64 lowercase hex characters: the cache-key
+ * hash, which the SDK otherwise computes in JS with identical output.
+ *
+ * `data` is borrowed from the JS Uint8Array, never copied. The hex is built here
+ * because a string costs less to return than a Uint8Array would to return and
+ * hex-encode in JS.
+ */
+export declare function blake2b256Hex(data: Uint8Array): string
+
+/**
  * Decrypt ciphertext using TenantKeys (keys stay in Rust memory).
  *
  * Uses the encryptor stored in TenantKeys for consistency.

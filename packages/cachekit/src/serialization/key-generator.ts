@@ -1,6 +1,7 @@
 import { Encoder } from '@msgpack/msgpack';
 import { blake2b } from '@noble/hashes/blake2.js';
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
+import { blake2b256Hex } from './blake2b.js';
 import { normalize } from './serializer.js';
 import { ValueTooLargeError } from '../errors.js';
 import {
@@ -25,33 +26,13 @@ const newKeyEncoder = (): Encoder => new Encoder({ initialBufferSize: KEY_ENCODE
  */
 let keyEncoder = newKeyEncoder();
 
-const HEX_DIGITS = new TextEncoder().encode('0123456789abcdef');
-const hexBytes = new Uint8Array(CACHE_KEY_HASH_LENGTH);
-const hexDecoder = new TextDecoder();
-const nativeHex = typeof (Uint8Array.prototype as { toHex?: unknown }).toHex === 'function';
-
 /**
- * Lowercase hex of a 32-byte digest, as one string. Without a native
- * Uint8Array.prototype.toHex (Node.js 24 and earlier), bytesToHex appends two
- * digits at a time, and V8 keeps every intermediate string inside the result:
- * about 800 bytes more for each key that L1 or a key memo holds.
- */
-function digestHex(digest: Uint8Array): string {
-  if (nativeHex) return bytesToHex(digest);
-  for (let i = 0; i < digest.length; i++) {
-    hexBytes[2 * i] = HEX_DIGITS[digest[i] >> 4];
-    hexBytes[2 * i + 1] = HEX_DIGITS[digest[i] & 15];
-  }
-  return hexDecoder.decode(hexBytes);
-}
-
-/**
- * BLAKE2b-256 of the key arguments' deterministic MessagePack, with strict
+ * BLAKE2b-256 hex of the key arguments' deterministic MessagePack, with strict
  * limits. Not the value serializer: key arguments are hashed, never decoded, so
  * any binary argument (typed array, DataView, ArrayBuffer) hashes by its type
  * and bytes.
  */
-function digestArgs(args: unknown[]): Uint8Array {
+function digestArgs(args: unknown[]): string {
   const normalized = normalize(args, 0, KEY_GEN_MAX_DEPTH, DEFAULT_MAX_COLLECTION_SIZE, {
     forKey: true,
     objects: 0,
@@ -71,7 +52,7 @@ function digestArgs(args: unknown[]): Uint8Array {
         `Encoded size ${encoded.length} exceeds max ${KEY_GEN_MAX_SIZE}`
       );
     }
-    return blake2b(encoded, { dkLen: 32 });
+    return blake2b256Hex(encoded);
   } finally {
     encoded.fill(0);
     if (encoded.buffer.byteLength > KEY_ENCODER_BUFFER) {
@@ -86,7 +67,9 @@ function digestArgs(args: unknown[]): Uint8Array {
  * Uses Blake2b-256 for the hash, which is:
  * - Faster than SHA-256
  * - Equally secure (256-bit security level)
- * - Used by @noble/hashes (Cure53-audited)
+ * - Computed in Rust by the loaded binding (NAPI on Node, wasm on Workers once
+ *   its module is instantiated), otherwise by @noble/hashes (Cure53-audited);
+ *   either way the key is the same
  *
  * Output format: `{namespace}:{64-char-hex-hash}`
  *
@@ -116,7 +99,7 @@ export function generateKey(namespace: string, args: unknown[]): string {
  * @returns 64-character hex hash string
  */
 export function generateParamsHash(args: unknown[]): string {
-  return digestHex(digestArgs(args));
+  return digestArgs(args);
 }
 
 /**

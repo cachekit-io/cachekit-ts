@@ -13,6 +13,8 @@
 
 #![deny(clippy::all)]
 
+use blake2::digest::consts::U32;
+use blake2::{Blake2b, Digest};
 use wasm_bindgen::prelude::*;
 
 use cachekit_core::encryption::key_derivation::{
@@ -59,6 +61,26 @@ fn validate_decryption_input(ciphertext_len: usize, aad_len: usize) -> Result<()
 #[wasm_bindgen]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Unkeyed BLAKE2b-256 of `data`, as 64 lowercase hex characters: the cache-key
+/// hash, which the SDK otherwise computes in JS with identical output. Mirrors
+/// the NAPI crate's `blake2b256Hex`.
+///
+/// `data` is a copy of the caller's bytes in wasm linear memory, which outlives
+/// the call: it holds a key's arguments, so it is wiped before it is freed, as
+/// the SDK wipes its own encoder buffer.
+#[wasm_bindgen(js_name = blake2b256Hex)]
+pub fn blake2b256_hex(data: Vec<u8>) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let data = Zeroizing::new(data);
+    let digest = Blake2b::<U32>::digest(&*data);
+    let mut hex = String::with_capacity(2 * digest.len());
+    for byte in digest {
+        hex.push(DIGITS[usize::from(byte >> 4)] as char);
+        hex.push(DIGITS[usize::from(byte & 15)] as char);
+    }
+    hex
 }
 
 /// ByteStorage provides LZ4 compression with xxHash3-64 integrity verification.

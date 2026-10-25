@@ -15,6 +15,11 @@ crate-type = ["cdylib"]
 napi = { version = "3", default-features = false, features = ["napi3", "dyn-symbols"] }
 napi-derive = "3"
 cachekit-core = { version = "0.7.0", features = ["encryption"] }
+# Cache-key BLAKE2b-256 (blake2b256Hex). The 0.10 line builds on the digest 0.10
+# that cachekit-core's sha2 and hmac already bring in, so it adds this one crate;
+# 0.11 would add a second digest stack. It is also the line cachekit-core's own
+# dev-dependency uses.
+blake2 = { version = "0.10.6", default-features = false }
 
 [build-dependencies]
 napi-build = "2"

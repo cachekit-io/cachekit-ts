@@ -589,6 +589,7 @@ if (!nativeBinding) {
 module.exports = nativeBinding
 module.exports.ByteStorage = nativeBinding.ByteStorage
 module.exports.TenantKeys = nativeBinding.TenantKeys
+module.exports.blake2b256Hex = nativeBinding.blake2b256Hex
 module.exports.decryptWithTenantKeys = nativeBinding.decryptWithTenantKeys
 module.exports.deriveKey = nativeBinding.deriveKey
 module.exports.deriveTenantKeys = nativeBinding.deriveTenantKeys

@@ -9,10 +9,15 @@ import { redis } from './backends/redis.js';
 import { cachekitio, cachekitioWithLocking } from './backends/cachekitio-factory.js';
 import { createMetrics } from './metrics/prometheus.js';
 import { EncryptionManager } from './encryption/manager.js';
-import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
+import { ByteStorage, blake2b256Hex } from '@cachekit-io/cachekit-core-ts';
 import { RedisInvalidationChannel } from './invalidation/redis-channel.js';
 import { CacheImpl, type CacheRuntime } from './cache-core.js';
+import { setKeyHashBinding } from './serialization/blake2b.js';
 import timers from 'node:timers';
+
+// The NAPI binding is loaded by the import above, so cache keys hash in Rust
+// from here on: about a tenth of the JS hash's cost per key.
+setKeyHashBinding(blake2b256Hex);
 
 /**
  * Node runtime: Redis + CachekitIO backends, NAPI bindings for the

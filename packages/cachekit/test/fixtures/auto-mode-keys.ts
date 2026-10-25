@@ -350,6 +350,11 @@ export const MEMOISABLE_KEYS: readonly PinnedKey[] = [
   },
 ];
 
+/** `length` bytes of a fixed pattern, as an ArrayBuffer. */
+function filledBuffer(length: number): ArrayBuffer {
+  return Uint8Array.from({ length }, (_, i) => (i * 31 + 7) & 255).buffer;
+}
+
 export const FULL_PATH_KEYS: readonly PinnedKey[] = [
   {
     name: 'NaN',
@@ -405,6 +410,35 @@ export const FULL_PATH_KEYS: readonly PinnedKey[] = [
     name: 'Uint8Array',
     args: [Uint8Array.of(1, 2)],
     key: 'svc:getThing:04df24b940715d0f6a344bf3c87421c63d24db5c5d784a114f09b0cbab5565bc',
+  },
+  // Other binary arguments key by type and a BLAKE2b-256 of their bytes: a
+  // second hash inside the key, pinned here too. Captured from main at 3bd2bb2;
+  // the ArrayBuffer key was also recomputed with Python's hashlib.
+  {
+    name: 'Int8Array',
+    args: [Int8Array.of(-1, 2)],
+    key: 'svc:getThing:4bec300b70bc368d81ed320faf2bb5cf0ef7f1259d5a23f6250203d3592be066',
+  },
+  {
+    name: 'DataView',
+    args: [new DataView(Uint8Array.of(1, 2, 3).buffer)],
+    key: 'svc:getThing:b4fd0f33ae38d367266a7ea7303f01b8e80307bb63760e18857615eaab98a672',
+  },
+  {
+    name: 'ArrayBuffer',
+    args: [Uint8Array.of(1, 2).buffer],
+    key: 'svc:getThing:492f7ea9f61ac819557ef22a2a4d1eac95d0fa5b7317098b5517dbfc09779f46',
+  },
+  // At and one past the key size limit, where Workers stops hashing in wasm.
+  {
+    name: '64 KiB ArrayBuffer',
+    args: [filledBuffer(64 * 1024)],
+    key: 'svc:getThing:7c17a957c23e00e94abec52b59773d470cdf0c1fdb5d554fdbbc0364cd6c006c',
+  },
+  {
+    name: '64 KiB + 1 ArrayBuffer',
+    args: [filledBuffer(64 * 1024 + 1)],
+    key: 'svc:getThing:773520f0181eff94833cacc07fb77f32f47054294931dabd54d365df85bfbbd2',
   },
   {
     name: 'boxed number (keys as {})',

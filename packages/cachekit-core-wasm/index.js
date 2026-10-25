@@ -8,6 +8,7 @@ import { initSync } from './pkg/cachekit_core_wasm.js';
 export {
   ByteStorage,
   TenantKeys,
+  blake2b256Hex,
   deriveKey,
   deriveTenantKeys,
   encryptWithTenantKeys,
