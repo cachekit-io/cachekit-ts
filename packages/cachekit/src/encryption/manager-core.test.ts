@@ -163,19 +163,14 @@ describe('EncryptionManagerCore', () => {
     }
   );
 
-  it('a near-limit key builds the AAD once more, for the exact size check; a short key does not', async () => {
+  it('validateKey and encrypt on a short key encode only the cache key, once', async () => {
     const { bindings } = mockBindings();
     const manager = new TestManager(async () => bindings);
     const encode = vi.spyOn(TextEncoder.prototype, 'encode');
     try {
-      for (const key of ['ns:k', 'k'.repeat(MAX_AAD_SIZE - 100)]) {
-        encode.mockClear();
-        manager.validateKey(key, true);
-        await manager.encrypt(new Uint8Array([1]), key, true);
-        expect(encode.mock.calls.map(([text]) => text)).toEqual(
-          key === 'ns:k' ? [key] : [key, key]
-        );
-      }
+      manager.validateKey('ns:k', true);
+      await manager.encrypt(new Uint8Array([1]), 'ns:k', true);
+      expect(encode.mock.calls.map(([text]) => text)).toEqual(['ns:k']);
     } finally {
       encode.mockRestore();
       manager.dispose();

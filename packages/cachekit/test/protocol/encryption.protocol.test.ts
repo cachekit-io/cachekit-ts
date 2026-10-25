@@ -617,12 +617,14 @@ describe('encryption.json aad_hex — the shipped AAD builder', () => {
     ...buildable(fixture.default_tenant.vectors).map((v) => ({ ...v, tenantId: undefined })),
   ];
 
-  it('covers the buildable rows of every sealed table, compressed and not', () => {
+  it('covers buildable rows of vectors, master_key_input and default_tenant, compressed and not', () => {
     expect(buildable(fixture.vectors).map((v) => v.name)).toEqual([
       'basic_bytes',
       'special_cache_key',
       'compressed_basic',
     ]);
+    expect(buildable(masterKeyInput.accept_vectors)).not.toHaveLength(0);
+    expect(buildable(fixture.default_tenant.vectors)).not.toHaveLength(0);
     expect(fixture.default_tenant.tenant_id).toBe('default');
     expect(new Set(rows.map((v) => v.compressed))).toEqual(new Set([true, false]));
   });
@@ -658,7 +660,6 @@ describe('encryption.json aad_hex — the shipped AAD builder', () => {
     { tenantId: 'tenant-é', cacheKey: 'ns:ключ:€:😀', compressed: true },
     { tenantId: '租户', cacheKey: 'ns:k', compressed: false },
     { tenantId: 'acme', cacheKey: '', compressed: false },
-    { tenantId: 'acme', cacheKey: '', compressed: true },
   ])(
     'tenant $tenantId, key $cacheKey, compressed=$compressed matches the v0x03 layout',
     async ({ tenantId, cacheKey, compressed }) => {

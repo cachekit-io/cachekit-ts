@@ -471,10 +471,10 @@ export class EncryptionManagerCore {
    * only MessagePack payloads.
    *
    * @param cacheKey - Cache key to bind in AAD
-   * @param compressed - Whether data is compressed (default: false)
+   * @param compressed - Whether data is compressed
    * @returns Serialized AAD buffer for AES-GCM operations
    */
-  private buildAAD(cacheKey: string, compressed = false): Uint8Array {
+  private buildAAD(cacheKey: string, compressed: boolean): Uint8Array {
     const key = utf8.encode(cacheKey);
     const aad = new Uint8Array(this.aadLength(key.length, compressed));
     let offset = 0;
