@@ -74,9 +74,9 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "cachekit-core"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da83c6ae3ed61a36c8344bf5246d69528e6937b3df8445830d073f74d5327888"
+checksum = "9bc8d8f44d0c6e6b7951f4ca9cc826357a087caee20c8dbc9cf022284464ac52"
 dependencies = [
  "aes",
  "aes-gcm",
