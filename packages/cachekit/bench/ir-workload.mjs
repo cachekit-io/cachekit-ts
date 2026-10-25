@@ -216,6 +216,24 @@ export const WORKLOADS = {
       return encryptedOp(manager, new glue.ByteStorage());
     },
   },
+  // a secure cache's L2 round trip on Node, L1 off: set + get, each running the
+  // AAD-size pre-flight (validateKey) and then encrypt or decrypt
+  'secure-set-get': {
+    n: 5_000,
+    setup: async () => {
+      const { createCache } = await load('index.js');
+      const cache = createCache({
+        backend: new MemoryBackend(),
+        l1: { enabled: false },
+        encryption: { masterKey: MASTER_KEY },
+        metrics: false,
+      });
+      return async () => {
+        await cache.set(KEY, VALUE);
+        sink += (await cache.get(KEY)).rows.length;
+      };
+    },
+  },
   // the public API's fastest path: keygen + L1 lookup + L1 decode
   'wrap-l1-hit': {
     n: 10_000,

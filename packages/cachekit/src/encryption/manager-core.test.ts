@@ -131,8 +131,46 @@ describe('EncryptionManagerCore', () => {
       expect(() => manager.validateKey('k'.repeat(MAX_AAD_SIZE + 1))).toThrow(ConfigurationError);
       expect(encode).not.toHaveBeenCalled();
       // Control: the spy does see the measured path, so the assertion above is not vacuous.
-      manager.validateKey('ns:k');
+      manager.validateKey('k'.repeat(MAX_AAD_SIZE - 100));
       expect(encode).toHaveBeenCalled();
+    } finally {
+      encode.mockRestore();
+      manager.dispose();
+    }
+  });
+
+  // AAD overhead for the default tenant: version byte + four 4-byte lengths +
+  // 'default' + 'msgpack' + 'True' (4) or 'False' (5).
+  const overhead = (compressed: boolean) => 1 + 16 + 7 + 7 + (compressed ? 4 : 5);
+
+  it.each([true, false])(
+    'validateKey encodes no key that fits at 3 UTF-8 bytes per UTF-16 unit (compressed=%s)',
+    (compressed) => {
+      const manager = new TestManager(async () => mockBindings().bindings);
+      const atBound = Math.floor((MAX_AAD_SIZE - overhead(compressed)) / 3);
+      const encode = vi.spyOn(TextEncoder.prototype, 'encode');
+      try {
+        // The worst case at the bound: every unit a lone surrogate, 3 bytes as U+FFFD.
+        manager.validateKey('\uD800'.repeat(atBound), compressed);
+        expect(encode).not.toHaveBeenCalled();
+        // One unit past the bound is measured, and still fits as ASCII.
+        manager.validateKey('k'.repeat(atBound + 1), compressed);
+        expect(encode).toHaveBeenCalledTimes(1);
+      } finally {
+        encode.mockRestore();
+        manager.dispose();
+      }
+    }
+  );
+
+  it('validateKey and encrypt on a short key encode only the cache key, once', async () => {
+    const { bindings } = mockBindings();
+    const manager = new TestManager(async () => bindings);
+    const encode = vi.spyOn(TextEncoder.prototype, 'encode');
+    try {
+      manager.validateKey('ns:k', true);
+      await manager.encrypt(new Uint8Array([1]), 'ns:k', true);
+      expect(encode.mock.calls.map(([text]) => text)).toEqual(['ns:k']);
     } finally {
       encode.mockRestore();
       manager.dispose();

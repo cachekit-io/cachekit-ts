@@ -1879,11 +1879,11 @@ describe('Cache Integration', () => {
     // layout, not to the implementation.
     const keyBudget = (compressed: boolean) =>
       MAX_AAD - (1 + 16 + TENANT.length + 'msgpack'.length + (compressed ? 4 : 5));
-    /** A key of exactly `bytes` UTF-8 bytes; `multibyte` spends most of it on 2-byte 'é'. */
-    const keyOfBytes = (bytes: number, multibyte = false) => {
+    /** A key of exactly `bytes` UTF-8 bytes, most of it `char`, which takes `width` UTF-8 bytes. */
+    const keyOfBytes = (bytes: number, char = 'k', width = 1) => {
       const body = bytes - 'ns:'.length;
-      const wide = multibyte ? Math.floor(body / 2) : 0;
-      return `ns:${'é'.repeat(wide)}${'k'.repeat(body - 2 * wide)}`;
+      const count = Math.floor(body / width);
+      return `ns:${char.repeat(count)}${'k'.repeat(body - count * width)}`;
     };
     // production reliability: retry 3x with backoff, breaker opens at 5 failures.
     const secureCache = (backend: Backend, compression?: boolean) =>
@@ -1960,7 +1960,9 @@ describe('Cache Integration', () => {
       'boundary is 65 536 AAD bytes, counted in UTF-8 (compression=$compression, multibyte=$multibyte)',
       async ({ compression, multibyte }) => {
         const c = secureCache(new InMemoryBackend(), compression);
-        const atLimit = keyOfBytes(keyBudget(compression), multibyte);
+        const atLimit = multibyte
+          ? keyOfBytes(keyBudget(compression), 'é', 2)
+          : keyOfBytes(keyBudget(compression));
 
         await c.set(atLimit, 'fits');
         expect(await c.get(atLimit)).toBe('fits');
@@ -1970,6 +1972,41 @@ describe('Cache Integration', () => {
         await c.close();
       }
     );
+
+    // validateKey skips encoding for keys that fit at 3 bytes per UTF-16 unit,
+    // so every row here is near the limit and takes the measured path. Each
+    // width is the character's UTF-8 size; a lone surrogate encodes as the
+    // 3-byte U+FFFD. The backend's keyPrefix counts.
+    describe.each([
+      { char: 'k', width: 1 },
+      { char: 'é', width: 2 },
+      { char: '€', width: 3 },
+      { char: '😀', width: 4 },
+      { char: '\uD800', width: 3 },
+    ])('key of $char ($width UTF-8 bytes each) behind keyPrefix app1:', ({ char, width }) => {
+      class PrefixedBackend extends InMemoryBackend {
+        readonly keyPrefix = 'app1:';
+      }
+      it.each([
+        { compression: true, delta: -1 },
+        { compression: true, delta: 0 },
+        { compression: true, delta: 1 },
+        { compression: false, delta: -1 },
+        { compression: false, delta: 0 },
+        { compression: false, delta: 1 },
+      ])(
+        'AAD of MAX_AAD_SIZE $delta bytes (compression=$compression)',
+        async ({ compression, delta }) => {
+          const c = secureCache(new PrefixedBackend(), compression);
+          const key = keyOfBytes(keyBudget(compression) - 'app1:'.length + delta, char, width);
+
+          if (delta > 0) await expect(c.set(key, 'v')).rejects.toThrow(ConfigurationError);
+          else await expect(c.set(key, 'v')).resolves.toBeUndefined();
+
+          await c.close();
+        }
+      );
+    });
 
     it('a cache without encryption stores the same key as before', async () => {
       const backend = new InMemoryBackend();
@@ -2060,6 +2097,20 @@ describe('Cache Integration', () => {
         await c.close();
       }
     );
+    it('a secure set and a secure read that misses L1 each build the AAD once', async () => {
+      const buildAAD = vi.spyOn(
+        EncryptionManagerCore.prototype as unknown as { buildAAD(...args: unknown[]): Uint8Array },
+        'buildAAD'
+      );
+      const c = secureOver(new PrefixingBackend('app1:', new Map()));
+
+      await c.set('k1', 'v');
+      expect(buildAAD).toHaveBeenCalledTimes(1);
+      expect(await c.get('k1')).toBe('v');
+      expect(buildAAD).toHaveBeenCalledTimes(2);
+
+      await c.close();
+    });
   });
 
   describe('backend-advertised compression default', () => {

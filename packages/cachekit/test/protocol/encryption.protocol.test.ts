@@ -18,6 +18,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createCache } from '../../src/index.js';
+import {
+  EncryptionManagerCore,
+  type EncryptionBindings,
+} from '../../src/encryption/manager-core.js';
 import { ConfigurationError, EncryptionError, SerializationError } from '../../src/errors.js';
 import { generateInteropKey } from '../../src/serialization/interop.js';
 import type { Backend } from '../../src/backends/types.js';
@@ -59,10 +63,18 @@ interface SealedRow {
 interface Fixture {
   master_key_hex: string;
   tenant_id: string;
-  vectors: (SealedRow & { plaintext_hex: string })[];
+  vectors: (SealedRow & { plaintext_hex: string; aad_hex: string })[];
+  default_tenant: {
+    tenant_id: string;
+    vectors: (SealedRow & { aad_hex: string })[];
+  };
   master_key_input: {
     tenant_id: string;
-    accept_vectors: (SealedRow & { master_key_hex: string; plaintext_hex: string })[];
+    accept_vectors: (SealedRow & {
+      master_key_hex: string;
+      plaintext_hex: string;
+      aad_hex: string;
+    })[];
     reject_vectors: { name: string; master_key_hex: string }[];
   };
   keyring: {
@@ -96,13 +108,18 @@ function assertFixtureFile(value: unknown): asserts value is Fixture {
     {
       master_key_hex: 'string',
       tenant_id: 'string',
-      vectors: table({ ...SEALED_ROW_SHAPE, plaintext_hex: 'string' }),
+      vectors: table({ ...SEALED_ROW_SHAPE, plaintext_hex: 'string', aad_hex: 'string' }),
+      default_tenant: {
+        tenant_id: 'string',
+        vectors: table({ ...SEALED_ROW_SHAPE, aad_hex: 'string' }),
+      },
       master_key_input: {
         tenant_id: 'string',
         accept_vectors: table({
           ...SEALED_ROW_SHAPE,
           master_key_hex: 'string',
           plaintext_hex: 'string',
+          aad_hex: 'string',
         }),
         reject_vectors: table({ name: 'string', master_key_hex: 'string' }),
       },
@@ -550,4 +567,104 @@ describe('encryption.json decrypted_container (protocol 1.5.0, ENC-3) — the co
       await cache.close();
     }
   });
+});
+
+describe('encryption.json aad_hex — the shipped AAD builder', () => {
+  // The Workers lane proves the builder only end to end, by decrypting; this
+  // pins its bytes. Mock bindings capture the AAD the manager hands encrypt
+  // and decrypt, so no key material or native code is involved.
+  async function managerAad(
+    tenantId: string | undefined,
+    cacheKey: string,
+    compressed: boolean
+  ): Promise<string[]> {
+    const aads: Uint8Array[] = [];
+    const bindings: EncryptionBindings = {
+      deriveTenantKeys: (_masterKey, tenant) => ({
+        tenantId: tenant,
+        encryptionFingerprint: () => new Uint8Array(16),
+        getNonceCounter: () => 0,
+      }),
+      encryptWithTenantKeys: (_data, aad) => (aads.push(aad), new Uint8Array([1])),
+      decryptWithTenantKeys: (_data, aad) => (aads.push(aad), new Uint8Array([2])),
+    };
+    const manager = new EncryptionManagerCore(
+      fixture.master_key_hex,
+      tenantId,
+      async () => bindings
+    );
+    try {
+      await manager.encrypt(new Uint8Array([1]), cacheKey, compressed);
+      await manager.decrypt(new Uint8Array([1]), cacheKey, compressed);
+    } finally {
+      manager.dispose();
+    }
+    return aads.map((aad) => Buffer.from(aad).toString('hex'));
+  }
+
+  // The manager builds AAD from (tenantId, cacheKey, 'msgpack', compressed):
+  // exactly the rows without a Python-serializer original_type extension, as
+  // the Workers lane filters them. The default_tenant row builds with no
+  // tenantId configured.
+  const buildable = <T extends SealedRow>(rows: T[]) =>
+    rows.filter((v) => v.format === 'msgpack' && v.original_type === undefined);
+  const rows = [
+    ...buildable(fixture.vectors).map((v) => ({ ...v, tenantId: fixture.tenant_id })),
+    ...buildable(masterKeyInput.accept_vectors).map((v) => ({
+      ...v,
+      tenantId: masterKeyInput.tenant_id,
+    })),
+    ...buildable(fixture.default_tenant.vectors).map((v) => ({ ...v, tenantId: undefined })),
+  ];
+
+  it('covers buildable rows of vectors, master_key_input and default_tenant, compressed and not', () => {
+    expect(buildable(fixture.vectors).map((v) => v.name)).toEqual([
+      'basic_bytes',
+      'special_cache_key',
+      'compressed_basic',
+    ]);
+    expect(buildable(masterKeyInput.accept_vectors)).not.toHaveLength(0);
+    expect(buildable(fixture.default_tenant.vectors)).not.toHaveLength(0);
+    expect(fixture.default_tenant.tenant_id).toBe('default');
+    expect(new Set(rows.map((v) => v.compressed))).toEqual(new Set([true, false]));
+  });
+
+  it.each(rows.map((v) => [v.name, v] as const))(
+    '%s: encrypt and decrypt hand the binding aad_hex',
+    async (_name, v) => {
+      expect(await managerAad(v.tenantId, v.cache_key, v.compressed)).toEqual([
+        v.aad_hex,
+        v.aad_hex,
+      ]);
+    }
+  );
+
+  /** The v0x03 layout written out, independent of the builder under test. */
+  function layoutHex(tenantId: string, cacheKey: string, compressed: boolean): string {
+    const component = (text: string) => {
+      const bytes = Buffer.from(text, 'utf8');
+      const length = Buffer.alloc(4);
+      length.writeUInt32BE(bytes.length);
+      return Buffer.concat([length, bytes]);
+    };
+    return Buffer.concat([
+      Buffer.from([0x03]),
+      component(tenantId),
+      component(cacheKey),
+      component('msgpack'),
+      component(compressed ? 'True' : 'False'),
+    ]).toString('hex');
+  }
+
+  it.each([
+    { tenantId: 'tenant-é', cacheKey: 'ns:ключ:€:😀', compressed: true },
+    { tenantId: '租户', cacheKey: 'ns:k', compressed: false },
+    { tenantId: 'acme', cacheKey: '', compressed: false },
+  ])(
+    'tenant $tenantId, key $cacheKey, compressed=$compressed matches the v0x03 layout',
+    async ({ tenantId, cacheKey, compressed }) => {
+      const expected = layoutHex(tenantId, cacheKey, compressed);
+      expect(await managerAad(tenantId, cacheKey, compressed)).toEqual([expected, expected]);
+    }
+  );
 });
