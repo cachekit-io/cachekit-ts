@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect } from 'vitest';
-import { blake2b256Hex } from '@cachekit-io/cachekit-core-ts';
+import { blake2b256Hex as napiBlake2b256Hex } from '@cachekit-io/cachekit-core-ts';
 import {
   setKeyHashBinding,
   usingKeyHashBinding,
@@ -12,7 +12,7 @@ import {
  * both. The Workers lane runs the wasm binding (test/workers).
  */
 export const KEY_HASH_LANES: ReadonlyArray<readonly [string, Blake2b256Hex | undefined]> = [
-  ['NAPI binding', blake2b256Hex],
+  ['NAPI binding', napiBlake2b256Hex],
   ['pure JS', undefined],
 ];
 

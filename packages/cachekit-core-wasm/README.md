@@ -61,8 +61,11 @@ rotating.free(); // zeroize the whole keyring when the grace window ends
   than the NAPI binding's Rust heap — on Workers the host is your own
   isolate, making it roughly JS-heap-equivalent in threat model.
 - `blake2b256Hex` copies its input (a cache key's encoded arguments) into
-  linear memory and wipes that copy before freeing it. Linear memory never
-  shrinks, so the SDK hashes inputs over 64 KiB in JS instead.
+  linear memory and wipes that copy before freeing it. The hasher's last block
+  of input, up to 128 bytes and so all of a short key, stays on the stack in
+  linear memory until later calls overwrite it, as the input to `pack` or
+  `encryptWithTenantKeys` does. Linear memory never shrinks, so the SDK hashes
+  inputs over 64 KiB in JS instead.
 - Each `TenantKeys` handle owns one encryptor with a counter nonce (unique
   instance id + monotonic counter, exhaustion at 2^32) — the same
   nonce-reuse guarantees as the native core. Reuse one handle per key; do

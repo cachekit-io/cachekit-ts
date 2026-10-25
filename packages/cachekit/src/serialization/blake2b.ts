@@ -85,20 +85,21 @@ export function usingKeyHashBinding(): boolean {
 /**
  * A binding that throws once it is in use is dropped for good, after one
  * report, and the call that met the failure is answered in JS: a faster hash
- * must never be the reason a key cannot be made.
+ * must never be the reason a key cannot be made. The answer is computed before
+ * the report: `data` can be a view of the shared key encoder's buffer, and a
+ * logger that makes a key of its own would overwrite it.
  */
 function viaBinding(hash: Blake2b256Hex, data: Uint8Array): string {
   try {
     return hash(data);
   } catch (error) {
-    if (binding === hash) {
-      binding = undefined;
-      logError(
-        "[cachekit] the binding's BLAKE2b-256 failed; cache keys are hashed in JS from now on",
-        error
-      );
-    }
-    return nobleBlake2b256Hex(data);
+    const hex = nobleBlake2b256Hex(data);
+    binding = undefined;
+    logError(
+      "[cachekit] the binding's BLAKE2b-256 failed; cache keys are hashed in JS from now on",
+      error
+    );
+    return hex;
   }
 }
 

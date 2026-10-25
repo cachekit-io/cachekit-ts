@@ -18,11 +18,11 @@ import {
   ensureInitialized,
   ByteStorage as WasmByteStorage,
   TenantKeys as WasmTenantKeys,
-  blake2b256Hex,
   deriveTenantKeys,
   encryptWithTenantKeys,
   decryptWithTenantKeys,
 } from '@cachekit-io/cachekit-core-wasm';
+import * as core from '@cachekit-io/cachekit-core-wasm';
 import type { CacheOptions, SecureCache } from '../types/cache.js';
 import type { CachekitIOBackendConfig } from '../backends/types.js';
 import { cachekitio } from '../backends/cachekitio-factory.js';
@@ -30,17 +30,11 @@ import { CacheImpl, type CacheRuntime, type ExecutionContextLike } from '../cach
 import { EncryptionManagerCore, type EncryptionBindings } from '../encryption/manager-core.js';
 import { ConfigurationError } from '../errors.js';
 import { KEY_GEN_MAX_SIZE } from '../constants.js';
-import { nobleBlake2b256Hex, setKeyHashBinding } from '../serialization/blake2b.js';
-
-/**
- * The cache-key hash through wasm. The binding copies its input into wasm
- * memory, which never shrinks, so input past the key size limit (a large
- * interop argument list, or a large binary argument's bytes) is hashed in JS
- * instead.
- */
-function wasmKeyHash(data: Uint8Array): string {
-  return data.length <= KEY_GEN_MAX_SIZE ? blake2b256Hex(data) : nobleBlake2b256Hex(data);
-}
+import {
+  nobleBlake2b256Hex,
+  setKeyHashBinding,
+  type Blake2b256Hex,
+} from '../serialization/blake2b.js';
 
 let keyHashBound = false;
 
@@ -48,12 +42,22 @@ let keyHashBound = false;
  * Instantiate the wasm module, and hash cache keys through it from then on.
  * Until something here first needs the module (a compression-on cache, or
  * encryption), keys are hashed in JS, with the same result.
+ *
+ * The hash is read off the namespace, never imported by name: a core-wasm
+ * published before it lacks the export, and keys then stay in JS. It copies
+ * its input into wasm memory, which never shrinks, so input past the key size
+ * limit (a large interop argument list, or a large binary argument's bytes) is
+ * hashed in JS instead.
  */
 function initWasm(): void {
   ensureInitialized();
   if (keyHashBound) return;
   keyHashBound = true;
-  setKeyHashBinding(wasmKeyHash);
+  const wasmHash = (core as { blake2b256Hex?: Blake2b256Hex }).blake2b256Hex;
+  if (typeof wasmHash !== 'function') return;
+  setKeyHashBinding((data) =>
+    data.length <= KEY_GEN_MAX_SIZE ? wasmHash(data) : nobleBlake2b256Hex(data)
+  );
 }
 
 function wasmEncryptionBindings(): EncryptionBindings {

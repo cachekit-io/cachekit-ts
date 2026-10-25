@@ -27,41 +27,6 @@ const newKeyEncoder = (): Encoder => new Encoder({ initialBufferSize: KEY_ENCODE
 let keyEncoder = newKeyEncoder();
 
 /**
- * BLAKE2b-256 hex of the key arguments' deterministic MessagePack, with strict
- * limits. Not the value serializer: key arguments are hashed, never decoded, so
- * any binary argument (typed array, DataView, ArrayBuffer) hashes by its type
- * and bytes.
- */
-function digestArgs(args: unknown[]): string {
-  const normalized = normalize(args, 0, KEY_GEN_MAX_DEPTH, DEFAULT_MAX_COLLECTION_SIZE, {
-    forKey: true,
-    objects: 0,
-    values: 0,
-  });
-  let encoded: Uint8Array;
-  try {
-    encoded = keyEncoder.encodeSharedRef(normalized);
-  } catch (error) {
-    // The buffer holds whatever was written before the throw: drop it.
-    keyEncoder = newKeyEncoder();
-    throw error;
-  }
-  try {
-    if (encoded.length > KEY_GEN_MAX_SIZE) {
-      throw new ValueTooLargeError(
-        `Encoded size ${encoded.length} exceeds max ${KEY_GEN_MAX_SIZE}`
-      );
-    }
-    return blake2b256Hex(encoded);
-  } finally {
-    encoded.fill(0);
-    if (encoded.buffer.byteLength > KEY_ENCODER_BUFFER) {
-      keyEncoder = newKeyEncoder();
-    }
-  }
-}
-
-/**
  * Generate a cache key from namespace and arguments.
  *
  * Uses Blake2b-256 for the hash, which is:
@@ -95,11 +60,41 @@ export function generateKey(namespace: string, args: unknown[]): string {
  * - Params-level invalidation
  * - Cross-language cache key compatibility
  *
+ * It is the BLAKE2b-256 of the arguments' deterministic MessagePack, with strict
+ * limits. Not the value serializer: key arguments are hashed, never decoded, so
+ * any binary argument (typed array, DataView, ArrayBuffer) hashes by its type
+ * and bytes.
+ *
  * @param args - Function arguments to hash
  * @returns 64-character hex hash string
  */
 export function generateParamsHash(args: unknown[]): string {
-  return digestArgs(args);
+  const normalized = normalize(args, 0, KEY_GEN_MAX_DEPTH, DEFAULT_MAX_COLLECTION_SIZE, {
+    forKey: true,
+    objects: 0,
+    values: 0,
+  });
+  let encoded: Uint8Array;
+  try {
+    encoded = keyEncoder.encodeSharedRef(normalized);
+  } catch (error) {
+    // The buffer holds whatever was written before the throw: drop it.
+    keyEncoder = newKeyEncoder();
+    throw error;
+  }
+  try {
+    if (encoded.length > KEY_GEN_MAX_SIZE) {
+      throw new ValueTooLargeError(
+        `Encoded size ${encoded.length} exceeds max ${KEY_GEN_MAX_SIZE}`
+      );
+    }
+    return blake2b256Hex(encoded);
+  } finally {
+    encoded.fill(0);
+    if (encoded.buffer.byteLength > KEY_ENCODER_BUFFER) {
+      keyEncoder = newKeyEncoder();
+    }
+  }
 }
 
 /**

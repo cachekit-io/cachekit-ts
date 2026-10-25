@@ -8,37 +8,19 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { blake2b256Hex, initSync } from '@cachekit-io/cachekit-core-wasm';
-import { createCache, type Backend } from '../../src/workers/index.js';
+import { blake2b256Hex as wasmBlake2b256Hex, initSync } from '@cachekit-io/cachekit-core-wasm';
+import { createCache } from '../../src/workers/index.js';
 import { generateKey } from '../../src/serialization/key-generator.js';
 import { generateInteropKey } from '../../src/serialization/interop.js';
 import { usingKeyHashBinding } from '../../src/serialization/blake2b.js';
 import { FULL_PATH_KEYS, MEMOISABLE_KEYS, PINNED_NAMESPACE } from '../fixtures/auto-mode-keys.js';
+import { InMemoryBackend } from '../fixtures/metrics.js';
 import { hexToBytes } from '../fixtures/wire-vectors.js';
 import interop from '../protocol/fixtures/interop-mode.json' with { type: 'json' };
 
 const PINNED = [...MEMOISABLE_KEYS, ...FULL_PATH_KEYS];
 /** ['x' * 65,537] as interop args: past the wasm limit. Python's hashlib agrees. */
-const LONG_INTEROP_KEY = 'ns1:op:e8896cc5d4fe161cabdfd093b47a70d4b65ea03e05871cf61a3b458f1349a126';
-
-function memoryBackend(): Backend {
-  const store = new Map<string, Uint8Array>();
-  return {
-    async get(key) {
-      return store.get(key) ?? null;
-    },
-    async set(key, value) {
-      store.set(key, value);
-    },
-    async delete(key) {
-      return store.delete(key);
-    },
-    async exists(key) {
-      return store.has(key);
-    },
-    async close() {},
-  };
-}
+const LONG_INTEROP_KEY = 'ns1:op:e8896cc5d4fe161cabdfd093b47a70d4b65ea03e05871cf61a3b458f1349a126'; // pragma: allowlist secret
 
 /**
  * The wasm instance's linear memory. Once the module is instantiated, initSync
@@ -59,13 +41,13 @@ function contains(haystack: Uint8Array, needle: Uint8Array): boolean {
 describe('cache-key hashing on Workers', () => {
   it('hashes in JS while no cache has needed the wasm module', () => {
     // Compression off and no encryption: nothing instantiates the module.
-    createCache({ backend: memoryBackend(), compression: false });
+    createCache({ backend: new InMemoryBackend(), compression: false });
     expect(usingKeyHashBinding()).toBe(false);
     for (const { args, key } of PINNED) expect(generateKey(PINNED_NAMESPACE, [...args])).toBe(key);
   });
 
   it('hashes through wasm once a cache instantiates the module', () => {
-    createCache({ backend: memoryBackend() });
+    createCache({ backend: new InMemoryBackend() });
     expect(usingKeyHashBinding()).toBe(true);
     for (const { args, key } of PINNED) expect(generateKey(PINNED_NAMESPACE, [...args])).toBe(key);
     expect(generateInteropKey('ns1', 'op', ['x'.repeat(64 * 1024 + 1)])).toBe(LONG_INTEROP_KEY);
@@ -74,7 +56,7 @@ describe('cache-key hashing on Workers', () => {
   it.each(interop.key_vectors.map((v) => [v.name, v] as const))(
     'wasm blake2b256Hex gives interop vector %s its args_hash',
     (_, vector) => {
-      expect(blake2b256Hex(hexToBytes(vector.canonical_args_hex))).toBe(vector.args_hash);
+      expect(wasmBlake2b256Hex(hexToBytes(vector.canonical_args_hex))).toBe(vector.args_hash);
     }
   );
 
@@ -82,8 +64,8 @@ describe('cache-key hashing on Workers', () => {
     const backing = new Uint8Array(64).fill(0xc1);
     const view = backing.subarray(7, 52);
     view.set(Uint8Array.from({ length: 45 }, (_, i) => i));
-    expect(blake2b256Hex(view)).toBe(blake2b256Hex(view.slice()));
-    expect(blake2b256Hex(view)).not.toBe(blake2b256Hex(backing));
+    expect(wasmBlake2b256Hex(view)).toBe(wasmBlake2b256Hex(view.slice()));
+    expect(wasmBlake2b256Hex(view)).not.toBe(wasmBlake2b256Hex(backing));
   });
 
   it('wipes its copy of the input from wasm memory', () => {
@@ -92,7 +74,7 @@ describe('cache-key hashing on Workers', () => {
     const input = new Uint8Array(1024);
     const marker = Uint8Array.from({ length: 48 }, (_, i) => (i * 37 + 11) & 255);
     input.set(marker, 64);
-    blake2b256Hex(input);
+    wasmBlake2b256Hex(input);
     expect(contains(new Uint8Array(wasmMemory().buffer), marker)).toBe(false);
   });
 
@@ -102,7 +84,7 @@ describe('cache-key hashing on Workers', () => {
     generateKey(PINNED_NAMESPACE, [big]);
     expect(wasmMemory().buffer.byteLength).toBe(before);
     // The control: the same bytes through the binding directly do grow it.
-    blake2b256Hex(new Uint8Array(big));
+    wasmBlake2b256Hex(new Uint8Array(big));
     expect(wasmMemory().buffer.byteLength).toBeGreaterThan(before);
   });
 });

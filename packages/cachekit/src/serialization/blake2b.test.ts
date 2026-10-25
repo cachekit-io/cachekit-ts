@@ -2,14 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { blake2b } from '@noble/hashes/blake2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import * as napi from '@cachekit-io/cachekit-core-ts';
-import {
-  blake2b256,
-  blake2b256Hex,
-  nobleBlake2b256Hex,
-  setKeyHashBinding,
-  usingKeyHashBinding,
-} from './blake2b.js';
+import { blake2b256, blake2b256Hex, setKeyHashBinding, usingKeyHashBinding } from './blake2b.js';
+import { generateKey } from './key-generator.js';
 import { setLogger } from '../logger.js';
+import { FULL_PATH_KEYS, PINNED_NAMESPACE } from '../../test/fixtures/auto-mode-keys.js';
 
 const reference = (data: Uint8Array) => bytesToHex(blake2b(data, { dkLen: 32 }));
 const filled = (length: number) => Uint8Array.from({ length }, (_, i) => (i * 31 + 7) & 255);
@@ -45,13 +41,6 @@ describe('setKeyHashBinding', () => {
   it('hashes in JS until a binding is set', () => {
     expect(usingKeyHashBinding()).toBe(false);
     expect(blake2b256Hex(filled(45))).toBe(reference(filled(45)));
-  });
-
-  it('pins the self-test digest to the JS hash', () => {
-    const input = Uint8Array.from({ length: 257 }, (_, i) => i & 255);
-    expect(nobleBlake2b256Hex(input)).toBe(
-      '45f7f084c30bac7cbae2e1963bc6e6b0d8cb227a12927e97fb941d288fb1f9a3' // pragma: allowlist secret
-    );
   });
 
   it('routes both digests through the binding once it passes the self-test', () => {
@@ -116,5 +105,19 @@ describe('setKeyHashBinding', () => {
     expect(usingKeyHashBinding()).toBe(false);
     expect(log).toHaveBeenCalledTimes(1);
     expect(log).toHaveBeenCalledWith(expect.stringMatching(/hashed in JS from now on/), failure);
+  });
+
+  it('keys the failing call right when the logger makes a key of its own', () => {
+    // The failing call's input is a view of the shared key encoder's buffer,
+    // which a key made inside the logger would overwrite.
+    const { args, key } = FULL_PATH_KEYS.find((k) => k.name === 'the Ir suite arguments')!;
+    setLogger(() => void generateKey('logger', ['an alert', { id: 1 }]));
+    let broken = false;
+    setKeyHashBinding((data) => {
+      if (broken) throw new Error('out of memory');
+      return napi.blake2b256Hex(data);
+    });
+    broken = true;
+    expect(generateKey(PINNED_NAMESPACE, [...args])).toBe(key);
   });
 });

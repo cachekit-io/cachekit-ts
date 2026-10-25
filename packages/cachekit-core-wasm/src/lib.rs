@@ -69,7 +69,10 @@ pub fn version() -> String {
 ///
 /// `data` is a copy of the caller's bytes in wasm linear memory, which outlives
 /// the call: it holds a key's arguments, so it is wiped before it is freed, as
-/// the SDK wipes its own encoder buffer.
+/// the SDK wipes its own encoder buffer. The hasher's own buffer is not: its
+/// last block of input, up to 128 bytes and so all of a short key, stays on
+/// the stack in linear memory until later calls overwrite it, as the input to
+/// any other export here does.
 #[wasm_bindgen(js_name = blake2b256Hex)]
 pub fn blake2b256_hex(data: Vec<u8>) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
