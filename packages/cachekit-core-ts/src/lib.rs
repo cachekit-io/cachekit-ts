@@ -83,9 +83,10 @@ pub fn version() -> String {
 /// Unkeyed BLAKE2b-256 of `data`, as 64 lowercase hex characters: the cache-key
 /// hash, which the SDK otherwise computes in JS with identical output.
 ///
-/// `data` is borrowed from the JS Uint8Array, never copied. The hex is built here
-/// because a string costs less to return than a Uint8Array would to return and
-/// hex-encode in JS.
+/// `data` is read in place from the JS Uint8Array; only the hasher's last block
+/// (up to 128 bytes) is buffered, unwiped, on the native stack. The hex is built
+/// here because a string costs less to return than a Uint8Array would to return
+/// and hex-encode in JS.
 #[napi(js_name = "blake2b256Hex")]
 pub fn blake2b256_hex(data: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";

@@ -36,7 +36,7 @@ import {
   type Blake2b256Hex,
 } from '../serialization/blake2b.js';
 
-let keyHashBound = false;
+let keyHashBindingTried = false;
 
 /**
  * Instantiate the wasm module, and hash cache keys through it from then on.
@@ -51,8 +51,8 @@ let keyHashBound = false;
  */
 function initWasm(): void {
   ensureInitialized();
-  if (keyHashBound) return;
-  keyHashBound = true;
+  if (keyHashBindingTried) return;
+  keyHashBindingTried = true;
   const wasmHash = (core as { blake2b256Hex?: Blake2b256Hex }).blake2b256Hex;
   if (typeof wasmHash !== 'function') return;
   setKeyHashBinding((data) =>
