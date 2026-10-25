@@ -26,8 +26,15 @@ const LONG_INTEROP_KEY = 'ns1:op:e8896cc5d4fe161cabdfd093b47a70d4b65ea03e05871cf
  * The wasm instance's linear memory. Once the module is instantiated, initSync
  * returns the live instance's exports without reading its argument.
  */
-const wasmMemory = () =>
-  (initSync(undefined as unknown as ArrayBuffer) as { memory: { buffer: ArrayBuffer } }).memory;
+function wasmBuffer(): ArrayBuffer {
+  const live: unknown = initSync({ module: new Uint8Array(0) });
+  const buffer =
+    typeof live === 'object' && live !== null && 'memory' in live
+      ? (live.memory as { buffer?: unknown } | undefined)?.buffer
+      : undefined;
+  if (!(buffer instanceof ArrayBuffer)) throw new Error('no live wasm instance');
+  return buffer;
+}
 
 /** Whether `needle` occurs anywhere in `haystack`. */
 function contains(haystack: Uint8Array, needle: Uint8Array): boolean {
@@ -75,16 +82,16 @@ describe('cache-key hashing on Workers', () => {
     const marker = Uint8Array.from({ length: 48 }, (_, i) => (i * 37 + 11) & 255);
     input.set(marker, 64);
     wasmBlake2b256Hex(input);
-    expect(contains(new Uint8Array(wasmMemory().buffer), marker)).toBe(false);
+    expect(contains(new Uint8Array(wasmBuffer()), marker)).toBe(false);
   });
 
   it('never copies a binary key argument past the key size limit into wasm memory', () => {
-    const before = wasmMemory().buffer.byteLength;
+    const before = wasmBuffer().byteLength;
     const big = new ArrayBuffer(before + (1 << 20));
     generateKey(PINNED_NAMESPACE, [big]);
-    expect(wasmMemory().buffer.byteLength).toBe(before);
+    expect(wasmBuffer().byteLength).toBe(before);
     // The control: the same bytes through the binding directly do grow it.
     wasmBlake2b256Hex(new Uint8Array(big));
-    expect(wasmMemory().buffer.byteLength).toBeGreaterThan(before);
+    expect(wasmBuffer().byteLength).toBeGreaterThan(before);
   });
 });

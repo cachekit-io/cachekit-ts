@@ -11,6 +11,11 @@ import {
  * when no binding is set. Key vectors must come out byte for byte the same in
  * both. The Workers lane runs the wasm binding (test/workers).
  */
+// Without the export, the NAPI lane would hash in JS and still pass.
+if (typeof napiBlake2b256Hex !== 'function') {
+  throw new Error('the NAPI binding has no blake2b256Hex: rebuild it');
+}
+
 export const KEY_HASH_LANES: ReadonlyArray<readonly [string, Blake2b256Hex | undefined]> = [
   ['NAPI binding', napiBlake2b256Hex],
   ['pure JS', undefined],
