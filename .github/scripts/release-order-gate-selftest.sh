@@ -3,7 +3,7 @@
 # scratch repository holding this repo's release-please-config.json, an SDK
 # that depends on both cores as workspace:*, and both cores tagged at 0.2.0.
 # gh is a stub that serves each commit's pull request body from a file, or
-# fails when told to. Every `bad` fixture must exit with the given code and
+# fails or stalls when told to. Every `bad` fixture must exit with the given code and
 # exactly the given number of ::error lines, each holding the given text.
 # Every `good` fixture must exit 0. Add the shape here when you close a hole.
 #
@@ -20,6 +20,7 @@ cat > "$tmp/bin/gh" <<'GH'
 #!/usr/bin/env bash
 # gh api repos/<repo>/commits/<sha>/pulls
 [ -z "${GH_STUB_FAIL:-}" ] || { echo "HTTP 502: Bad Gateway" >&2; exit 1; }
+[ -z "${GH_STUB_SLEEP:-}" ] || exec sleep "$GH_STUB_SLEEP" # the timeout kills sleep itself
 sha=${2%/pulls}
 sha=${sha##*/}
 if [ -f "$GH_STUB_PRS/$sha" ]; then
@@ -110,6 +111,7 @@ fixture tag-elsewhere && version packages/cachekit-core-ts 0.2.1 && change "$ts"
 bad tag-elsewhere 2 1 "$cannot: cachekit-core-ts-v0.2.1 is not an ancestor"
 fixture api-down && change "$ts" 'chore: tidy'
 bad api-down 2 1 "$cannot: gh api" GH_STUB_FAIL=1
+bad api-down 2 1 "timed out after 500 ms" GH_STUB_SLEEP=5 RELEASE_ORDER_GATE_TIMEOUT_MS=500
 bad no-such-rev 2 1 "$cannot: git rev-parse"
 bad clean 2 1 "$cannot: GITHUB_REPOSITORY is not set" GITHUB_REPOSITORY=
 g checkout -q --orphan off-history && g commit -qm 'chore: unrelated root' || exit 1

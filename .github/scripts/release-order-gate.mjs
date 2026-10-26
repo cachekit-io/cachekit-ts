@@ -25,15 +25,20 @@ import { execFileSync } from 'node:child_process';
 
 class CannotCheck extends Error {}
 
+// A stalled API call must refuse, not hang the job until its own timeout.
+const timeout = Number(process.env.RELEASE_ORDER_GATE_TIMEOUT_MS) || 60_000;
 const run = (cmd, args) => {
   try {
     return execFileSync(cmd, args, {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       maxBuffer: 1 << 26,
+      timeout,
     });
   } catch (e) {
-    throw new CannotCheck(`${cmd} ${args.join(' ')} failed: ${(e.stderr || e.message).trim()}`);
+    const why =
+      e.code === 'ETIMEDOUT' ? `timed out after ${timeout} ms` : (e.stderr || e.message).trim();
+    throw new CannotCheck(`${cmd} ${args.join(' ')} failed: ${why}`);
   }
 };
 const git = (...args) => run('git', args);
