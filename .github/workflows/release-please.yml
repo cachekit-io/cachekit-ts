@@ -96,7 +96,7 @@ jobs:
     permissions:
       contents: read
       checks: read
-      pull-requests: read # the release-order gate reads BEGIN_COMMIT_OVERRIDE blocks
+      pull-requests: read # the release-order gate lists the cores' open release PRs
 
     steps:
       # The tag path needs no check: release-please only tags commits on main,
@@ -134,14 +134,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.release-please.outputs.cachekit--tag_name || github.sha }}
-          fetch-depth: 0 # the release-order gate reads the cores' tags and history
           persist-credentials: false
 
       # The pack below pins each core at the version in its package.json here.
       # ci.yml runs this gate on the release PR, but that result can be stale:
       # a core commit may have landed after the PR's last CI run. Before any
-      # dependency code runs, refuse while a core has releasable commits that
-      # no core release carries. Once refused, this tag's pins are final, so
+      # dependency code runs, refuse while a core has an open release PR: the
+      # release-please step above opened or updated those from this same
+      # commit, so they hold every core change it would release. Once refused,
+      # this tag's pins are final, so
       # recover by releasing the cores and then dispatching this workflow from
       # main with force_release (see CONTRIBUTING.md, Releasing).
       - name: Cores release before the SDK

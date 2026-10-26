@@ -675,28 +675,25 @@ jobs:
 
   # Only on the SDK's release PR, where it blocks the merge through CI Success.
   # pnpm pack pins each core at the version in its package.json, so the SDK
-  # must not release while a core has releasable commits that no core release
-  # carries. The release PR does not touch the cores, so this checks them at
-  # main's tip, not at the PR's merge commit: a re-run reuses that commit, but
-  # fetches main afresh, so it sees a core released since. This result still
-  # goes stale when a core commit lands after the PR's last run, so Release's
-  # build-cachekit runs the same check at the tag.
+  # must not release while a core has an open release PR. The gate reads
+  # GitHub's live PR state, so a re-run after a core releases sees it. This
+  # result still goes stale when a core commit lands after the PR's last run,
+  # so Release's build-cachekit runs the same check at the tag.
   release-order:
     if: github.head_ref == 'release-please--branches--main--components--cachekit'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read # BEGIN_COMMIT_OVERRIDE blocks live in PR bodies
+      pull-requests: read # the gate lists the cores' open release PRs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 0 # every branch and tag, fetched afresh on each run
           persist-credentials: false
 
       - name: Cores release before the SDK
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node .github/scripts/release-order-gate.mjs packages/cachekit origin/main
+        run: node .github/scripts/release-order-gate.mjs packages/cachekit
 
   ci-success:
     name: CI Success

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Regression fixtures for release-order-gate.mjs. Each fixture is a branch of a
-# scratch repository holding this repo's release-please-config.json, an SDK
-# that depends on both cores as workspace:*, and both cores tagged at 0.2.0.
-# gh is a stub that serves each commit's pull request body from a file, or
-# fails or stalls when told to. Every `bad` fixture must exit with the given code and
-# exactly the given number of ::error lines, each holding the given text.
-# Every `good` fixture must exit 0. Add the shape here when you close a hole.
+# Regression fixtures for release-order-gate.mjs. Each fixture runs the real
+# gate in a scratch directory holding this repo's release-please-config.json
+# and an SDK that depends on both cores as workspace:*. gh is a stub that
+# serves the open pull requests of each branch from a file, or fails, stalls or
+# answers garbage when told to. Every `bad` fixture must exit with the given
+# code and exactly the given number of ::error lines, each holding the given
+# text. Every `good` fixture must exit 0. Add the shape here when you close a
+# hole.
 #
-#   bash .github/scripts/release-order-gate-selftest.sh   (needs git, node)
+#   bash .github/scripts/release-order-gate-selftest.sh   (needs node, jq)
 set -u
 cd "$(dirname "$0")/../.." || exit 1
 root=$PWD
@@ -15,48 +16,39 @@ tmp=$(mktemp -d) || exit 1
 trap 'rm -rf "$tmp"' EXIT
 fail=0
 
-mkdir -p "$tmp/bin" "$tmp/prs"
+mkdir -p "$tmp/bin" "$tmp/work/packages/cachekit"
 cat > "$tmp/bin/gh" <<'GH'
 #!/usr/bin/env bash
-# gh api repos/<repo>/commits/<sha>/pulls
+# gh api repos/<repo>/pulls?state=open&head=<owner>:<branch>&per_page=100
 [ -z "${GH_STUB_FAIL:-}" ] || { echo "HTTP 502: Bad Gateway" >&2; exit 1; }
 [ -z "${GH_STUB_SLEEP:-}" ] || exec sleep "$GH_STUB_SLEEP" # the timeout kills sleep itself
-sha=${2%/pulls}
-sha=${sha##*/}
-if [ -f "$GH_STUB_PRS/$sha" ]; then
-  jq -n --arg sha "$sha" --rawfile body "$GH_STUB_PRS/$sha" '[{merge_commit_sha: $sha, body: $body}]'
-else
-  echo '[]'
-fi
+[ -z "${GH_STUB_RAW:-}" ] || { printf '%s\n' "$GH_STUB_RAW"; exit 0; }
+branch=${2#*head=*:}
+branch=${branch%%&*}
+cat "$GH_STUB_OPEN/$branch" 2>/dev/null || echo '[]'
 GH
 chmod +x "$tmp/bin/gh"
-export PATH="$tmp/bin:$PATH" GH_STUB_PRS="$tmp/prs" GITHUB_REPOSITORY=selftest/selftest
-export GIT_AUTHOR_NAME=selftest GIT_AUTHOR_EMAIL=selftest@example.com GIT_COMMITTER_NAME=selftest \
-  GIT_COMMITTER_EMAIL=selftest@example.com GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export PATH="$tmp/bin:$PATH" GITHUB_REPOSITORY=cachekit-io/cachekit-ts
+cp "$root/release-please-config.json" "$tmp/work/" || exit 1
+sdk='{"name":"@cachekit-io/cachekit","version":"0.2.1","dependencies":{"@cachekit-io/cachekit-core-ts":"workspace:*","@cachekit-io/cachekit-core-wasm":"workspace:*","@msgpack/msgpack":"^3.1.3"}}'
 
-repo=$tmp/repo
-version() { # dir version
-  mkdir -p "$repo/$1" && printf '{"name":"@cachekit-io/%s","version":"%s"}\n' "${1#packages/}" "$2" > "$repo/$1/package.json"
-}
-git init -q -b main "$repo" || exit 1
-cp "$root/release-please-config.json" "$repo/" || exit 1
-mkdir -p "$repo/packages/cachekit"
-printf '%s\n' '{"name":"@cachekit-io/cachekit","version":"0.2.1","dependencies":{"@cachekit-io/cachekit-core-ts":"workspace:*","@cachekit-io/cachekit-core-wasm":"workspace:*","@msgpack/msgpack":"^3.1.3"}}' \
-  > "$repo/packages/cachekit/package.json"
-version packages/cachekit-core-ts 0.2.0
-version packages/cachekit-core-wasm 0.2.0
-g() { git -C "$repo" "$@"; }
-g add -A && g commit -qm 'chore: init' && g tag cachekit-core-ts-v0.2.0 && g tag cachekit-core-wasm-v0.2.0 || exit 1
-
-fixture() { g checkout -q -B "$1" main || exit 1; } # name: a branch off the tagged base
-change() { # path message [pr-body]: one commit touching path, with that message
-  echo "$RANDOM" >> "$repo/$1" && g add -A && g commit -qm "$2" || exit 1
-  [ "$#" -lt 3 ] || printf '%s' "$3" > "$tmp/prs/$(g rev-parse HEAD)"
+n=0
+fixture() { # [component repo]...: a fresh state where each component's release branch has an open PR from repo
+  n=$((n + 1))
+  open=$tmp/open.$n
+  mkdir -p "$open" && printf '%s\n' "$sdk" > "$tmp/work/packages/cachekit/package.json" || exit 1
+  while [ "$#" -ge 2 ]; do
+    branch=release-please--branches--main--components--$1
+    jq -n --arg b "$branch" --arg r "$2" --arg c "$1" \
+      '[{html_url: "https://github.com/\($r)/pull/1", title: "chore(main): release \($c) 9.9.9", head: {ref: $b, repo: {full_name: $r}}}]' \
+      > "$open/$branch" || exit 1
+    shift 2
+  done
 }
 run() { # kind name code errors text [env...]
   local kind=$1 name=$2 code=$3 errors=$4 text=$5 out rc got
   shift 5
-  out=$(cd "$repo" && env "$@" node "$root/.github/scripts/release-order-gate.mjs" packages/cachekit "$name" 2>&1)
+  out=$(cd "$tmp/work" && env GH_STUB_OPEN="$open" "$@" node "$root/.github/scripts/release-order-gate.mjs" packages/cachekit 2>&1)
   rc=$?
   got=$(grep -c '^::error' <<<"$out")
   case "$kind" in
@@ -70,55 +62,38 @@ run() { # kind name code errors text [env...]
 bad() { run bad "$@"; }
 good() { run good "$1" 0 0 '' "${@:2}"; }
 
-ts=packages/cachekit-core-ts/src.rs wasm=packages/cachekit-core-wasm/src.rs sdk=packages/cachekit/src.ts
-ahead='releasable change(s) since'
-# --- a core with releasable commits refuses the SDK ---------------------------
-fixture fix && change "$ts" 'fix(cachekit-core-ts): a fix'
-bad fix 1 1 "@cachekit-io/cachekit-core-ts has 1 $ahead cachekit-core-ts-v0.2.0"
-fixture both && change "$ts" 'feat: a feature' && change "$wasm" 'perf(cachekit-core-wasm): faster'
-bad both 1 2 "$ahead"
-fixture security && change "$wasm" 'security: a fix'
-bad security 1 1 "@cachekit-io/cachekit-core-wasm has 1 $ahead"
-fixture bang && change "$ts" 'refactor(cachekit-core-ts)!: drop an export'
-bad bang 1 1 "$ahead"
-fixture footer && change "$ts" $'chore: rename\n\nBREAKING CHANGE: an export is gone'
-bad footer 1 1 "$ahead"
-fixture nested && change "$ts" $'chore(deps): bump\n\nfix(cachekit-core-ts): a second message in the body'
-bad nested 1 1 "$ahead"
-fixture nested-block && change "$ts" $'chore: bump\n\nBEGIN_NESTED_COMMIT\nfix: nested\nEND_NESTED_COMMIT'
-bad nested-block 1 1 "$ahead"
-# A hidden type recast as releasable in its PR body, as release-please reads it.
-fixture override-up && change "$ts" 'chore(deps): update a crate' $'Body.\r\n\r\nBEGIN_COMMIT_OVERRIDE\r\nfix(deps): update a crate\r\nEND_COMMIT_OVERRIDE\r\n'
-bad override-up 1 1 "$ahead"
-# --- nothing releasable since the tag lets the SDK through ---------------------
-fixture clean
-good clean
-fixture hidden && change "$ts" 'docs(cachekit-core-ts): a note' && change "$wasm" 'chore: tidy' && change "$ts" 'test: more' && change "$ts" 'not conventional'
-good hidden
-fixture sdk-only && change "$sdk" 'feat(cachekit): uses no core change'
-good sdk-only
-fixture override-down && change "$ts" 'fix: really a chore' $'BEGIN_COMMIT_OVERRIDE\nchore: really a chore\nEND_COMMIT_OVERRIDE'
-good override-down
-fixture released && change "$ts" 'fix: a fix' && version packages/cachekit-core-ts 0.2.1 && change "$ts" 'chore(main): release cachekit-core-ts 0.2.1' &&
-  g tag cachekit-core-ts-v0.2.1
-good released
+us=cachekit-io/cachekit-ts
+held='has an open release PR'
+# --- an open core release PR refuses the SDK ----------------------------------
+fixture cachekit-core-ts "$us"
+bad core-ts 1 1 "@cachekit-io/cachekit-core-ts $held"
+fixture cachekit-core-wasm "$us"
+bad core-wasm 1 1 "@cachekit-io/cachekit-core-wasm $held"
+# main at 1dc06f9: both cores' release PRs open.
+fixture cachekit-core-ts "$us" cachekit-core-wasm "$us"
+bad both 1 2 "$held"
+# --- no open core release PR lets the SDK through -----------------------------
+# main at d400cfd: no release PR open.
+fixture
+good none
+# The SDK's own release PR is the one being checked, not a hold.
+fixture cachekit "$us"
+good sdk-own
+# A fork's branch of the same name, should the server's head filter let it by.
+fixture cachekit-core-ts someone/cachekit-ts
+good fork
 # --- anything unreadable refuses ----------------------------------------------
 cannot='Cannot check release order'
-fixture no-tag && version packages/cachekit-core-ts 0.3.0 && change "$ts" 'chore(main): release cachekit-core-ts 0.3.0'
-bad no-tag 2 1 "$cannot: no tag cachekit-core-ts-v0.3.0"
-# Tags are repository-wide: released's 0.2.1 tag is on another branch.
-fixture tag-elsewhere && version packages/cachekit-core-ts 0.2.1 && change "$ts" 'chore(main): release cachekit-core-ts 0.2.1'
-bad tag-elsewhere 2 1 "$cannot: cachekit-core-ts-v0.2.1 is not an ancestor"
-fixture api-down && change "$ts" 'chore: tidy'
+fixture
 bad api-down 2 1 "$cannot: gh api" GH_STUB_FAIL=1
-bad api-down 2 1 "timed out after 500 ms" GH_STUB_SLEEP=5 RELEASE_ORDER_GATE_TIMEOUT_MS=500
-bad no-such-rev 2 1 "$cannot: git rev-parse"
-bad clean 2 1 "$cannot: GITHUB_REPOSITORY is not set" GITHUB_REPOSITORY=
-g checkout -q --orphan off-history && g commit -qm 'chore: unrelated root' || exit 1
-bad off-history 2 1 "$cannot: cachekit-core-ts-v0.2.0 is not an ancestor"
-fixture unknown-sibling && printf '%s\n' '{"name":"@cachekit-io/cachekit","version":"0.2.1","dependencies":{"@cachekit-io/other":"workspace:*"}}' \
-  > "$repo/packages/cachekit/package.json" && change "$sdk" 'chore: depend on another workspace package'
+bad api-stalls 2 1 "timed out after 500 ms" GH_STUB_SLEEP=5 RELEASE_ORDER_GATE_TIMEOUT_MS=500
+bad not-json 2 1 "$cannot: the open pull requests from release-please--branches--main--components--cachekit-core-ts are not JSON" GH_STUB_RAW='<html>'
+bad not-list 2 1 'are not a list' GH_STUB_RAW='{"message":"Not Found"}'
+bad no-repo 2 1 "$cannot: GITHUB_REPOSITORY is not set" GITHUB_REPOSITORY=
+printf '%s\n' '{"name":"@cachekit-io/cachekit","dependencies":{"@cachekit-io/other":"workspace:*"}}' > "$tmp/work/packages/cachekit/package.json"
 bad unknown-sibling 2 1 "$cannot: @cachekit-io/other is a workspace dependency with no release-please package"
+rm "$tmp/work/packages/cachekit/package.json"
+bad no-manifest 2 1 "$cannot: cannot read packages/cachekit/package.json"
 
 if [ "$fail" -ne 0 ]; then echo "release-order-gate selftest FAILED"; exit 1; fi
 echo "release-order-gate selftest OK ($(grep -cE '^(bad|good) ' "$0") fixtures)"
