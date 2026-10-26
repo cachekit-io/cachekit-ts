@@ -72,8 +72,19 @@ const openPulls = (repo, branch) => {
   );
   if (!Array.isArray(pulls))
     throw new CannotCheck(`the open pull requests from ${branch} are not a list`);
+  // Every row must be readable before any is dropped: a row this cannot read
+  // is not evidence that no release is pending. head.repo is null when a
+  // fork has been deleted, which makes that PR foreign, not unreadable.
+  for (const p of pulls) {
+    const repoOk =
+      p?.head?.repo === null ||
+      (typeof p?.head?.repo === 'object' && typeof p.head.repo.full_name === 'string');
+    if (typeof p?.head?.ref !== 'string' || !repoOk) {
+      throw new CannotCheck(`an open pull request from ${branch} has no readable head`);
+    }
+  }
   // The head filter is the server's; a fork's branch of the same name is not ours.
-  return pulls.filter((p) => p?.head?.ref === branch && p?.head?.repo?.full_name === repo);
+  return pulls.filter((p) => p.head.ref === branch && p.head.repo?.full_name === repo);
 };
 
 const releasedOnMain = (repo) => {
@@ -110,9 +121,7 @@ try {
   })
     .filter(([, spec]) => typeof spec === 'string' && spec.startsWith('workspace:'))
     .map(([name]) => name);
-  const released = packing ? releasedOnMain(repo) : null;
-
-  for (const name of siblings) {
+  const deps = siblings.map((name) => {
     const found = Object.entries(config.packages ?? {}).find(([, p]) => p['package-name'] === name);
     if (!found?.[1].component) {
       throw new CannotCheck(
@@ -120,36 +129,51 @@ try {
       );
     }
     const [path, { component }] = found;
+    return {
+      name,
+      path,
+      component,
+      pinned: packing ? readJson(`${path}/package.json`).version : null,
+    };
+  });
 
-    if (packing) {
-      const pinned = readJson(`${path}/package.json`).version;
-      const latest = released[path];
-      if (typeof latest !== 'string' || !latest) {
-        throw new CannotCheck(
-          `.release-please-manifest.json on ${TARGET_BRANCH} has no version for ${path}`
-        );
-      }
-      if (pinned !== latest) {
-        held++;
-        console.log(
-          `::error::${dir} would pin ${name}@${pinned}, but ${TARGET_BRANCH} has released ${name}@${latest}. A re-run packs this checkout's pins again; release from ${TARGET_BRANCH} instead — refusing to release.`
-        );
-        continue;
-      }
-    }
-
+  // Every PR read finishes before the manifest read starts. A dependency's
+  // release merging while the gate runs closes its PR and moves main's
+  // manifest past the pin, and the manifest never moves back. So a merge
+  // before a PR read shows in the manifest read after it, and a merge after
+  // a PR read was seen there as an open PR: no order of events passes stale
+  // pins. Read the other way round, a merge between the reads passed.
+  for (const { name, component } of deps) {
     const branch = `release-please--branches--${TARGET_BRANCH}--components--${component}`;
     const pulls = openPulls(repo, branch);
     if (pulls.length === 0) {
-      console.log(
-        `${name}: no open release PR${packing ? `; pins ${released[path]}, as released` : ''}.`
-      );
+      console.log(`${name}: no open release PR.`);
       continue;
     }
     held++;
     for (const p of pulls) {
       console.log(
         `::error::${name} has an open release PR, ${p.html_url} ("${p.title}"), so ${dir} would pin the previous ${name}. Merge it and let it publish, then release this package — refusing to release.`
+      );
+    }
+  }
+
+  if (packing) {
+    const released = releasedOnMain(repo);
+    for (const { name, path, pinned } of deps) {
+      const latest = released[path];
+      if (typeof latest !== 'string' || !latest) {
+        throw new CannotCheck(
+          `.release-please-manifest.json on ${TARGET_BRANCH} has no version for ${path}`
+        );
+      }
+      if (pinned === latest) {
+        console.log(`${name}: pins ${pinned}, as released on ${TARGET_BRANCH}.`);
+        continue;
+      }
+      held++;
+      console.log(
+        `::error::${dir} would pin ${name}@${pinned}, but ${TARGET_BRANCH} has released ${name}@${latest}. A re-run packs this checkout's pins again; release from ${TARGET_BRANCH} instead — refusing to release.`
       );
     }
   }

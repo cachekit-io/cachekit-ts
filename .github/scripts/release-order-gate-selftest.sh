@@ -4,7 +4,8 @@
 # SDK that depends on both cores as workspace:*, and both cores at a version.
 # gh is a stub: it serves the open pull requests of each branch and main's
 # .release-please-manifest.json from files, or fails, stalls or answers
-# garbage when told to. Every `bad` fixture must exit with the given code and
+# garbage when told to. With GH_STUB_MERGE_AFTER=k it serves the fixture's
+# "after" state from its (k+1)th call on: a release merging mid-run. Every `bad` fixture must exit with the given code and
 # exactly the given number of ::error lines, each holding the given text.
 # Every `good` fixture must exit 0. Add the shape here when you close a hole.
 #
@@ -25,12 +26,21 @@ cat > "$tmp/bin/gh" <<'GH'
 [ -z "${GH_STUB_SLEEP:-}" ] || exec sleep "$GH_STUB_SLEEP" # the timeout kills sleep itself
 [ -z "${GH_STUB_RAW:-}" ] || { printf '%s\n' "$GH_STUB_RAW"; exit 0; }
 url=${*: -1}
+state=$GH_STUB_STATE
+if [ -n "${GH_STUB_MERGE_AFTER:-}" ]; then
+  calls=$(($(cat "$GH_STUB_STATE/calls" 2>/dev/null || echo 0) + 1))
+  echo "$calls" > "$GH_STUB_STATE/calls"
+  [ "$calls" -le "$GH_STUB_MERGE_AFTER" ] || state=$GH_STUB_STATE/after
+fi
 case $url in
-  */contents/.release-please-manifest.json\?ref=main) cat "$GH_STUB_STATE/manifest" ;;
+  */contents/.release-please-manifest.json\?ref=main)
+    [ -z "${GH_STUB_MANIFEST_RAW:-}" ] || { printf '%s\n' "$GH_STUB_MANIFEST_RAW"; exit 0; }
+    cat "$state/manifest"
+    ;;
   */pulls\?*)
     branch=${url#*head=*:}
     branch=${branch%%&*}
-    cat "$GH_STUB_STATE/open/$branch" 2>/dev/null || echo '[]'
+    cat "$state/open/$branch" 2>/dev/null || echo '[]'
     ;;
   *) echo "gh stub: unexpected $url" >&2; exit 1 ;;
 esac
@@ -47,17 +57,25 @@ n=0
 fixture() {
   n=$((n + 1))
   state=$tmp/state.$n
-  mkdir -p "$state/open" && printf '%s\n' "$sdk" > "$tmp/work/packages/cachekit/package.json" || exit 1
+  printf '%s\n' "$sdk" > "$tmp/work/packages/cachekit/package.json" || exit 1
   printf '{"name":"@cachekit-io/cachekit-core-ts","version":"%s"}\n' "$1" > "$tmp/work/packages/cachekit-core-ts/package.json"
   printf '{"name":"@cachekit-io/cachekit-core-wasm","version":"%s"}\n' "$2" > "$tmp/work/packages/cachekit-core-wasm/package.json"
-  jq -n --arg ts "$3" --arg wasm "$4" \
-    '{"packages/cachekit": "0.2.1", "packages/cachekit-core-ts": $ts, "packages/cachekit-core-wasm": $wasm}' > "$state/manifest" || exit 1
-  shift 4
+  shift 2
+  write_state "$state" "$@"
+}
+# after <main-ts> <main-wasm> [component repo]...: the fixture's state once a release has merged.
+after() { write_state "$state/after" "$@"; }
+write_state() { # dir main-ts main-wasm [component repo]...
+  local dir=$1
+  mkdir -p "$dir/open" || exit 1
+  jq -n --arg ts "$2" --arg wasm "$3" \
+    '{"packages/cachekit": "0.2.1", "packages/cachekit-core-ts": $ts, "packages/cachekit-core-wasm": $wasm}' > "$dir/manifest" || exit 1
+  shift 3
   while [ "$#" -ge 2 ]; do
     branch=release-please--branches--main--components--$1
     jq -n --arg b "$branch" --arg r "$2" --arg c "$1" \
       '[{html_url: "https://github.com/\($r)/pull/1", title: "chore(main): release \($c) 9.9.9", head: {ref: $b, repo: {full_name: $r}}}]' \
-      > "$state/open/$branch" || exit 1
+      > "$dir/open/$branch" || exit 1
     shift 2
   done
 }
@@ -101,6 +119,19 @@ fixture 0.2.0 0.2.0 0.2.1 0.2.1
 bad rerun-both-released 1 2 "$behind" "$packing"
 # On the release PR, the merge commit is not what gets packed, so its pins are not checked.
 good stale-merge-commit "$pr"
+# core-ts's release merges while the gate runs, after k of its three gh calls
+# (core-ts PRs, core-wasm PRs, manifest), for every k. Before: its PR is open
+# and main records 0.2.0. After: no PR, and main records 0.2.1. Each state
+# alone refuses the 0.2.0 pin, so every interleaving must too.
+fixture 0.2.0 0.2.0 0.2.0 0.2.0 cachekit-core-ts "$us"
+after 0.2.1 0.2.0
+bad merge-after-0-calls 1 1 "cachekit-core-ts@0.2.0, but main has released" "$packing" GH_STUB_MERGE_AFTER=0
+rm -f "$state/calls"
+bad merge-after-1-call 1 2 "cachekit-core-ts" "$packing" GH_STUB_MERGE_AFTER=1
+rm -f "$state/calls"
+bad merge-after-2-calls 1 2 "cachekit-core-ts" "$packing" GH_STUB_MERGE_AFTER=2
+rm -f "$state/calls"
+bad merge-after-3-calls 1 1 "@cachekit-io/cachekit-core-ts $held" "$packing" GH_STUB_MERGE_AFTER=3
 # --- nothing waiting lets the SDK through -------------------------------------
 # main at d400cfd: no release PR open, both cores pinned as released.
 fixture 0.2.0 0.2.0 0.2.0 0.2.0
@@ -115,6 +146,8 @@ good sdk-own "$packing"
 # A fork's branch of the same name, should the server's head filter let it by.
 fixture 0.2.0 0.2.0 0.2.0 0.2.0 cachekit-core-ts someone/cachekit-ts
 good fork "$pr"
+# A PR whose fork was deleted (head.repo null) is not ours either.
+good deleted-fork "$pr" GH_STUB_RAW='[{"head":{"ref":"release-please--branches--main--components--cachekit-core-ts","repo":null}}]'
 # --- anything unreadable refuses ----------------------------------------------
 cannot='Cannot check release order'
 fixture 0.2.0 0.2.0 0.2.0 0.2.0
@@ -122,9 +155,15 @@ bad api-down 2 1 "$cannot: gh api" "$pr" GH_STUB_FAIL=1
 bad api-down-packing 2 1 "$cannot: gh api" "$packing" GH_STUB_FAIL=1
 bad api-stalls 2 1 "timed out after 500 ms" "$packing" GH_STUB_SLEEP=5 RELEASE_ORDER_GATE_TIMEOUT_MS=500
 bad not-json 2 1 "$cannot: the open pull requests from release-please--branches--main--components--cachekit-core-ts are not JSON" "$pr" GH_STUB_RAW='<html>'
-bad manifest-not-json 2 1 "$cannot: the contents of .release-please-manifest.json on main are not JSON" "$packing" GH_STUB_RAW='<html>'
+bad manifest-not-json 2 1 "$cannot: the contents of .release-please-manifest.json on main are not JSON" "$packing" GH_STUB_MANIFEST_RAW='<html>'
 bad not-list 2 1 'are not a list' "$pr" GH_STUB_RAW='{"message":"Not Found"}'
-bad manifest-not-object 2 1 '.release-please-manifest.json on main is not an object' "$packing" GH_STUB_RAW='[]'
+# A PR row this cannot read is not evidence that no release is pending.
+unreadable="$cannot: an open pull request from release-please--branches--main--components--cachekit-core-ts has no readable head"
+bad empty-row 2 1 "$unreadable" "$packing" GH_STUB_RAW='[{}]'
+bad null-row 2 1 "$unreadable" "$packing" GH_STUB_RAW='[null]'
+bad numeric-ref 2 1 "$unreadable" "$pr" GH_STUB_RAW='[{"head":{"ref":1,"repo":{"full_name":"cachekit-io/cachekit-ts"}}}]'
+bad repo-without-name 2 1 "$unreadable" "$pr" GH_STUB_RAW='[{"head":{"ref":"x","repo":{}}}]'
+bad manifest-not-object 2 1 '.release-please-manifest.json on main is not an object' "$packing" GH_STUB_MANIFEST_RAW='[]'
 jq 'del(."packages/cachekit-core-wasm")' "$state/manifest" > "$state/m" && mv "$state/m" "$state/manifest" || exit 1
 bad manifest-missing-core 2 1 "$cannot: .release-please-manifest.json on main has no version for packages/cachekit-core-wasm" "$packing"
 fixture 0.2.0 0.2.0 0.2.0 0.2.0
