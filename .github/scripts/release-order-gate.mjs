@@ -1,9 +1,10 @@
-// Refuse to release a package while a workspace package it depends on has an
-// open release-please release PR.
+// Refuse to release a package while a workspace package it depends on has
+// unreleased changes, or, when packing, while the checkout would pin an older
+// release of it than main has.
 //
-// Usage: node release-order-gate.mjs <package-dir>
+// Usage: node release-order-gate.mjs <package-dir> [--packing]
 //   from the repository root, with GITHUB_REPOSITORY set and gh authenticated
-//   (GH_TOKEN) to read pull requests.
+//   (GH_TOKEN) to read pull requests and contents.
 //
 // pnpm pack writes each `workspace:` dependency as the version in that
 // package's package.json at the packed commit, and release-please releases
@@ -11,14 +12,20 @@
 // SDK can release pinned to a core whose newer commits are still waiting in
 // the core's release PR; npm serves the old core, so no later check notices.
 //
-// The gate asks release-please itself instead of re-deriving its rules: an open
-// PR from a dependency's release branch
-// (release-please--branches--main--components--<component>) is release-please's
-// own decision that the dependency has unreleased changes. Release-please opens
-// and updates those PRs in the same step that tags a release, so in the Release
-// workflow they reflect main at the commit being released. Any open one refuses
-// (exit 1). Anything this cannot read, including a failed or stalled lookup,
-// refuses too (exit 2).
+// Two checks, each refusing with exit 1:
+// - An open PR from a dependency's release branch
+//   (release-please--branches--main--components--<component>) is
+//   release-please's own decision that the dependency has unreleased changes.
+//   Release-please opens and updates those PRs in the same step that tags a
+//   release, so in the Release workflow they reflect main at the commit being
+//   released.
+// - With --packing, the checkout is what will be packed, so each dependency's
+//   version in it must equal the version main's .release-please-manifest.json
+//   records as released. A re-run of a refused release re-packs its old tag
+//   after the dependency has released, when no PR is open any more; this is
+//   what refuses it.
+// Anything this cannot read, including a failed or stalled lookup, refuses too
+// (exit 2).
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
@@ -37,14 +44,11 @@ const readJson = (path) => {
   }
 };
 
-const openPulls = (repo, branch) => {
-  const args = [
-    'api',
-    `repos/${repo}/pulls?state=open&head=${repo.split('/')[0]}:${branch}&per_page=100`,
-  ];
+// gh's answer parsed as JSON; what names the answer in errors.
+const ghJson = (what, ...args) => {
   let out;
   try {
-    out = execFileSync('gh', args, {
+    out = execFileSync('gh', ['api', ...args], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout,
@@ -52,23 +56,44 @@ const openPulls = (repo, branch) => {
   } catch (e) {
     const why =
       e.code === 'ETIMEDOUT' ? `timed out after ${timeout} ms` : (e.stderr || e.message).trim();
-    throw new CannotCheck(`gh ${args.join(' ')} failed: ${why}`);
+    throw new CannotCheck(`gh api ${args.join(' ')} failed: ${why}`);
   }
-  let pulls;
   try {
-    pulls = JSON.parse(out);
+    return JSON.parse(out);
   } catch {
-    throw new CannotCheck(`the open pull requests from ${branch} are not JSON`);
+    throw new CannotCheck(`${what} are not JSON`);
   }
+};
+
+const openPulls = (repo, branch) => {
+  const pulls = ghJson(
+    `the open pull requests from ${branch}`,
+    `repos/${repo}/pulls?state=open&head=${repo.split('/')[0]}:${branch}&per_page=100`
+  );
   if (!Array.isArray(pulls))
     throw new CannotCheck(`the open pull requests from ${branch} are not a list`);
   // The head filter is the server's; a fork's branch of the same name is not ours.
   return pulls.filter((p) => p?.head?.ref === branch && p?.head?.repo?.full_name === repo);
 };
 
-const [dir] = process.argv.slice(2);
-if (!dir) {
-  console.log('Usage: node release-order-gate.mjs <package-dir>');
+const releasedOnMain = (repo) => {
+  const manifest = ghJson(
+    `the contents of .release-please-manifest.json on ${TARGET_BRANCH}`,
+    '-H',
+    'Accept: application/vnd.github.raw+json',
+    `repos/${repo}/contents/.release-please-manifest.json?ref=${TARGET_BRANCH}`
+  );
+  if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    throw new CannotCheck(`.release-please-manifest.json on ${TARGET_BRANCH} is not an object`);
+  }
+  return manifest;
+};
+
+const args = process.argv.slice(2);
+const packing = args.includes('--packing');
+const [dir, ...extra] = args.filter((a) => a !== '--packing');
+if (!dir || extra.length) {
+  console.log('Usage: node release-order-gate.mjs <package-dir> [--packing]');
   process.exit(2);
 }
 
@@ -85,18 +110,40 @@ try {
   })
     .filter(([, spec]) => typeof spec === 'string' && spec.startsWith('workspace:'))
     .map(([name]) => name);
+  const released = packing ? releasedOnMain(repo) : null;
 
   for (const name of siblings) {
-    const found = Object.values(config.packages ?? {}).find((p) => p['package-name'] === name);
-    if (!found?.component) {
+    const found = Object.entries(config.packages ?? {}).find(([, p]) => p['package-name'] === name);
+    if (!found?.[1].component) {
       throw new CannotCheck(
         `${name} is a workspace dependency with no release-please package and component`
       );
     }
-    const branch = `release-please--branches--${TARGET_BRANCH}--components--${found.component}`;
+    const [path, { component }] = found;
+
+    if (packing) {
+      const pinned = readJson(`${path}/package.json`).version;
+      const latest = released[path];
+      if (typeof latest !== 'string' || !latest) {
+        throw new CannotCheck(
+          `.release-please-manifest.json on ${TARGET_BRANCH} has no version for ${path}`
+        );
+      }
+      if (pinned !== latest) {
+        held++;
+        console.log(
+          `::error::${dir} would pin ${name}@${pinned}, but ${TARGET_BRANCH} has released ${name}@${latest}. A re-run packs this checkout's pins again; release from ${TARGET_BRANCH} instead — refusing to release.`
+        );
+        continue;
+      }
+    }
+
+    const branch = `release-please--branches--${TARGET_BRANCH}--components--${component}`;
     const pulls = openPulls(repo, branch);
     if (pulls.length === 0) {
-      console.log(`${name}: no open release PR.`);
+      console.log(
+        `${name}: no open release PR${packing ? `; pins ${released[path]}, as released` : ''}.`
+      );
       continue;
     }
     held++;
