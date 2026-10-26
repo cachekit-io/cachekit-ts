@@ -22,8 +22,8 @@ jobs:
       - name: Release tarball verifier self-test
         run: bash .github/scripts/verify-tarball-selftest.sh
 
-      # The release-order gate, run against a scratch repository: it must
-      # refuse an SDK release while a core has releasable commits, or when it
+      # The release-order gate, run against a stubbed GitHub API: it must
+      # refuse an SDK release while a core has an open release PR, or when it
       # cannot tell, and pass one whose cores are released.
       - name: Release-order gate self-test
         run: bash .github/scripts/release-order-gate-selftest.sh
@@ -674,11 +674,7 @@ jobs:
         run: bash .github/scripts/runner-drift-guard-selftest.sh "$RUNNER_TEMP/runner-drift-guard.awk" "$RUNNER_TEMP/runner-drift-guard-scan.sh"
 
   # Only on the SDK's release PR, where it blocks the merge through CI Success.
-  # pnpm pack pins each core at the version in its package.json, so the SDK
-  # must not release while a core has an open release PR. The gate reads
-  # GitHub's live PR state, so a re-run after a core releases sees it. This
-  # result still goes stale when a core commit lands after the PR's last run,
-  # so Release's build-cachekit runs the same check at the tag.
+  # Why and how: CONTRIBUTING.md, Releasing.
   release-order:
     if: github.head_ref == 'release-please--branches--main--components--cachekit'
     runs-on: ubuntu-latest

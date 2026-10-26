@@ -1,5 +1,5 @@
-// Refuse to release a package while a workspace package it depends on has
-// unreleased changes, or, when packing, while the checkout would pin an older
+// Refuse to release a package while a workspace package it depends on has an
+// open release PR, or, when packing, while the checkout would pin an older
 // release of it than main has.
 //
 // Usage: node release-order-gate.mjs <package-dir> [--packing]
@@ -15,7 +15,9 @@
 // Two checks, each refusing with exit 1:
 // - An open PR from a dependency's release branch
 //   (release-please--branches--main--components--<component>) is
-//   release-please's own decision that the dependency has unreleased changes.
+//   release-please's own decision that the dependency has changes to release.
+//   A change of a type release-please hides (chore, docs, ...) opens no PR, so
+//   it does not hold the release.
 //   Release-please opens and updates those PRs in the same step that tags a
 //   release, so in the Release workflow they reflect main at the commit being
 //   released.
@@ -102,6 +104,11 @@ const releasedOnMain = (repo) => {
 
 const args = process.argv.slice(2);
 const packing = args.includes('--packing');
+// When packing, the release's tag already exists and a re-run packs the same
+// pins, so the way out is a release from main, not a re-run.
+const recovery = packing
+  ? 'then dispatch Release from main with force_release: true, or cut a new SDK patch if main has SDK changes since this tag (CONTRIBUTING.md, Releasing)'
+  : 'then re-run this check';
 const [dir, ...extra] = args.filter((a) => a !== '--packing');
 if (!dir || extra.length) {
   console.log('Usage: node release-order-gate.mjs <package-dir> [--packing]');
@@ -152,7 +159,7 @@ try {
     held++;
     for (const p of pulls) {
       console.log(
-        `::error::${name} has an open release PR, ${p.html_url} ("${p.title}"), so ${dir} would pin the previous ${name}. Merge it and let it publish, then release this package — refusing to release.`
+        `::error::${name} has an open release PR, ${p.html_url} ("${p.title}"), so ${dir} would pin the previous ${name}. Merge it and let it publish, ${recovery} — refusing to release.`
       );
     }
   }
@@ -172,7 +179,7 @@ try {
       }
       held++;
       console.log(
-        `::error::${dir} would pin ${name}@${pinned}, but ${TARGET_BRANCH} has released ${name}@${latest}. A re-run packs this checkout's pins again; release from ${TARGET_BRANCH} instead — refusing to release.`
+        `::error::${dir} would pin ${name}@${pinned}, but ${TARGET_BRANCH} has released ${name}@${latest}. A re-run packs this checkout's pins again; dispatch Release from ${TARGET_BRANCH} with force_release: true, or cut a new SDK patch if ${TARGET_BRANCH} has SDK changes since this tag (CONTRIBUTING.md, Releasing) — refusing to release.`
       );
     }
   }
@@ -181,4 +188,6 @@ try {
   process.exit(2);
 }
 if (held) process.exit(1);
-console.log(`Release order OK: no workspace dependency of ${dir} has an open release PR.`);
+console.log(
+  `Release order OK: no workspace dependency of ${dir} has an open release PR${packing ? `, and every pin matches ${TARGET_BRANCH}'s release manifest` : ''}.`
+);

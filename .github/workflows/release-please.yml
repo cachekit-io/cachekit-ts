@@ -136,17 +136,9 @@ jobs:
           ref: ${{ needs.release-please.outputs.cachekit--tag_name || github.sha }}
           persist-credentials: false
 
-      # The pack below pins each core at the version in its package.json here.
-      # ci.yml runs this gate on the release PR, but that result can be stale:
-      # a core commit may have landed after the PR's last CI run. Before any
-      # dependency code runs, refuse while a core has an open release PR: the
-      # release-please step above opened or updated those from this same
-      # commit, so they hold every core change it would release. --packing
-      # also refuses while this checkout pins an older core than main's
-      # release manifest records, which is what a re-run of a refused tag does
-      # once the cores have released. Recover by releasing the cores and then
-      # dispatching this workflow from main with force_release (see
-      # CONTRIBUTING.md, Releasing).
+      # Runs before any dependency code, against the pins the pack below
+      # writes. Why, and how to recover from a refusal: CONTRIBUTING.md,
+      # Releasing.
       - name: Cores release before the SDK
         env:
           GH_TOKEN: ${{ github.token }}

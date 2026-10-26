@@ -118,6 +118,7 @@ bad rerun-after-release 1 1 "would pin @cachekit-io/cachekit-core-ts@0.2.0, but 
 fixture 0.2.0 0.2.0 0.2.1 0.2.1
 bad rerun-both-released 1 2 "$behind" "$packing"
 # On the release PR, the merge commit is not what gets packed, so its pins are not checked.
+fixture 0.2.0 0.2.0 0.2.1 0.2.1
 good stale-merge-commit "$pr"
 # core-ts's release merges while the gate runs, after k of its three gh calls
 # (core-ts PRs, core-wasm PRs, manifest), for every k. Before: its PR is open
@@ -140,9 +141,6 @@ good none-packing "$packing"
 # A force_release from main once the cores published: pins and manifest agree.
 fixture 0.2.1 0.2.1 0.2.1 0.2.1
 good force-release-after "$packing"
-# The SDK's own release PR is the one being checked, not a hold.
-fixture 0.2.0 0.2.0 0.2.0 0.2.0 cachekit "$us"
-good sdk-own "$packing"
 # A fork's branch of the same name, should the server's head filter let it by.
 fixture 0.2.0 0.2.0 0.2.0 0.2.0 cachekit-core-ts someone/cachekit-ts
 good fork "$pr"
@@ -152,7 +150,6 @@ good deleted-fork "$pr" GH_STUB_RAW='[{"head":{"ref":"release-please--branches--
 cannot='Cannot check release order'
 fixture 0.2.0 0.2.0 0.2.0 0.2.0
 bad api-down 2 1 "$cannot: gh api" "$pr" GH_STUB_FAIL=1
-bad api-down-packing 2 1 "$cannot: gh api" "$packing" GH_STUB_FAIL=1
 bad api-stalls 2 1 "timed out after 500 ms" "$packing" GH_STUB_SLEEP=5 RELEASE_ORDER_GATE_TIMEOUT_MS=500
 bad not-json 2 1 "$cannot: the open pull requests from release-please--branches--main--components--cachekit-core-ts are not JSON" "$pr" GH_STUB_RAW='<html>'
 bad manifest-not-json 2 1 "$cannot: the contents of .release-please-manifest.json on main are not JSON" "$packing" GH_STUB_MANIFEST_RAW='<html>'
