@@ -62,6 +62,27 @@ feat: rename createCache.minimal to createCache.fast
 BREAKING CHANGE: createCache.minimal is now createCache.fast.
 ```
 
+## Releasing
+
+release-please opens one release PR per package: `@cachekit-io/cachekit`, `@cachekit-io/cachekit-core-ts` and `@cachekit-io/cachekit-core-wasm`. Merging a release PR tags that package, and the Release workflow publishes it to npm. The SDK depends on both cores as `workspace:*`, which `pnpm pack` writes as the exact version in each core's `package.json` at the SDK's release commit. So **the cores release before the SDK.** If the SDK released first, it would pin the previous cores, and its users would not get the core changes it was tested against.
+
+The release-order gate (`.github/scripts/release-order-gate.mjs`) enforces this. It refuses the SDK release while either core has an open release PR, on the branch `release-please--branches--main--components--<core>`. An open core release PR is release-please's own verdict that the core has changes it would release, so the gate reads that verdict rather than re-parsing commits. It also refuses when it cannot tell, for example when the GitHub API fails or stalls. It runs in two places:
+
+- **On the SDK's release PR**, as the `release-order` job under `CI Success`. If the job says a core has an open release PR, merge that PR, let the Release workflow publish the core, then re-run the SDK release PR's CI. If it says `Cannot check release order`, the job could not read GitHub; re-run it.
+- **In the Release workflow, before the SDK is packed.** The release-please step in the same run opens or updates the core release PRs from the SDK's release commit, so this catches a core change that landed after the release PR's last CI run. Here the gate also checks the pins it is about to pack: each core's version in the checkout must equal the version `main`'s `.release-please-manifest.json` records as released. By then the SDK's tag exists, and re-running the job packs the same old pins. Once the cores have released, that re-run fails on this second check, so it cannot publish the old pins. Release the cores first. Then, if `main` has no SDK changes since the SDK's tag, run the Release workflow from `main` with `force_release: true`. If it does have SDK changes, release a new SDK patch instead.
+
+A core change of a type release-please hides, such as `chore(deps)`, does not open a core release, so it does not hold the SDK either. To ship such a change before the next SDK release, recast it as releasable in its merged PR's body:
+
+```
+BEGIN_COMMIT_OVERRIDE
+fix(deps): update the core crate
+END_COMMIT_OVERRIDE
+```
+
+Editing a PR body triggers nothing, so release-please opens the core's release PR on the next Release run, after the next push to `main`. Wait for that PR to appear before you merge the SDK's release PR; the gate then holds the SDK until that core is released.
+
+To release the SDK on purpose while a core release waits, snooze the core's release PR: close it and add the `autorelease: snooze` label. The SDK then pins the previous core, by your choice. The snooze holds only until a Release run generates a different body for that PR, and the body carries the run's UTC date, so in practice the first Release run on a later UTC day reopens it. So snooze it and merge the SDK's release PR on the same UTC day. If `build-cachekit` still refuses because the core PR reopened, snooze it again and re-run only the failed `build-cachekit` job, which does not run release-please again.
+
 ## Running tests
 
 ```bash
