@@ -169,6 +169,9 @@ bad manifest-missing-core 2 1 "$cannot: .release-please-manifest.json on main ha
 fixture 0.2.0 0.2.0 0.2.0 0.2.0
 bad no-repo 2 1 "$cannot: GITHUB_REPOSITORY is not set" "$pr" GITHUB_REPOSITORY=
 bad usage 2 0 '' "$pr --packin"
+printf '%s\n' '{"name":"@cachekit-io/cachekit-core-wasm"}' > "$tmp/work/packages/cachekit-core-wasm/package.json"
+bad core-without-version 2 1 "$cannot: packages/cachekit-core-wasm/package.json has no version for pnpm pack to pin" "$packing"
+good core-without-version-on-pr "$pr"
 rm "$tmp/work/packages/cachekit-core-ts/package.json"
 bad no-core-manifest 2 1 "$cannot: cannot read packages/cachekit-core-ts/package.json" "$packing"
 printf '%s\n' '{"name":"@cachekit-io/cachekit","dependencies":{"@cachekit-io/other":"workspace:*"}}' > "$tmp/work/packages/cachekit/package.json"

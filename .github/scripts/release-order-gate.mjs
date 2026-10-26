@@ -129,12 +129,11 @@ try {
       );
     }
     const [path, { component }] = found;
-    return {
-      name,
-      path,
-      component,
-      pinned: packing ? readJson(`${path}/package.json`).version : null,
-    };
+    const pinned = packing ? readJson(`${path}/package.json`).version : null;
+    if (packing && (typeof pinned !== 'string' || !pinned)) {
+      throw new CannotCheck(`${path}/package.json has no version for pnpm pack to pin`);
+    }
+    return { name, path, component, pinned };
   });
 
   // Every PR read finishes before the manifest read starts. A dependency's
