@@ -7,6 +7,19 @@
       "matchDepTypes": ["pnpm-workspace.overrides"],
       "matchUpdateTypes": ["major"],
       "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Hold wasm-bindgen and js-sys in packages/cachekit-core-wasm. Both are exact-pinned, and scripts/build.sh fails unless the wasm-bindgen CLI equals the locked wasm-bindgen. CI downloads that CLI by WASM_BINDGEN_VERSION and WASM_BINDGEN_SHA256 in ci.yml, build-wasm.yml and release-please.yml, so the two pins, Cargo.lock and those three workflow pins move together by hand. An update to either crate alone fails the Cargo.lock update, because js-sys pins wasm-bindgen exactly, and both together still fail the wasm build against the pinned CLI, so it waits under Pending Approval on the Dependency Dashboard instead. Vulnerability updates are not held.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["wasm-bindgen", "js-sys"],
+      "groupName": null,
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "napi, napi-derive and napi-build update in their own napi-rs group, out of all-minor-patch. napi-rs releases napi, napi-derive and napi-derive-backend together, and a new napi-derive-backend can generate calls that only the napi released with it provides. minimumReleaseAge holds napi back for five days, but Cargo.lock takes the newest napi-derive-backend at once because it is transitive, so for up to five days after such a release the pair does not build: napi-derive-backend 6.1.6 calls napi::bindgen_prelude::defer_native_borrow_scope, which napi 3.14.2 lacks, and cachekit-core-ts failed with E0425. In its own group that window fails only the napi-rs PR, and the first Renovate run after napi clears the release age brings the matching napi. Majors group too, on their own branch, since napi-derive generates code for the napi of the same release.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["napi", "napi-derive", "napi-build"],
+      "groupName": "napi-rs"
     }
   ]
 }
