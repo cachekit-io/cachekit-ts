@@ -46,13 +46,38 @@ const VALUE = {
 };
 const encoded = async () =>
   (await load('serialization/serializer.js')).defaultSerializer.encode(VALUE);
+// 40 B of repeated ASCII: compressible, and under the core's 64 B cutover to a
+// literals-only LZ4 block, so the store skips the match search.
+const SMALL = new TextEncoder().encode('cachekit'.repeat(5));
+// 65,536 B where per-byte costs dominate the per-call overhead that hides them
+// at 1 KB. compressible: VALUE's msgpack repeated, for the LZ4 match search.
+async function compressible() {
+  const unit = await encoded();
+  const bytes = new Uint8Array(65_536);
+  for (let at = 0; at < bytes.length; at += unit.length)
+    bytes.set(unit.subarray(0, bytes.length - at), at);
+  return bytes;
+}
+// incompressible: xorshift32 output, so the envelope stays 64 KiB and AES-GCM
+// seals all of it (the repeated msgpack packs to about 1 KB).
+async function incompressible() {
+  const bytes = new Uint8Array(65_536);
+  let x = 0x9e3779b9;
+  for (let i = 0; i < bytes.length; i++) {
+    x ^= x << 13;
+    x ^= x >>> 17;
+    x ^= x << 5;
+    bytes[i] = x & 0xff;
+  }
+  return bytes;
+}
 
 let sink = 0;
 // Ops run before the window opens, past V8's tier-up.
 const WARMUP = 2000;
 
-async function encryptedOp(manager, storage) {
-  const packed = storage.pack(await encoded());
+async function encryptedOp(manager, storage, bytes) {
+  const packed = storage.pack(bytes);
   const ciphertext = await manager.encrypt(packed, KEY, true);
   return async () => {
     sink += (await manager.decrypt(ciphertext, KEY, true)).length;
@@ -138,6 +163,43 @@ const keygen = (args, n, wasmHash = false) => ({
   },
 });
 
+const napiStorage = async () => new (napi().ByteStorage)();
+const wasmStorage = async () => new (await wasm()).ByteStorage();
+
+// pack + unpack of one payload: a store and an L2 read of the envelope
+const envelope = (storage, payload, n) => ({
+  n,
+  setup: async () => {
+    const s = await storage();
+    const bytes = await payload();
+    return () => {
+      sink += s.unpack(s.pack(bytes)).length;
+    };
+  },
+});
+
+const napiEncrypted = (payload, n) => ({
+  n,
+  setup: async () => {
+    const { EncryptionManager } = await load('encryption/manager.js');
+    return encryptedOp(new EncryptionManager(MASTER_KEY), await napiStorage(), await payload());
+  },
+});
+
+const wasmEncrypted = (payload, n) => ({
+  n,
+  setup: async () => {
+    const glue = await wasm();
+    const { EncryptionManagerCore } = await load('encryption/manager-core.js');
+    const manager = new EncryptionManagerCore(MASTER_KEY, undefined, async () => ({
+      deriveTenantKeys: glue.deriveTenantKeys,
+      encryptWithTenantKeys: glue.encryptWithTenantKeys,
+      decryptWithTenantKeys: glue.decryptWithTenantKeys,
+    }));
+    return encryptedOp(manager, new glue.ByteStorage(), await payload());
+  },
+});
+
 /**
  * Each workload's setup(n) gets the n the run executes and returns its op: one
  * call on the path its name gives. The default n is sized so n x Ir/op dwarfs
@@ -199,49 +261,19 @@ export const WORKLOADS = {
     },
   },
   // Node envelope: LZ4 + xxHash3-64 through the NAPI core
-  'napi-envelope': {
-    n: 20_000,
-    setup: async () => {
-      const storage = new (napi().ByteStorage)();
-      const bytes = await encoded();
-      return () => {
-        sink += storage.unpack(storage.pack(bytes)).length;
-      };
-    },
-  },
+  'napi-envelope': envelope(napiStorage, encoded, 20_000),
+  'napi-envelope-40b': envelope(napiStorage, async () => SMALL, 50_000),
+  'napi-envelope-64kb': envelope(napiStorage, compressible, 500),
   // Workers envelope: the same codec through the wasm core
-  'wasm-envelope': {
-    n: 10_000,
-    setup: async () => {
-      const storage = new (await wasm()).ByteStorage();
-      const bytes = await encoded();
-      return () => {
-        sink += storage.unpack(storage.pack(bytes)).length;
-      };
-    },
-  },
+  'wasm-envelope': envelope(wasmStorage, encoded, 10_000),
+  'wasm-envelope-40b': envelope(wasmStorage, async () => SMALL, 20_000),
+  'wasm-envelope-64kb': envelope(wasmStorage, compressible, 200),
   // secure cache on Node: AAD v0x03 + AES-256-GCM through the NAPI core, decrypt + encrypt
-  'napi-encrypted': {
-    n: 10_000,
-    setup: async () => {
-      const { EncryptionManager } = await load('encryption/manager.js');
-      return encryptedOp(new EncryptionManager(MASTER_KEY), new (napi().ByteStorage)());
-    },
-  },
+  'napi-encrypted': napiEncrypted(encoded, 10_000),
+  'napi-encrypted-64kb': napiEncrypted(incompressible, 500),
   // secure cache on Workers: the same through the wasm core
-  'wasm-encrypted': {
-    n: 5_000,
-    setup: async () => {
-      const glue = await wasm();
-      const { EncryptionManagerCore } = await load('encryption/manager-core.js');
-      const manager = new EncryptionManagerCore(MASTER_KEY, undefined, async () => ({
-        deriveTenantKeys: glue.deriveTenantKeys,
-        encryptWithTenantKeys: glue.encryptWithTenantKeys,
-        decryptWithTenantKeys: glue.decryptWithTenantKeys,
-      }));
-      return encryptedOp(manager, new glue.ByteStorage());
-    },
-  },
+  'wasm-encrypted': wasmEncrypted(encoded, 5_000),
+  'wasm-encrypted-64kb': wasmEncrypted(incompressible, 50),
   // a secure cache's L2 round trip on Node, L1 off: set + get, each running the
   // AAD-size pre-flight (validateKey) and then encrypt or decrypt
   'secure-set-get': {
