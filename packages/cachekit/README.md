@@ -728,9 +728,10 @@ crypto backend picks its implementation independently, so use it to explain
 `.secure` latency, not to change behaviour. It initialises the bindings if
 needed, and returns `null` (unknown) only when the installed binding
 predates the accessor. The per-architecture semantics are core's — as of
-cachekit-core 0.6 a runtime AES-NI probe on x86/x86_64, `true` on every aarch64
-build (a NEON check, not the Crypto Extension), and `false` on Cloudflare
-Workers (wasm32 has no AES instructions).
+cachekit-core 0.7.0 a runtime AES-NI probe on x86/x86_64, a runtime probe for
+the Armv8 Crypto Extension's AES instructions on aarch64 (a Raspberry Pi 4, a
+Cortex-A72 without the Crypto Extension, reports `false`), and `false` on
+Cloudflare Workers (wasm32 has no AES instructions).
 
 ```typescript
 import { EncryptionManager } from '@cachekit-io/cachekit';
