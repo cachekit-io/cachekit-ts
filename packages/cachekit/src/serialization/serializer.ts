@@ -692,9 +692,9 @@ const unrecognized = (value: unknown) =>
  * Writes the bytes of @msgpack/msgpack's encode(normalize(value)) in one walk,
  * without building normalize's sorted copy first.
  *
- * Plain values (primitives, Uint8Array, Array.prototype arrays, and objects
- * with neither an index-like nor a `__proto__` key) are normalized and encoded
- * where they are visited, reading each property once, in the order normalize
+ * Plain values (primitives, Array.prototype arrays, and objects with neither
+ * an index-like nor a `__proto__` key) are normalized and encoded where they
+ * are visited, reading each property once, in the order normalize
  * reads it. Any other subtree goes to normalize itself and its copy is encoded
  * as @msgpack/msgpack would encode it, so a change to how normalize treats
  * Map, Set, Date, other binary or those keys applies here unchanged.
@@ -708,6 +708,27 @@ const unrecognized = (value: unknown) =>
  * normalize returned, is written in after the walk too, so a getter that
  * changes it later in the walk changes the result as it did before, and an
  * ExtData sees its offset in the stream.
+ *
+ * A rejected write is bounded, not free: before a late segment shows that
+ * encode() would have stopped, the walk writes what follows it, but never more
+ * than maxEncodedSize; past that it only counts (see `doomed`).
+ *
+ * Known differences from encode(normalize(value)), all needing user code that
+ * changes or misreports the value while it is encoded:
+ * - a Proxy whose traps have side effects or answer inconsistently (trap
+ *   call counts and order differ);
+ * - patched intrinsics: a non-conforming Array.prototype.map, its iterator,
+ *   Array[Symbol.species] or Array.prototype.constructor, or an
+ *   Array.prototype index set during the walk;
+ * - an Object.prototype property that is read-only or an accessor, which
+ *   normalize's `result[key] = v` trips over and this does not;
+ * - an encoder registered on @msgpack/msgpack's shared default codec;
+ * - a function the walk visits itself, or gets back from an array's own map
+ *   or species, that a later getter moves onto Date's or ExtData's prototype
+ *   (see `callable`; one inside a Map or Set copy is read late, as before);
+ * - a typed array or ExtData data whose `length` is not a non-negative
+ *   integer, or whose `length` or `byteLength` disagrees with its contents:
+ *   encode()'s result then depends on its private buffer's capacity.
  *
  * One instance per module, reused: building a buffer and its views per call
  * costs a write of a small value more than encoding it. The bytes returned are
@@ -742,6 +763,8 @@ export class ValueEncoder {
   private doomed = false;
   /** The output's length once the late segments are counted in. */
   private size = 0;
+  /** While splicing, walked bytes still to be copied after the current segment. */
+  private toCopy = 0;
   private maxEncodedSize = 0;
   private maxDepth = 0;
   private maxCollectionSize = 0;
@@ -767,7 +790,6 @@ export class ValueEncoder {
       // would otherwise stay entered for good.
       this.deferred = undefined;
       this.skip = false;
-      this.finishing = false;
       this.doomed = false;
       this.segments.length = 0;
       this.entered = false;
@@ -784,14 +806,14 @@ export class ValueEncoder {
   private finish(): Uint8Array {
     // Nothing is added past encode()'s first error, so it reached every segment.
     this.size = this.pos;
-    const encoded = this.segments.length
-      ? this.splice()
-      : this.doomed
-        ? EMPTY
-        : this.bytes.slice(0, this.pos);
+    const encoded = this.segments.length ? this.splice() : EMPTY;
     if (this.deferred) throw this.deferred();
     if (this.doomed) throw encodedTooLarge(this.size, this.maxEncodedSize);
-    return encoded;
+    if (this.segments.length) return encoded;
+    // A buffer this drops can be handed over as it is; one it keeps is copied.
+    return this.bytes.length > VALUE_ENCODER_RETAIN
+      ? this.bytes.subarray(0, this.pos)
+      : this.bytes.slice(0, this.pos);
   }
 
   /**
@@ -920,6 +942,9 @@ export class ValueEncoder {
    * built-in one encodes a function on Date's or ExtData's prototype, so such
    * a function is read after the walk. Any other is encode()'s Unrecognized
    * object error, held so the rest of a rejected write is never written.
+   * Known difference: the prototype is checked here, during the walk, so a
+   * function that a later getter moves onto Date's or ExtData's prototype is
+   * still rejected, where encode() would have encoded it.
    */
   private callable(fn: unknown, depth: number): void {
     if (fn instanceof Date || fn instanceof ExtData) this.late(fn as object, depth + 1);
@@ -964,8 +989,9 @@ export class ValueEncoder {
   /**
    * The walk's bytes with the segments written in, where and as encode()
    * wrote them, in its stream's coordinates. Sized for the walk and the
-   * binaries; a segment that needs more grows the buffer as encode() grew its
-   * own, and the result is then a view of it, as encode()'s was.
+   * binaries, with slack for object segments; one that needs more grows it.
+   * Unless the buffer ends up exactly full, the result is a view of it, as
+   * encode()'s was.
    */
   private splice(): Uint8Array {
     const read = this.segments.length;
@@ -1004,9 +1030,11 @@ export class ValueEncoder {
       for (let i = 0; i < read; i++) {
         const { at, copy, depth } = this.segments[i];
         this.raw(walked.subarray(from, at));
+        this.toCopy = end - at;
         this.normalized(copy, depth);
         from = at;
       }
+      this.toCopy = 0;
       this.raw(walked.subarray(from, end));
       this.size = this.pos;
       if (this.doomed) return EMPTY;
@@ -1124,7 +1152,6 @@ export class ValueEncoder {
   }
 
   private arrayHeader(size: number): void {
-    if (this.skip) return;
     if (size < 16) {
       this.u8(0x90 + size);
     } else if (size < 0x10000) {
@@ -1137,7 +1164,6 @@ export class ValueEncoder {
   }
 
   private mapHeader(size: number): void {
-    if (this.skip) return;
     if (size < 16) {
       this.u8(0x80 + size);
     } else if (size < 0x10000) {
@@ -1173,9 +1199,11 @@ export class ValueEncoder {
     this.raw(ext.data);
   }
 
-  // Every writer is a no-op while `skip` is set, so nothing the walk writes
-  // past encode()'s first error costs a byte; new walk-path writers must
-  // check it too.
+  // Every writer the walk reaches is a no-op while `skip` is set, so nothing
+  // it writes past encode()'s first error costs a byte; a new walk-path writer
+  // must check it too. bin() and extension() are not: they run user code (a
+  // length getter, ExtData data) before their first checked write, and are
+  // reached only from splice(), where `skip` is off.
 
   /** A type byte and a big-endian length of `width` bytes. */
   private head(type: number, width: 1 | 2 | 4, size: number): void {
@@ -1225,7 +1253,10 @@ export class ValueEncoder {
       return false;
     }
     const written = this.bytes.subarray(0, this.pos);
-    this.reset(required * 2);
+    // A spliced output grows by what is still to come, not by doubling a
+    // large prefix again, but at least geometrically, so a large segment is
+    // not copied once per write.
+    this.reset(this.finishing ? required + Math.max(this.toCopy, required >> 3) : required * 2);
     this.bytes.set(written);
     return true;
   }

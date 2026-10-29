@@ -552,6 +552,9 @@ describe('encodeCounted one-pass encode', () => {
         const bytes = Object.defineProperty(Uint8Array.of(7), 'length', { get: () => ++reads });
         return { a: mapped([bytes]) };
       });
+      // binary that is not a Uint8Array, which only an own map can put in the copy
+      same(() => ({ a: mapped([new Int16Array([1, -2, 300])]) }));
+      same(() => ({ a: mapped([new DataView(new ArrayBuffer(8), 3, 4)]) }));
       // a Date, or a function on Date.prototype, encodes as the timestamp ext
       const dated = () =>
         Object.assign(Object.setPrototypeOf(function () {}, Date.prototype) as object, {
@@ -607,6 +610,32 @@ describe('encodeCounted one-pass encode', () => {
           { a: ext },
           'b',
           later(() => ((ext.data[0] = 1), 1))
+        );
+      });
+    });
+
+    it('rejects a function a later getter moves onto Date.prototype (a known difference)', () => {
+      // Documented on ValueEncoder: the prototype is checked during the walk.
+      const make = () => {
+        const fn = Object.assign(function () {}, { getTime: () => 0 });
+        return Object.defineProperty(
+          { a: fn },
+          'b',
+          later(() => (Object.setPrototypeOf(fn, Date.prototype), 1))
+        );
+      };
+      expect(twoPass(make(), config)).toHaveProperty('bytes');
+      expect(onePass(make(), config)).toEqual({
+        error: 'Error',
+        message: 'Unrecognized object: [object Function]',
+      });
+      // inside a Map's copy the function is read late, so it matches
+      same(() => {
+        const fn = Object.assign(function () {}, { getTime: () => 0 });
+        return Object.defineProperty(
+          { a: new Map([['f', fn]]) },
+          'b',
+          later(() => (Object.setPrototypeOf(fn, Date.prototype), 1))
         );
       });
     });
@@ -763,6 +792,28 @@ describe('encodeCounted one-pass encode', () => {
       same(() => ({ a: 'x'.repeat(100), b: new Map([['k', 1n]]) }), small);
     });
 
+    it('bounds every rejected write by the limit, wherever the error sits', () => {
+      const tail = 'x'.repeat(4 * 1024 * 1024);
+      let deep: unknown = new Map([['k', 1]]);
+      for (let i = 0; i < 101; i++) deep = [deep];
+      for (const make of [
+        () => ({ a: new Set([Symbol('s')]), b: tail }),
+        () => ({ a: new Set([() => 1]), b: tail }),
+        () => ({ a: { 0: 1n }, b: tail }),
+        () => ({ a: new Map([['k', deep]]), b: tail }),
+      ]) {
+        const encoder = new ValueEncoder();
+        const kept = () => (encoder as unknown as { bytes: Uint8Array }).bytes;
+        const before = kept();
+        const want = twoPass(make(), config);
+        expect(want).toHaveProperty('error');
+        expect(() =>
+          encoder.encode(make(), config, { forKey: false, objects: 0, values: 0 })
+        ).toThrow((want as { message: string }).message);
+        expect(kept()).toBe(before);
+      }
+    });
+
     it('allocates no output for binaries that take it past the limit', () => {
       const encoder = new ValueEncoder();
       const sizes: number[] = [];
@@ -831,6 +882,17 @@ describe('encodeCounted one-pass encode', () => {
       }
       expect(first.byteOffset).toBe(0);
       expect(first.buffer.byteLength).toBe(first.length);
+    });
+
+    it('grows a spliced output by what is still to come, not by doubling', () => {
+      const big = resolveSerializerConfig({ maxEncodedSize: 2 ** 25 });
+      const value = {
+        a: 'x'.repeat(8 * 1024 * 1024),
+        b: new Map([['k', 'y'.repeat(2 * 1024 * 1024)]]),
+      };
+      const out = encodeCounted(value, big);
+      expect(hex(onePass(value, big))).toEqual(hex(twoPass(value, big)));
+      expect(out.buffer.byteLength).toBeLessThanOrEqual(out.length * 1.25);
     });
 
     it('writes late segments into one output, without regrowing a large prefix', () => {
