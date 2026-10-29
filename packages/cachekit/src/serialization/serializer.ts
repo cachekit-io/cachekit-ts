@@ -841,10 +841,8 @@ export class ValueEncoder {
     this.walk.values += length;
     this.arrayHeader(length);
     for (let i = 0; i < length; i++) {
-      // map()'s order: whether the element exists, then its value. Above the
-      // depth bound a hole and an undefined element encode alike, so only an
-      // element at the bound pays for the check.
-      if (depth < this.maxDepth || i in value) {
+      // map()'s order: whether the element exists, then its value.
+      if (i in value) {
         this.value(value[i], depth + 1);
       } else {
         // A hole: map() skips it, and encode() reads it from the copy as undefined.
