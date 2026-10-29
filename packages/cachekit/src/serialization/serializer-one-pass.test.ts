@@ -512,6 +512,46 @@ describe('encodeCounted one-pass encode', () => {
       }));
     });
 
+    it('reads lengths as often as encode() does, and encodes what its codec matches', () => {
+      // An array whose own map returns `out` as normalize's copy.
+      const mapped = (out: unknown[]) => Object.assign([0], { map: () => out });
+      // A Uint8Array whose length getter counts its reads, and an object that
+      // reports the count when encode() reaches it, after the binary.
+      const counted = () => {
+        const state = { reads: 0 };
+        class Counted extends Uint8Array {
+          get length() {
+            state.reads++;
+            return super.length;
+          }
+        }
+        return {
+          bytes: new Counted([1, 2]),
+          probe: {
+            get v() {
+              return state.reads;
+            },
+          },
+        };
+      };
+      same(() => {
+        const { bytes, probe } = counted();
+        return { a: mapped([bytes, probe]) };
+      });
+      same(() => {
+        const { bytes, probe } = counted();
+        return { a: mapped([new ExtData(12, () => bytes), probe]) };
+      });
+      // a Date, or a function on Date.prototype, encodes as the timestamp ext
+      const dated = () =>
+        Object.assign(Object.setPrototypeOf(function () {}, Date.prototype) as object, {
+          getTime: () => 0,
+        });
+      same(() => ({ a: mapped([new Date(0)]) }));
+      same(() => ({ a: dated() }));
+      same(() => ({ a: mapped([dated()]) }));
+    });
+
     it("reads a binary's byteLength and a callable ExtData when encode() did", () => {
       const species = (copy: unknown) => {
         const a: unknown[] = [];
@@ -589,11 +629,13 @@ describe('encodeCounted one-pass encode', () => {
         c: new Array(9000).fill(true),
         d: new Array(9000).fill(300),
       };
+      const kept = () => (encoder as unknown as { bytes: Uint8Array }).bytes;
+      const before = kept();
       expect(() => encoder.encode(value, config, { forKey: false, objects: 0, values: 0 })).toThrow(
         'Unrecognized object: [object BigInt]'
       );
-      // encode() stopped at a; the buffer never grew for b or c.
-      expect((encoder as unknown as { bytes: Uint8Array }).bytes.length).toBe(2048);
+      // encode() stopped at a; the buffer never grew for b, c or d.
+      expect(kept()).toBe(before);
       // normalize's checks still run past it, and win.
       same(() => ({ a: 1n, b: 'x'.repeat(100), c: new Int8Array(1) }));
       // an encode() error inside normalize's copy of a comes before b's
@@ -693,6 +735,11 @@ describe('encodeCounted one-pass encode', () => {
       );
       encodeCounted({ b: 'second' }, config);
       expect(first).toEqual(snapshot);
+      // A value with a binary is sized exactly too, header widths included.
+      for (const n of [3, 300, 70_000]) {
+        const out = encodeCounted({ b: new Uint8Array(n), s: 'x' }, config);
+        expect(out.buffer.byteLength, `binary of ${n}`).toBe(out.length);
+      }
       expect(first.byteOffset).toBe(0);
       expect(first.buffer.byteLength).toBe(first.length);
     });

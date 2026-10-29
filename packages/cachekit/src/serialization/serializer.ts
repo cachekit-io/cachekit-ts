@@ -721,9 +721,10 @@ export class ValueEncoder {
   /** Set while the late segments are written: encode()'s errors then throw at once. */
   private finishing = false;
   /**
-   * What encode() read from normalize's copy, not from the caller's value: a
-   * Uint8Array's bytes and every object normalize returned. Written in, where
-   * they go, once the walk ends.
+   * What encode() read only after normalize had finished, and user code later
+   * in the walk can still change: a Uint8Array's bytes, which normalize's copy
+   * shares with the caller's buffer, and every object or function normalize
+   * returned or the value holds. Written in, where they go, once the walk ends.
    */
   private segments: { at: number; copy: object; depth: number }[] = [];
   private maxDepth = 0;
@@ -745,22 +746,23 @@ export class ValueEncoder {
       this.value(value, 0);
       return this.finish();
     } finally {
-      // Zero the buffer this keeps; one it drops is garbage, as encode()'s are.
-      if (this.bytes.length > VALUE_ENCODER_RETAIN) this.reset(VALUE_ENCODER_BUFFER);
-      else this.bytes.fill(0, 0, this.pos);
+      // State first: if zeroing threw (at the stack limit), this encoder
+      // would otherwise stay entered for good.
       this.deferred = undefined;
       this.skip = false;
       this.finishing = false;
       this.segments.length = 0;
       this.entered = false;
+      // Zero the buffer this keeps; one it drops is garbage, as encode()'s are.
+      if (this.bytes.length > VALUE_ENCODER_RETAIN) this.reset(VALUE_ENCODER_BUFFER);
+      else this.bytes.fill(0, 0, this.pos);
     }
   }
 
   /** The walk's result: its bytes with the segments written in, or encode()'s first error. */
   private finish(): Uint8Array {
     // Nothing is added past encode()'s first error, so it reached every segment.
-    const read = this.segments.length;
-    const encoded = read ? this.splice(read) : this.bytes.slice(0, this.pos);
+    const encoded = this.segments.length ? this.splice() : this.bytes.slice(0, this.pos);
     if (this.deferred) throw this.deferred();
     return encoded;
   }
@@ -839,8 +841,10 @@ export class ValueEncoder {
     this.walk.values += length;
     this.arrayHeader(length);
     for (let i = 0; i < length; i++) {
-      // map()'s order: whether the element exists, then its value.
-      if (i in value) {
+      // map()'s order: whether the element exists, then its value. Above the
+      // depth bound a hole and an undefined element encode alike, so only an
+      // element at the bound pays for the check.
+      if (depth < this.maxDepth || i in value) {
         this.value(value[i], depth + 1);
       } else {
         // A hole: map() skips it, and encode() reads it from the copy as undefined.
@@ -903,7 +907,8 @@ export class ValueEncoder {
     if (typeof value === 'boolean') return this.u8(value ? 0xc3 : 0xc2);
     if (typeof value === 'number') return this.number(value);
     if (typeof value === 'string') return this.string(value);
-    // Only an ExtData can match: normalize's own output holds no Date.
+    // An ExtData, or a Date (the timestamp ext) that an array's species or own
+    // map put in normalize's copy, or a function with either prototype.
     const ext = ExtensionCodec.defaultCodec.tryToEncode(value, undefined);
     if (ext != null) return this.extension(ext);
     if (Array.isArray(value)) {
@@ -925,10 +930,13 @@ export class ValueEncoder {
   }
 
   /**
-   * The walk's bytes with the first `read` segments written in, where and as
-   * encode() wrote them, in its stream's coordinates.
+   * The walk's bytes with the segments written in, where and as encode()
+   * wrote them, in its stream's coordinates. Sized for the walk and the
+   * binaries; a segment that needs more grows the buffer as encode() grew its
+   * own, and the result is then a view of it, as encode()'s was.
    */
-  private splice(read: number): Uint8Array {
+  private splice(): Uint8Array {
+    const read = this.segments.length;
     const walked = this.bytes;
     const walkedView = this.view;
     const end = this.pos;
@@ -940,7 +948,7 @@ export class ValueEncoder {
       // only when bin() reaches this segment, as in encode().
       const length = intrinsicByteLength(copy);
       if (length >= 0x100000000) break; // bin() throws when it gets there
-      size += 5 + length;
+      size += (length < 0x100 ? 2 : length < 0x10000 ? 3 : 5) + length;
     }
     this.reset(size);
     this.pos = 0;
@@ -955,7 +963,7 @@ export class ValueEncoder {
         from = at;
       }
       this.raw(walked.subarray(from, end));
-      return this.bytes.length === this.pos ? this.bytes : this.bytes.slice(0, this.pos);
+      return this.bytes.length === this.pos ? this.bytes : this.bytes.subarray(0, this.pos);
     } finally {
       this.finishing = false;
       this.bytes = walked;
@@ -1096,10 +1104,9 @@ export class ValueEncoder {
     if (typeof ext.data === 'function') {
       // The data may depend on where it lands in the stream.
       const data = ext.data(this.pos + 6);
-      if (data.length >= 0x100000000) {
-        throw new Error(`Too large extension object: ${data.length}`);
-      }
-      this.head(0xc9, 4, data.length);
+      const size = data.length; // read as often as encode() reads it
+      if (size >= 0x100000000) throw new Error(`Too large extension object: ${size}`);
+      this.head(0xc9, 4, size);
       this.i8(ext.type);
       return this.raw(data);
     }
@@ -1117,8 +1124,13 @@ export class ValueEncoder {
     this.raw(ext.data);
   }
 
+  // Every writer is a no-op while `skip` is set, so nothing the walk writes
+  // past encode()'s first error costs a byte; new walk-path writers must
+  // check it too.
+
   /** A type byte and a big-endian length of `width` bytes. */
   private head(type: number, width: 1 | 2 | 4, size: number): void {
+    if (this.skip) return;
     this.ensure(1 + width);
     this.bytes[this.pos++] = type;
     if (width === 1) this.bytes[this.pos] = size;
@@ -1134,14 +1146,17 @@ export class ValueEncoder {
   }
 
   private i8(value: number): void {
+    if (this.skip) return;
     this.ensure(1);
     this.view.setInt8(this.pos++, value);
   }
 
   private raw(bytes: Uint8Array): void {
-    this.ensure(bytes.length);
+    if (this.skip) return;
+    const size = bytes.length; // read once, as encode()'s writeU8a does
+    this.ensure(size);
     this.bytes.set(bytes, this.pos);
-    this.pos += bytes.length;
+    this.pos += size;
   }
 
   private ensure(size: number): void {
