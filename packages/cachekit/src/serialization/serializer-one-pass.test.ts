@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { runInNewContext } from 'node:vm';
-import { encode as msgpackEncode } from '@msgpack/msgpack';
+import { ExtData, encode as msgpackEncode } from '@msgpack/msgpack';
 import {
   ValueEncoder,
   encodeCounted,
@@ -310,7 +310,8 @@ describe('encodeCounted one-pass encode', () => {
   });
 
   it('matches at every header width boundary, 32-bit lengths included', () => {
-    // The random cases stay short; these reach str/bin/array/map 8, 16 and 32.
+    // The random cases stay short. These reach every header width: fix, 8,
+    // 16 and 32-bit lengths (msgpack arrays and maps have no 8-bit header).
     const c = resolveSerializerConfig({ maxEncodedSize: 2 ** 22, maxCollectionSize: 70_000 });
     for (const n of [0x0f, 0x10, 0x1f, 0x20, 0xff, 0x100, 0xffff, 0x10000, 70_000]) {
       for (const value of [
@@ -321,7 +322,10 @@ describe('encodeCounted one-pass encode', () => {
         Array.from({ length: n }, (_, i) => i),
         Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${i}`, i])),
       ]) {
-        expect(hex(onePass(value, c)), `length ${n}`).toEqual(hex(twoPass(value, c)));
+        const want = twoPass(value, c);
+        // Both paths must encode it, or the writers go unchecked.
+        expect(want, `length ${n}`).toHaveProperty('bytes');
+        expect(hex(onePass(value, c)), `length ${n}`).toEqual(hex(want));
       }
     }
   });
@@ -465,6 +469,80 @@ describe('encodeCounted one-pass encode', () => {
           later(() => (ab.resize(1), 1))
         );
       });
+    });
+
+    it("encodes an array species' object as encode() read it, after normalize", () => {
+      // A species must be a constructor, so a function, not an arrow.
+      const species = (make: () => unknown) => {
+        const a: unknown[] = [];
+        const ctor = function () {
+          return make();
+        };
+        Object.defineProperty(a, 'constructor', { value: { [Symbol.species]: ctor } });
+        return a;
+      };
+      same(() => {
+        const shared = { n: 0 };
+        return Object.defineProperty(
+          { a: species(() => shared) },
+          'b',
+          later(() => ((shared.n = 1), 1))
+        );
+      });
+      // inside an object with an index-like key, which normalize copies
+      same(() => {
+        const shared = { n: 0 };
+        return Object.defineProperty(
+          { a: { 0: species(() => shared) } },
+          'b',
+          later(() => ((shared.n = 1), 1))
+        );
+      });
+      // an ExtData whose bytes depend on where it lands in the stream
+      same(() => ({
+        a: species(() => new ExtData(12, (pos: number) => Uint8Array.of(pos))),
+        z: species(() => new ExtData(3, Uint8Array.of(1, 2, 3))),
+      }));
+    });
+
+    it('checks the depth of an element whose getter deletes it', () => {
+      same(
+        () => {
+          const a = [0];
+          Object.defineProperty(a, '0', {
+            configurable: true,
+            get() {
+              delete a[0];
+              return undefined;
+            },
+          });
+          let value: unknown = a;
+          for (let i = 0; i < 32; i++) value = { n: value };
+          return value;
+        },
+        resolveSerializerConfig({ maxDepth: 32 })
+      );
+    });
+
+    it('writes nothing past the first encode() error', () => {
+      const encoder = new ValueEncoder();
+      // Under the 1 MiB the encoder keeps, so growth for b would show.
+      const value = {
+        a: 1n,
+        b: 'x'.repeat(400_000),
+        c: new Array(9000).fill(true),
+        d: new Array(9000).fill(300),
+      };
+      expect(() => encoder.encode(value, config, { forKey: false, objects: 0, values: 0 })).toThrow(
+        'Unrecognized object: [object BigInt]'
+      );
+      // encode() stopped at a; the buffer never grew for b or c.
+      expect((encoder as unknown as { bytes: Uint8Array }).bytes.length).toBe(2048);
+      // normalize's checks still run past it, and win.
+      same(() => ({ a: 1n, b: 'x'.repeat(100), c: new Int8Array(1) }));
+      // an encode() error inside normalize's copy of a comes before b's
+      same(() => ({ a: new Map([['k', 1n]]), b: Symbol('s') }));
+      same(() => ({ a: new Set([() => 1]), b: 1n }));
     });
 
     it('makes encode() error messages only for the error thrown, when it is thrown', () => {

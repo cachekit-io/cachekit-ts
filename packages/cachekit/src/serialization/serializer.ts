@@ -684,9 +684,12 @@ const unrecognized = (value: unknown) =>
  * Old order, kept: normalize ran to completion before encode() started. So
  * normalize's errors (depth, collection size, binary type) throw at once,
  * while encode()'s (its own depth bound of 100, a bigint, symbol or function)
- * wait for the walk to end, and only the first is made and thrown. Binary bytes
- * are read then too, so a getter that changes or detaches a buffer later in the
- * walk changes the result as it did before.
+ * wait for the walk to end, and only the first is made and thrown; past it the
+ * walk runs normalize's checks and writes nothing. What encode() read from the
+ * copy rather than the caller's value, a Uint8Array's bytes and any object
+ * normalize returned, is written in after the walk too, so a getter that
+ * changes it later in the walk changes the result as it did before, and an
+ * ExtData sees its offset in the stream.
  *
  * One instance per module, reused: building a buffer and its views per call
  * costs a write of a small value more than encoding it. The bytes returned are
@@ -702,10 +705,16 @@ export class ValueEncoder {
   private entered = false;
   /** Makes encode()'s first error, when it is thrown. */
   private deferred: (() => Error) | undefined;
-  /** Binary values and where they go, written in once the walk ends. */
-  private binaries: { at: number; value: ArrayBufferView }[] = [];
-  /** How many binaries encode() wrote before its first error. */
-  private binariesRead = 0;
+  /** Set once encode() would have stopped: the walk then only runs normalize's checks. */
+  private skip = false;
+  /** Set while the late segments are written: encode()'s errors then throw at once. */
+  private finishing = false;
+  /**
+   * What encode() read from normalize's copy, not from the caller's value: a
+   * Uint8Array's bytes and every object normalize returned. Written in, where
+   * they go, once the walk ends.
+   */
+  private segments: { at: number; copy: object; depth: number }[] = [];
   private maxDepth = 0;
   private maxCollectionSize = 0;
   private walk: NormalizeWalk = { forKey: false, objects: 0, values: 0 };
@@ -718,7 +727,6 @@ export class ValueEncoder {
     if (this.entered) return new ValueEncoder().encode(value, config, walk);
     this.entered = true;
     this.pos = 0;
-    this.deferred = undefined;
     this.maxDepth = config.maxDepth;
     this.maxCollectionSize = config.maxCollectionSize;
     this.walk = walk;
@@ -730,24 +738,37 @@ export class ValueEncoder {
       if (this.bytes.length > VALUE_ENCODER_RETAIN) this.reset(VALUE_ENCODER_BUFFER);
       else this.bytes.fill(0, 0, this.pos);
       this.deferred = undefined;
-      this.binaries.length = 0;
+      this.skip = false;
+      this.finishing = false;
+      this.segments.length = 0;
       this.entered = false;
     }
   }
 
-  /** The walk's result: its bytes with the binaries written in, or encode()'s first error. */
+  /** The walk's result: its bytes with the segments written in, or encode()'s first error. */
   private finish(): Uint8Array {
-    const read = this.deferred ? this.binariesRead : this.binaries.length;
+    // Nothing is added past encode()'s first error, so it reached every segment.
+    const read = this.segments.length;
     const encoded = read ? this.splice(read) : this.bytes.slice(0, this.pos);
     if (this.deferred) throw this.deferred();
     return encoded;
   }
 
-  /** Holds encode()'s error, if it is the first, until normalize would have finished. */
+  /**
+   * An encode() error. In the walk, the first is held until normalize would
+   * have finished, and nothing after it is written; in a late segment it
+   * throws, being earlier than any held one.
+   */
   private defer(error: () => Error): void {
+    if (this.finishing) throw error();
     if (this.deferred) return;
     this.deferred = error;
-    this.binariesRead = this.binaries.length;
+    this.skip = true;
+  }
+
+  /** A part of normalize's copy, for encode() to read after the walk. */
+  private late(copy: object, depth: number): void {
+    if (!this.skip) this.segments.push({ at: this.pos, copy, depth });
   }
 
   /** normalize(value, depth) then encode() at depth + 1, as one step. */
@@ -779,8 +800,7 @@ export class ValueEncoder {
     if (bin) {
       this.walk.objects++;
       if (bin[0] !== 'Uint8Array') throw binaryValueError(bin[0]);
-      this.binaries.push({ at: this.pos, value: bin[1] });
-      return;
+      return this.late(bin[1], depth + 1);
     }
     this.object(value as Record<string, unknown>, depth);
   }
@@ -804,9 +824,9 @@ export class ValueEncoder {
     this.walk.values += length;
     this.arrayHeader(length);
     for (let i = 0; i < length; i++) {
-      const item = value[i];
-      if (item !== undefined || i in value) {
-        this.value(item, depth + 1);
+      // map()'s order: whether the element exists, then its value.
+      if (i in value) {
+        this.value(value[i], depth + 1);
       } else {
         // A hole: map() skips it, and encode() reads it from the copy as undefined.
         this.normalized(undefined, depth + 2);
@@ -830,7 +850,7 @@ export class ValueEncoder {
           this.maxCollectionSize,
           this.walk
         );
-        return this.normalized(copy, depth + 1);
+        return this.late(copy, depth + 1);
       }
     }
     this.walk.objects++;
@@ -845,7 +865,11 @@ export class ValueEncoder {
 
   private delegate(value: object, depth: number): void {
     const copy = normalize(value, depth, this.maxDepth, this.maxCollectionSize, this.walk);
-    this.normalized(copy, depth + 1);
+    // A Date's copy is a string, which nothing can change before encode()
+    // reads it; an object (a Map's, or whatever an array's species built)
+    // can be, by a getter later in the walk.
+    if (copy !== null && typeof copy === 'object') this.late(copy, depth + 1);
+    else this.normalized(copy, depth + 1);
   }
 
   /**
@@ -861,15 +885,14 @@ export class ValueEncoder {
     if (typeof value === 'boolean') return this.u8(value ? 0xc3 : 0xc2);
     if (typeof value === 'number') return this.number(value);
     if (typeof value === 'string') return this.string(value);
-    // Unreachable from normalize's own output, which holds no Date; encode()
-    // writes an ExtData the same wherever it sits.
+    // Only an ExtData can match: normalize's own output holds no Date.
     const ext = ExtensionCodec.defaultCodec.tryToEncode(value, undefined);
-    if (ext != null) return this.raw(encode(ext));
+    if (ext != null) return this.extension(ext);
     if (Array.isArray(value)) {
       this.arrayHeader(value.length);
       for (const item of value) this.normalized(item, depth + 1);
     } else if (ArrayBuffer.isView(value)) {
-      this.binaries.push({ at: this.pos, value });
+      this.bin(value);
     } else if (typeof value === 'object') {
       const map = value as Record<string, unknown>;
       const keys = Object.keys(map);
@@ -884,8 +907,8 @@ export class ValueEncoder {
   }
 
   /**
-   * The walk's bytes with the first `read` binaries written in, where and as
-   * encode() wrote them, into a buffer of the result's size.
+   * The walk's bytes with the first `read` segments written in, where and as
+   * encode() wrote them, in its stream's coordinates.
    */
   private splice(read: number): Uint8Array {
     const walked = this.bytes;
@@ -893,23 +916,28 @@ export class ValueEncoder {
     const end = this.pos;
     let size = end;
     for (let i = 0; i < read; i++) {
-      const length = this.binaries[i].value.byteLength;
+      const { copy } = this.segments[i];
+      if (!ArrayBuffer.isView(copy)) continue; // the buffer grows to fit it
+      const length = copy.byteLength;
       if (length >= 0x100000000) break; // bin() throws when it gets there
-      size += (length < 0x100 ? 2 : length < 0x10000 ? 3 : 5) + length;
+      size += 5 + length;
     }
     this.reset(size);
     this.pos = 0;
+    this.skip = false;
+    this.finishing = true;
     try {
       let from = 0;
       for (let i = 0; i < read; i++) {
-        const { at, value } = this.binaries[i];
+        const { at, copy, depth } = this.segments[i];
         this.raw(walked.subarray(from, at));
-        this.bin(value);
+        this.normalized(copy, depth);
         from = at;
       }
       this.raw(walked.subarray(from, end));
       return this.bytes.length === this.pos ? this.bytes : this.bytes.slice(0, this.pos);
     } finally {
+      this.finishing = false;
       this.bytes = walked;
       this.view = walkedView;
       this.pos = end;
@@ -919,6 +947,7 @@ export class ValueEncoder {
   // The writers below produce @msgpack/msgpack 3.1.3's bytes for each type.
 
   private number(n: number): void {
+    if (this.skip) return;
     this.ensure(9);
     const view = this.view;
     let pos = this.pos;
@@ -971,6 +1000,7 @@ export class ValueEncoder {
   }
 
   private string(s: string): void {
+    if (this.skip) return;
     const byteLength = utf8Count(s);
     this.ensure(5 + byteLength);
     if (byteLength < 32) {
@@ -1017,6 +1047,7 @@ export class ValueEncoder {
   }
 
   private arrayHeader(size: number): void {
+    if (this.skip) return;
     if (size < 16) {
       this.u8(0x90 + size);
     } else if (size < 0x10000) {
@@ -1029,6 +1060,7 @@ export class ValueEncoder {
   }
 
   private mapHeader(size: number): void {
+    if (this.skip) return;
     if (size < 16) {
       this.u8(0x80 + size);
     } else if (size < 0x10000) {
@@ -1038,6 +1070,31 @@ export class ValueEncoder {
     } else {
       throw new Error(`Too large map object: ${size}`);
     }
+  }
+
+  private extension(ext: ExtData): void {
+    if (typeof ext.data === 'function') {
+      // The data may depend on where it lands in the stream.
+      const data = ext.data(this.pos + 6);
+      if (data.length >= 0x100000000) {
+        throw new Error(`Too large extension object: ${data.length}`);
+      }
+      this.head(0xc9, 4, data.length);
+      this.i8(ext.type);
+      return this.raw(data);
+    }
+    const size = ext.data.length;
+    if (size === 1) this.u8(0xd4);
+    else if (size === 2) this.u8(0xd5);
+    else if (size === 4) this.u8(0xd6);
+    else if (size === 8) this.u8(0xd7);
+    else if (size === 16) this.u8(0xd8);
+    else if (size < 0x100) this.head(0xc7, 1, size);
+    else if (size < 0x10000) this.head(0xc8, 2, size);
+    else if (size < 0x100000000) this.head(0xc9, 4, size);
+    else throw new Error(`Too large extension object: ${size}`);
+    this.i8(ext.type);
+    this.raw(ext.data);
   }
 
   /** A type byte and a big-endian length of `width` bytes. */
@@ -1051,8 +1108,14 @@ export class ValueEncoder {
   }
 
   private u8(byte: number): void {
+    if (this.skip) return;
     this.ensure(1);
     this.bytes[this.pos++] = byte;
+  }
+
+  private i8(value: number): void {
+    this.ensure(1);
+    this.view.setInt8(this.pos++, value);
   }
 
   private raw(bytes: Uint8Array): void {
