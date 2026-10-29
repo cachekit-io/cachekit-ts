@@ -752,6 +752,7 @@ export class ValueEncoder {
    * returned or the value holds. Written in, where they go, once the walk ends.
    */
   private segments: { at: number; copy: object; depth: number }[] = [];
+  private maxEncodedSize = 0;
   private maxDepth = 0;
   private maxCollectionSize = 0;
   private walk: NormalizeWalk = { forKey: false, objects: 0, values: 0 };
@@ -764,6 +765,7 @@ export class ValueEncoder {
     if (this.entered) return new ValueEncoder().encode(value, config, walk);
     this.entered = true;
     this.pos = 0;
+    this.maxEncodedSize = config.maxEncodedSize;
     this.maxDepth = config.maxDepth;
     this.maxCollectionSize = config.maxCollectionSize;
     this.walk = walk;
@@ -791,8 +793,9 @@ export class ValueEncoder {
       if (this.deferred) throw this.deferred();
       return encoded;
     }
-    // Thrown before any copy of a value it rejects.
+    // Thrown before any copy of a value it rejects, as encodeCounted would.
     if (this.deferred) throw this.deferred();
+    if (this.pos > this.maxEncodedSize) throw encodedTooLarge(this.pos, this.maxEncodedSize);
     // A buffer this drops can be handed over as it is; one it keeps is copied.
     return this.bytes.length > VALUE_ENCODER_RETAIN
       ? this.bytes.subarray(0, this.pos)

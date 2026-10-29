@@ -762,6 +762,27 @@ describe('encodeCounted one-pass encode', () => {
   describe('past maxEncodedSize', () => {
     const small = resolveSerializerConfig({ maxEncodedSize: 64 });
 
+    it('reads late sizes when written, and keeps set() errors past the limit', () => {
+      // a binary an earlier segment shrinks: its size is read when written
+      same(
+        () => {
+          const ab = resizable(2000, 2000);
+          const view = new Uint8Array(ab);
+          const shrinker = new ExtData(12, () => (ab.resize(4), new Uint8Array(1)));
+          return { a: species(shrinker), b: species(view) };
+        },
+        resolveSerializerConfig({ maxEncodedSize: 100 })
+      );
+      // ExtData data that set() rejects, past the limit: its error still wins
+      same(
+        () => ({
+          a: 'x'.repeat(3000),
+          b: species(new ExtData(12, new BigInt64Array([1n]) as unknown as Uint8Array)),
+        }),
+        resolveSerializerConfig({ maxEncodedSize: 64 })
+      );
+    });
+
     it('matches with a walked prefix past the start buffer before late segments', () => {
       // Past 2 KiB the walk's buffer has grown; the segments' offsets must still hold.
       const make = () => ({
