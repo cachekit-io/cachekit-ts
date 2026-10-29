@@ -73,7 +73,8 @@ async function incompressible() {
 }
 
 let sink = 0;
-// Ops run before the window opens, past V8's tier-up.
+// Ops run before the window opens, past V8's tier-up. A workload whose op
+// is long enough to tier up sooner sets its own `warmup`.
 const WARMUP = 2000;
 
 async function encryptedOp(manager, storage, bytes) {
@@ -123,18 +124,21 @@ const l1AtCapacity = (entries, n) => ({
 });
 
 // A plaintext set(): L1 is handed the decoded value, so its size accounting is
-// part of the write. Rows as in VALUE, ~33 B of msgpack each.
-const plaintextSet = (rows, n) => ({
+// part of the write.
+const plaintextSetOf = (value, n, warmup) => ({
   n,
+  warmup,
   setup: async () => {
     const { createCache } = await load('index.js');
     const cache = createCache({ backend: new MemoryBackend(), metrics: false });
-    const value = { rows: Array.from({ length: rows }, (_, i) => VALUE.rows[i % 32]) };
     return async () => {
       await cache.set(KEY, value);
     };
   },
 });
+// Rows as in VALUE, ~33 B of msgpack each.
+const rowsOf = (rows) => ({ rows: Array.from({ length: rows }, (_, i) => VALUE.rows[i % 32]) });
+const plaintextSet = (rows, n) => plaintextSetOf(rowsOf(rows), n);
 
 /**
  * generateKey(args) as wrap() runs it: after the Node entry has loaded, or, with
@@ -228,6 +232,19 @@ export const WORKLOADS = {
   'plaintext-set-1kb': plaintextSet(32, 5_000),
   'plaintext-set-10kb': plaintextSet(320, 1_000),
   'plaintext-set-100kb': plaintextSet(3_200, 1_000),
+  // the ends of the object-heavy write range: one 64 B object, and 1,005,035 B
+  // in 96 groups of 320 rows, so no collection nears the 10,000-element bound
+  // and the whole stays under the 1 MiB encode limit. A 1 MB op runs long
+  // enough under callgrind that 20 warm-up ops are past tier-up.
+  'plaintext-set-64b': plaintextSetOf(
+    { id: 7, name: 'item-7', score: 10.5, ok: true, tags: ['a', 'b'], owner: 'user-424242' },
+    20_000
+  ),
+  'plaintext-set-1mb': plaintextSetOf(
+    { groups: Array.from({ length: 96 }, () => rowsOf(320)) },
+    20,
+    20
+  ),
   // the worst case for L1's container count: 2,000 empty objects, one
   // MessagePack byte each, so the count is a large share of the write
   'plaintext-set-containers': {
@@ -250,7 +267,8 @@ export const WORKLOADS = {
   // instantiated
   'keygen-wasm': keygen(ARGS, 20_000, true),
   'keygen-wasm-1kb': keygen([VALUE], 5_000, true),
-  // set encodes, an L2 hit decodes (normalize + msgpack + depth bounds)
+  // set encodes (normalize + msgpack, in one walk), an L2 hit decodes
+  // (depth bounds + msgpack)
   'serializer-roundtrip': {
     n: 10_000,
     setup: async () => {
@@ -334,7 +352,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     throw new Error(`n must be a non-negative integer, got "${nArg}"`);
 
   const op = await WORKLOADS[name].setup(n);
-  for (let i = 0; i < WARMUP; i++) await op();
+  const warmup = WORKLOADS[name].warmup ?? WARMUP;
+  for (let i = 0; i < warmup; i++) await op();
   process.cpuUsage(); // window start: callgrind dump 1
   const t0 = process.hrtime.bigint();
   for (let i = 0; i < n; i++) await op();
