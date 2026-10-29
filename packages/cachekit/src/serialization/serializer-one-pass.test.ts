@@ -256,6 +256,11 @@ function generate(r: ReturnType<typeof rng>, depth: number): unknown {
 const hex = (o: Outcome) =>
   'bytes' in o ? { ...o, bytes: Buffer.from(o.bytes).toString('hex') } : o;
 
+// Each case builds two fresh values, since its getters change state.
+const same = (make: () => unknown, c = config) =>
+  expect(hex(onePass(make(), c))).toEqual(hex(twoPass(make(), c)));
+const later = (get: () => unknown) => ({ get, enumerable: true });
+
 describe('encodeCounted one-pass encode', () => {
   it('matches encode(normalize(value)): bytes, L1 counts and errors, on seeded random values', () => {
     // Fixed, so every run checks the same values; set the variable to explore others.
@@ -263,10 +268,14 @@ describe('encodeCounted one-pass encode', () => {
     const r = rng(seed);
     const failures: unknown[] = [];
     let errors = 0;
+    // Every other case under a small output limit, so values cross it
+    // anywhere: in the walk, in a late segment, or in a binary.
+    const limits = [16, 64, 256, 1024].map((n) => resolveSerializerConfig({ maxEncodedSize: n }));
     for (let i = 0; i < 4000 && failures.length < 3; i++) {
       const value = generate(r, 0);
-      const want = twoPass(value, config);
-      const got = onePass(value, config);
+      const c = i % 2 ? config : limits[(i >> 1) % limits.length];
+      const want = twoPass(value, c);
+      const got = onePass(value, c);
       if ('error' in want) errors++;
       try {
         expect(hex(got)).toEqual(hex(want));
@@ -426,11 +435,6 @@ describe('encodeCounted one-pass encode', () => {
   });
 
   describe('user code that runs later in the walk', () => {
-    // Each case builds two fresh values, since its getters change state.
-    const same = (make: () => unknown, c = config) =>
-      expect(hex(onePass(make(), c))).toEqual(hex(twoPass(make(), c)));
-    const later = (get: () => unknown) => ({ get, enumerable: true });
-
     it('sees a Uint8Array as encode() read it, after normalize', () => {
       same(() => {
         const u = Uint8Array.of(1, 2, 3);
@@ -713,6 +717,75 @@ describe('encodeCounted one-pass encode', () => {
           get: () => ((o[`k${n++}`] = n), 'T'),
         });
       });
+    });
+  });
+
+  describe('past maxEncodedSize', () => {
+    const small = resolveSerializerConfig({ maxEncodedSize: 64 });
+    const species = (copy: unknown) => {
+      const a: unknown[] = [];
+      const ctor = function () {
+        return copy;
+      };
+      Object.defineProperty(a, 'constructor', { value: { [Symbol.species]: ctor } });
+      return a;
+    };
+
+    it('counts instead of writing, and names the exact size', () => {
+      for (const value of [
+        'x'.repeat(100),
+        { a: 'x'.repeat(50), n: [1, 300, 70_000, 2 ** 40, -5, -200, -40_000, -(2 ** 40), 1.5] },
+        { a: new Uint8Array(80), b: 'é'.repeat(30) },
+        { a: 'x'.repeat(60), b: new Map([['k', 'y'.repeat(30)]]), c: Uint8Array.of(1, 2) },
+        // an ExtData whose size depends on its offset, after the limit
+        {
+          a: 'x'.repeat(70),
+          b: species(new ExtData(12, (pos: number) => new Uint8Array(pos % 7))),
+        },
+      ]) {
+        const want = twoPass(value, small);
+        expect(want).toMatchObject({ error: 'ValueTooLargeError' });
+        expect(onePass(value, small)).toEqual(want);
+      }
+    });
+
+    it('still throws what encode() would have, past the limit', () => {
+      // a binary detached by a later getter: encode()'s copy would throw
+      same(() => {
+        const u = Uint8Array.of(1, 2, 3);
+        return Object.defineProperty(
+          { a: 'x'.repeat(100), b: species(u) },
+          'c',
+          later(() => (detach(u), 1))
+        );
+      }, small);
+      // a late error after the limit wins over the size error
+      same(() => ({ a: 'x'.repeat(100), b: new Map([['k', 1n]]) }), small);
+    });
+
+    it('allocates no output for binaries that take it past the limit', () => {
+      const encoder = new ValueEncoder();
+      const sizes: number[] = [];
+      const internal = encoder as unknown as { reset(size: number): void };
+      const reset = internal.reset.bind(encoder);
+      internal.reset = (size: number) => (sizes.push(size), reset(size));
+      const value = { b: new Uint8Array(4 * 1024 * 1024) };
+      expect(() => encoder.encode(value, config, { forKey: false, objects: 0, values: 0 })).toThrow(
+        `Encoded size ${4 * 1024 * 1024 + 8} exceeds max ${config.maxEncodedSize}`
+      );
+      expect(sizes.filter((n) => n > config.maxEncodedSize)).toEqual([]);
+    });
+
+    it('allocates nothing for a write a late segment will reject', () => {
+      const encoder = new ValueEncoder();
+      const kept = () => (encoder as unknown as { bytes: Uint8Array }).bytes;
+      const before = kept();
+      const value = { a: new Map([['k', 1n]]), b: 'x'.repeat(4 * 1024 * 1024) };
+      expect(() => encoder.encode(value, config, { forKey: false, objects: 0, values: 0 })).toThrow(
+        'Unrecognized object: [object BigInt]'
+      );
+      expect(kept()).toBe(before);
+      same(() => ({ a: new Map([['k', 1n]]), b: 'x'.repeat(4 * 1024 * 1024) }));
     });
   });
 
