@@ -17,6 +17,12 @@ import { ValueTooLargeError } from '../errors.js';
 type Outcome =
   { bytes: Uint8Array; objects: number; values: number } | { error: string; message: string };
 
+/** What was thrown, without assuming an Error: a bare throw must not hide the failure. */
+const thrown = (e: unknown): Outcome =>
+  e instanceof Error
+    ? { error: e.constructor.name, message: e.message }
+    : { error: typeof e, message: String(e) };
+
 function twoPass(value: unknown, config: SerializerConfig): Outcome {
   try {
     const walk = { forKey: false, objects: 0, values: 0 };
@@ -30,7 +36,7 @@ function twoPass(value: unknown, config: SerializerConfig): Outcome {
     }
     return { bytes: bytes.slice(), objects: walk.objects, values: walk.values };
   } catch (e) {
-    return { error: (e as Error).constructor.name, message: (e as Error).message };
+    return thrown(e);
   }
 }
 
@@ -40,7 +46,7 @@ function onePass(value: unknown, config: SerializerConfig): Outcome {
     const bytes = encodeCounted(value, config, count);
     return { bytes, ...count };
   } catch (e) {
-    return { error: (e as Error).constructor.name, message: (e as Error).message };
+    return thrown(e);
   }
 }
 
@@ -252,7 +258,8 @@ const hex = (o: Outcome) =>
 
 describe('encodeCounted one-pass encode', () => {
   it('matches encode(normalize(value)): bytes, L1 counts and errors, on seeded random values', () => {
-    const seed = Number(process.env.CACHEKIT_ONE_PASS_SEED ?? (Math.random() * 2 ** 32) >>> 0);
+    // Fixed, so every run checks the same values; set the variable to explore others.
+    const seed = Number(process.env.CACHEKIT_ONE_PASS_SEED ?? 0x5eed);
     const r = rng(seed);
     const failures: unknown[] = [];
     let errors = 0;
