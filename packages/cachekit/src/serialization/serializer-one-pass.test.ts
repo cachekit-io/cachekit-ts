@@ -542,6 +542,12 @@ describe('encodeCounted one-pass encode', () => {
         const { bytes, probe } = counted();
         return { a: mapped([new ExtData(12, () => bytes), probe]) };
       });
+      // a length getter that changes per read: one read, so no stray byte
+      same(() => {
+        let reads = 0;
+        const bytes = Object.defineProperty(Uint8Array.of(7), 'length', { get: () => ++reads });
+        return { a: mapped([bytes]) };
+      });
       // a Date, or a function on Date.prototype, encodes as the timestamp ext
       const dated = () =>
         Object.assign(Object.setPrototypeOf(function () {}, Date.prototype) as object, {
@@ -636,6 +642,16 @@ describe('encodeCounted one-pass encode', () => {
       );
       // encode() stopped at a; the buffer never grew for b, c or d.
       expect(kept()).toBe(before);
+      // a plain function is encode()'s error too: nothing after it is written
+      const plainBefore = kept();
+      expect(() =>
+        encoder.encode({ a: () => 1, b: 'x'.repeat(400_000) }, config, {
+          forKey: false,
+          objects: 0,
+          values: 0,
+        })
+      ).toThrow('Unrecognized object: [object Function]');
+      expect(kept()).toBe(plainBefore);
       // normalize's checks still run past it, and win.
       same(() => ({ a: 1n, b: 'x'.repeat(100), c: new Int8Array(1) }));
       // an encode() error inside normalize's copy of a comes before b's
@@ -742,6 +758,21 @@ describe('encodeCounted one-pass encode', () => {
       }
       expect(first.byteOffset).toBe(0);
       expect(first.buffer.byteLength).toBe(first.length);
+    });
+
+    it('writes late segments into one output, without regrowing a large prefix', () => {
+      const encoder = new ValueEncoder();
+      const sizes: number[] = [];
+      const internal = encoder as unknown as { reset(size: number): void };
+      const reset = internal.reset.bind(encoder);
+      internal.reset = (size: number) => (sizes.push(size), reset(size));
+      const big = resolveSerializerConfig({ maxEncodedSize: 2 ** 24 });
+      const value = { a: 'x'.repeat(4 * 1024 * 1024), b: new Map([['k', 1]]) };
+      const out = encoder.encode(value, big, { forKey: false, objects: 0, values: 0 });
+      expect(hex(onePass(value, big))).toEqual(hex(twoPass(value, big)));
+      // the walk's last growth, and the output: no copy to grow it again
+      expect(sizes.filter((n) => n > 4 * 1024 * 1024)).toHaveLength(2);
+      expect(out.length).toBe(4 * 1024 * 1024 + 14);
     });
 
     it('encodes correctly after an encode that threw part-way', () => {

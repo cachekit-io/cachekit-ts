@@ -802,9 +802,7 @@ export class ValueEncoder {
       case 'object':
         break;
       case 'function':
-        // encode() asks the codec about a function too (an ExtData can be
-        // callable), and the function can change before it does.
-        return this.late(value, depth + 1);
+        return this.callable(value, depth);
       default:
         return this.defer(() => unrecognized(value));
     }
@@ -885,11 +883,20 @@ export class ValueEncoder {
     // A Date's copy is a string, which nothing can change before encode()
     // reads it; an object or function (a Map's copy, or whatever an array's
     // species built) can be, by a getter later in the walk.
-    if ((copy !== null && typeof copy === 'object') || typeof copy === 'function') {
-      this.late(copy, depth + 1);
-    } else {
-      this.normalized(copy, depth + 1);
-    }
+    if (copy !== null && typeof copy === 'object') this.late(copy, depth + 1);
+    else if (typeof copy === 'function') this.callable(copy, depth);
+    else this.normalized(copy, depth + 1);
+  }
+
+  /**
+   * A function at depth + 1. encode() asks the codec about it too, and the
+   * built-in one encodes a function on Date's or ExtData's prototype, so such
+   * a function is read after the walk. Any other is encode()'s Unrecognized
+   * object error, held so the rest of a rejected write is never written.
+   */
+  private callable(fn: unknown, depth: number): void {
+    if (fn instanceof Date || fn instanceof ExtData) this.late(fn as object, depth + 1);
+    else this.defer(() => unrecognized(fn));
   }
 
   /**
@@ -938,17 +945,23 @@ export class ValueEncoder {
     const walked = this.bytes;
     const walkedView = this.view;
     const end = this.pos;
+    // An object segment's size is unknown until it is written: leave room
+    // for small ones, so a large walked prefix is not copied again to grow.
     let size = end;
+    let slack = 0;
     for (let i = 0; i < read; i++) {
       const { copy } = this.segments[i];
-      if (!ArrayBuffer.isView(copy)) continue; // the buffer grows to fit it
+      if (!ArrayBuffer.isView(copy)) {
+        slack = Math.max(1024, end >> 3);
+        continue;
+      }
       // Through the intrinsic getter: a caller's own byteLength getter runs
       // only when bin() reaches this segment, as in encode().
       const length = intrinsicByteLength(copy);
       if (length >= 0x100000000) break; // bin() throws when it gets there
       size += (length < 0x100 ? 2 : length < 0x10000 ? 3 : 5) + length;
     }
-    this.reset(size);
+    this.reset(size + slack);
     this.pos = 0;
     this.skip = false;
     this.finishing = true;
