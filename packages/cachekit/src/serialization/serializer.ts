@@ -664,8 +664,6 @@ export function resolveSerializerConfig(config: Partial<SerializerConfig> = {}):
   return resolved;
 }
 
-/** @msgpack/msgpack's encode() nesting bound, counted from 1 at the top value. */
-const MSGPACK_MAX_DEPTH = 100;
 /**
  * A safe superset of the keys an engine orders before all others, which
  * `normalize` cannot order: it also matches '4294967295' and above, which
@@ -678,9 +676,6 @@ const textEncoder = new TextEncoder();
 const VALUE_ENCODER_BUFFER = 2048;
 /** A buffer grown past this is dropped after the encode rather than kept. */
 const VALUE_ENCODER_RETAIN = 1 << 20;
-/** The error for an encoded value past `maxEncodedSize`, wherever it is found. */
-const encodedTooLarge = (size: number, max: number) =>
-  new ValueTooLargeError(`Encoded size ${size} exceeds max ${max}`);
 const unrecognized = (value: unknown) =>
   new Error(`Unrecognized object: ${Object.prototype.toString.apply(value)}`);
 
@@ -697,7 +692,7 @@ const unrecognized = (value: unknown) =>
  *
  * Old order, kept: normalize ran to completion before encode() started. So
  * normalize's errors (depth, collection size, binary type) throw at once,
- * while encode()'s (its own depth bound of 100, a bigint, symbol or function)
+ * while encode()'s (a bigint, symbol or function, or a hole past maxDepth)
  * wait for the walk to end, and only the first is made and thrown; past it the
  * walk runs normalize's checks and writes nothing. What encode() read from the
  * copy rather than the caller's value, a Uint8Array's bytes and any object
@@ -707,8 +702,10 @@ const unrecognized = (value: unknown) =>
  *
  * A declared cost, not a difference in result: a write rejected by an
  * encode() error inside a Map, Set, index-key or other late-segment copy still
- * encodes the rest of the walk first, so it can cost up to a full encode of
- * the value, as an oversized value always did.
+ * encodes the rest of the walk first, so it can cost a full encode of the
+ * value plus one splice buffer (about 1.1 times the walked bytes). An accepted
+ * write whose late segment outgrows the splice slack after a large prefix can
+ * allocate up to twice the output again.
  *
  * Known differences from encode(normalize(value)), all needing user code, or
  * patched globals, that change or misreport the value:
@@ -752,7 +749,6 @@ export class ValueEncoder {
    * returned or the value holds. Written in, where they go, once the walk ends.
    */
   private segments: { at: number; copy: object; depth: number }[] = [];
-  private maxEncodedSize = 0;
   private maxDepth = 0;
   private maxCollectionSize = 0;
   private walk: NormalizeWalk = { forKey: false, objects: 0, values: 0 };
@@ -765,7 +761,6 @@ export class ValueEncoder {
     if (this.entered) return new ValueEncoder().encode(value, config, walk);
     this.entered = true;
     this.pos = 0;
-    this.maxEncodedSize = config.maxEncodedSize;
     this.maxDepth = config.maxDepth;
     this.maxCollectionSize = config.maxCollectionSize;
     this.walk = walk;
@@ -793,9 +788,7 @@ export class ValueEncoder {
       if (this.deferred) throw this.deferred();
       return encoded;
     }
-    // Thrown before any copy of a value it rejects, as encodeCounted would.
     if (this.deferred) throw this.deferred();
-    if (this.pos > this.maxEncodedSize) throw encodedTooLarge(this.pos, this.maxEncodedSize);
     // A buffer this drops can be handed over as it is; one it keeps is copied.
     return this.bytes.length > VALUE_ENCODER_RETAIN
       ? this.bytes.subarray(0, this.pos)
@@ -822,9 +815,6 @@ export class ValueEncoder {
   /** normalize(value, depth) then encode() at depth + 1, as one step. */
   private value(value: unknown, depth: number): void {
     if (depth > this.maxDepth) throw tooDeep(this.maxDepth);
-    if (depth >= MSGPACK_MAX_DEPTH) {
-      this.defer(() => new Error(`Too deep objects in depth ${depth + 1}`));
-    }
     switch (typeof value) {
       case 'undefined':
         return this.u8(0xc0);
@@ -938,14 +928,14 @@ export class ValueEncoder {
   }
 
   /**
-   * @msgpack/msgpack 3.1.3 Encoder.doEncode with default options, for a value
-   * normalize has already copied. It counts nothing and reads only what encode()
-   * would read from that copy.
+   * @msgpack/msgpack 3.1.3 Encoder.doEncode for a value normalize has already
+   * copied, with its depth bound set to maxDepth: `depth` counts from 1 at the
+   * top value, where normalize counts from 0. Only what normalize never visits
+   * reaches the bound, such as an array's holes. It counts nothing and reads
+   * only what encode() would read from that copy.
    */
   private normalized(value: unknown, depth: number): void {
-    if (depth > MSGPACK_MAX_DEPTH) {
-      return this.defer(() => new Error(`Too deep objects in depth ${depth}`));
-    }
+    if (depth > this.maxDepth + 1) return this.defer(() => tooDeep(this.maxDepth));
     if (value == null) return this.u8(0xc0);
     if (typeof value === 'boolean') return this.u8(value ? 0xc3 : 0xc2);
     if (typeof value === 'number') return this.number(value);
@@ -1300,7 +1290,9 @@ export function encodeCounted<T>(
 
   // Check encoded size
   if (encoded.length > config.maxEncodedSize) {
-    throw encodedTooLarge(encoded.length, config.maxEncodedSize);
+    throw new ValueTooLargeError(
+      `Encoded size ${encoded.length} exceeds max ${config.maxEncodedSize}`
+    );
   }
 
   if (count) {

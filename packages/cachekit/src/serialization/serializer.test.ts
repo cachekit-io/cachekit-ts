@@ -250,6 +250,36 @@ describe('MessagePackSerializer', () => {
       expect(() => shallowSerializer.encode(deep)).toThrow(SerializationError);
       expect(() => shallowSerializer.encode(deep)).toThrow('Max depth of 32 exceeded');
     });
+
+    // Encode honours the configured bound on both sides, as decode does, at
+    // the lowest, the default and the highest bound the constructor accepts.
+    describe.each([
+      ['32', { maxDepth: 32 }, 32],
+      ['100 (default)', {}, 100],
+      ['1024', { maxDepth: 1024 }, 1024],
+    ])('at maxDepth %s', (_label, options, maxDepth) => {
+      const config = resolveSerializerConfig(options);
+
+      it.each([false, true])('round-trips a leaf at depth maxDepth (arrays: %s)', (array) => {
+        const value = nest(maxDepth, array);
+        expect(decodeCounted(encodeCounted(value, config), config)).toEqual(value);
+      });
+
+      it.each([false, true])('rejects a leaf at depth maxDepth + 1 (arrays: %s)', (array) => {
+        const value = nest(maxDepth + 1, array);
+        expect(() => encodeCounted(value, config)).toThrow(SerializationError);
+        expect(() => encodeCounted(value, config)).toThrow(`Max depth of ${maxDepth} exceeded`);
+      });
+
+      it('rejects a hole at depth maxDepth + 1, which normalize never visits', () => {
+        // An array at depth maxDepth holding only a hole: encode writes the
+        // hole as nil one level deeper, which decode would reject.
+        let value: unknown = new Array(1);
+        for (let i = 0; i < maxDepth; i++) value = [value];
+        expect(() => encodeCounted(value, config)).toThrow(SerializationError);
+        expect(() => encodeCounted(value, config)).toThrow(`Max depth of ${maxDepth} exceeded`);
+      });
+    });
   });
 
   describe('decode error handling', () => {

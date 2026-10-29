@@ -8,11 +8,13 @@ import {
   resolveSerializerConfig,
   type SerializerConfig,
 } from './serializer.js';
-import { ValueTooLargeError } from '../errors.js';
+import { SerializationError, ValueTooLargeError } from '../errors.js';
 
 // encodeCounted writes encode(normalize(value)) in one walk. The oracle is that
 // two-pass composition, run on the in-tree normalize at test time, so a change
-// to normalize that the one-pass path does not follow fails here.
+// to normalize that the one-pass path does not follow fails here. Its encode()
+// nesting bound is the configured maxDepth (msgpack counts the top value as 1,
+// normalize as 0), and passing it is the SerializationError normalize throws.
 
 type Outcome =
   { bytes: Uint8Array; objects: number; values: number } | { error: string; message: string };
@@ -26,9 +28,16 @@ const thrown = (e: unknown): Outcome =>
 function twoPass(value: unknown, config: SerializerConfig): Outcome {
   try {
     const walk = { forKey: false, objects: 0, values: 0 };
-    const bytes = msgpackEncode(
-      normalize(value, 0, config.maxDepth, config.maxCollectionSize, walk)
-    );
+    const normalized = normalize(value, 0, config.maxDepth, config.maxCollectionSize, walk);
+    let bytes: Uint8Array;
+    try {
+      bytes = msgpackEncode(normalized, { maxDepth: config.maxDepth + 1 });
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith('Too deep objects')) {
+        throw new SerializationError(`Max depth of ${config.maxDepth} exceeded`);
+      }
+      throw e;
+    }
     if (bytes.length > config.maxEncodedSize) {
       throw new ValueTooLargeError(
         `Encoded size ${bytes.length} exceeds max ${config.maxEncodedSize}`
@@ -306,7 +315,7 @@ describe('encodeCounted one-pass encode', () => {
     }
   });
 
-  it('matches at and past msgpack encode depth of 100 and the configured maxDepth', () => {
+  it('matches at and past the configured maxDepth', () => {
     const nest = (levels: number, leaf: unknown, array = false): unknown => {
       let v = leaf;
       for (let i = 0; i < levels; i++) v = array ? [v] : { n: v };
