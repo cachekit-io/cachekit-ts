@@ -681,10 +681,6 @@ const VALUE_ENCODER_RETAIN = 1 << 20;
 /** The error for an encoded value past `maxEncodedSize`, wherever it is found. */
 const encodedTooLarge = (size: number, max: number) =>
   new ValueTooLargeError(`Encoded size ${size} exceeds max ${max}`);
-/** What a writer reads its bytes from once the output can only be an error. */
-const EMPTY = new Uint8Array(0);
-/** set() on it throws for a detached or out-of-bounds view, and does nothing for an empty one. */
-const ONE_BYTE = new Uint8Array(1);
 const unrecognized = (value: unknown) =>
   new Error(`Unrecognized object: ${Object.prototype.toString.apply(value)}`);
 
@@ -709,12 +705,13 @@ const unrecognized = (value: unknown) =>
  * changes it later in the walk changes the result as it did before, and an
  * ExtData sees its offset in the stream.
  *
- * A rejected write is bounded, not free: before a late segment shows that
- * encode() would have stopped, the walk writes what follows it, but never more
- * than maxEncodedSize; past that it only counts (see `doomed`).
+ * A declared cost, not a difference in result: a write rejected by an
+ * encode() error inside a Map, Set, index-key or other late-segment copy still
+ * encodes the rest of the walk first, so it can cost up to a full encode of
+ * the value, as an oversized value always did.
  *
- * Known differences from encode(normalize(value)), all needing user code that
- * changes or misreports the value while it is encoded:
+ * Known differences from encode(normalize(value)), all needing user code, or
+ * patched globals, that change or misreport the value:
  * - a Proxy whose traps have side effects or answer inconsistently (trap
  *   call counts and order differ);
  * - patched intrinsics: a non-conforming Array.prototype.map, its iterator,
@@ -732,7 +729,7 @@ const unrecognized = (value: unknown) =>
  *
  * One instance per module, reused: building a buffer and its views per call
  * costs a write of a small value more than encoding it. The bytes returned are
- * a copy; the buffer is zeroed after every encode, so it never keeps a
+ * never a view of the buffer it keeps; that buffer is zeroed after every encode, so it never keeps a
  * plaintext value, and dropped once it outgrows VALUE_ENCODER_RETAIN. A
  * re-entrant call (a getter on the value writing to a cache) gets an instance
  * of its own. Package-internal: exported for its tests.
@@ -755,17 +752,6 @@ export class ValueEncoder {
    * returned or the value holds. Written in, where they go, once the walk ends.
    */
   private segments: { at: number; copy: object; depth: number }[] = [];
-  /**
-   * Set once the output passes maxEncodedSize, when the result can only be an
-   * error: writers then only count, so the error still names the exact size
-   * and an ExtData still sees its offset, but nothing more is allocated.
-   */
-  private doomed = false;
-  /** The output's length once the late segments are counted in. */
-  private size = 0;
-  /** While splicing, walked bytes still to be copied after the current segment. */
-  private toCopy = 0;
-  private maxEncodedSize = 0;
   private maxDepth = 0;
   private maxCollectionSize = 0;
   private walk: NormalizeWalk = { forKey: false, objects: 0, values: 0 };
@@ -778,7 +764,6 @@ export class ValueEncoder {
     if (this.entered) return new ValueEncoder().encode(value, config, walk);
     this.entered = true;
     this.pos = 0;
-    this.maxEncodedSize = config.maxEncodedSize;
     this.maxDepth = config.maxDepth;
     this.maxCollectionSize = config.maxCollectionSize;
     this.walk = walk;
@@ -790,7 +775,6 @@ export class ValueEncoder {
       // would otherwise stay entered for good.
       this.deferred = undefined;
       this.skip = false;
-      this.doomed = false;
       this.segments.length = 0;
       this.entered = false;
       // Zero the buffer this keeps; one it drops is garbage, as encode()'s are.
@@ -799,17 +783,16 @@ export class ValueEncoder {
     }
   }
 
-  /**
-   * The walk's result: its bytes with the segments written in, or encode()'s
-   * first error, or, past maxEncodedSize, the size error encodeCounted makes.
-   */
+  /** The walk's result: its bytes with the segments written in, or encode()'s first error. */
   private finish(): Uint8Array {
-    // Nothing is added past encode()'s first error, so it reached every segment.
-    this.size = this.pos;
-    const encoded = this.segments.length ? this.splice() : EMPTY;
+    if (this.segments.length) {
+      // Nothing is added past encode()'s first error, so it reached every segment.
+      const encoded = this.splice();
+      if (this.deferred) throw this.deferred();
+      return encoded;
+    }
+    // Thrown before any copy of a value it rejects.
     if (this.deferred) throw this.deferred();
-    if (this.doomed) throw encodedTooLarge(this.size, this.maxEncodedSize);
-    if (this.segments.length) return encoded;
     // A buffer this drops can be handed over as it is; one it keeps is copied.
     return this.bytes.length > VALUE_ENCODER_RETAIN
       ? this.bytes.subarray(0, this.pos)
@@ -1014,14 +997,7 @@ export class ValueEncoder {
       if (length >= 0x100000000) break; // bin() throws when it gets there
       size += (length < 0x100 ? 2 : length < 0x10000 ? 3 : 5) + length;
     }
-    if (size > this.maxEncodedSize) this.doomed = true;
-    // Doomed, every write takes ensure()'s slow path, which only counts.
-    if (this.doomed) {
-      this.bytes = EMPTY;
-      this.view = new DataView(EMPTY.buffer);
-    } else {
-      this.reset(size + slack);
-    }
+    this.reset(size + slack);
     this.pos = 0;
     this.skip = false;
     this.finishing = true;
@@ -1030,14 +1006,10 @@ export class ValueEncoder {
       for (let i = 0; i < read; i++) {
         const { at, copy, depth } = this.segments[i];
         this.raw(walked.subarray(from, at));
-        this.toCopy = end - at;
         this.normalized(copy, depth);
         from = at;
       }
-      this.toCopy = 0;
       this.raw(walked.subarray(from, end));
-      this.size = this.pos;
-      if (this.doomed) return EMPTY;
       return this.bytes.length === this.pos ? this.bytes : this.bytes.subarray(0, this.pos);
     } finally {
       this.finishing = false;
@@ -1051,7 +1023,7 @@ export class ValueEncoder {
 
   private number(n: number): void {
     if (this.skip) return;
-    if (this.pos + 9 > this.bytes.length && !this.ensure(numberSize(n))) return;
+    this.ensure(9);
     const view = this.view;
     let pos = this.pos;
     if (Number.isSafeInteger(n)) {
@@ -1108,8 +1080,7 @@ export class ValueEncoder {
     if (byteLength >= 0x100000000) {
       throw new Error(`Too long string: ${byteLength} bytes in UTF-8`);
     }
-    const header = byteLength < 32 ? 1 : byteLength < 0x100 ? 2 : byteLength < 0x10000 ? 3 : 5;
-    if (!this.ensure(header + byteLength)) return;
+    this.ensure(5 + byteLength);
     if (byteLength < 32) {
       this.bytes[this.pos++] = 0xa0 + byteLength;
     } else if (byteLength < 0x100) {
@@ -1207,7 +1178,8 @@ export class ValueEncoder {
 
   /** A type byte and a big-endian length of `width` bytes. */
   private head(type: number, width: 1 | 2 | 4, size: number): void {
-    if (this.skip || !this.ensure(1 + width)) return;
+    if (this.skip) return;
+    this.ensure(1 + width);
     this.bytes[this.pos++] = type;
     if (width === 1) this.bytes[this.pos] = size;
     else if (width === 2) this.view.setUint16(this.pos, size);
@@ -1216,62 +1188,38 @@ export class ValueEncoder {
   }
 
   private u8(byte: number): void {
-    if (this.skip || !this.ensure(1)) return;
+    if (this.skip) return;
+    this.ensure(1);
     this.bytes[this.pos++] = byte;
   }
 
   private i8(value: number): void {
-    if (this.skip || !this.ensure(1)) return;
+    if (this.skip) return;
+    this.ensure(1);
     this.view.setInt8(this.pos++, value);
   }
 
   private raw(bytes: Uint8Array): void {
     if (this.skip) return;
     const size = bytes.length; // read once, as encode()'s writeU8a does
-    if (!this.ensure(size)) {
-      // encode() would still have copied it: throw as its set() would for a
-      // detached view, and read an array-like's elements as set() does.
-      if (!ArrayBuffer.isView(bytes)) new Uint8Array(size).set(bytes);
-      else if (intrinsicByteLength(bytes) === 0) ONE_BYTE.set(bytes);
-      return;
-    }
+    this.ensure(size);
     this.bytes.set(bytes, this.pos);
     this.pos += size;
   }
 
-  /**
-   * Room for `size` more bytes, growing the buffer as encode() grew its own.
-   * Past maxEncodedSize it only advances `pos` by `size` and returns false:
-   * the writer then stores nothing.
-   */
-  private ensure(size: number): boolean {
+  /** Room for `size` more bytes, growing the buffer as encode() grew its own. */
+  private ensure(size: number): void {
     const required = this.pos + size;
-    if (required <= this.bytes.length) return true;
-    if (this.doomed || required > this.maxEncodedSize) {
-      this.doomed = true;
-      this.pos = required;
-      return false;
-    }
+    if (required <= this.bytes.length) return;
     const written = this.bytes.subarray(0, this.pos);
-    // A spliced output grows by what is still to come, not by doubling a
-    // large prefix again, but at least geometrically, so a large segment is
-    // not copied once per write.
-    this.reset(this.finishing ? required + Math.max(this.toCopy, required >> 3) : required * 2);
+    this.reset(required * 2);
     this.bytes.set(written);
-    return true;
   }
 
   private reset(size: number): void {
     this.bytes = new Uint8Array(size);
     this.view = new DataView(this.bytes.buffer);
   }
-}
-
-/** How many bytes ValueEncoder.number() writes for `n`. */
-function numberSize(n: number): number {
-  if (!Number.isSafeInteger(n)) return 9;
-  if (n >= 0) return n < 0x80 ? 1 : n < 0x100 ? 2 : n < 0x10000 ? 3 : n < 0x100000000 ? 5 : 9;
-  return n >= -0x20 ? 1 : n >= -0x80 ? 2 : n >= -0x8000 ? 3 : n >= -0x80000000 ? 5 : 9;
 }
 
 /** @msgpack/msgpack 3.1.3's utf8Count: a lone surrogate counts 3 bytes. */

@@ -261,6 +261,19 @@ const same = (make: () => unknown, c = config) =>
   expect(hex(onePass(make(), c))).toEqual(hex(twoPass(make(), c)));
 const later = (get: () => unknown) => ({ get, enumerable: true });
 
+/**
+ * An empty array whose own species returns `copy`, so normalize's copy of it
+ * is `copy` itself. A species must be a constructor: a function, not an arrow.
+ */
+const species = (copy: unknown) => {
+  const a: unknown[] = [];
+  const ctor = function () {
+    return copy;
+  };
+  Object.defineProperty(a, 'constructor', { value: { [Symbol.species]: ctor } });
+  return a;
+};
+
 describe('encodeCounted one-pass encode', () => {
   it('matches encode(normalize(value)): bytes, L1 counts and errors, on seeded random values', () => {
     // Fixed, so every run checks the same values; set the variable to explore others.
@@ -483,19 +496,10 @@ describe('encodeCounted one-pass encode', () => {
     });
 
     it("encodes an array species' object as encode() read it, after normalize", () => {
-      // A species must be a constructor, so a function, not an arrow.
-      const species = (make: () => unknown) => {
-        const a: unknown[] = [];
-        const ctor = function () {
-          return make();
-        };
-        Object.defineProperty(a, 'constructor', { value: { [Symbol.species]: ctor } });
-        return a;
-      };
       same(() => {
         const shared = { n: 0 };
         return Object.defineProperty(
-          { a: species(() => shared) },
+          { a: species(shared) },
           'b',
           later(() => ((shared.n = 1), 1))
         );
@@ -504,15 +508,15 @@ describe('encodeCounted one-pass encode', () => {
       same(() => {
         const shared = { n: 0 };
         return Object.defineProperty(
-          { a: { 0: species(() => shared) } },
+          { a: { 0: species(shared) } },
           'b',
           later(() => ((shared.n = 1), 1))
         );
       });
       // an ExtData whose bytes depend on where it lands in the stream
       same(() => ({
-        a: species(() => new ExtData(12, (pos: number) => Uint8Array.of(pos))),
-        z: species(() => new ExtData(3, Uint8Array.of(1, 2, 3))),
+        a: species(new ExtData(12, (pos: number) => Uint8Array.of(pos))),
+        z: species(new ExtData(3, Uint8Array.of(1, 2, 3))),
       }));
     });
 
@@ -566,14 +570,6 @@ describe('encodeCounted one-pass encode', () => {
     });
 
     it("reads a binary's byteLength and a callable ExtData when encode() did", () => {
-      const species = (copy: unknown) => {
-        const a: unknown[] = [];
-        const ctor = function () {
-          return copy;
-        };
-        Object.defineProperty(a, 'constructor', { value: { [Symbol.species]: ctor } });
-        return a;
-      };
       // a later view's own byteLength getter runs after the earlier segment is read
       same(() => {
         const shared = { n: 0 };
@@ -626,6 +622,20 @@ describe('encodeCounted one-pass encode', () => {
       };
       expect(twoPass(make(), config)).toHaveProperty('bytes');
       expect(onePass(make(), config)).toEqual({
+        error: 'Error',
+        message: 'Unrecognized object: [object Function]',
+      });
+      // the same for a function an array's own species returns
+      const fromSpecies = () => {
+        const fn = Object.assign(function () {}, { getTime: () => 0 });
+        return Object.defineProperty(
+          { a: species(fn) },
+          'b',
+          later(() => (Object.setPrototypeOf(fn, Date.prototype), 1))
+        );
+      };
+      expect(twoPass(fromSpecies(), config)).toHaveProperty('bytes');
+      expect(onePass(fromSpecies(), config)).toEqual({
         error: 'Error',
         message: 'Unrecognized object: [object Function]',
       });
@@ -751,16 +761,34 @@ describe('encodeCounted one-pass encode', () => {
 
   describe('past maxEncodedSize', () => {
     const small = resolveSerializerConfig({ maxEncodedSize: 64 });
-    const species = (copy: unknown) => {
-      const a: unknown[] = [];
-      const ctor = function () {
-        return copy;
-      };
-      Object.defineProperty(a, 'constructor', { value: { [Symbol.species]: ctor } });
-      return a;
-    };
 
-    it('counts instead of writing, and names the exact size', () => {
+    it('matches with a walked prefix past the start buffer before late segments', () => {
+      // Past 2 KiB the walk's buffer has grown; the segments' offsets must still hold.
+      const make = () => ({
+        a: new Map([['k', 1]]),
+        b: 'x'.repeat(3000),
+        c: new Map([['k', 'y'.repeat(100)]]),
+        d: new Set([1, 2]),
+        e: new Uint8Array(70_000),
+        f: species(new ExtData(12, (pos: number) => new Uint8Array(pos % 7))),
+      });
+      const fits = twoPass(make(), config);
+      expect(fits).toHaveProperty('bytes');
+      const size = (fits as { bytes: Uint8Array }).bytes.length;
+      for (const limit of [64, 8 * 1024, size - 1, size, size + 1]) {
+        const c = resolveSerializerConfig({ maxEncodedSize: limit });
+        expect(hex(onePass(make(), c)), `limit ${limit}`).toEqual(hex(twoPass(make(), c)));
+      }
+      // and a late error after that prefix, under both limits
+      for (const limit of [64, 8 * 1024]) {
+        same(
+          () => ({ a: 'x'.repeat(3000), b: new Map([['k', 1n]]), c: 'y'.repeat(3000) }),
+          resolveSerializerConfig({ maxEncodedSize: limit })
+        );
+      }
+    });
+
+    it('names the exact size', () => {
       for (const value of [
         'x'.repeat(100),
         { a: 'x'.repeat(50), n: [1, 300, 70_000, 2 ** 40, -5, -200, -40_000, -(2 ** 40), 1.5] },
@@ -790,53 +818,6 @@ describe('encodeCounted one-pass encode', () => {
       }, small);
       // a late error after the limit wins over the size error
       same(() => ({ a: 'x'.repeat(100), b: new Map([['k', 1n]]) }), small);
-    });
-
-    it('bounds every rejected write by the limit, wherever the error sits', () => {
-      const tail = 'x'.repeat(4 * 1024 * 1024);
-      let deep: unknown = new Map([['k', 1]]);
-      for (let i = 0; i < 101; i++) deep = [deep];
-      for (const make of [
-        () => ({ a: new Set([Symbol('s')]), b: tail }),
-        () => ({ a: new Set([() => 1]), b: tail }),
-        () => ({ a: { 0: 1n }, b: tail }),
-        () => ({ a: new Map([['k', deep]]), b: tail }),
-      ]) {
-        const encoder = new ValueEncoder();
-        const kept = () => (encoder as unknown as { bytes: Uint8Array }).bytes;
-        const before = kept();
-        const want = twoPass(make(), config);
-        expect(want).toHaveProperty('error');
-        expect(() =>
-          encoder.encode(make(), config, { forKey: false, objects: 0, values: 0 })
-        ).toThrow((want as { message: string }).message);
-        expect(kept()).toBe(before);
-      }
-    });
-
-    it('allocates no output for binaries that take it past the limit', () => {
-      const encoder = new ValueEncoder();
-      const sizes: number[] = [];
-      const internal = encoder as unknown as { reset(size: number): void };
-      const reset = internal.reset.bind(encoder);
-      internal.reset = (size: number) => (sizes.push(size), reset(size));
-      const value = { b: new Uint8Array(4 * 1024 * 1024) };
-      expect(() => encoder.encode(value, config, { forKey: false, objects: 0, values: 0 })).toThrow(
-        `Encoded size ${4 * 1024 * 1024 + 8} exceeds max ${config.maxEncodedSize}`
-      );
-      expect(sizes.filter((n) => n > config.maxEncodedSize)).toEqual([]);
-    });
-
-    it('allocates nothing for a write a late segment will reject', () => {
-      const encoder = new ValueEncoder();
-      const kept = () => (encoder as unknown as { bytes: Uint8Array }).bytes;
-      const before = kept();
-      const value = { a: new Map([['k', 1n]]), b: 'x'.repeat(4 * 1024 * 1024) };
-      expect(() => encoder.encode(value, config, { forKey: false, objects: 0, values: 0 })).toThrow(
-        'Unrecognized object: [object BigInt]'
-      );
-      expect(kept()).toBe(before);
-      same(() => ({ a: new Map([['k', 1n]]), b: 'x'.repeat(4 * 1024 * 1024) }));
     });
   });
 
@@ -882,17 +863,6 @@ describe('encodeCounted one-pass encode', () => {
       }
       expect(first.byteOffset).toBe(0);
       expect(first.buffer.byteLength).toBe(first.length);
-    });
-
-    it('grows a spliced output by what is still to come, not by doubling', () => {
-      const big = resolveSerializerConfig({ maxEncodedSize: 2 ** 25 });
-      const value = {
-        a: 'x'.repeat(8 * 1024 * 1024),
-        b: new Map([['k', 'y'.repeat(2 * 1024 * 1024)]]),
-      };
-      const out = encodeCounted(value, big);
-      expect(hex(onePass(value, big))).toEqual(hex(twoPass(value, big)));
-      expect(out.buffer.byteLength).toBeLessThanOrEqual(out.length * 1.25);
     });
 
     it('writes late segments into one output, without regrowing a large prefix', () => {
