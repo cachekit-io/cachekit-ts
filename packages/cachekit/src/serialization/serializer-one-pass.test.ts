@@ -45,6 +45,15 @@ function onePass(value: unknown, config: SerializerConfig): Outcome {
 
 const config = resolveSerializerConfig();
 
+// ES2024 buffer operations, which this lib target does not type.
+const detach = (u: Uint8Array) =>
+  void structuredClone(u.buffer, { transfer: [u.buffer as ArrayBuffer] });
+type Resizable = ArrayBuffer & { resize(length: number): void };
+const resizable = (length: number, maxByteLength: number) =>
+  new (
+    ArrayBuffer as unknown as new (length: number, options: { maxByteLength: number }) => Resizable
+  )(length, { maxByteLength });
+
 /** mulberry32: small, seedable, and good enough to spread the cases. */
 function rng(seed: number) {
   let a = seed >>> 0;
@@ -385,6 +394,116 @@ describe('encodeCounted one-pass encode', () => {
     reads = 0;
     encodeCounted(value, config);
     expect(reads).toBe(5);
+  });
+
+  describe('user code that runs later in the walk', () => {
+    // Each case builds two fresh values, since its getters change state.
+    const same = (make: () => unknown, c = config) =>
+      expect(hex(onePass(make(), c))).toEqual(hex(twoPass(make(), c)));
+    const later = (get: () => unknown) => ({ get, enumerable: true });
+
+    it('sees a Uint8Array as encode() read it, after normalize', () => {
+      same(() => {
+        const u = Uint8Array.of(1, 2, 3);
+        return Object.defineProperty(
+          { a: u },
+          'b',
+          later(() => ((u[0] = 99), 1))
+        );
+      });
+      // inside a Map, which normalize copies
+      same(() => {
+        const u = Uint8Array.of(1, 2, 3);
+        return Object.defineProperty(
+          { a: new Map([['k', u]]) },
+          'b',
+          later(() => ((u[1] = 7), 1))
+        );
+      });
+      // detached, then a later encode() error: the detached read throws first
+      same(() => {
+        const u = Uint8Array.of(1, 2, 3);
+        return Object.defineProperty(
+          { a: u },
+          'b',
+          later(() => (detach(u), () => 1))
+        );
+      });
+      // encode() stops at its first error, so it never reads a binary after it
+      same(() => {
+        const u = Uint8Array.of(1, 2, 3);
+        return Object.defineProperty(
+          { a: () => 1, b: u },
+          'c',
+          later(() => (detach(u), 1))
+        );
+      });
+      same(() => {
+        const ab = resizable(4, 8);
+        const u = new Uint8Array(ab, 0, 4);
+        return Object.defineProperty(
+          { a: u },
+          'b',
+          later(() => (ab.resize(1), 1))
+        );
+      });
+    });
+
+    it('makes encode() error messages only for the error thrown, when it is thrown', () => {
+      let tags = 0;
+      const tagged = () =>
+        Object.defineProperty(() => 1, Symbol.toStringTag, {
+          get: () => (tags++, 'Tagged'),
+        });
+      same(() => ({ a: tagged(), b: tagged() }));
+      tags = 0;
+      onePass({ a: tagged(), b: tagged() }, config);
+      expect(tags).toBe(1);
+      // normalize's error wins, and no message is made for the function
+      tags = 0;
+      same(() => ({ a: tagged(), b: new ArrayBuffer(1) }));
+      onePass({ a: tagged(), b: new ArrayBuffer(1) }, config);
+      expect(tags).toBe(0);
+      // a later getter changes the tag the message reads
+      same(() => {
+        const f = tagged();
+        return Object.defineProperty(
+          { a: f },
+          'b',
+          later(() => (Object.defineProperty(f, Symbol.toStringTag, { value: 'Changed' }), 1))
+        );
+      });
+    });
+
+    it('reads an array constructor, an own map and a toStringTag as often as normalize', () => {
+      let reads = 0;
+      const count = <T>(v: T) => later(() => (reads++, v));
+      const cases: [() => object, number][] = [
+        [() => Object.defineProperty([1, 2], 'constructor', count(undefined)), 1],
+        [() => Object.defineProperty([1, 2], 'map', count(Array.prototype.map)), 1],
+        [() => Object.defineProperty({ 0: 1, a: 2 }, Symbol.toStringTag, count('T')), 1],
+        [
+          () => Object.defineProperty(new ArrayBuffer(1), Symbol.toStringTag, count('ArrayBuffer')),
+          1,
+        ],
+      ];
+      for (const [make, want] of cases) {
+        same(make);
+        reads = 0;
+        onePass(make(), config);
+        expect(reads).toBe(want);
+      }
+      // an own map that is not Array.prototype.map is called, as normalize calls it
+      same(() => Object.assign([1, 2], { map: () => 'x' }));
+      // a tag getter that adds a key each time it runs
+      same(() => {
+        const o: Record<string, number> = { 0: 1 };
+        let n = 0;
+        return Object.defineProperty(o, Symbol.toStringTag, {
+          get: () => ((o[`k${n++}`] = n), 'T'),
+        });
+      });
+    });
   });
 
   describe('the reused buffer', () => {

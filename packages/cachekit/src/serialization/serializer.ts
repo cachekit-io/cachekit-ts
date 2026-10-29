@@ -436,6 +436,13 @@ function binary(value: object): [type: string, bytes: Uint8Array] | undefined {
 const tooDeep = (maxDepth: number) => new SerializationError(`Max depth of ${maxDepth} exceeded`);
 const tooLarge = (what: string, size: number, maxCollectionSize: number) =>
   new SerializationError(`${what} ${size} exceeds max collection size ${maxCollectionSize}`);
+// A value would decode as a Uint8Array — a silent type change — so reject
+// it with the fix instead.
+const binaryValueError = (type: string) =>
+  new SerializationError(
+    `Cannot serialize ${type}: binary values must be a Uint8Array or Buffer ` +
+      '(view the bytes with new Uint8Array(buffer, byteOffset, byteLength))'
+  );
 
 /**
  * Normalize a value for deterministic serialization.
@@ -536,18 +543,22 @@ export function normalize(
     // which no ordinary argument normalizes to, it cannot collide with an object
     // of that shape, e.g. { Int8Array: Uint8Array.of(255) }.
     if (walk.forKey) return new ExtData(0, encode([type, blake2b256(bytes)]));
-    // A value would decode as a Uint8Array — a silent type change — so reject
-    // it with the fix instead.
-    throw new SerializationError(
-      `Cannot serialize ${type}: binary values must be a Uint8Array or Buffer ` +
-        '(view the bytes with new Uint8Array(buffer, byteOffset, byteLength))'
-    );
+    throw binaryValueError(type);
   }
 
-  // Plain object - sort keys
   const obj = value as Record<string, unknown>;
-  const keys = Object.keys(obj);
+  return normalizeObject(obj, Object.keys(obj), depth, maxDepth, maxCollectionSize, walk);
+}
 
+/** normalize() of a plain object whose own enumerable keys are `keys`. */
+function normalizeObject(
+  obj: Record<string, unknown>,
+  keys: string[],
+  depth: number,
+  maxDepth: number,
+  maxCollectionSize: number,
+  walk: NormalizeWalk
+): Record<string, unknown> {
   // Check object key count
   if (keys.length > maxCollectionSize) {
     throw tooLarge('Object key count', keys.length, maxCollectionSize);
@@ -659,17 +670,19 @@ const unrecognized = (value: unknown) =>
  * Writes the bytes of @msgpack/msgpack's encode(normalize(value)) in one walk,
  * without building normalize's sorted copy first.
  *
- * Plain values (primitives, Uint8Array, arrays and objects with neither an
- * index-like nor a `__proto__` key) are normalized and encoded where they are
- * visited, reading each property once, in the order normalize reads it. Any
- * other subtree goes to normalize itself and its copy is encoded as
- * @msgpack/msgpack would encode it, so a change to how normalize treats Map,
- * Set, Date, other binary or those keys applies here unchanged.
+ * Plain values (primitives, Uint8Array, Array.prototype arrays, and objects
+ * with neither an index-like nor a `__proto__` key) are normalized and encoded
+ * where they are visited, reading each property once, in the order normalize
+ * reads it. Any other subtree goes to normalize itself and its copy is encoded
+ * as @msgpack/msgpack would encode it, so a change to how normalize treats
+ * Map, Set, Date, other binary or those keys applies here unchanged.
  *
- * Errors keep today's precedence. normalize ran to completion before encode()
- * started, so its errors (depth, collection size, binary type) throw at once,
- * while an encode() error (its own depth bound of 100, a bigint, symbol or
- * function) is held until the walk ends, and only the first one is thrown.
+ * Old order, kept: normalize ran to completion before encode() started. So
+ * normalize's errors (depth, collection size, binary type) throw at once,
+ * while encode()'s (its own depth bound of 100, a bigint, symbol or function)
+ * wait for the walk to end, and only the first is made and thrown. Binary bytes
+ * are read then too, so a getter that changes or detaches a buffer later in the
+ * walk changes the result as it did before.
  *
  * One instance per module, reused: building a buffer and its views per call
  * costs a write of a small value more than encoding it. The bytes returned are
@@ -683,7 +696,12 @@ class ValueEncoder {
   private view!: DataView;
   private pos = 0;
   private entered = false;
-  private deferred: Error | undefined;
+  /** Makes encode()'s first error, when it is thrown. */
+  private deferred: (() => Error) | undefined;
+  /** Binary values and where they go, written in once the walk ends. */
+  private binaries: { at: number; value: ArrayBufferView }[] = [];
+  /** How many binaries encode() wrote before its first error. */
+  private binariesRead = 0;
   private maxDepth = 0;
   private maxCollectionSize = 0;
   private walk: NormalizeWalk = { forKey: false, objects: 0, values: 0 };
@@ -702,26 +720,38 @@ class ValueEncoder {
     this.walk = walk;
     try {
       this.value(value, 0);
-      if (this.deferred) throw this.deferred;
-      return this.bytes.slice(0, this.pos);
+      return this.finish();
     } finally {
       // Zero the buffer this keeps; one it drops is garbage, as encode()'s are.
       if (this.bytes.length > VALUE_ENCODER_RETAIN) this.reset(VALUE_ENCODER_BUFFER);
       else this.bytes.fill(0, 0, this.pos);
       this.deferred = undefined;
+      this.binaries.length = 0;
       this.entered = false;
     }
   }
 
-  /** encode()'s error, if it is the first: thrown once normalize has run. */
-  private defer(error: Error): void {
-    this.deferred ??= error;
+  /** The walk's result: its bytes with the binaries written in, or encode()'s first error. */
+  private finish(): Uint8Array {
+    const read = this.deferred ? this.binariesRead : this.binaries.length;
+    const encoded = read ? this.splice(read) : this.bytes.slice(0, this.pos);
+    if (this.deferred) throw this.deferred();
+    return encoded;
+  }
+
+  /** Holds encode()'s error, if it is the first, until normalize would have finished. */
+  private defer(error: () => Error): void {
+    if (this.deferred) return;
+    this.deferred = error;
+    this.binariesRead = this.binaries.length;
   }
 
   /** normalize(value, depth) then encode() at depth + 1, as one step. */
   private value(value: unknown, depth: number): void {
     if (depth > this.maxDepth) throw tooDeep(this.maxDepth);
-    if (depth >= MSGPACK_MAX_DEPTH) this.defer(new Error(`Too deep objects in depth ${depth + 1}`));
+    if (depth >= MSGPACK_MAX_DEPTH) {
+      this.defer(() => new Error(`Too deep objects in depth ${depth + 1}`));
+    }
     switch (typeof value) {
       case 'undefined':
         return this.u8(0xc0);
@@ -734,7 +764,7 @@ class ValueEncoder {
       case 'object':
         break;
       default:
-        return this.defer(unrecognized(value));
+        return this.defer(() => unrecognized(value));
     }
     if (value === null) return this.u8(0xc0);
     if (Array.isArray(value)) return this.array(value as unknown[], depth);
@@ -743,10 +773,10 @@ class ValueEncoder {
     }
     const bin = binary(value);
     if (bin) {
-      // Other binary throws, from normalize.
-      if (bin[0] !== 'Uint8Array') return this.delegate(value, depth);
       this.walk.objects++;
-      return this.bin(bin[1]);
+      if (bin[0] !== 'Uint8Array') throw binaryValueError(bin[0]);
+      this.binaries.push({ at: this.pos, value: bin[1] });
+      return;
     }
     this.object(value as Record<string, unknown>, depth);
   }
@@ -756,9 +786,16 @@ class ValueEncoder {
     if (length > this.maxCollectionSize) {
       throw tooLarge('Array size', length, this.maxCollectionSize);
     }
-    // normalize's map() builds its copy from the array's constructor (its
-    // species), which then decides how encode() iterates it.
-    if (value.constructor !== Array) return this.delegate(value, depth);
+    // normalize copies with value.map(), which an own `map` replaces, and
+    // which builds its copy from value.constructor (its species). Checked
+    // without reading either, so normalize still reads each once.
+    if (
+      Object.getPrototypeOf(value) !== Array.prototype ||
+      Object.hasOwn(value, 'constructor') ||
+      Object.hasOwn(value, 'map')
+    ) {
+      return this.delegate(value, depth);
+    }
     this.walk.objects++;
     this.walk.values += length;
     this.arrayHeader(length);
@@ -769,7 +806,7 @@ class ValueEncoder {
       } else {
         // A hole: map() skips it, and encode() reads it from the copy as undefined.
         if (depth + 1 >= MSGPACK_MAX_DEPTH) {
-          this.defer(new Error(`Too deep objects in depth ${depth + 2}`));
+          this.defer(() => new Error(`Too deep objects in depth ${depth + 2}`));
         }
         this.u8(0xc0);
       }
@@ -784,7 +821,15 @@ class ValueEncoder {
     for (const key of keys) {
       const c = key.charCodeAt(0);
       if ((c >= 48 && c <= 57 && INDEX_KEY.test(key)) || key === '__proto__') {
-        return this.delegate(value, depth);
+        const copy = normalizeObject(
+          value,
+          keys,
+          depth,
+          this.maxDepth,
+          this.maxCollectionSize,
+          this.walk
+        );
+        return this.normalized(copy, depth + 1);
       }
     }
     this.walk.objects++;
@@ -807,8 +852,9 @@ class ValueEncoder {
    * normalize has already copied. Nothing here counts or reads the caller's value.
    */
   private normalized(value: unknown, depth: number): void {
-    if (depth > MSGPACK_MAX_DEPTH)
-      return this.defer(new Error(`Too deep objects in depth ${depth}`));
+    if (depth > MSGPACK_MAX_DEPTH) {
+      return this.defer(() => new Error(`Too deep objects in depth ${depth}`));
+    }
     if (value == null) return this.u8(0xc0);
     if (typeof value === 'boolean') return this.u8(value ? 0xc3 : 0xc2);
     if (typeof value === 'number') return this.number(value);
@@ -821,11 +867,7 @@ class ValueEncoder {
       this.arrayHeader(value.length);
       for (const item of value) this.normalized(item, depth + 1);
     } else if (ArrayBuffer.isView(value)) {
-      this.bin(
-        value instanceof Uint8Array
-          ? value
-          : new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
-      );
+      this.binaries.push({ at: this.pos, value });
     } else if (typeof value === 'object') {
       const map = value as Record<string, unknown>;
       const keys = Object.keys(map);
@@ -835,7 +877,40 @@ class ValueEncoder {
         this.normalized(map[key], depth + 1);
       }
     } else {
-      this.defer(unrecognized(value));
+      this.defer(() => unrecognized(value));
+    }
+  }
+
+  /**
+   * The walk's bytes with the first `read` binaries written in, where and as
+   * encode() wrote them, into a buffer of the result's size.
+   */
+  private splice(read: number): Uint8Array {
+    const walked = this.bytes;
+    const walkedView = this.view;
+    const end = this.pos;
+    let size = end;
+    for (let i = 0; i < read; i++) {
+      const length = this.binaries[i].value.byteLength;
+      if (length >= 0x100000000) break; // bin() throws when it gets there
+      size += (length < 0x100 ? 2 : length < 0x10000 ? 3 : 5) + length;
+    }
+    this.reset(size);
+    this.pos = 0;
+    try {
+      let from = 0;
+      for (let i = 0; i < read; i++) {
+        const { at, value } = this.binaries[i];
+        this.raw(walked.subarray(from, at));
+        this.bin(value);
+        from = at;
+      }
+      this.raw(walked.subarray(from, end));
+      return this.bytes.length === this.pos ? this.bytes : this.bytes.slice(0, this.pos);
+    } finally {
+      this.bytes = walked;
+      this.view = walkedView;
+      this.pos = end;
     }
   }
 
@@ -921,8 +996,8 @@ class ValueEncoder {
     this.pos += byteLength;
   }
 
-  private bin(bytes: Uint8Array): void {
-    const size = bytes.byteLength;
+  private bin(value: ArrayBufferView): void {
+    const size = value.byteLength;
     if (size < 0x100) {
       this.head(0xc4, 1, size);
     } else if (size < 0x10000) {
@@ -932,7 +1007,11 @@ class ValueEncoder {
     } else {
       throw new Error(`Too large binary: ${size}`);
     }
-    this.raw(bytes);
+    this.raw(
+      value instanceof Uint8Array
+        ? value
+        : new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+    );
   }
 
   private arrayHeader(size: number): void {
