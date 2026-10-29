@@ -655,7 +655,11 @@ export function resolveSerializerConfig(config: Partial<SerializerConfig> = {}):
 
 /** @msgpack/msgpack's encode() nesting bound, counted from 1 at the top value. */
 const MSGPACK_MAX_DEPTH = 100;
-/** Keys an engine orders before all others (and `normalize` cannot order). */
+/**
+ * A safe superset of the keys an engine orders before all others, which
+ * `normalize` cannot order: it also matches '4294967295' and above, which
+ * engines order as plain strings. A match only sends the object to normalize.
+ */
 const INDEX_KEY = /^(0|[1-9][0-9]*)$/;
 /** Above this many UTF-16 units @msgpack/msgpack encodes a string with TextEncoder. */
 const TEXT_ENCODER_THRESHOLD = 50;
@@ -689,9 +693,9 @@ const unrecognized = (value: unknown) =>
  * a copy; the buffer is zeroed after every encode, so it never keeps a
  * plaintext value, and dropped once it outgrows VALUE_ENCODER_RETAIN. A
  * re-entrant call (a getter on the value writing to a cache) gets an instance
- * of its own.
+ * of its own. Package-internal: exported for its tests.
  */
-class ValueEncoder {
+export class ValueEncoder {
   private bytes!: Uint8Array;
   private view!: DataView;
   private pos = 0;
@@ -805,10 +809,7 @@ class ValueEncoder {
         this.value(item, depth + 1);
       } else {
         // A hole: map() skips it, and encode() reads it from the copy as undefined.
-        if (depth + 1 >= MSGPACK_MAX_DEPTH) {
-          this.defer(() => new Error(`Too deep objects in depth ${depth + 2}`));
-        }
-        this.u8(0xc0);
+        this.normalized(undefined, depth + 2);
       }
     }
   }
@@ -849,7 +850,8 @@ class ValueEncoder {
 
   /**
    * @msgpack/msgpack 3.1.3 Encoder.doEncode with default options, for a value
-   * normalize has already copied. Nothing here counts or reads the caller's value.
+   * normalize has already copied. It counts nothing and reads only what encode()
+   * would read from that copy.
    */
   private normalized(value: unknown, depth: number): void {
     if (depth > MSGPACK_MAX_DEPTH) {

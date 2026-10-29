@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { runInNewContext } from 'node:vm';
 import { encode as msgpackEncode } from '@msgpack/msgpack';
 import {
+  ValueEncoder,
   encodeCounted,
   normalize,
   resolveSerializerConfig,
@@ -267,7 +268,7 @@ describe('encodeCounted one-pass encode', () => {
       }
     }
     // Both outcomes are exercised, not only the happy path.
-    expect(errors).toBeGreaterThan(20);
+    expect(errors, `CACHEKIT_ONE_PASS_SEED=${seed}`).toBeGreaterThan(20);
     if (failures.length) {
       throw new Error(
         `one-pass encode diverged; reproduce with CACHEKIT_ONE_PASS_SEED=${seed}\n` +
@@ -304,6 +305,23 @@ describe('encodeCounted one-pass encode', () => {
             );
           }
         }
+      }
+    }
+  });
+
+  it('matches at every header width boundary, 32-bit lengths included', () => {
+    // The random cases stay short; these reach str/bin/array/map 8, 16 and 32.
+    const c = resolveSerializerConfig({ maxEncodedSize: 2 ** 22, maxCollectionSize: 70_000 });
+    for (const n of [0x0f, 0x10, 0x1f, 0x20, 0xff, 0x100, 0xffff, 0x10000, 70_000]) {
+      for (const value of [
+        'y'.repeat(n),
+        'é'.repeat(n),
+        new Uint8Array(n).fill(7),
+        { b: new Uint8Array(n).fill(3), s: 'y'.repeat(n) },
+        Array.from({ length: n }, (_, i) => i),
+        Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${i}`, i])),
+      ]) {
+        expect(hex(onePass(value, c)), `length ${n}`).toEqual(hex(twoPass(value, c)));
       }
     }
   });
@@ -507,6 +525,29 @@ describe('encodeCounted one-pass encode', () => {
   });
 
   describe('the reused buffer', () => {
+    it('is zeroed after every encode, one that throws included', () => {
+      const encoder = new ValueEncoder();
+      const kept = () => (encoder as unknown as { bytes: Uint8Array }).bytes;
+      const encode = (value: unknown) =>
+        encoder.encode(value, config, { forKey: false, objects: 0, values: 0 });
+      const zeroed = () => expect(kept().some((b) => b !== 0)).toBe(false);
+      encode({ secret: 'p'.repeat(500), n: [1, 2, 3] });
+      zeroed();
+      // with a binary, which is written in after the walk
+      encode({ b: new Uint8Array(100).fill(9), s: 'x'.repeat(100) });
+      zeroed();
+      const throwing = Object.defineProperty({ a: 's'.repeat(1500) }, 'b', {
+        get: () => {
+          throw new RangeError('getter');
+        },
+        enumerable: true,
+      });
+      expect(() => encode(throwing)).toThrow(RangeError);
+      zeroed();
+      expect(() => encode({ a: 'q'.repeat(100), b: 1n })).toThrow('Unrecognized object');
+      zeroed();
+    });
+
     it('never changes bytes it returned earlier', () => {
       const first = encodeCounted({ a: 'first', n: [1, 2, 3] }, config);
       const snapshot = first.slice();
