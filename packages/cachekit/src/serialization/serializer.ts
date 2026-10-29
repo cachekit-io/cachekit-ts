@@ -692,7 +692,7 @@ const unrecognized = (value: unknown) =>
  *
  * Old order, kept: normalize ran to completion before encode() started. So
  * normalize's errors (depth, collection size, binary type) throw at once,
- * while encode()'s (a bigint, symbol or function, or a hole past maxDepth)
+ * while encode()'s (a bigint, symbol or function) and a hole past maxDepth
  * wait for the walk to end, and only the first is made and thrown; past it the
  * walk runs normalize's checks and writes nothing. What encode() read from the
  * copy rather than the caller's value, a Uint8Array's bytes and any object
@@ -929,10 +929,10 @@ export class ValueEncoder {
 
   /**
    * @msgpack/msgpack 3.1.3 Encoder.doEncode for a value normalize has already
-   * copied, with its depth bound set to maxDepth: `depth` counts from 1 at the
-   * top value, where normalize counts from 0. Only what normalize never visits
-   * reaches the bound, such as an array's holes. It counts nothing and reads
-   * only what encode() would read from that copy.
+   * copied, with its maxDepth option at maxDepth + 1: `depth` counts from 1 at
+   * the top value, where normalize counts from 0. Only an array's holes, which
+   * normalize never visits, reach the bound. It counts nothing and reads only
+   * what encode() would read from that copy.
    */
   private normalized(value: unknown, depth: number): void {
     if (depth > this.maxDepth + 1) return this.defer(() => tooDeep(this.maxDepth));
