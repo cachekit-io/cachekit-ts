@@ -376,6 +376,17 @@ function hasBufferBrand(value: object, byteLength: Getter<number>): value is Arr
   }
 }
 
+/** A view's byte length, read without running user code; 0 once detached. */
+function intrinsicByteLength(view: ArrayBufferView): number {
+  try {
+    return (
+      typedArrayName.call(view) === undefined ? dataViewView : typedArrayView
+    ).byteLength.call(view);
+  } catch {
+    return 0;
+  }
+}
+
 /**
  * The bytes as a Uint8Array view, not a copy. A detached (transferred) buffer
  * throws on any view but holds no bytes, so it reads as empty, as it would in
@@ -788,6 +799,10 @@ export class ValueEncoder {
         return this.string(value);
       case 'object':
         break;
+      case 'function':
+        // encode() asks the codec about a function too (an ExtData can be
+        // callable), and the function can change before it does.
+        return this.late(value, depth + 1);
       default:
         return this.defer(() => unrecognized(value));
     }
@@ -866,10 +881,13 @@ export class ValueEncoder {
   private delegate(value: object, depth: number): void {
     const copy = normalize(value, depth, this.maxDepth, this.maxCollectionSize, this.walk);
     // A Date's copy is a string, which nothing can change before encode()
-    // reads it; an object (a Map's, or whatever an array's species built)
-    // can be, by a getter later in the walk.
-    if (copy !== null && typeof copy === 'object') this.late(copy, depth + 1);
-    else this.normalized(copy, depth + 1);
+    // reads it; an object or function (a Map's copy, or whatever an array's
+    // species built) can be, by a getter later in the walk.
+    if ((copy !== null && typeof copy === 'object') || typeof copy === 'function') {
+      this.late(copy, depth + 1);
+    } else {
+      this.normalized(copy, depth + 1);
+    }
   }
 
   /**
@@ -918,7 +936,9 @@ export class ValueEncoder {
     for (let i = 0; i < read; i++) {
       const { copy } = this.segments[i];
       if (!ArrayBuffer.isView(copy)) continue; // the buffer grows to fit it
-      const length = copy.byteLength;
+      // Through the intrinsic getter: a caller's own byteLength getter runs
+      // only when bin() reaches this segment, as in encode().
+      const length = intrinsicByteLength(copy);
       if (length >= 0x100000000) break; // bin() throws when it gets there
       size += 5 + length;
     }

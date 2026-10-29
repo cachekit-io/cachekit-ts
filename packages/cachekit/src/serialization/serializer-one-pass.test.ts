@@ -512,6 +512,55 @@ describe('encodeCounted one-pass encode', () => {
       }));
     });
 
+    it("reads a binary's byteLength and a callable ExtData when encode() did", () => {
+      const species = (copy: unknown) => {
+        const a: unknown[] = [];
+        const ctor = function () {
+          return copy;
+        };
+        Object.defineProperty(a, 'constructor', { value: { [Symbol.species]: ctor } });
+        return a;
+      };
+      // a later view's own byteLength getter runs after the earlier segment is read
+      same(() => {
+        const shared = { n: 0 };
+        const view = Object.defineProperty(Uint8Array.of(7), 'byteLength', {
+          get: () => ((shared.n = 1), 1),
+        });
+        return { a: species(shared), b: species(view) };
+      });
+      same(() => {
+        const view = Object.defineProperty(new Uint8Array(1), 'byteLength', {
+          get: () => {
+            throw new Error('later byteLength');
+          },
+        });
+        return { a: new Map([['k', 1n]]), b: species(view) };
+      });
+      // a function the codec takes for an ExtData, from a species and in the value itself
+      const callableExt = () =>
+        Object.assign(Object.setPrototypeOf(function () {}, ExtData.prototype) as object, {
+          type: 12,
+          data: Uint8Array.of(0),
+        }) as { data: Uint8Array };
+      same(() => {
+        const ext = callableExt();
+        return Object.defineProperty(
+          { a: species(ext) },
+          'b',
+          later(() => ((ext.data[0] = 1), 1))
+        );
+      });
+      same(() => {
+        const ext = callableExt();
+        return Object.defineProperty(
+          { a: ext },
+          'b',
+          later(() => ((ext.data[0] = 1), 1))
+        );
+      });
+    });
+
     it('checks the depth of an element whose getter deletes it', () => {
       same(
         () => {
