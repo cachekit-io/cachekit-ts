@@ -318,7 +318,7 @@ const cache = createCache.secure({
 ```
 
 On Node, the derived keyring lives behind the NAPI boundary and is zeroized
-on dispose. On Workers, the keys are non-extractable WebCrypto keys that
+when the GC finalizes the handle after dispose. On Workers, the keys are non-extractable WebCrypto keys that
 dispose drops for the garbage collector (see the Workers section). On both
 runtimes, the decoded key buffers are wiped as soon as the keyring is built.
 The hex key strings themselves (config values, environment variables) live in

@@ -203,6 +203,11 @@ function checkAad(aad: Uint8Array): void {
  * all of them have returned before the caller can zero-fill the master-key
  * bytes: deriveKey checks only the key's length, and would silently derive
  * from an all-zero key.
+ *
+ * The finally below can zero-fill derived bytes while an import is still
+ * pending (Promise.all rejects on the first failure). That is safe only
+ * because WebCrypto's importKey copies keyData before it returns; never swap
+ * in an API that reads the bytes later.
  */
 async function deriveTenantKeys(
   core: KeyDerivationCore,

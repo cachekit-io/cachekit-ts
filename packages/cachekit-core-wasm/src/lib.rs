@@ -140,8 +140,10 @@ impl ByteStorage {
 /// The master key arrives as a JS handle and the derived key leaves as a new
 /// JS `Uint8Array`, so neither crosses through a linear-memory buffer that is
 /// freed unwiped (the `&[u8]` argument and `Vec<u8>` return ABIs both do).
-/// The staging copy and the derived key are wiped on every return path. The
-/// Workers SDK takes its AES key from here once per manager.
+/// The staging copy and this function's copy of the derived key are wiped on
+/// every return path. HKDF's own working buffers, the derived key returned by
+/// value included, stay on the wasm stack until later calls overwrite them.
+/// The Workers SDK takes its AES key from here once per manager.
 #[wasm_bindgen(js_name = deriveKey)]
 pub fn derive_key(
     master_key: js_sys::Uint8Array,

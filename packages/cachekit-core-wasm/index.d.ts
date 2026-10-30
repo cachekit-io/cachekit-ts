@@ -52,8 +52,10 @@ export declare class TenantKeys {
 
 /**
  * Derive a 32-byte domain key using HKDF-SHA256 (RFC 5869). The master key is
- * read from, and the derived key returned as, JS memory, with no unwiped copy
- * left in linear memory; wipe the returned key when done.
+ * read from, and the derived key returned as, JS memory: no linear-memory heap
+ * buffer holding either is freed unwiped. HKDF's working buffers stay on the
+ * wasm stack, which is linear memory, until later calls overwrite them. Wipe
+ * the returned key when done.
  */
 export declare function deriveKey(
   masterKey: Uint8Array,
