@@ -18,6 +18,14 @@ function aadComponent(text: string): Uint8Array {
   return component;
 }
 
+/**
+ * Whether a binding returned a Promise. The NAPI bindings return plain values,
+ * and awaiting one would still cost a microtask hop on every Node operation.
+ */
+function isThenable<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
+  return typeof (value as { then?: unknown }).then === 'function';
+}
+
 function concatBytes(...parts: Uint8Array[]): Uint8Array {
   const out = new Uint8Array(parts.reduce((sum, p) => sum + p.length, 0));
   let offset = 0;
@@ -322,8 +330,9 @@ export class EncryptionManagerCore {
 
     try {
       const aad = this.buildAAD(cacheKey, compressed);
+      const result = this.native!.encryptWithTenantKeys(data, aad, this.tenantKeys!);
       // Awaited inside the try, so a rejected Promise is classified below.
-      return await this.native!.encryptWithTenantKeys(data, aad, this.tenantKeys!);
+      return isThenable(result) ? await result : result;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       // Detect nonce exhaustion from Rust error message
@@ -364,7 +373,8 @@ export class EncryptionManagerCore {
 
     try {
       const aad = this.buildAAD(cacheKey, compressed);
-      return await this.native!.decryptWithTenantKeys(ciphertext, aad, this.tenantKeys!);
+      const result = this.native!.decryptWithTenantKeys(ciphertext, aad, this.tenantKeys!);
+      return isThenable(result) ? await result : result;
     } catch (error) {
       throw new EncryptionError(
         `Decryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
