@@ -26,26 +26,6 @@ function isThenable<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
   return typeof (value as { then?: unknown }).then === 'function';
 }
 
-/** Classify an encrypt failure: nonce exhaustion, or any other failure. */
-function encryptionFailure(error: unknown): Error {
-  const message = error instanceof Error ? error.message : 'Unknown error';
-  const cause = error instanceof Error ? error : undefined;
-  // Detect nonce exhaustion from the core's error message
-  if (message.includes('Nonce counter exhausted') || message.includes('NonceCounterExhausted')) {
-    // Guidance (forward-only rotation + runbook link) lives once, in the
-    // NonceExhaustedError default message.
-    return new NonceExhaustedError(undefined, { cause });
-  }
-  return new EncryptionError(`Encryption failed: ${message}`, { cause });
-}
-
-function decryptionFailure(error: unknown): Error {
-  return new EncryptionError(
-    `Decryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
-    { cause: error instanceof Error ? error : undefined }
-  );
-}
-
 function concatBytes(...parts: Uint8Array[]): Uint8Array {
   const out = new Uint8Array(parts.reduce((sum, p) => sum + p.length, 0));
   let offset = 0;
@@ -348,21 +328,28 @@ export class EncryptionManagerCore {
   async encrypt(data: Uint8Array, cacheKey: string, compressed = false): Promise<Uint8Array> {
     await this.ensureInitialized();
 
-    let result: Uint8Array | Promise<Uint8Array>;
     try {
       const aad = this.buildAAD(cacheKey, compressed);
-      result = this.native!.encryptWithTenantKeys(data, aad, this.tenantKeys!);
+      const result = this.native!.encryptWithTenantKeys(data, aad, this.tenantKeys!);
+      // Awaited inside the try, so a rejected Promise is classified below.
+      return isThenable(result) ? await result : result;
     } catch (error) {
-      throw encryptionFailure(error);
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      // Detect nonce exhaustion from Rust error message
+      if (
+        message.includes('Nonce counter exhausted') ||
+        message.includes('NonceCounterExhausted')
+      ) {
+        // Guidance (forward-only rotation + runbook link) lives once, in the
+        // NonceExhaustedError default message.
+        throw new NonceExhaustedError(undefined, {
+          cause: error instanceof Error ? error : undefined,
+        });
+      }
+      throw new EncryptionError(`Encryption failed: ${message}`, {
+        cause: error instanceof Error ? error : undefined,
+      });
     }
-    // A Promise's rejection is classified the same way. Its mapping is chained,
-    // not awaited, so this function keeps a single await: an await inside the
-    // try measurably slowed every synchronous NAPI call too.
-    return isThenable(result)
-      ? Promise.resolve(result).catch((error: unknown) => {
-          throw encryptionFailure(error);
-        })
-      : result;
   }
 
   /**
@@ -384,18 +371,16 @@ export class EncryptionManagerCore {
   async decrypt(ciphertext: Uint8Array, cacheKey: string, compressed = false): Promise<Uint8Array> {
     await this.ensureInitialized();
 
-    let result: Uint8Array | Promise<Uint8Array>;
     try {
       const aad = this.buildAAD(cacheKey, compressed);
-      result = this.native!.decryptWithTenantKeys(ciphertext, aad, this.tenantKeys!);
+      const result = this.native!.decryptWithTenantKeys(ciphertext, aad, this.tenantKeys!);
+      return isThenable(result) ? await result : result;
     } catch (error) {
-      throw decryptionFailure(error);
+      throw new EncryptionError(
+        `Decryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        { cause: error instanceof Error ? error : undefined }
+      );
     }
-    return isThenable(result)
-      ? Promise.resolve(result).catch((error: unknown) => {
-          throw decryptionFailure(error);
-        })
-      : result;
   }
 
   /**
