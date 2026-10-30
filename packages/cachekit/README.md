@@ -432,10 +432,7 @@ overtakes them, and `close()` drains every pending write before it closes the
 backend. On Workers the wait is capped at 30 s, because workerd can cancel a
 pending write, which then never settles. After the cap the op runs anyway, so
 there the ordering holds for 30 s: a write still in flight at the cap can
-land after the op. Once a cache has a `writeBehind` function, its L2 writes
-and deletes of one key run one at a time in this process, so a write-behind
-never fills L1 ahead of a `set()` still in flight; a cache without one keeps
-same-key writes unordered, as before.
+land after the op.
 
 **The write stays on the caller's path:**
 
@@ -446,9 +443,10 @@ same-key writes unordered, as before.
 - on Cloudflare Workers, unless the function was wrapped through
   `cache.withExecutionContext(ctx)`, which registers the write with
   `ctx.waitUntil`. workerd cancels unregistered work at response return;
-- while the key already has a write or delete pending in this process: the
-  write queues behind it on the caller's path, and fills L1 after its L2
-  write, so L1 never ends older than L2 (as with the option off). On Workers
+- while the key already has a write or delete pending or in flight in this
+  process: the write runs on the caller's path (behind a pending one,
+  alongside one in flight) and fills L1 after its L2 write, as with the
+  option off, so a write-behind never fills L1 ahead of an earlier write. On Workers
   a background write queued there would also spend workerd's 30 s
   `waitUntil` budget waiting and be cancelled as it sends; for that reason an
   SWR refresh of such a key on Workers sends no write, and the key's refresh

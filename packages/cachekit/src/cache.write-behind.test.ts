@@ -287,33 +287,40 @@ describe('write-behind', () => {
     await expect(cache.get(key)).resolves.toEqual({ id: 1, call: 2 });
   });
 
-  it('a set() in flight on an idle key is not overtaken in L1 by a write-behind', async () => {
-    const backend = new GatedBackend();
-    const cache = make({ backend });
-    const counter = { calls: 0 };
-    const wrapped = cache.wrap(async (id: number) => ({ id, call: ++counter.calls }), {
-      namespace: 'wb:idle-set',
-      ttl: 60,
-      writeBehind: true,
-    });
-    await wrapped(1); // learn the key
-    await settle();
-    const [key] = backend.setKeys;
-    await cache.delete(key); // both levels empty, and no write pending
+  it.each([
+    ['Node', false],
+    ['a Workers-like runtime', true],
+  ])(
+    'on %s, a set() in flight on an idle key is not overtaken in L1 by a write-behind',
+    async (_runtime, workersLike) => {
+      const backend = new GatedBackend();
+      const cache = workersLike ? makeWorkersLike({ backend }) : make({ backend });
+      const view = workersLike ? viewOf(cache, { waitUntil: () => {} }) : cache;
+      const counter = { calls: 0 };
+      const wrapped = view.wrap(async (id: number) => ({ id, call: ++counter.calls }), {
+        namespace: 'wb:idle-set',
+        ttl: 60,
+        writeBehind: true,
+      });
+      await wrapped(1); // learn the key
+      await settle();
+      const [key] = backend.setKeys;
+      await cache.delete(key); // both levels empty, and nothing pending or in flight
 
-    backend.gate();
-    const explicit = cache.set(key, 99, { ttl: 3600 }); // in flight on an idle key
-    const second = wrapped(1); // misses: computes call 2
-    await settle();
+      backend.gate();
+      const explicit = cache.set(key, 99, { ttl: 3600 }); // in flight on an idle key
+      const second = wrapped(1); // misses: computes call 2, written on the caller's path
+      await settle();
+      expect(backend.setKeys.filter((k) => k === key)).toHaveLength(3); // both writes sent
 
-    backend.open(); // the set lands first, then call 2's write
-    await explicit;
-    await expect(second).resolves.toEqual({ id: 1, call: 2 });
-    await settle();
-    await expect(cache.get(key)).resolves.toEqual({ id: 1, call: 2 }); // L1
-    await cache.invalidate('global');
-    await expect(cache.get(key)).resolves.toEqual({ id: 1, call: 2 }); // L2
-  });
+      backend.open(); // the set lands first, then call 2's write
+      await explicit;
+      await expect(second).resolves.toEqual({ id: 1, call: 2 });
+      await expect(cache.get(key)).resolves.toEqual({ id: 1, call: 2 }); // L1
+      await cache.invalidate('global');
+      await expect(cache.get(key)).resolves.toEqual({ id: 1, call: 2 }); // L2, decoded
+    }
+  );
 
   it('close() drains pending PUTs before the backend closes', async () => {
     const backend = new GatedBackend();

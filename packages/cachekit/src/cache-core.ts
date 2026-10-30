@@ -350,13 +350,15 @@ export class CacheImpl implements SecureCache {
   private pendingWrites = 0;
   private pendingWriteBytes = 0;
   /**
-   * Set once a function is wrapped with `writeBehind`. From then on every L2
-   * write and delete registers in keyTails while it runs (see inKeyOrder),
-   * so a write-behind sees an in-flight foreground op and queues behind it
-   * instead of filling L1 ahead of it. A cache that never opts in keeps
-   * unordered same-key ops, as before.
+   * Per key, the L2 writes and deletes running on an idle key (no tail), so
+   * not in keyTails. A write-behind of such a key is refused and runs on the
+   * caller's path, concurrently, as with the option off: its early L1 fill
+   * could otherwise land before the running op's later one, leaving L1
+   * older than L2. Kept out of keyTails so that an op workerd cancels never
+   * leaves a tail that never settles; a count it leaks only keeps that key's
+   * writes on the caller's path.
    */
-  private orderKeyWrites = false;
+  private readonly keysInFlight = new Map<string, number>();
 
   constructor(options: CacheOptions, runtime: CacheRuntime) {
     // Every config check that can throw ConfigurationError runs before
@@ -1271,9 +1273,9 @@ export class CacheImpl implements SecureCache {
   /**
    * Start `key`'s L2 write in the background and return true, or start
    * nothing and return false when the write must stay on the caller's path:
-   * the key already has a write or delete pending, or the runtime cancels
-   * unregistered work (Workers) and no waitUntil is bound, or registering
-   * with it throws, or the write would take the pending writes past
+   * the key already has a write or delete pending or in flight, or the
+   * runtime cancels unregistered work (Workers) and no waitUntil is bound,
+   * or registering with it throws, or the write would take the pending writes past
    * MAX_PENDING_WRITES or MAX_PENDING_WRITE_BYTES. A write sent back to the
    * caller waits behind the key's pending ops (inKeyOrder), so the older
    * value can never land last.
@@ -1295,7 +1297,7 @@ export class CacheImpl implements SecureCache {
   ): boolean {
     // After close() began, the drain may already have run: a write started
     // now would outlive it.
-    if (this.closed || this.keyTails.has(key)) return false;
+    if (this.closed || this.keyTails.has(key) || this.keysInFlight.has(key)) return false;
     if (this.swrRequiresWaitUntil && !waitUntil) return false;
     if (
       this.pendingWrites >= MAX_PENDING_WRITES ||
@@ -1352,19 +1354,33 @@ export class CacheImpl implements SecureCache {
 
   /**
    * Run an L2 write or delete of `key` after everything already queued for
-   * the key, and make it the key's new tail. Once the cache has a
-   * `writeBehind` function (orderKeyWrites), an op on an idle key registers
-   * too, so a write-behind started while it runs is refused and queues
-   * behind it: its early L1 fill could otherwise land before this op's later
-   * one, leaving L1 older than L2. On a cache without one, an op on an idle
-   * key runs at once, unregistered, as before write-behind existed.
+   * the key, and make it the key's new tail. An op on an idle key runs at
+   * once, as before write-behind existed, counted in keysInFlight while it
+   * runs.
    */
   private inKeyOrder<T>(key: string, op: () => Promise<T>): Promise<T> {
     const tail = this.keyTails.get(key);
-    if (tail === undefined && !this.orderKeyWrites) return op();
-    const result = tail === undefined ? op() : this.afterTail(tail).then(op);
+    if (tail === undefined) return this.countInFlight(key, op);
+    const result = this.afterTail(tail).then(op);
     this.setKeyTail(key, result);
     return result;
+  }
+
+  private countInFlight<T>(key: string, op: () => Promise<T>): Promise<T> {
+    this.keysInFlight.set(key, (this.keysInFlight.get(key) ?? 0) + 1);
+    const release = (): void => {
+      const left = (this.keysInFlight.get(key) ?? 1) - 1;
+      if (left > 0) this.keysInFlight.set(key, left);
+      else this.keysInFlight.delete(key);
+    };
+    let running: Promise<T>;
+    try {
+      running = op();
+    } catch (error) {
+      release();
+      throw error;
+    }
+    return running.finally(release);
   }
 
   /** A key's tail, capped at KEY_WAIT_CAP_MS where it may never settle. */
@@ -1535,7 +1551,6 @@ export class CacheImpl implements SecureCache {
       !interop && !this.encryption && this.l1 !== null ? this.setUnrefTimeout : undefined
     );
     if (autoKeys.memoising) this.trackKeyMemo(autoKeys);
-    if (options.writeBehind) this.orderKeyWrites = true;
     return async (...args: TArgs): Promise<TResult> => {
       // First, and before keying in particular: keying puts the arguments in the
       // key memo, which close() has emptied, and only the timer of a new window
