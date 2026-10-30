@@ -66,15 +66,28 @@ describe('write-behind inside workerd', () => {
     state.gate();
     const cache = createCache({ backend, defaultTtl: 60 });
     const ctx = createExecutionContext();
+    // Capture what the cache registers, then hand it to the real context.
+    const registered: Promise<unknown>[] = [];
     const fn = cache
-      .withExecutionContext(ctx)
+      .withExecutionContext({
+        waitUntil: (promise) => {
+          registered.push(promise);
+          ctx.waitUntil(promise);
+        },
+      })
       .wrap(async (id: number) => ({ id }), { namespace: 'wb:ctx', ttl: 60, writeBehind: true });
 
     expect(await fn(1)).toEqual({ id: 1 });
     expect(state.sets).toBe(0); // returned with the PUT still pending
+    expect(registered).toHaveLength(1); // the pending write is registered
+    let settled = false;
+    void registered[0].then(() => (settled = true));
+    await settle();
+    expect(settled).toBe(false); // and registered as the write itself, still pending
 
     state.open();
     await waitOnExecutionContext(ctx);
+    expect(settled).toBe(true);
     expect(state.sets).toBe(1);
     expect(state.store.size).toBe(1);
     await cache.close();

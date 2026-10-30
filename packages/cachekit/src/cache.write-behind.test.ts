@@ -322,6 +322,52 @@ describe('write-behind', () => {
     }
   );
 
+  it.each([0, 1, 2, 3, 4, 5, 6, 8, 12])(
+    "a write-behind admitted between a set()'s L2 write and its L1 fill does not leave L1 older (origin resolves %i microtasks after the set lands)",
+    async (delay) => {
+      const backend = new GatedBackend();
+      const cache = make({ backend });
+      let origin: ((value: number) => void) | null = null;
+      const wrapped = cache.wrap(
+        async (id: number) => ({ id, v: await new Promise<number>((r) => (origin = r)) }),
+        { namespace: 'wb:fill-gap', ttl: 60, writeBehind: true }
+      );
+      const first = wrapped(1); // learn the key
+      await vi.waitFor(() => expect(origin).not.toBeNull());
+      origin!(1);
+      await first;
+      await settle();
+      const [key] = backend.setKeys;
+      await cache.delete(key);
+
+      // The explicit set lands, then the origin resolves `delay` microtasks later.
+      const realSet = backend.set.bind(backend);
+      backend.set = async (k, value) => {
+        await realSet(k, value);
+        if (k === key && backend.setKeys.length === 2) {
+          void (async () => {
+            for (let i = 0; i < delay; i++) await Promise.resolve();
+            origin!(2);
+          })();
+        }
+      };
+      backend.gate();
+      const explicit = cache.set(key, 99, { ttl: 3600 }); // held
+      origin = null;
+      const second = wrapped(1); // computing: waits on the origin
+      await vi.waitFor(() => expect(origin).not.toBeNull());
+      backend.open();
+      await explicit;
+      await expect(second).resolves.toEqual({ id: 1, v: 2 });
+      await settle();
+
+      // L2 ends with v 2 (its write lands last); L1 must agree.
+      await expect(cache.get(key)).resolves.toEqual({ id: 1, v: 2 });
+      await cache.invalidate('global');
+      await expect(cache.get(key)).resolves.toEqual({ id: 1, v: 2 });
+    }
+  );
+
   it('close() drains pending PUTs before the backend closes', async () => {
     const backend = new GatedBackend();
     backend.gate();

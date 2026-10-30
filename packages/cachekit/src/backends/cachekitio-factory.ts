@@ -15,8 +15,10 @@ export function cachekitioWithTTL(config: CachekitIOBackendConfig): TTLBackend {
   return new TTLCachekitIO(new CachekitIOCore(config));
 }
 
-// Required<…getWithTtl>: tsc, not only tests, enforces the forward.
-class CachekitIO implements LockableBackend, TTLBackend, Required<Pick<Backend, 'getWithTtl'>> {
+// Required<…getWithTtl | setWithStaleTtl>: tsc, not only tests, enforces the forwards.
+class CachekitIO
+  implements LockableBackend, TTLBackend, Required<Pick<Backend, 'getWithTtl' | 'setWithStaleTtl'>>
+{
   private readonly lockable: LockableCachekitIO;
   private readonly ttl: TTLCachekitIO;
 
@@ -42,6 +44,10 @@ class CachekitIO implements LockableBackend, TTLBackend, Required<Pick<Backend, 
   }
   set(key: string, value: Uint8Array, ttl?: number) {
     return this.lockable.set(key, value, ttl);
+  }
+  // MUST forward: see Backend.setWithStaleTtl.
+  setWithStaleTtl(key: string, value: Uint8Array, ttl: number, staleTtl: number) {
+    return this.lockable.setWithStaleTtl(key, value, ttl, staleTtl);
   }
   // Forwarded like keyPrefix — hiding it would let CacheImpl's reliability
   // stack swallow the inner backend's TTL rejection. See Backend.validateTtl.
