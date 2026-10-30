@@ -61,6 +61,28 @@ async function shapes(n: number, op: (i: number) => Promise<unknown>): Promise<s
   return out;
 }
 
+/**
+ * Like shapes(), split into the requests the SaaS had answered when the op
+ * resolved (the caller's path: the op's continuation runs before any socket
+ * I/O, so a request it started but did not await cannot have arrived) and
+ * every request the op sent.
+ */
+async function blockingShapes(
+  n: number,
+  op: (i: number) => Promise<unknown>
+): Promise<{ blocking: string[][]; all: string[][] }> {
+  const blocking: string[][] = [];
+  const all: string[][] = [];
+  for (let i = 0; i < n; i++) {
+    const before = saas.requests().length;
+    await op(i);
+    blocking.push(saas.requests().slice(before));
+    await settle();
+    all.push(saas.requests().slice(before));
+  }
+  return { blocking, all };
+}
+
 const compute = async (id: number) => ({ id, name: `user-${id}` });
 
 /** Requests each op sends, as asserted per op below and over whole runs. */
@@ -112,6 +134,33 @@ describe('CachekitIO call shape: requests per op', () => {
     const getUser = cache.wrap(compute, { namespace: 'shape', ttl: 60 });
     const seen = await shapes(N, (i) => getUser(i));
     expect(seen).toEqual(Array.from({ length: N }, () => SHAPES['locked wrap miss']));
+  });
+
+  // writeBehind is opt-in: the default miss keeps the caller waiting on its PUT.
+  it('wrap miss: the caller waits for the GET and the PUT', async () => {
+    const getUser = cacheFor().wrap(compute, { namespace: 'shape', ttl: 60 });
+    const { blocking, all } = await blockingShapes(N, (i) => getUser(i));
+    expect(blocking).toEqual(Array.from({ length: N }, () => SHAPES['wrap miss']));
+    expect(all).toEqual(blocking);
+  });
+
+  // 2 blocking requests to 1: the PUT goes in the background. Same requests overall.
+  it('writeBehind wrap miss: the caller waits for the GET only, and the PUT follows', async () => {
+    const getUser = cacheFor().wrap(compute, { namespace: 'shape', ttl: 60, writeBehind: true });
+    const { blocking, all } = await blockingShapes(N, (i) => getUser(i));
+    expect(blocking).toEqual(Array.from({ length: N }, () => ['GET cache']));
+    expect(all).toEqual(Array.from({ length: N }, () => SHAPES['wrap miss']));
+  });
+
+  // Under the lock the PUT stays on the caller's path, writeBehind or not.
+  it('writeBehind locked wrap miss: the caller still waits for the PUT', async () => {
+    const cache = cacheFor({ stampede: { distributedLock: true } });
+    const getUser = cache.wrap(compute, { namespace: 'shape', ttl: 60, writeBehind: true });
+    const { blocking, all } = await blockingShapes(N, (i) => getUser(i));
+    expect(blocking).toEqual(
+      Array.from({ length: N }, () => ['GET cache', 'POST lock', 'PUT cache'])
+    );
+    expect(all).toEqual(Array.from({ length: N }, () => SHAPES['locked wrap miss']));
   });
 });
 

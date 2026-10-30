@@ -58,6 +58,22 @@ export interface WrapOptionsBase {
   ttl: number;
   /** Skip L1 cache for this operation */
   skipL1?: boolean;
+  /**
+   * Write-behind (opt-in, off by default, matching cachekit-py's
+   * `write_behind`): a cold miss returns once its value is encoded (and
+   * encrypted) and in L1, and its L2 write finishes in the background.
+   * Until that write lands, another process misses the key and recomputes
+   * it; a write still pending when the process ends without `close()` is
+   * lost. In this process, a later `set`, `delete` or `invalidate('params')`
+   * of the key waits for it, and `close()` drains it.
+   *
+   * The write stays on the caller's path while a distributed lock is held
+   * (`stampede.distributedLock`), on Workers unless the function was wrapped
+   * through `withExecutionContext`, and when 64 writes or 16 MiB are already
+   * pending. Requires `reliability.degradation` (the default): a failed
+   * background write is logged and counted, never thrown.
+   */
+  writeBehind?: boolean;
 }
 
 /**

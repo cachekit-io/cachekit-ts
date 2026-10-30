@@ -389,12 +389,72 @@ lock endpoint is selected automatically), `cachekitioWithLocking()`, or
 `cachekitioFull()`. `createCache` throws `ConfigurationError` if
 `distributedLock` is requested on a backend without `acquireLock`/`releaseLock`.
 
+With `writeBehind` on, a locked miss still waits for its `PUT`: the write
+stays inside the lock (see [Write-Behind](#write-behind)).
+
 There is deliberately no general admission-control cap beyond L1's
 `maxConcurrentRefreshes`: on Node's single-threaded event loop concurrent
 misses don't compete for threads, single-flight collapses the per-key herd,
 and distinct-key miss floods are already bounded by backend timeouts plus the
 circuit breaker. A global semaphore would add queueing latency without a
 failure mode it prevents.
+
+## Write-Behind
+
+`writeBehind: true` is an opt-in per wrapped function, off by default and set
+by no preset, matching cachekit-py's `write_behind`. A cold miss returns once
+the value is encoded (and encrypted) and in L1; its L2 write finishes in the
+background. On CachekitIO that takes the miss from `GET`, `PUT` on the
+caller's path to `GET` alone. The server still confirms the write; only the
+caller stops waiting for it.
+
+```typescript
+const getUser = cache.wrap(async (id: number) => fetchUser(id), {
+  namespace: 'users:getUser',
+  ttl: 300,
+  writeBehind: true,
+});
+```
+
+The cost is visibility. Until the write lands, **another process misses the
+key** and recomputes it (on the metered-misses backend, a billed miss), and so
+does this process when L1 is off. Another process's `invalidate` or `delete` is
+not ordered against this process's pending write, so a value computed before
+that invalidation can be written after it, with its full TTL.
+
+> [!CAUTION]
+> Do not enable it for values that must not outlive an invalidation in
+> another process, such as authorization decisions or entitlements.
+
+**In this process**, a later `set()`, `delete()` or `invalidate('params')` of
+the key waits for its pending write, so a pending write never overtakes them,
+and `close()` drains every pending write before it closes the backend.
+
+**The write stays on the caller's path:**
+
+- while `stampede.distributedLock` holds the lease: a write deferred past the
+  release would send every waiter's double-check to an empty L2, and each
+  would recompute. A miss that ran without the lock (the lock fell through)
+  writes behind as usual;
+- on Cloudflare Workers, unless the function was wrapped through
+  `cache.withExecutionContext(ctx)`, which registers the write with
+  `ctx.waitUntil`. workerd cancels unregistered work at response return;
+- when 64 writes or 16 MiB are already pending on the cache: that write is the
+  caller's, and it still waits behind any pending write of the same key, so
+  the older value can never land last.
+
+**Failures.** `writeBehind` requires `reliability.degradation` (the default);
+with degradation off, `wrap()` throws `ConfigurationError`, because a
+background write cannot report its failure to the caller. A failed background
+write keeps the value in this process's L1, logs one rate-limited line with a
+digest of the key, and counts as `operation="write_behind", status="error"` in
+`cachekit_operations_total` (a landed one as `status="success"`).
+
+> [!WARNING]
+> Pending writes live in process memory. A process that exits without
+> `await cache.close()` (a crash, `process.exit()`, a frozen serverless
+> instance) loses them. A lost write is only a later miss: the value is
+> recomputed.
 
 ## Cross-SDK interop mode
 
@@ -524,6 +584,10 @@ const cachedFn = cache.wrap(async (id: number) => fetchData(id), {
 });
 ```
 
+Options: `namespace`, `ttl`, `skipL1`, `writeBehind` (see
+[Write-Behind](#write-behind)), and `interop` / `interopArity` (see
+[Cross-SDK interop mode](#cross-sdk-interop-mode)).
+
 ### cache.invalidate(level, options?)
 
 Invalidate cache entries.
@@ -559,7 +623,8 @@ The second call evicts the whole namespace from every peer's L1, and neither
 
 ### cache.close()
 
-Close connections and release resources.
+Close connections and release resources. It first waits for every pending
+write-behind write.
 
 ## Error Handling
 
@@ -881,7 +946,8 @@ reported through the library logger by key digest.
   expire and recompute in the request path instead. The bound view also
   registers the `stampede.distributedLock` release; from the base cache that
   release can be cancelled, leaving the lease held for `lockTimeoutMs` while
-  other callers wait out `lockWaitMs`.
+  other callers wait out `lockWaitMs`. It also registers `writeBehind` writes;
+  from the base cache they stay on the caller's path.
 - **No Prometheus metrics.**
 - **Key material semantics**: keys are derived in wasm linear memory, a
   host-readable `ArrayBuffer`, then imported once as non-extractable
