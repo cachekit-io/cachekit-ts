@@ -136,8 +136,19 @@ impl ByteStorage {
 }
 
 /// Key derivation using HKDF-SHA256 (RFC 5869). Same validation as NAPI.
+///
+/// The master key arrives as a JS handle and the derived key leaves as a new
+/// JS `Uint8Array`, so neither crosses through a linear-memory buffer that is
+/// freed unwiped (the `&[u8]` argument and `Vec<u8>` return ABIs both do).
+/// The staging copy and the derived key are wiped on every return path. The
+/// Workers SDK takes its AES key from here once per manager.
 #[wasm_bindgen(js_name = deriveKey)]
-pub fn derive_key(master_key: &[u8], domain: &str, tenant_salt: &str) -> Result<Vec<u8>, JsError> {
+pub fn derive_key(
+    master_key: js_sys::Uint8Array,
+    domain: &str,
+    tenant_salt: &str,
+) -> Result<js_sys::Uint8Array, JsError> {
+    let master_key = Zeroizing::new(master_key.to_vec());
     if master_key.len() != 32 {
         return Err(JsError::new(&format!(
             "Master key must be 32 bytes, got {}",
@@ -155,9 +166,11 @@ pub fn derive_key(master_key: &[u8], domain: &str, tenant_salt: &str) -> Result<
         ));
     }
 
-    derive_domain_key(master_key, domain, tenant_salt.as_bytes())
-        .map(|derived| derived.to_vec())
-        .map_err(|e| JsError::new(&e.to_string()))
+    let derived = Zeroizing::new(
+        derive_domain_key(&master_key, domain, tenant_salt.as_bytes())
+            .map_err(|e| JsError::new(&e.to_string()))?,
+    );
+    Ok(js_sys::Uint8Array::from(&derived[..]))
 }
 
 /// Per-tenant derived keys with automatic zeroization.

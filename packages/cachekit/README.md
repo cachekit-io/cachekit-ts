@@ -317,8 +317,9 @@ const cache = createCache.secure({
 // or: CACHEKIT_PREVIOUS_MASTER_KEYS=<hex>,<hex> (comma-separated)
 ```
 
-The derived keyring lives behind the NAPI (or wasm) boundary and is zeroized
-on dispose; the decoded key buffers are wiped as soon as the keyring is built.
+The derived keyring lives behind the NAPI boundary and is zeroized on
+dispose (on Workers, as non-extractable WebCrypto keys; see the Workers
+section); the decoded key buffers are wiped as soon as the keyring is built.
 The hex key strings themselves (config values, environment variables) live in
 JavaScript memory and cannot be reliably scrubbed — treat them as sensitive
 for the lifetime of the process.
@@ -726,12 +727,13 @@ runtimes apart.
 encryption manager forwards cachekit-core's detection. Informational only: the
 crypto backend picks its implementation independently, so use it to explain
 `.secure` latency, not to change behaviour. It initialises the bindings if
-needed, and returns `null` (unknown) only when the installed binding
-predates the accessor. The per-architecture semantics are core's — as of
-cachekit-core 0.7.0 a runtime AES-NI probe on x86/x86_64, a runtime probe for
-the Armv8 Crypto Extension's AES instructions on aarch64 (a Raspberry Pi 4, a
-Cortex-A72 without the Crypto Extension, reports `false`), and `false` on
-Cloudflare Workers (wasm32 has no AES instructions).
+needed, and returns `null` (unknown) when the installed binding predates the
+accessor, and always on Cloudflare Workers: there AES-GCM runs through the
+runtime's WebCrypto, and an isolate cannot see whether that uses the host's
+AES instructions. On Node the per-architecture semantics are core's — as of
+cachekit-core 0.7.0 a runtime AES-NI probe on x86/x86_64, and a runtime probe
+for the Armv8 Crypto Extension's AES instructions on aarch64 (a Raspberry Pi 4,
+a Cortex-A72 without the Crypto Extension, reports `false`).
 
 ```typescript
 import { EncryptionManager } from '@cachekit-io/cachekit';
@@ -750,11 +752,12 @@ The SDK ships a Workers-native entrypoint: `@cachekit-io/cachekit/workers`
 (bare `import '@cachekit-io/cachekit'` also resolves to it under wrangler via
 the `workerd` export condition). It needs **no `nodejs_compat` flag** — the
 bundle contains no `node:*` builtins, no native addons, no ioredis, and no
-prom-client. Crypto (AES-256-GCM + HKDF-SHA256, counter nonces) and the
+prom-client. Key derivation (HKDF-SHA256), the key fingerprint and the
 ByteStorage wire envelope (LZ4 + xxHash3-64) run on a wasm32 build of the
 same audited Rust core the Node SDK uses (`@cachekit-io/cachekit-core-wasm`,
-~66 KB gzipped), so ciphertexts and envelopes are byte-compatible across
-Node, Workers, Python, and Rust.
+~66 KB gzipped). AES-256-GCM runs through the runtime's WebCrypto, which is
+native code, with the core's counter-nonce scheme. Ciphertexts and envelopes
+are byte-compatible across Node, Workers, Python, and Rust.
 
 ```typescript
 import { createCache, type WorkersCache } from '@cachekit-io/cachekit/workers';
@@ -791,7 +794,7 @@ export default {
 > uniqueness rests on a random 64-bit instance id (a weaker, birthday-bounded
 > guarantee at very high request volumes) and leave wasm allocations behind
 > on hot isolates. If you do create short-lived caches, call `cache.close()`
-> — it zeroizes key material and frees the wasm codec deterministically.
+> — it releases key material and frees the wasm codec deterministically.
 
 ### Native edge storage: Workers KV and the Cache API
 
@@ -879,11 +882,14 @@ reported through the library logger by key digest.
   release can be cancelled, leaving the lease held for `lockTimeoutMs` while
   other callers wait out `lockWaitMs`.
 - **No Prometheus metrics.**
-- **Key material semantics**: keys are derived and held in wasm linear
-  memory, which is a host-readable `ArrayBuffer` — weaker isolation than the
-  NAPI Rust heap on Node. On Workers, the host is your own isolate, making
-  this roughly JS-heap-equivalent in threat model; `dispose()`/`close()`
-  still zeroizes deterministically.
+- **Key material semantics**: keys are derived in wasm linear memory, a
+  host-readable `ArrayBuffer`, then imported once as non-extractable
+  WebCrypto `CryptoKey`s (decrypt-only for previous keys). The wasm key
+  handle and every JS copy of derived key bytes are wiped before the first
+  operation runs; HKDF's working buffers can stay on the wasm stack until
+  later calls overwrite them. A `CryptoKey` cannot be zeroized:
+  `dispose()`/`close()` drops it for the garbage collector. As on Node, the
+  master key itself stays in JS memory as its configured hex string.
 - **Startup**: wasm instantiation is a small one-time cost per isolate
   (~186 KB module, no I/O). A cache with compression off and no encryption
   never needs the module, so its keys are hashed in JS; once any cache has

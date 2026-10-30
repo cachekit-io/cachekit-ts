@@ -66,6 +66,7 @@
     "check:workers-bundle": "node scripts/check-workers-bundle.mjs",
     "bench:ir": "node bench/ir.mjs",
     "bench:cold-start": "node bench/cold-start.mjs",
+    "bench:workers-crypto": "vitest run --config bench/workers-crypto/vitest.config.ts --reporter=verbose",
     "bench:runtime": "node bench/runtime/run.mjs",
     "bench:live": "node bench/live/wall-time-probe.mjs",
     "bench:readme": "node bench/readme.mjs"

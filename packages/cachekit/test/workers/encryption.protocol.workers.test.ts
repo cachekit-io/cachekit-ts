@@ -11,8 +11,9 @@
  * 1. Raw wasm bindings decrypt EVERY ground-truth vector using the vector's
  *    own aad_hex (covers arrow/orjson/original_type AADs the TS SDK never
  *    builds itself).
- * 2. The Workers EncryptionManager decrypts the msgpack vectors from
- *    (cacheKey, compressed) alone — AES-GCM authentication makes a
+ * 2. The Workers EncryptionManager (AES-GCM through WebCrypto, keys from
+ *    the wasm build; webcrypto.workers.test.ts pins that path) decrypts the
+ *    msgpack vectors from (cacheKey, compressed) alone — AES-GCM authentication makes a
  *    successful decrypt a cryptographic proof its AAD construction matches
  *    the ground-truth aad_hex byte-for-byte.
  * 3. Fingerprint, AAD literal equality, round-trips, counter-nonce
@@ -288,7 +289,7 @@ describe('encryption + envelope composition (wasm end-to-end)', () => {
   });
 });
 
-describe('keyring rotation — Workers EncryptionManager (wasm keyring loop)', () => {
+describe('keyring rotation — Workers EncryptionManager (WebCrypto keyring loop)', () => {
   const K1_HEX = '11'.repeat(32);
   const K2_HEX = '22'.repeat(32);
   const CACHE_KEY = 'ns:workers:rotation';
