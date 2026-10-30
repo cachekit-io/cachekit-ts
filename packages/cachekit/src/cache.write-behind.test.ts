@@ -8,7 +8,9 @@
 import { createHash } from 'node:crypto';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createCache } from './cache.js';
-import { CacheImpl, type ExecutionContextLike } from './cache-core.js';
+import { CacheImpl, type CacheRuntime, type ExecutionContextLike } from './cache-core.js';
+import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
+import { EncryptionManager } from './encryption/manager.js';
 import { BackendError, ConfigurationError } from './errors.js';
 import { setLogger } from './logger.js';
 import type { Backend, LockableBackend } from './backends/types.js';
@@ -108,6 +110,22 @@ describe('write-behind', () => {
   const caches: SecureCache[] = [];
   const make = (options: CacheOptions): SecureCache => {
     const cache = createCache(options);
+    caches.push(cache);
+    return cache;
+  };
+
+  /**
+   * A cache on a runtime that, as Workers does, cancels work not registered
+   * with waitUntil: the only CacheRuntime field that differs here.
+   */
+  const makeWorkersLike = (options: CacheOptions & { backend: Backend }): SecureCache => {
+    const runtime: CacheRuntime = {
+      resolveBackend: () => options.backend,
+      createByteStorage: () => new ByteStorage(),
+      createEncryption: (config) => new EncryptionManager(config.masterKey, config.tenantId),
+      swrRequiresWaitUntil: true,
+    };
+    const cache = new CacheImpl(options, runtime);
     caches.push(cache);
     return cache;
   };
@@ -326,8 +344,7 @@ describe('write-behind', () => {
         }
         return realSet(key, value);
       };
-      const cache = make({ backend, l1: { enabled: false } });
-      (cache as unknown as { swrRequiresWaitUntil: boolean }).swrRequiresWaitUntil = true;
+      const cache = makeWorkersLike({ backend, l1: { enabled: false } });
       const registered: Promise<unknown>[] = [];
       const view = viewOf(cache, { waitUntil: (p) => registered.push(p) });
       let calls = 0;
@@ -370,8 +387,7 @@ describe('write-behind', () => {
         return realSet(key, value);
       };
       // A threshold ratio above 1 makes every L1 hit stale, so the next read refreshes.
-      const cache = make({ backend, l1: { swrEnabled: true, swrThresholdRatio: 2 } });
-      (cache as unknown as { swrRequiresWaitUntil: boolean }).swrRequiresWaitUntil = true;
+      const cache = makeWorkersLike({ backend, l1: { swrEnabled: true, swrThresholdRatio: 2 } });
       const registered: Promise<unknown>[] = [];
       const view = viewOf(cache, { waitUntil: (p) => registered.push(p) });
       let calls = 0;
@@ -407,8 +423,7 @@ describe('write-behind', () => {
     try {
       const backend = new GatedBackend();
       backend.gate(); // never opened: a write workerd cancelled
-      const cache = make({ backend });
-      (cache as unknown as { swrRequiresWaitUntil: boolean }).swrRequiresWaitUntil = true;
+      const cache = makeWorkersLike({ backend });
       const view = viewOf(cache, { waitUntil: () => {} });
       const fn = view.wrap(async (id: number) => id, {
         namespace: 'wb:cap',
