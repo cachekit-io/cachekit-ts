@@ -396,6 +396,61 @@ and distinct-key miss floods are already bounded by backend timeouts plus the
 circuit breaker. A global semaphore would add queueing latency without a
 failure mode it prevents.
 
+## Server stale-grace (CachekitIO)
+
+Off by default. A function wrapped with `staleTtl` asks the CachekitIO server to
+keep each entry for `staleTtl` seconds past its `ttl` and to serve it labelled
+`stale` in that window. A `wrap()` call whose L2 read comes back stale returns
+that value at once and re-runs the function in the background, so a call at a
+TTL boundary pays one `GET` instead of `GET`, compute and `PUT`.
+
+```typescript
+const cache = createCache.io({ apiKey: process.env.CACHEKIT_API_KEY! });
+
+const getReport = cache.wrap(async (id: string) => buildReport(id), {
+  namespace: 'reports:get',
+  ttl: 300,
+  staleTtl: 3600, // serve for up to an hour past the TTL while revalidating
+});
+```
+
+- Revalidation runs one at a time per key in each cache; one still running
+  after 60 seconds no longer blocks a new one. When the backend can lock
+  (`cachekitioWithLocking()`, `cachekitioFull()`, or on Node an `apiKey`
+  config with `stampede.distributedLock`, a flag that otherwise governs only
+  cold misses; on Workers use `cachekitioWithLocking()`),
+  it runs only under the server lease, so one process in the fleet
+  revalidates and the rest keep serving stale. A process the lease turns away,
+  or that cannot reach the lock endpoint, does not ask again for that key
+  until the lease could have expired (`stampede.lockTimeoutMs`, at most 60
+  seconds). Every write of the key, revalidation included, re-sends the TTL
+  and the stale window.
+- A failed revalidation never reaches the caller: the stale entry stays and
+  a later stale read tries again. A function that throws is logged
+  (rate-limited); a failed write follows the cache's reliability settings,
+  like any write. Past the window the server answers 404 and the call takes
+  the ordinary miss path.
+- A stale value never enters L1, and the L1 copy of a written value still
+  expires at `ttl`: the window is served by the server only.
+- On Cloudflare Workers the revalidation needs a context bound with
+  `withExecutionContext(ctx)`; without one, a stale read is treated as a miss
+  and recomputed in the request.
+- `wrap()` throws `ConfigurationError` when `staleTtl` is set on an encrypted
+  cache (a secure cache's TTL is often a revocation boundary), on a backend
+  other than CachekitIO, above 2,591,999 seconds, or when `ttl + staleTtl`
+  exceeds 2,592,000 (30 days). Fractions round up; `0` turns it off.
+
+> [!WARNING]
+> The stale window applies to every reader of the key, not only to this
+> function. Any reader that does not set `staleTtl` gets a stale-window value
+> back as an ordinary hit, where without the window it would have missed. In
+> this SDK that is `cache.get()` and every `wrap()` without `staleTtl`: they
+> return the value without revalidating it, and never cache it in L1. Readers
+> that do not check the server's freshness label (cachekit-ts before 0.2.0,
+> cachekit-rs today) also cache it locally as fresh. Do not set `staleTtl` on
+> keys whose readers rely on hard expiry, including interop keys. The protocol states this rule
+> ([`saas-api.md` § Stale-While-Revalidate](https://github.com/cachekit-io/protocol/blob/main/spec/saas-api.md#stale-while-revalidate)).
+
 ## Cross-SDK interop mode
 
 Interop mode lets this SDK share cache entries with the Python and Rust SDKs.
@@ -523,6 +578,9 @@ const cachedFn = cache.wrap(async (id: number) => fetchData(id), {
   ttl: 300,
 });
 ```
+
+Options: `namespace`, `ttl`, `skipL1`, `staleTtl` ([Server stale-grace](#server-stale-grace-cachekitio)), and the
+`interop` / `interopArity` pair ([Cross-SDK interop mode](#cross-sdk-interop-mode)).
 
 ### cache.invalidate(level, options?)
 

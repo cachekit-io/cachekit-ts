@@ -58,6 +58,27 @@ export interface WrapOptionsBase {
   ttl: number;
   /** Skip L1 cache for this operation */
   skipL1?: boolean;
+  /**
+   * Opt into the CachekitIO server's stale-grace window, in seconds (off by
+   * default): a stale L2 read is served at once and revalidated in the
+   * background. See the README's "Server stale-grace" section.
+   *
+   * Checked at wrap time (ConfigurationError): requires a backend that reads
+   * and writes the stale window (CachekitIO); refused on encrypted caches; at
+   * most 2,591,999 seconds, and `ttl + staleTtl` at most 2,592,000 (30 days);
+   * fractions round up; `0` turns it off.
+   *
+   * On Workers the revalidation needs a bound `waitUntil`
+   * (`withExecutionContext`); without one a stale read is a miss, recomputed
+   * in the request.
+   *
+   * Mixed readers: the window applies to every reader of the key. A reader
+   * that does not set `staleTtl` (`cache.get()`, a plain `wrap()`, another
+   * SDK) gets a stale-window value as an ordinary hit where it would have
+   * missed; cachekit-ts before 0.2.0 and cachekit-rs also cache it locally.
+   * Do not set this on keys whose readers rely on hard expiry.
+   */
+  staleTtl?: number;
 }
 
 /**

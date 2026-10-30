@@ -62,6 +62,22 @@ export interface Backend {
   set(key: string, value: Uint8Array, ttl?: number): Promise<void>;
 
   /**
+   * Optional capability: `set` plus a stale-grace window, the time the store
+   * keeps the entry past `ttl` and serves it labelled stale (CachekitIO
+   * `X-CacheKit-Stale-TTL`, protocol spec/saas-api.md § Stale-While-Revalidate).
+   * Implement it only together with {@link getWithTtl} reporting `isStale`:
+   * CacheImpl refuses `WrapOptions.staleTtl` on a backend without both, because
+   * a reader that cannot see the stale label caches stale bytes as fresh.
+   *
+   * Delegating wrappers MUST forward the inner backend's implementation.
+   *
+   * @param ttl - Time-to-live in seconds (required: the window counts from it)
+   * @param staleTtl - Stale-grace window in seconds, >= 0; `0` sends no window
+   * @throws {BackendError} if the operation fails
+   */
+  setWithStaleTtl?(key: string, value: Uint8Array, ttl: number, staleTtl: number): Promise<void>;
+
+  /**
    * Optional capability: synchronously reject a TTL this backend cannot
    * store, BEFORE any I/O. CacheImpl calls this ahead of the reliability
    * executor, because a deterministic caller error must surface to the
