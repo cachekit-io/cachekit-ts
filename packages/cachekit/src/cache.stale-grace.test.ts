@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Registry } from 'prom-client';
 import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
+import { metricValue } from '../test/fixtures/metrics.js';
 import { createCache } from './cache.js';
 import { CacheImpl, type CacheRuntime } from './cache-core.js';
 import { EncryptionManager } from './encryption/manager.js';
@@ -367,6 +369,31 @@ describe('server stale-grace (WrapOptions.staleTtl)', () => {
 
       await wrapped(64); // the insert that crosses the threshold sweeps
       expect(revalidating(reader).size).toBe(1);
+    });
+
+    it('counts a failed lease release without failing the revalidation or logging', async () => {
+      const backend = new LockingStaleGraceBackend();
+      await seedStale(backend);
+      vi.spyOn(backend, 'releaseLock').mockRejectedValueOnce(
+        new Error('lock endpoint unreachable')
+      );
+      const logError = vi.spyOn(logger, 'logError').mockImplementation(() => {});
+      const registry = new Registry();
+      const reader = process(backend, { metrics: { registry } });
+
+      expect(await reader.wrap(async () => 'v2', WRAP)()).toBe('v1');
+      // The revalidation ran, so the failed release puts no hold on the key.
+      await vi.waitFor(() => expect(revalidating(reader).size).toBe(0));
+      await vi.waitFor(async () =>
+        expect(
+          await metricValue(registry, 'cachekit_operations_total', {
+            operation: 'lock_release',
+            status: 'error',
+          })
+        ).toBe(1)
+      );
+      expect(backend.writes).toEqual([WIRE, WIRE]);
+      expect(logError).not.toHaveBeenCalled();
     });
   });
 
