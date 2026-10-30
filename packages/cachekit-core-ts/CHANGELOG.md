@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.1](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-core-ts-v0.2.0...cachekit-core-ts-v0.2.1) (2026-10-27)
+
+
+### Bug Fixes
+
+* **cachekit-core-ts:** build napi without napi4 so a first load keeps no async context (LAB-10886) ([#256](https://github.com/cachekit-io/cachekit-ts/issues/256)) ([a5fbdda](https://github.com/cachekit-io/cachekit-ts/commit/a5fbddaaad69b6c1c314394ac7289fe327390f97))
+* **deps:** update rust crate cachekit-core to 0.7.0 ([52823b0](https://github.com/cachekit-io/cachekit-ts/commit/52823b0bb76e157e3430af76a60de42835b14801))
+
+
+### Performance Improvements
+
+* **cachekit:** hash cache keys through the NAPI and wasm bindings (LAB-7141) ([#259](https://github.com/cachekit-io/cachekit-ts/issues/259)) ([1dc06f9](https://github.com/cachekit-io/cachekit-ts/commit/1dc06f9014687ebddd2f7905a36c9c9982f890f3))
+* **deps:** bump cachekit-core to 0.7.2 (LAB-11012) ([#264](https://github.com/cachekit-io/cachekit-ts/issues/264)) ([be5a779](https://github.com/cachekit-io/cachekit-ts/commit/be5a779bd4f34374630c6efc3bde48ce9ffd516c))
+* **deps:** update cachekit-core to 0.7.1 (LAB-10985) ([#257](https://github.com/cachekit-io/cachekit-ts/issues/257)) ([3bd2bb2](https://github.com/cachekit-io/cachekit-ts/commit/3bd2bb219a47e15496ea0a95b74c37de6e7ce7a3))
+
 ## [0.2.0](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-core-ts-v0.1.3...cachekit-core-ts-v0.2.0) (2026-10-21)
 
 

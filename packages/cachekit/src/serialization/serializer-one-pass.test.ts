@@ -1,0 +1,947 @@
+import { describe, it, expect } from 'vitest';
+import { runInNewContext } from 'node:vm';
+import { ExtData, encode as msgpackEncode } from '@msgpack/msgpack';
+import {
+  ValueEncoder,
+  encodeCounted,
+  normalize,
+  resolveSerializerConfig,
+  type SerializerConfig,
+} from './serializer.js';
+import { SerializationError, ValueTooLargeError } from '../errors.js';
+
+// encodeCounted writes encode(normalize(value)) in one walk. The oracle is that
+// two-pass composition, run on the in-tree normalize at test time, so a change
+// to normalize that the one-pass path does not follow fails here. Its encode()
+// nesting bound is the configured maxDepth (msgpack counts the top value as 1,
+// normalize as 0), and passing it is the SerializationError normalize throws.
+
+type Outcome =
+  { bytes: Uint8Array; objects: number; values: number } | { error: string; message: string };
+
+/** What was thrown, without assuming an Error: a bare throw must not hide the failure. */
+const thrown = (e: unknown): Outcome =>
+  e instanceof Error
+    ? { error: e.constructor.name, message: e.message }
+    : { error: typeof e, message: String(e) };
+
+function twoPass(value: unknown, config: SerializerConfig): Outcome {
+  try {
+    const walk = { forKey: false, objects: 0, values: 0 };
+    const normalized = normalize(value, 0, config.maxDepth, config.maxCollectionSize, walk);
+    let bytes: Uint8Array;
+    try {
+      bytes = msgpackEncode(normalized, { maxDepth: config.maxDepth + 1 });
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith('Too deep objects')) {
+        throw new SerializationError(`Max depth of ${config.maxDepth} exceeded`);
+      }
+      throw e;
+    }
+    if (bytes.length > config.maxEncodedSize) {
+      throw new ValueTooLargeError(
+        `Encoded size ${bytes.length} exceeds max ${config.maxEncodedSize}`
+      );
+    }
+    return { bytes: bytes.slice(), objects: walk.objects, values: walk.values };
+  } catch (e) {
+    return thrown(e);
+  }
+}
+
+function onePass(value: unknown, config: SerializerConfig): Outcome {
+  try {
+    const count = { objects: 0, values: 0 };
+    const bytes = encodeCounted(value, config, count);
+    return { bytes, ...count };
+  } catch (e) {
+    return thrown(e);
+  }
+}
+
+const config = resolveSerializerConfig();
+
+// ES2024 buffer operations, which this lib target does not type.
+const detach = (u: Uint8Array) =>
+  void structuredClone(u.buffer, { transfer: [u.buffer as ArrayBuffer] });
+type Resizable = ArrayBuffer & { resize(length: number): void };
+const resizable = (length: number, maxByteLength: number) =>
+  new (
+    ArrayBuffer as unknown as new (length: number, options: { maxByteLength: number }) => Resizable
+  )(length, { maxByteLength });
+
+/** mulberry32: small, seedable, and good enough to spread the cases. */
+function rng(seed: number) {
+  let a = seed >>> 0;
+  const next = () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const int = (n: number) => Math.floor(next() * n);
+  const pick = <T>(items: readonly T[]): T => items[int(items.length)];
+  return { next, int, pick };
+}
+
+const NUMBERS = [
+  0,
+  -0,
+  1,
+  -1,
+  31,
+  -32,
+  -33,
+  127,
+  128,
+  -128,
+  -129,
+  255,
+  256,
+  65535,
+  65536,
+  -32768,
+  -32769,
+  2 ** 31 - 1,
+  -(2 ** 31),
+  -(2 ** 31) - 1,
+  2 ** 32 - 1,
+  2 ** 32,
+  2 ** 40 + 7,
+  -(2 ** 40) - 7,
+  Number.MAX_SAFE_INTEGER,
+  Number.MIN_SAFE_INTEGER,
+  2 ** 60,
+  -(2 ** 60),
+  0.5,
+  -1.25,
+  1e300,
+  Number.MIN_VALUE,
+  NaN,
+  Infinity,
+  -Infinity,
+];
+const STRINGS = [
+  '',
+  'a',
+  'b',
+  'B',
+  'key',
+  'é',
+  '日本',
+  '😀',
+  'x'.repeat(31),
+  'x'.repeat(32),
+  'x'.repeat(255),
+  'y'.repeat(256),
+  'é'.repeat(60),
+  '\ud800',
+  'a\udc00b',
+  'z'.repeat(50) + '\ud83d',
+  'w'.repeat(49) + '\ud83d',
+  'constructor',
+  'toString',
+  '10',
+  '2',
+  '01',
+  '-1',
+  '1.5',
+  '4294967295',
+];
+// Keys that stay in the one-pass path, and the shapes that must go to normalize.
+const PLAIN_KEYS = ['a', 'b', 'B', 'key', 'é', '', '01', '-1', '1.5', 'constructor', 'k10', '😀'];
+const INDEX_KEYS = ['0', '2', '10', '4294967295', '9007199254740993'];
+
+function generate(r: ReturnType<typeof rng>, depth: number): unknown {
+  const leaf = depth > 4 || r.next() < 0.35;
+  if (leaf) {
+    switch (r.int(14)) {
+      case 0:
+        return undefined;
+      case 1:
+        return null;
+      case 2:
+        return r.next() < 0.5;
+      case 3:
+      case 4:
+        return r.pick(NUMBERS);
+      case 5:
+        return (r.next() - 0.5) * 10 ** r.int(12);
+      case 6:
+      case 7:
+        return r.pick(STRINGS);
+      case 8:
+        return Uint8Array.from({ length: r.pick([0, 3, 300]) }, (_, i) => i);
+      case 9:
+        return Buffer.from([1, 2, 3]).subarray(1);
+      case 10:
+        return r.pick([new Date(1_700_000_000_000), new Date(NaN)]);
+      case 11:
+        // Each of these makes both paths throw.
+        return r.next() < 0.97
+          ? r.pick(STRINGS)
+          : r.pick<() => unknown>([
+              () => new Int8Array([1]),
+              () => new DataView(new ArrayBuffer(2)),
+              () => new ArrayBuffer(2),
+              () => 1n,
+              () => Symbol('s'),
+              () => () => 1,
+            ])();
+      case 12:
+        return new Uint8Array(new ArrayBuffer(8), 2, 4);
+      default:
+        return r.pick(STRINGS);
+    }
+  }
+  const children = () =>
+    Array.from({ length: r.pick(depth < 2 ? [0, 1, 3, 16, 17] : [0, 1, 2]) }, () =>
+      generate(r, depth + 1)
+    );
+  switch (r.int(12)) {
+    case 0:
+    case 1:
+    case 2: {
+      const obj: Record<string, unknown> = {};
+      for (const v of children())
+        obj[r.pick(PLAIN_KEYS) + (r.next() < 0.5 ? '' : String(r.int(40)))] = v;
+      return obj;
+    }
+    case 3: {
+      const obj: Record<string, unknown> = {};
+      for (const v of children()) obj[r.pick([...PLAIN_KEYS, ...INDEX_KEYS])] = v;
+      return obj;
+    }
+    case 4: {
+      // An own __proto__ key, as JSON.parse makes one.
+      const obj = JSON.parse('{"__proto__": {"x": 1}, "a": 1}') as Record<string, unknown>;
+      obj.b = generate(r, depth + 1);
+      return obj;
+    }
+    case 5: {
+      const obj: Record<string, unknown> = {};
+      const v = generate(r, depth + 1);
+      Object.defineProperty(obj, r.pick(PLAIN_KEYS), { get: () => v, enumerable: true });
+      Object.defineProperty(obj, 'hidden', { value: 1, enumerable: false });
+      obj.z = generate(r, depth + 1);
+      return obj;
+    }
+    case 6:
+    case 7:
+      return children();
+    case 8: {
+      // Holey, and with an element getter.
+      const arr: unknown[] = new Array(r.int(20));
+      for (let i = 0; i < arr.length; i++) if (r.next() < 0.5) arr[i] = generate(r, depth + 1);
+      if (arr.length > 0) Object.defineProperty(arr, 0, { get: () => 'g', enumerable: true });
+      return arr;
+    }
+    case 9: {
+      // String(key) merges 1 and '1', and a non-string key sorts by its string.
+      const keys = [1, '1', 'b', 2, true, null, { o: 1 }];
+      return new Map(children().map((v, i) => [keys[i % keys.length], v]));
+    }
+    case 10:
+      return new Set([...children(), r.pick(STRINGS), r.pick(NUMBERS)]);
+    default:
+      return r.pick<() => unknown>([
+        () => Object.assign(Object.create(null), { b: 1, a: [2] }),
+        () =>
+          new (class Point {
+            y = 2;
+            x = 1;
+          })(),
+        () => new String('ab'),
+        () => new Number(5),
+        () => Object.assign(new (class extends Array {})(), { 0: 1 }),
+        () => Object.setPrototypeOf([1, 2], null),
+        () => runInNewContext('({ b: [1, { a: new Date(0) }], a: new Map([[1, 2]]) })'),
+        () => runInNewContext('[new Uint8Array([1]), [2]]'),
+      ])();
+  }
+}
+
+const hex = (o: Outcome) =>
+  'bytes' in o ? { ...o, bytes: Buffer.from(o.bytes).toString('hex') } : o;
+
+// Each case builds two fresh values, since its getters change state.
+const same = (make: () => unknown, c = config) =>
+  expect(hex(onePass(make(), c))).toEqual(hex(twoPass(make(), c)));
+const later = (get: () => unknown) => ({ get, enumerable: true });
+
+/**
+ * An empty array whose own species returns `copy`, so normalize's copy of it
+ * is `copy` itself. A species must be a constructor: a function, not an arrow.
+ */
+const species = (copy: unknown) => {
+  const a: unknown[] = [];
+  const ctor = function () {
+    return copy;
+  };
+  Object.defineProperty(a, 'constructor', { value: { [Symbol.species]: ctor } });
+  return a;
+};
+
+describe('encodeCounted one-pass encode', () => {
+  it('matches encode(normalize(value)): bytes, L1 counts and errors, on seeded random values', () => {
+    // Fixed, so every run checks the same values; set the variable to explore others.
+    const seed = Number(process.env.CACHEKIT_ONE_PASS_SEED ?? 0x5eed);
+    const r = rng(seed);
+    const failures: unknown[] = [];
+    let errors = 0;
+    // Every other case under a small output limit, so values cross it
+    // anywhere: in the walk, in a late segment, or in a binary.
+    const limits = [16, 64, 256, 1024].map((n) => resolveSerializerConfig({ maxEncodedSize: n }));
+    for (let i = 0; i < 4000 && failures.length < 3; i++) {
+      const value = generate(r, 0);
+      const c = i % 2 ? config : limits[(i >> 1) % limits.length];
+      const want = twoPass(value, c);
+      const got = onePass(value, c);
+      if ('error' in want) errors++;
+      try {
+        expect(hex(got)).toEqual(hex(want));
+      } catch {
+        failures.push({ case: i, want: hex(want), got: hex(got) });
+      }
+    }
+    // Both outcomes are exercised, not only the happy path.
+    expect(errors, `CACHEKIT_ONE_PASS_SEED=${seed}`).toBeGreaterThan(20);
+    if (failures.length) {
+      throw new Error(
+        `one-pass encode diverged; reproduce with CACHEKIT_ONE_PASS_SEED=${seed}\n` +
+          JSON.stringify(failures, null, 2)
+      );
+    }
+  });
+
+  it('matches at and past the configured maxDepth', () => {
+    const nest = (levels: number, leaf: unknown, array = false): unknown => {
+      let v = leaf;
+      for (let i = 0; i < levels; i++) v = array ? [v] : { n: v };
+      return v;
+    };
+    for (const maxDepth of [32, 100, 200, 1024]) {
+      const c = resolveSerializerConfig({ maxDepth });
+      for (const levels of [31, 32, 33, 98, 99, 100, 101, 150, 199, 200, 201]) {
+        // Holes: [<hole>, 1], and [<hole>] alone, whose depth only encode() checks.
+        const holey = Object.assign(new Array(2), { 1: 1 });
+        for (const leaf of [
+          1,
+          undefined,
+          new Map([[1, 2]]),
+          new Date(0),
+          holey,
+          new Array(1),
+          {},
+          1n,
+        ]) {
+          for (const array of [false, true]) {
+            const value = nest(levels, leaf, array);
+            expect(hex(onePass(value, c)), `maxDepth ${maxDepth} levels ${levels}`).toEqual(
+              hex(twoPass(value, c))
+            );
+          }
+        }
+      }
+    }
+  });
+
+  it('matches at every header width boundary, 32-bit lengths included', () => {
+    // The random cases stay short. These reach every header width: fix, 8,
+    // 16 and 32-bit lengths (msgpack arrays and maps have no 8-bit header).
+    const c = resolveSerializerConfig({ maxEncodedSize: 2 ** 22, maxCollectionSize: 70_000 });
+    for (const n of [0x0f, 0x10, 0x1f, 0x20, 0xff, 0x100, 0xffff, 0x10000, 70_000]) {
+      for (const value of [
+        'y'.repeat(n),
+        'é'.repeat(n),
+        new Uint8Array(n).fill(7),
+        { b: new Uint8Array(n).fill(3), s: 'y'.repeat(n) },
+        Array.from({ length: n }, (_, i) => i),
+        Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${i}`, i])),
+      ]) {
+        const want = twoPass(value, c);
+        // Both paths must encode it, or the writers go unchecked.
+        expect(want, `length ${n}`).toHaveProperty('bytes');
+        expect(hex(onePass(value, c)), `length ${n}`).toEqual(hex(want));
+      }
+    }
+  });
+
+  it('lets a normalize error later in the walk win over an earlier encode error', () => {
+    // msgpack's "Unrecognized object" at a, normalize's binary rule at b
+    const value = { a: () => 1, b: new Int8Array(1), c: 1n };
+    const got = onePass(value, config);
+    expect(got).toEqual(twoPass(value, config));
+    expect(got).toMatchObject({ error: 'SerializationError' });
+    // With no normalize error the first encode error is thrown.
+    expect(onePass({ a: Symbol('x'), b: 1n }, config)).toEqual({
+      error: 'Error',
+      message: 'Unrecognized object: [object Symbol]',
+    });
+  });
+
+  describe('errors: same class and message as normalize + encode', () => {
+    const small = resolveSerializerConfig({ maxCollectionSize: 3, maxEncodedSize: 64 });
+    const cases: [string, unknown, SerializerConfig][] = [
+      [
+        'depth',
+        JSON.parse('{"a":'.repeat(40) + '1' + '}'.repeat(40)),
+        resolveSerializerConfig({ maxDepth: 32 }),
+      ],
+      ['array size', [1, 2, 3, 4], small],
+      ['nested array size', { a: [1, 2, 3, 4] }, small],
+      [
+        'Map size',
+        new Map([
+          [1, 1],
+          [2, 2],
+          [3, 3],
+          [4, 4],
+        ]),
+        small,
+      ],
+      ['Set size', { s: new Set([1, 2, 3, 4]) }, small],
+      ['object key count', { a: 1, b: 2, c: 3, d: 4 }, small],
+      ['Int8Array', { v: new Int8Array([1]) }, config],
+      ['DataView', [new DataView(new ArrayBuffer(1))], config],
+      ['ArrayBuffer', new ArrayBuffer(1), config],
+      ['maxEncodedSize', 'x'.repeat(100), small],
+      ['maxEncodedSize, object', { a: 'x'.repeat(40), b: 'y'.repeat(40) }, small],
+    ];
+    for (const [name, value, c] of cases) {
+      it(name, () => {
+        const want = twoPass(value, c);
+        expect(want).toHaveProperty('error');
+        expect(onePass(value, c)).toEqual(want);
+      });
+    }
+  });
+
+  it('hands Map, own __proto__ and index-like keys to normalize', () => {
+    // normalize orders these as the engine does, so the bytes show who encoded them.
+    for (const value of [
+      { 10: 'a', 2: 'b', x: 'c' },
+      { '4294967295': 1, '0': 2 },
+      JSON.parse('{"b": 1, "__proto__": {"x": 1}, "a": 2}'),
+      new Map<unknown, unknown>([
+        [2, 'a'],
+        ['10', 'b'],
+        [{}, 'c'],
+      ]),
+    ]) {
+      expect(hex(onePass(value, config))).toEqual(hex(twoPass(value, config)));
+    }
+  });
+
+  it('reads each own property, element and getter once per encode', () => {
+    let reads = 0;
+    const counted = <T>(v: T) => ({
+      get: () => {
+        reads++;
+        return v;
+      },
+      enumerable: true,
+    });
+    const inner = Object.defineProperty({ a: 1 }, 'g', counted('inner'));
+    const arr = Object.defineProperty([1, 2, 3], 1, counted({ x: 1 }));
+    const value = Object.defineProperties(
+      {},
+      { b: counted(inner), c: counted(arr), d: counted(5) }
+    );
+    encodeCounted(value, config);
+    expect(reads).toBe(5);
+    reads = 0;
+    encodeCounted(value, config);
+    expect(reads).toBe(5);
+  });
+
+  describe('user code that runs later in the walk', () => {
+    it('sees a Uint8Array as encode() read it, after normalize', () => {
+      same(() => {
+        const u = Uint8Array.of(1, 2, 3);
+        return Object.defineProperty(
+          { a: u },
+          'b',
+          later(() => ((u[0] = 99), 1))
+        );
+      });
+      // inside a Map, which normalize copies
+      same(() => {
+        const u = Uint8Array.of(1, 2, 3);
+        return Object.defineProperty(
+          { a: new Map([['k', u]]) },
+          'b',
+          later(() => ((u[1] = 7), 1))
+        );
+      });
+      // detached, then a later encode() error: the detached read throws first
+      same(() => {
+        const u = Uint8Array.of(1, 2, 3);
+        return Object.defineProperty(
+          { a: u },
+          'b',
+          later(() => (detach(u), () => 1))
+        );
+      });
+      // encode() stops at its first error, so it never reads a binary after it
+      same(() => {
+        const u = Uint8Array.of(1, 2, 3);
+        return Object.defineProperty(
+          { a: () => 1, b: u },
+          'c',
+          later(() => (detach(u), 1))
+        );
+      });
+      same(() => {
+        const ab = resizable(4, 8);
+        const u = new Uint8Array(ab, 0, 4);
+        return Object.defineProperty(
+          { a: u },
+          'b',
+          later(() => (ab.resize(1), 1))
+        );
+      });
+    });
+
+    it("encodes an array species' object as encode() read it, after normalize", () => {
+      same(() => {
+        const shared = { n: 0 };
+        return Object.defineProperty(
+          { a: species(shared) },
+          'b',
+          later(() => ((shared.n = 1), 1))
+        );
+      });
+      // inside an object with an index-like key, which normalize copies
+      same(() => {
+        const shared = { n: 0 };
+        return Object.defineProperty(
+          { a: { 0: species(shared) } },
+          'b',
+          later(() => ((shared.n = 1), 1))
+        );
+      });
+      // an ExtData whose bytes depend on where it lands in the stream
+      same(() => ({
+        a: species(new ExtData(12, (pos: number) => Uint8Array.of(pos))),
+        z: species(new ExtData(3, Uint8Array.of(1, 2, 3))),
+      }));
+    });
+
+    it('reads lengths as often as encode() does, and encodes what its codec matches', () => {
+      // An array whose own map returns `out` as normalize's copy.
+      const mapped = (out: unknown[]) => Object.assign([0], { map: () => out });
+      // A Uint8Array whose length getter counts its reads, and an object that
+      // reports the count when encode() reaches it, after the binary.
+      const counted = () => {
+        const state = { reads: 0 };
+        class Counted extends Uint8Array {
+          get length() {
+            state.reads++;
+            return super.length;
+          }
+        }
+        return {
+          bytes: new Counted([1, 2]),
+          probe: {
+            get v() {
+              return state.reads;
+            },
+          },
+        };
+      };
+      same(() => {
+        const { bytes, probe } = counted();
+        return { a: mapped([bytes, probe]) };
+      });
+      same(() => {
+        const { bytes, probe } = counted();
+        return { a: mapped([new ExtData(12, () => bytes), probe]) };
+      });
+      // a length getter that changes per read: one read, so no stray byte
+      same(() => {
+        let reads = 0;
+        const bytes = Object.defineProperty(Uint8Array.of(7), 'length', { get: () => ++reads });
+        return { a: mapped([bytes]) };
+      });
+      // binary that is not a Uint8Array, which only an own map can put in the copy
+      same(() => ({ a: mapped([new Int16Array([1, -2, 300])]) }));
+      same(() => ({ a: mapped([new DataView(new ArrayBuffer(8), 3, 4)]) }));
+      // a Date, or a function on Date.prototype, encodes as the timestamp ext
+      const dated = () =>
+        Object.assign(Object.setPrototypeOf(function () {}, Date.prototype) as object, {
+          getTime: () => 0,
+        });
+      same(() => ({ a: mapped([new Date(0)]) }));
+      same(() => ({ a: dated() }));
+      same(() => ({ a: mapped([dated()]) }));
+    });
+
+    it("reads a binary's byteLength and a callable ExtData when encode() did", () => {
+      // a later view's own byteLength getter runs after the earlier segment is read
+      same(() => {
+        const shared = { n: 0 };
+        const view = Object.defineProperty(Uint8Array.of(7), 'byteLength', {
+          get: () => ((shared.n = 1), 1),
+        });
+        return { a: species(shared), b: species(view) };
+      });
+      same(() => {
+        const view = Object.defineProperty(new Uint8Array(1), 'byteLength', {
+          get: () => {
+            throw new Error('later byteLength');
+          },
+        });
+        return { a: new Map([['k', 1n]]), b: species(view) };
+      });
+      // a function the codec takes for an ExtData, from a species and in the value itself
+      const callableExt = () =>
+        Object.assign(Object.setPrototypeOf(function () {}, ExtData.prototype) as object, {
+          type: 12,
+          data: Uint8Array.of(0),
+        }) as { data: Uint8Array };
+      same(() => {
+        const ext = callableExt();
+        return Object.defineProperty(
+          { a: species(ext) },
+          'b',
+          later(() => ((ext.data[0] = 1), 1))
+        );
+      });
+      same(() => {
+        const ext = callableExt();
+        return Object.defineProperty(
+          { a: ext },
+          'b',
+          later(() => ((ext.data[0] = 1), 1))
+        );
+      });
+    });
+
+    it('rejects a function a later getter moves onto Date.prototype (a known difference)', () => {
+      // Documented on ValueEncoder: the prototype is checked during the walk.
+      const make = () => {
+        const fn = Object.assign(function () {}, { getTime: () => 0 });
+        return Object.defineProperty(
+          { a: fn },
+          'b',
+          later(() => (Object.setPrototypeOf(fn, Date.prototype), 1))
+        );
+      };
+      expect(twoPass(make(), config)).toHaveProperty('bytes');
+      expect(onePass(make(), config)).toEqual({
+        error: 'Error',
+        message: 'Unrecognized object: [object Function]',
+      });
+      // the same for a function an array's own species returns
+      const fromSpecies = () => {
+        const fn = Object.assign(function () {}, { getTime: () => 0 });
+        return Object.defineProperty(
+          { a: species(fn) },
+          'b',
+          later(() => (Object.setPrototypeOf(fn, Date.prototype), 1))
+        );
+      };
+      expect(twoPass(fromSpecies(), config)).toHaveProperty('bytes');
+      expect(onePass(fromSpecies(), config)).toEqual({
+        error: 'Error',
+        message: 'Unrecognized object: [object Function]',
+      });
+      // inside a Map's copy the function is read late, so it matches
+      same(() => {
+        const fn = Object.assign(function () {}, { getTime: () => 0 });
+        return Object.defineProperty(
+          { a: new Map([['f', fn]]) },
+          'b',
+          later(() => (Object.setPrototypeOf(fn, Date.prototype), 1))
+        );
+      });
+    });
+
+    it('checks the depth of an element whose getter deletes it', () => {
+      same(
+        () => {
+          const a = [0];
+          Object.defineProperty(a, '0', {
+            configurable: true,
+            get() {
+              delete a[0];
+              return undefined;
+            },
+          });
+          let value: unknown = a;
+          for (let i = 0; i < 32; i++) value = { n: value };
+          return value;
+        },
+        resolveSerializerConfig({ maxDepth: 32 })
+      );
+    });
+
+    it('writes nothing past the first encode() error', () => {
+      const encoder = new ValueEncoder();
+      // Under the 1 MiB the encoder keeps, so growth for b would show.
+      const value = {
+        a: 1n,
+        b: 'x'.repeat(400_000),
+        c: new Array(9000).fill(true),
+        d: new Array(9000).fill(300),
+      };
+      const kept = () => (encoder as unknown as { bytes: Uint8Array }).bytes;
+      const before = kept();
+      expect(() => encoder.encode(value, config, { forKey: false, objects: 0, values: 0 })).toThrow(
+        'Unrecognized object: [object BigInt]'
+      );
+      // encode() stopped at a; the buffer never grew for b, c or d.
+      expect(kept()).toBe(before);
+      // a plain function is encode()'s error too: nothing after it is written
+      const plainBefore = kept();
+      expect(() =>
+        encoder.encode({ a: () => 1, b: 'x'.repeat(400_000) }, config, {
+          forKey: false,
+          objects: 0,
+          values: 0,
+        })
+      ).toThrow('Unrecognized object: [object Function]');
+      expect(kept()).toBe(plainBefore);
+      // normalize's checks still run past it, and win.
+      same(() => ({ a: 1n, b: 'x'.repeat(100), c: new Int8Array(1) }));
+      // an encode() error inside normalize's copy of a comes before b's
+      same(() => ({ a: new Map([['k', 1n]]), b: Symbol('s') }));
+      same(() => ({ a: new Set([() => 1]), b: 1n }));
+    });
+
+    it('makes encode() error messages only for the error thrown, when it is thrown', () => {
+      let tags = 0;
+      const tagged = () =>
+        Object.defineProperty(() => 1, Symbol.toStringTag, {
+          get: () => (tags++, 'Tagged'),
+        });
+      same(() => ({ a: tagged(), b: tagged() }));
+      tags = 0;
+      onePass({ a: tagged(), b: tagged() }, config);
+      expect(tags).toBe(1);
+      // normalize's error wins, and no message is made for the function
+      tags = 0;
+      same(() => ({ a: tagged(), b: new ArrayBuffer(1) }));
+      onePass({ a: tagged(), b: new ArrayBuffer(1) }, config);
+      expect(tags).toBe(0);
+      // a later getter changes the tag the message reads
+      same(() => {
+        const f = tagged();
+        return Object.defineProperty(
+          { a: f },
+          'b',
+          later(() => (Object.defineProperty(f, Symbol.toStringTag, { value: 'Changed' }), 1))
+        );
+      });
+    });
+
+    it('reads an array constructor, an own map and a toStringTag as often as normalize', () => {
+      let reads = 0;
+      const count = <T>(v: T) => later(() => (reads++, v));
+      const cases: [() => object, number][] = [
+        [() => Object.defineProperty([1, 2], 'constructor', count(undefined)), 1],
+        [() => Object.defineProperty([1, 2], 'map', count(Array.prototype.map)), 1],
+        [() => Object.defineProperty({ 0: 1, a: 2 }, Symbol.toStringTag, count('T')), 1],
+        [
+          () => Object.defineProperty(new ArrayBuffer(1), Symbol.toStringTag, count('ArrayBuffer')),
+          1,
+        ],
+      ];
+      for (const [make, want] of cases) {
+        same(make);
+        reads = 0;
+        onePass(make(), config);
+        expect(reads).toBe(want);
+      }
+      // an own map that is not Array.prototype.map is called, as normalize calls it
+      same(() => Object.assign([1, 2], { map: () => 'x' }));
+      // a tag getter that adds a key each time it runs
+      same(() => {
+        const o: Record<string, number> = { 0: 1 };
+        let n = 0;
+        return Object.defineProperty(o, Symbol.toStringTag, {
+          get: () => ((o[`k${n++}`] = n), 'T'),
+        });
+      });
+    });
+  });
+
+  describe('past maxEncodedSize', () => {
+    const small = resolveSerializerConfig({ maxEncodedSize: 64 });
+
+    it('reads late sizes when written, and keeps set() errors past the limit', () => {
+      // a binary an earlier segment shrinks: its size is read when written
+      same(
+        () => {
+          const ab = resizable(2000, 2000);
+          const view = new Uint8Array(ab);
+          const shrinker = new ExtData(12, () => (ab.resize(4), new Uint8Array(1)));
+          return { a: species(shrinker), b: species(view) };
+        },
+        resolveSerializerConfig({ maxEncodedSize: 100 })
+      );
+      // ExtData data that set() rejects, past the limit: its error still wins
+      same(
+        () => ({
+          a: 'x'.repeat(3000),
+          b: species(new ExtData(12, new BigInt64Array([1n]) as unknown as Uint8Array)),
+        }),
+        resolveSerializerConfig({ maxEncodedSize: 64 })
+      );
+    });
+
+    it('matches with a walked prefix past the start buffer before late segments', () => {
+      // Past 2 KiB the walk's buffer has grown; the segments' offsets must still hold.
+      const make = () => ({
+        a: new Map([['k', 1]]),
+        b: 'x'.repeat(3000),
+        c: new Map([['k', 'y'.repeat(100)]]),
+        d: new Set([1, 2]),
+        e: new Uint8Array(70_000),
+        f: species(new ExtData(12, (pos: number) => new Uint8Array(pos % 7))),
+      });
+      const fits = twoPass(make(), config);
+      expect(fits).toHaveProperty('bytes');
+      const size = (fits as { bytes: Uint8Array }).bytes.length;
+      for (const limit of [64, 8 * 1024, size - 1, size, size + 1]) {
+        const c = resolveSerializerConfig({ maxEncodedSize: limit });
+        expect(hex(onePass(make(), c)), `limit ${limit}`).toEqual(hex(twoPass(make(), c)));
+      }
+      // and a late error after that prefix, under both limits
+      for (const limit of [64, 8 * 1024]) {
+        same(
+          () => ({ a: 'x'.repeat(3000), b: new Map([['k', 1n]]), c: 'y'.repeat(3000) }),
+          resolveSerializerConfig({ maxEncodedSize: limit })
+        );
+      }
+    });
+
+    it('names the exact size', () => {
+      for (const value of [
+        'x'.repeat(100),
+        { a: 'x'.repeat(50), n: [1, 300, 70_000, 2 ** 40, -5, -200, -40_000, -(2 ** 40), 1.5] },
+        { a: new Uint8Array(80), b: 'é'.repeat(30) },
+        { a: 'x'.repeat(60), b: new Map([['k', 'y'.repeat(30)]]), c: Uint8Array.of(1, 2) },
+        // an ExtData whose size depends on its offset, after the limit
+        {
+          a: 'x'.repeat(70),
+          b: species(new ExtData(12, (pos: number) => new Uint8Array(pos % 7))),
+        },
+      ]) {
+        const want = twoPass(value, small);
+        expect(want).toMatchObject({ error: 'ValueTooLargeError' });
+        expect(onePass(value, small)).toEqual(want);
+      }
+    });
+
+    it('still throws what encode() would have, past the limit', () => {
+      // a binary detached by a later getter: encode()'s copy would throw
+      same(() => {
+        const u = Uint8Array.of(1, 2, 3);
+        return Object.defineProperty(
+          { a: 'x'.repeat(100), b: species(u) },
+          'c',
+          later(() => (detach(u), 1))
+        );
+      }, small);
+      // a late error after the limit wins over the size error
+      same(() => ({ a: 'x'.repeat(100), b: new Map([['k', 1n]]) }), small);
+    });
+  });
+
+  describe('the reused buffer', () => {
+    it('is zeroed after every encode, one that throws included', () => {
+      const encoder = new ValueEncoder();
+      const kept = () => (encoder as unknown as { bytes: Uint8Array }).bytes;
+      const encode = (value: unknown) =>
+        encoder.encode(value, config, { forKey: false, objects: 0, values: 0 });
+      const zeroed = () => expect(kept().some((b) => b !== 0)).toBe(false);
+      encode({ secret: 'p'.repeat(500), n: [1, 2, 3] });
+      zeroed();
+      // with a binary, which is written in after the walk
+      encode({ b: new Uint8Array(100).fill(9), s: 'x'.repeat(100) });
+      zeroed();
+      const throwing = Object.defineProperty({ a: 's'.repeat(1500) }, 'b', {
+        get: () => {
+          throw new RangeError('getter');
+        },
+        enumerable: true,
+      });
+      expect(() => encode(throwing)).toThrow(RangeError);
+      zeroed();
+      expect(() => encode({ a: 'q'.repeat(100), b: 1n })).toThrow('Unrecognized object');
+      zeroed();
+    });
+
+    it('never changes bytes it returned earlier', () => {
+      const first = encodeCounted({ a: 'first', n: [1, 2, 3] }, config);
+      const snapshot = first.slice();
+      // Grows the buffer past its initial size, then past the retain limit.
+      encodeCounted({ big: 'x'.repeat(10_000) }, config);
+      encodeCounted(
+        { big: 'y'.repeat(1_000_000) },
+        resolveSerializerConfig({ maxEncodedSize: 2 ** 21 })
+      );
+      encodeCounted({ b: 'second' }, config);
+      expect(first).toEqual(snapshot);
+      // A value with a binary is sized exactly too, header widths included.
+      for (const n of [3, 300, 70_000]) {
+        const out = encodeCounted({ b: new Uint8Array(n), s: 'x' }, config);
+        expect(out.buffer.byteLength, `binary of ${n}`).toBe(out.length);
+      }
+      expect(first.byteOffset).toBe(0);
+      expect(first.buffer.byteLength).toBe(first.length);
+    });
+
+    it('writes late segments into one output, without regrowing a large prefix', () => {
+      const encoder = new ValueEncoder();
+      const sizes: number[] = [];
+      const internal = encoder as unknown as { reset(size: number): void };
+      const reset = internal.reset.bind(encoder);
+      internal.reset = (size: number) => (sizes.push(size), reset(size));
+      const big = resolveSerializerConfig({ maxEncodedSize: 2 ** 24 });
+      const value = { a: 'x'.repeat(4 * 1024 * 1024), b: new Map([['k', 1]]) };
+      const out = encoder.encode(value, big, { forKey: false, objects: 0, values: 0 });
+      expect(hex(onePass(value, big))).toEqual(hex(twoPass(value, big)));
+      // the walk's last growth, and the output: no copy to grow it again
+      expect(sizes.filter((n) => n > 4 * 1024 * 1024)).toHaveLength(2);
+      expect(out.length).toBe(4 * 1024 * 1024 + 14);
+    });
+
+    it('encodes correctly after an encode that threw part-way', () => {
+      const value = { a: 'a'.repeat(3000), b: 1 };
+      const want = twoPass(value, config);
+      const throwing = Object.defineProperty({ a: 'x'.repeat(5000) }, 'b', {
+        get: () => {
+          throw new RangeError('getter');
+        },
+        enumerable: true,
+      });
+      expect(() => encodeCounted(throwing, config)).toThrow(RangeError);
+      expect(() => encodeCounted({ a: 1, z: 1n }, config)).toThrow('Unrecognized object');
+      expect(hex(onePass(value, config))).toEqual(hex(want));
+    });
+
+    it('serves a re-entrant encode (a getter that writes) without corrupting either', () => {
+      const innerValue = { inner: 'i'.repeat(100), n: [1, 2] };
+      let inner: Uint8Array | undefined;
+      const outerValue = Object.defineProperty({ a: 'o'.repeat(100) }, 'b', {
+        get: () => {
+          inner = encodeCounted(innerValue, config);
+          return 'after';
+        },
+        enumerable: true,
+      });
+      const outer = encodeCounted(outerValue, config);
+      expect(hex(onePass(innerValue, config))).toEqual(hex(twoPass(innerValue, config)));
+      expect(Buffer.from(inner!).toString('hex')).toBe(
+        Buffer.from((twoPass(innerValue, config) as { bytes: Uint8Array }).bytes).toString('hex')
+      );
+      expect(Buffer.from(outer).toString('hex')).toBe(
+        Buffer.from(msgpackEncode({ a: 'o'.repeat(100), b: 'after' })).toString('hex')
+      );
+    });
+  });
+});

@@ -709,7 +709,15 @@ the cache operation and never surfaces as an unhandled rejection.
 
 With the CachekitIO backend, the `X-CacheKit-L1-*` telemetry headers are wired
 automatically from the cache's live L1/L2 hit and miss counters; pass your own
-`metricsProvider` in the backend config to override. Every CachekitIO request
+`metricsProvider` in the backend config to override. Those counters, and the
+Prometheus hit and miss counters, count one outcome per read: a plain `get()` or
+`exists()` counts a hit by the layer that served it, or a miss. A `wrap()` call
+also counts one outcome: an L1 or L2 hit by the layer that served its value
+(a caller that joined another in-process call for the same key counts an L1
+hit), or one miss when it runs the function. A call that fails before either,
+such as a caller whose joined flight rejects, counts nothing. The reads inside
+the call, such as the double-check under the distributed lock, count nothing
+themselves. Every CachekitIO request
 also sends `User-Agent: cachekit-ts/<version> (<runtime>)`, where the runtime is
 `node`, `bun`, `deno`, `workerd`, or `unknown` anywhere else, so the service can tell SDK releases and
 runtimes apart.
@@ -720,9 +728,10 @@ crypto backend picks its implementation independently, so use it to explain
 `.secure` latency, not to change behaviour. It initialises the bindings if
 needed, and returns `null` (unknown) only when the installed binding
 predates the accessor. The per-architecture semantics are core's — as of
-cachekit-core 0.6 a runtime AES-NI probe on x86/x86_64, `true` on every aarch64
-build (a NEON check, not the Crypto Extension), and `false` on Cloudflare
-Workers (wasm32 has no AES instructions).
+cachekit-core 0.7.0 a runtime AES-NI probe on x86/x86_64, a runtime probe for
+the Armv8 Crypto Extension's AES instructions on aarch64 (a Raspberry Pi 4, a
+Cortex-A72 without the Crypto Extension, reports `false`), and `false` on
+Cloudflare Workers (wasm32 has no AES instructions).
 
 ```typescript
 import { EncryptionManager } from '@cachekit-io/cachekit';

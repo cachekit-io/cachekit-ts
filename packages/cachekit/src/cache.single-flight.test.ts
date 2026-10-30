@@ -91,6 +91,34 @@ class ContestedBackend extends CountingBackend implements LockableBackend {
   }
 }
 
+/**
+ * Lock refused once, then granted: the first acquire finds another process
+ * holding the lease, so the grant comes after waiting. `onFirstAcquire` runs
+ * inside that refused acquire (the holder filling the key, or not).
+ */
+class WaitedGrantBackend extends CountingLockableBackend {
+  onFirstAcquire: (() => Promise<unknown>) | null = null;
+  private refused = false;
+
+  async acquireLock(key: string, timeoutMs?: number): Promise<string | null> {
+    if (!this.refused) {
+      this.refused = true;
+      this.acquires++;
+      if (this.onFirstAcquire) await this.onFirstAcquire();
+      return null;
+    }
+    return super.acquireLock(key, timeoutMs);
+  }
+}
+
+/** The cache's live hit/miss counters: what its telemetry headers carry. */
+const outcomes = (cache: SecureCache): { l1Hits: number; l2Hits: number; misses: number } => {
+  const { l1Hits, l2Hits, misses } = (
+    cache as unknown as { telemetry: { l1Hits: number; l2Hits: number; misses: number } }
+  ).telemetry;
+  return { l1Hits, l2Hits, misses };
+};
+
 describe('Cold-miss single-flight', () => {
   const caches: SecureCache[] = [];
 
@@ -125,6 +153,9 @@ describe('Cold-miss single-flight', () => {
       expect(calls).toBe(1);
       expect(backend.gets).toBe(1); // 1 billed miss, not 10
       expect(backend.sets).toBe(1);
+      // One outcome per call: the leader ran the function, and each joined
+      // caller was served in process.
+      expect(outcomes(cache)).toEqual({ l1Hits: 9, l2Hits: 0, misses: 1 });
     });
 
     it('does not share flights across distinct keys', async () => {
@@ -188,10 +219,27 @@ describe('Cold-miss single-flight', () => {
 
       expect(herd.every((r) => r.status === 'rejected')).toBe(true);
       expect(calls).toBe(1); // one shared failure, not five
+      // The leader ran the function; joined callers of a rejected flight count nothing.
+      expect(outcomes(cache)).toEqual({ l1Hits: 0, l2Hits: 0, misses: 1 });
 
       // Rejected flight must not be cached: next call recomputes.
       await expect(wrapped()).resolves.toBe('recovered');
       expect(calls).toBe(2);
+    });
+  });
+
+  describe('plain reads', () => {
+    it('count one outcome each: get and exists, hit or miss', async () => {
+      const backend = new CountingBackend();
+      const cache = make({ backend, l1: { enabled: true } });
+
+      expect(await cache.get('plain:k')).toBeNull();
+      expect(await cache.exists('plain:k')).toBe(false);
+      expect(outcomes(cache)).toEqual({ l1Hits: 0, l2Hits: 0, misses: 2 });
+
+      await cache.set('plain:k', 'v');
+      expect(await cache.get('plain:k')).toBe('v'); // the write populated L1
+      expect(outcomes(cache)).toEqual({ l1Hits: 1, l2Hits: 0, misses: 2 });
     });
   });
 
@@ -242,6 +290,9 @@ describe('Cold-miss single-flight', () => {
 
       await expect(wrapped()).resolves.toBe('computed-anyway');
       expect(calls).toBe(1);
+      // The first read and the deadline re-check both missed: one call, one miss.
+      expect(backend.gets).toBe(2);
+      expect(outcomes(cache)).toEqual({ l1Hits: 0, l2Hits: 0, misses: 1 });
     });
 
     it('degrades to computing without the lock when acquireLock throws', async () => {
@@ -357,6 +408,7 @@ describe('Cold-miss single-flight', () => {
         expect(backend.gets - before).toBe(2); // failed read, then the double-check hit
         expect(counter.calls).toBe(0);
         expect(backend.sets).toBe(1); // the writer's only
+        expect(outcomes(cache)).toEqual({ l1Hits: 0, l2Hits: 1, misses: 0 });
       });
 
       it('re-reads L2 on the contested-deadline exit and serves the holder’s write', async () => {
@@ -378,6 +430,7 @@ describe('Cold-miss single-flight', () => {
         expect(backend.gets).toBe(3);
         expect(counter.calls).toBe(0);
         expect(backend.sets).toBe(1); // the holder's only
+        expect(outcomes(cache)).toEqual({ l1Hits: 0, l2Hits: 1, misses: 0 });
       });
 
       it('re-reads L2 when the acquire throws after a contested attempt', async () => {
@@ -394,6 +447,45 @@ describe('Cold-miss single-flight', () => {
         expect(backend.gets).toBe(3);
         expect(counter.calls).toBe(0);
         expect(backend.sets).toBe(1); // the holder's only
+        expect(outcomes(cache)).toEqual({ l1Hits: 0, l2Hits: 1, misses: 0 });
+      });
+
+      it('counts one miss when the re-check after a contested acquire error misses', async () => {
+        const backend = new ContestedBackend();
+        backend.throwFromAcquire = 2;
+        const cache = make({ backend, l1: { enabled: false }, stampede: lockOptions });
+        const { wrapped, counter } = wrapCounting(cache, 'sf:contested-throw-miss');
+
+        await expect(wrapped(11)).resolves.toBe('result-11');
+        expect(backend.gets).toBe(2); // our miss, then the re-check, which misses too
+        expect(counter.calls).toBe(1);
+        expect(outcomes(cache)).toEqual({ l1Hits: 0, l2Hits: 0, misses: 1 });
+      });
+
+      it('counts one L2 hit when a grant after waiting finds the holder’s write', async () => {
+        const backend = new WaitedGrantBackend();
+        const holder = make({ backend, l1: { enabled: false } });
+        const h = wrapCounting(holder, 'sf:waited-hit');
+        const cache = make({ backend, l1: { enabled: false }, stampede: lockOptions });
+        const { wrapped, counter } = wrapCounting(cache, 'sf:waited-hit');
+        backend.onFirstAcquire = () => h.wrapped(12);
+
+        await expect(wrapped(12)).resolves.toBe('result-12');
+        // Our miss, the holder's miss, then the post-grant double-check, which hits.
+        expect(backend.gets).toBe(3);
+        expect(counter.calls).toBe(0);
+        expect(outcomes(cache)).toEqual({ l1Hits: 0, l2Hits: 1, misses: 0 });
+      });
+
+      it('counts one miss when a grant after waiting finds nothing and computes', async () => {
+        const backend = new WaitedGrantBackend();
+        const cache = make({ backend, l1: { enabled: false }, stampede: lockOptions });
+        const { wrapped, counter } = wrapCounting(cache, 'sf:waited-miss');
+
+        await expect(wrapped(13)).resolves.toBe('result-13');
+        expect(backend.gets).toBe(2); // our miss, then the double-check, which misses too
+        expect(counter.calls).toBe(1);
+        expect(outcomes(cache)).toEqual({ l1Hits: 0, l2Hits: 0, misses: 1 });
       });
 
       it('registers the release with waitUntil under withExecutionContext', async () => {
@@ -428,6 +520,23 @@ describe('Cold-miss single-flight', () => {
         await expect(wrapped(8)).resolves.toBe('v-8');
         expect(backend.releases).toBe(1); // the release was still sent
       });
+    });
+
+    it('counts one miss when the stored entry does not decode and the call computes', async () => {
+      const backend = new CountingLockableBackend();
+      const cache = make({ backend, l1: { enabled: false }, stampede: lockOptions });
+      const wrapped = cache.wrap(async (id: number) => `v-${id}`, {
+        namespace: 'sf:undecodable',
+        ttl: 60,
+      });
+      const originalGet = backend.get.bind(backend);
+      backend.get = async (key) => {
+        await originalGet(key);
+        return new Uint8Array([0xc1]); // never-used msgpack byte: undecodable
+      };
+
+      await expect(wrapped(14)).resolves.toBe('v-14');
+      expect(outcomes(cache)).toEqual({ l1Hits: 0, l2Hits: 0, misses: 1 });
     });
 
     it('rejects distributedLock on a backend without lock capability', () => {

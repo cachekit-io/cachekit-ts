@@ -1604,6 +1604,25 @@ describe('Cache Integration', () => {
       await c.close();
     });
 
+    it('caches a value within a raised maxDepth and logs the maxDepth reason past it', async () => {
+      const logs: string[] = [];
+      setLogger((message) => logs.push(message));
+      const c = createCache({ backend: new InMemoryBackend(), serializer: { maxDepth: 200 } });
+
+      // 150 levels: past the default bound of 100, within the configured 200.
+      await c.set('ns:deep', nested(150));
+      expect(await c.get('ns:deep')).toEqual(nested(150));
+      expect(logs.filter((m) => m.includes('set rejected'))).toHaveLength(0);
+
+      await c.set('ns:deeper', nested(201));
+      expect(await c.get('ns:deeper')).toBeNull();
+      const rejected = logs.filter((m) => m.includes('set rejected'));
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]).toContain('value exceeds maxDepth');
+
+      await c.close();
+    });
+
     // A getter or Proxy trap runs caller code inside normalize, so its error
     // text is caller-controlled and may carry the value or the key verbatim.
     it.each([

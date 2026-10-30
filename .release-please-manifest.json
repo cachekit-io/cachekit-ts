@@ -1,5 +1,5 @@
 {
-  "packages/cachekit": "0.2.1",
-  "packages/cachekit-core-ts": "0.2.0",
-  "packages/cachekit-core-wasm": "0.2.0"
+  "packages/cachekit": "0.2.3",
+  "packages/cachekit-core-ts": "0.2.1",
+  "packages/cachekit-core-wasm": "0.2.1"
 }

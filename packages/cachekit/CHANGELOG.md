@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.2.3](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.2.2...cachekit-v0.2.3) (2026-10-29)
+
+
+### Bug Fixes
+
+* **serializer:** honour serializer.maxDepth on encode (LAB-11773) ([#270](https://github.com/cachekit-io/cachekit-ts/issues/270)) ([608c6a9](https://github.com/cachekit-io/cachekit-ts/commit/608c6a9d62a5016204ee57f08d24ce1a7aa571db))
+
+
+### Performance Improvements
+
+* **serializer:** encode auto-mode values in one pass (LAB-7120) ([#268](https://github.com/cachekit-io/cachekit-ts/issues/268)) ([ad2fd01](https://github.com/cachekit-io/cachekit-ts/commit/ad2fd0171c6154a88ccc0e89c0d1f4925807f2a2))
+
+## [0.2.2](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.2.1...cachekit-v0.2.2) (2026-10-28)
+
+
+### Bug Fixes
+
+* **cachekit-core-ts:** build napi without napi4 so a first load keeps no async context (LAB-10886) ([#256](https://github.com/cachekit-io/cachekit-ts/issues/256)) ([a5fbdda](https://github.com/cachekit-io/cachekit-ts/commit/a5fbddaaad69b6c1c314394ac7289fe327390f97))
+* **cachekit:** count one outcome per wrap() call (LAB-11384) ([#265](https://github.com/cachekit-io/cachekit-ts/issues/265)) ([816a5f3](https://github.com/cachekit-io/cachekit-ts/commit/816a5f3d8aedb9de31fecd006812d75198ebb5d7))
+* **readme:** describe the aarch64 Crypto Extension probe (LAB-4654) ([#267](https://github.com/cachekit-io/cachekit-ts/issues/267)) ([25eef74](https://github.com/cachekit-io/cachekit-ts/commit/25eef740bb6da28d6c71531533847fa374aa13b1))
+* **readme:** replace the unmeasured L1 latency figure with measured ones (LAB-10638) ([#243](https://github.com/cachekit-io/cachekit-ts/issues/243)) ([78811ec](https://github.com/cachekit-io/cachekit-ts/commit/78811ec44bb2625a1de749d21668fccd9b815ef4))
+
+
+### Performance Improvements
+
+* **cachekit:** hash cache keys through the NAPI and wasm bindings (LAB-7141) ([#259](https://github.com/cachekit-io/cachekit-ts/issues/259)) ([1dc06f9](https://github.com/cachekit-io/cachekit-ts/commit/1dc06f9014687ebddd2f7905a36c9c9982f890f3))
+* **cachekit:** memoise wrap() keys so an L1 hit skips key generation (LAB-10664) ([#254](https://github.com/cachekit-io/cachekit-ts/issues/254)) ([959464f](https://github.com/cachekit-io/cachekit-ts/commit/959464f507119d6359374bb818fde9d126502c8a))
+* **encryption:** pre-encode the AAD's fixed parts and size-check keys without building it (LAB-11006) ([#258](https://github.com/cachekit-io/cachekit-ts/issues/258)) ([5d8ae17](https://github.com/cachekit-io/cachekit-ts/commit/5d8ae17f8cd1ce7d96e65c50b234a8fd29976c36))
+
 ## [0.2.1](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.2.0...cachekit-v0.2.1) (2026-10-22)
 
 

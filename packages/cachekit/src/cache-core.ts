@@ -78,14 +78,20 @@ const WARN_INTERVAL_MS = 60_000;
 const LOCK_FALLTHROUGH = Symbol('cachekit.lock-fallthrough');
 
 /**
- * Out-parameter of getEntry: set only where the backend itself answered
- * "no entry". getEntry returns null for a miss and for an absorbed read
- * failure alike; the lock path needs the difference, because after a failed
- * read the entry may still be live and the post-grant double-check is its
- * only retry (cachekit-py's probe_l2_miss).
+ * Out-parameter of getEntry for the reads of one wrap() call. A read given a
+ * probe counts nothing in the hit/miss counters; the call counts its one
+ * outcome (see wrapRead and computeAndStore).
+ *
+ * `cleanMiss` is set only where the backend itself answered "no entry".
+ * getEntry returns null for a miss and for an absorbed read failure alike;
+ * the lock path needs the difference, because after a failed read the entry
+ * may still be live and the post-grant double-check is its only retry
+ * (cachekit-py's probe_l2_miss). `servedBy` names the layer that served a
+ * hit.
  */
 interface L2ReadProbe {
   cleanMiss: boolean;
+  servedBy: 'l1' | 'l2' | null;
 }
 
 /**
@@ -911,7 +917,8 @@ export class CacheImpl implements SecureCache {
       if (l1Result !== null) {
         const decoded = await this.decodeL1Entry<T>(key, l1Result, interop);
         if (decoded !== null) {
-          this.recordHit('l1');
+          if (probe) probe.servedBy = 'l1';
+          else this.recordHit('l1');
           return decoded.value;
         }
       }
@@ -950,13 +957,14 @@ export class CacheImpl implements SecureCache {
       // The bounds count from receipt, not from the L1 write after decode.
       const receivedAt = Date.now();
       if (data === null) {
-        this.recordMiss();
         if (probe) probe.cleanMiss = true;
+        else this.recordMiss();
         return null;
       }
       return { data, l1Bound, isStale, receivedAt };
     });
-    // A miss (counted above) or a backend failure degradation absorbed.
+    // A miss (counted above unless probed) or a backend failure degradation
+    // absorbed.
     if (fetched === null) return null;
     const { data, l1Bound, isStale, receivedAt } = fetched;
 
@@ -1011,7 +1019,8 @@ export class CacheImpl implements SecureCache {
       }
     }
 
-    this.recordHit('l2');
+    if (probe) probe.servedBy = 'l2';
+    else this.recordHit('l2');
     return value;
   }
 
@@ -1396,7 +1405,12 @@ export class CacheImpl implements SecureCache {
       // must share one read, one compute, and one write.
       const existing = this.inflight.get(cacheKey);
       if (existing) {
-        return existing as Promise<TResult>;
+        // Served in process without a backend request, as cachekit-py
+        // counts a joined caller: one L1 hit. A flight that rejects counts
+        // nothing for its joiners.
+        const joined = (await existing) as TResult;
+        this.recordHit('l1');
+        return joined;
       }
       const flight = this.resolveMiss<TResult>(
         cacheKey,
@@ -1428,8 +1442,8 @@ export class CacheImpl implements SecureCache {
     options: WrapOptionsBase,
     waitUntil?: WaitUntil
   ): Promise<TResult> {
-    const read: L2ReadProbe = { cleanMiss: false };
-    const cached = await this.getEntry<TResult>(cacheKey, interop, options.ttl, read);
+    const read: L2ReadProbe = { cleanMiss: false, servedBy: null };
+    const cached = await this.wrapRead<TResult>(cacheKey, interop, options.ttl, read);
     if (cached !== null) {
       return cached;
     }
@@ -1488,7 +1502,7 @@ export class CacheImpl implements SecureCache {
     const { lockTimeoutMs, lockWaitMs, lockPollMs } = this.stampede;
     const deadline = Date.now() + lockWaitMs;
     const recheck = async (): Promise<TResult | typeof LOCK_FALLTHROUGH> => {
-      const filled = await this.getEntry<TResult>(cacheKey, interop, options.ttl);
+      const filled = await this.wrapRead<TResult>(cacheKey, interop, options.ttl);
       return filled !== null ? filled : LOCK_FALLTHROUGH;
     };
 
@@ -1510,7 +1524,7 @@ export class CacheImpl implements SecureCache {
           // of a duplicate compute + write. Skipped after an uncontended
           // grant on a clean miss (see above).
           if (attempt > 0 || !cleanMiss) {
-            const filled = await this.getEntry<TResult>(cacheKey, interop, options.ttl);
+            const filled = await this.wrapRead<TResult>(cacheKey, interop, options.ttl);
             if (filled !== null) {
               return filled;
             }
@@ -1539,12 +1553,32 @@ export class CacheImpl implements SecureCache {
     }
   }
 
+  /**
+   * One read of a wrap() call (the first L2 read, the post-grant
+   * double-check, the deadline re-check). The read counts nothing itself: a
+   * hit counts the call's one outcome, by the layer that served it, and a
+   * call that finds nothing counts its one miss in computeAndStore.
+   */
+  private async wrapRead<TResult>(
+    cacheKey: string,
+    interop: boolean,
+    ttlSeconds: number | undefined,
+    probe: L2ReadProbe = { cleanMiss: false, servedBy: null }
+  ): Promise<TResult | null> {
+    const value = await this.getEntry<TResult>(cacheKey, interop, ttlSeconds, probe);
+    if (value !== null && probe.servedBy !== null) this.recordHit(probe.servedBy);
+    return value;
+  }
+
   private async computeAndStore<TResult>(
     cacheKey: string,
     interop: boolean,
     compute: () => Promise<TResult>,
     options: WrapOptionsBase
   ): Promise<TResult> {
+    // The call runs the function: its one miss, counted before the write so
+    // the write's telemetry headers carry it.
+    this.recordMiss();
     const result = await compute();
     await this.setEntry(
       cacheKey,
