@@ -72,7 +72,7 @@ export interface Backend {
    * Delegating wrappers MUST forward the inner backend's implementation.
    *
    * @param ttl - Time-to-live in seconds (required: the window counts from it)
-   * @param staleTtl - Stale-grace window in seconds, > 0
+   * @param staleTtl - Stale-grace window in seconds, >= 0; `0` sends no window
    * @throws {BackendError} if the operation fails
    */
   setWithStaleTtl?(key: string, value: Uint8Array, ttl: number, staleTtl: number): Promise<void>;

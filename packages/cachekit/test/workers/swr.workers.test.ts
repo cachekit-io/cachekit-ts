@@ -293,7 +293,7 @@ describe('server stale-grace inside workerd', () => {
       { ttl: 10, staleTtl: 60 },
       { ttl: 10, staleTtl: 60 },
     ]);
-    expect(await fn()).toBe('v2'); // the revalidation's write filled L1
+    expect(await fn()).toBe('v2'); // read from L2; the revalidation's write skipped L1
 
     await reader.close();
   });

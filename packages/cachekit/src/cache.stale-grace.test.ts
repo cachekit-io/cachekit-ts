@@ -142,7 +142,11 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const WRAP = { namespace: 'svc:report', ttl: 10, staleTtl: 60 };
+/** The TTL and stale window a write of a WRAP entry carries. */
+const WIRE = { ttl: 10, staleTtl: 60 };
 
 describe('server stale-grace (WrapOptions.staleTtl)', () => {
   const open: SecureCache[] = [];
@@ -178,12 +182,6 @@ describe('server stale-grace (WrapOptions.staleTtl)', () => {
     expect(backend.writes).toEqual([{ ttl: 10 }]); // set(), no stale window
   });
 
-  it('sends the stale window with the TTL on a cold-miss write', async () => {
-    const backend = new StaleGraceBackend();
-    await process(backend).wrap(async () => 'v1', WRAP)();
-    expect(backend.writes).toEqual([{ ttl: 10, staleTtl: 60 }]);
-  });
-
   it('serves a stale read at once and revalidates in the background, without blocking on it', async () => {
     const backend = new StaleGraceBackend();
     await seedStale(backend);
@@ -202,7 +200,7 @@ describe('server stale-grace (WrapOptions.staleTtl)', () => {
 
     recompute.resolve('v2');
     // The revalidation re-sends the TTL and the stale window (API-55).
-    await vi.waitFor(() => expect(backend.writes).toEqual([WRAP, WRAP].map(timing)));
+    await vi.waitFor(() => expect(backend.writes).toEqual([WIRE, WIRE]));
 
     // Its write skipped L1: the next call reads the fresh entry from L2 and
     // backfills it, and the one after that is an L1 hit.
@@ -260,7 +258,7 @@ describe('server stale-grace (WrapOptions.staleTtl)', () => {
 
     await wrapped(); // cold miss
     await wrapped(); // L1 hit, refresh scheduled
-    await vi.waitFor(() => expect(backend.writes).toEqual([WRAP, WRAP].map(timing)));
+    await vi.waitFor(() => expect(backend.writes).toEqual([WIRE, WIRE]));
   });
 
   describe('server lease', () => {
@@ -278,23 +276,8 @@ describe('server stale-grace (WrapOptions.staleTtl)', () => {
       recompute.resolve('v2');
       await vi.waitFor(() => expect(backend.heldLocks()).toBe(0));
       expect(fn).toHaveBeenCalledTimes(1);
-      expect(backend.writes).toEqual([WRAP, WRAP].map(timing));
+      expect(backend.writes).toEqual([WIRE, WIRE]);
       expect(backend.releases).toBe(1);
-    });
-
-    it('stands down on a contested lease without waiting or retrying (API-62)', async () => {
-      const backend = new LockingStaleGraceBackend();
-      await seedStale(backend);
-      backend.mode = 'contested';
-      const fn = vi.fn(async () => 'v2');
-
-      const reader = process(backend);
-      expect(await reader.wrap(fn, WRAP)()).toBe('v1');
-      await vi.waitFor(() => expect(revalidating(reader).size).toBe(0));
-
-      expect(backend.acquires).toBe(1); // one attempt; the seed's miss took none (distributedLock off)
-      expect(fn).not.toHaveBeenCalled();
-      expect(backend.writes).toHaveLength(1);
     });
 
     it('computes under the lease when the post-grant double-check finds the entry stale', async () => {
@@ -312,27 +295,51 @@ describe('server stale-grace (WrapOptions.staleTtl)', () => {
       expect(await cache.wrap(fn, WRAP)()).toBe('v2');
       expect(fn).toHaveBeenCalledTimes(1);
       expect(backend.acquires).toBe(1); // no background attempt against our own lease
-      expect(backend.writes).toEqual([WRAP, WRAP].map(timing));
+      expect(backend.writes).toEqual([WIRE, WIRE]);
       expect(backend.heldLocks()).toBe(0);
     });
 
-    it('abandons the attempt when the lock endpoint fails, and a later stale read retries', async () => {
-      const backend = new LockingStaleGraceBackend();
-      await seedStale(backend);
-      backend.mode = 'error';
-      const logError = vi.spyOn(logger, 'logError').mockImplementation(() => {});
-      const fn = vi.fn(async () => 'v2');
-      const wrapped = process(backend).wrap(fn, WRAP);
+    // A revalidation that never ran holds the key off for min(lockTimeoutMs, 60 s):
+    // no lock request per stale read while another client holds the lease.
+    it.each([
+      ['contested', 5_000, 5_000],
+      ['contested', 120_000, 60_000],
+      ['error', 5_000, 5_000],
+    ] as const)(
+      'after a %s lease (lockTimeoutMs %d), holds the key off for %d ms without waiting, retrying or logging (API-62)',
+      async (mode, lockTimeoutMs, holdMs) => {
+        const backend = new LockingStaleGraceBackend();
+        await seedStale(backend);
+        backend.mode = mode;
+        const logError = vi.spyOn(logger, 'logError').mockImplementation(() => {});
+        const fn = vi.fn(async () => 'v2');
+        const reader = process(backend, { stampede: { lockTimeoutMs } });
+        const wrapped = reader.wrap(fn, WRAP);
+        vi.useFakeTimers({ toFake: ['Date'] });
+        try {
+          const marker = () => revalidating(reader).get([...backend.store.keys()][0]!);
+          expect(await wrapped()).toBe('v1');
+          // Real-timer polling: vi.waitFor would advance the faked clock.
+          while (marker() !== Date.now() + holdMs) await sleep(1);
+          expect(await wrapped()).toBe('v1');
+          expect(backend.acquires).toBe(1); // the seed's miss took none (distributedLock off)
 
-      expect(await wrapped()).toBe('v1');
-      await vi.waitFor(() => expect(logError).toHaveBeenCalledTimes(1));
-      expect(fn).not.toHaveBeenCalled();
+          backend.mode = 'grant';
+          vi.advanceTimersByTime(holdMs - 1);
+          expect(await wrapped()).toBe('v1');
+          expect(backend.acquires).toBe(1);
 
-      backend.mode = 'grant';
-      expect(await wrapped()).toBe('v1');
-      await vi.waitFor(() => expect(backend.writes).toHaveLength(2));
-      expect(fn).toHaveBeenCalledTimes(1);
-    });
+          vi.advanceTimersByTime(1);
+          expect(await wrapped()).toBe('v1');
+          await vi.waitFor(() => expect(backend.writes).toEqual([WIRE, WIRE]));
+          expect(backend.acquires).toBe(2);
+          expect(fn).toHaveBeenCalledTimes(1);
+          expect(logError).not.toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+        }
+      }
+    );
   });
 
   it('keeps a failed revalidation from the caller, leaves the entry, and retries on a later stale read', async () => {
@@ -438,7 +445,7 @@ describe('server stale-grace (WrapOptions.staleTtl)', () => {
       const reader = workersLike(backend);
 
       expect(await reader.wrap(fn, WRAP)()).toBe('v2'); // recomputed in the request
-      expect(backend.writes).toEqual([WRAP, WRAP].map(timing));
+      expect(backend.writes).toEqual([WIRE, WIRE]);
       expect(outcomes(reader)).toEqual({ l1Hits: 0, l2Hits: 0, misses: 1 });
     });
 
@@ -453,7 +460,7 @@ describe('server stale-grace (WrapOptions.staleTtl)', () => {
       expect(await view.wrap(async () => 'v2', WRAP)()).toBe('v1');
       expect(registered).toHaveLength(1);
       await registered[0];
-      expect(backend.writes).toEqual([WRAP, WRAP].map(timing));
+      expect(backend.writes).toEqual([WIRE, WIRE]);
     });
 
     it('still serves the stale value when waitUntil throws (stale ExecutionContext)', async () => {
@@ -562,7 +569,3 @@ describe('CachekitIO stale window on the wire', () => {
     expect(puts.map(wire)).toEqual([{ ttl: '10', staleTtl: null }]); // 0 sends no header
   });
 });
-
-function timing(options: { ttl: number; staleTtl?: number }) {
-  return { ttl: options.ttl, staleTtl: options.staleTtl };
-}

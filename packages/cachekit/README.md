@@ -414,11 +414,16 @@ const getReport = cache.wrap(async (id: string) => buildReport(id), {
 });
 ```
 
-- One revalidation runs per key in each cache. With a lock-capable backend
-  (`stampede.distributedLock`, `cachekitioWithLocking()`, `cachekitioFull()`)
+- Revalidation runs one at a time per key in each cache; one still running
+  after 60 seconds no longer blocks a new one. When the backend can lock
+  (`cachekitioWithLocking()`, `cachekitioFull()`, or an `apiKey` config with
+  `stampede.distributedLock`, a flag that otherwise governs only cold misses),
   it runs only under the server lease, so one process in the fleet
-  revalidates and the rest keep serving stale. Every write of the key,
-  revalidation included, re-sends the TTL and the stale window.
+  revalidates and the rest keep serving stale. A process the lease turns away,
+  or that cannot reach the lock endpoint, does not ask again for that key
+  until the lease could have expired (`stampede.lockTimeoutMs`, at most 60
+  seconds). Every write of the key, revalidation included, re-sends the TTL
+  and the stale window.
 - A failed revalidation never reaches the caller: the stale entry stays and
   a later stale read tries again. A function that throws is logged
   (rate-limited); a failed write follows the cache's reliability settings,
@@ -436,11 +441,13 @@ const getReport = cache.wrap(async (id: string) => buildReport(id), {
 
 > [!WARNING]
 > The stale window applies to every reader of the key, not only to this
-> function. A reader that does not check the server's freshness label
-> (cachekit-ts before 0.2.0, cachekit-rs today) serves a stale-window value as
-> fresh, where it would have missed, and caches it locally. Do not set
-> `staleTtl` on keys whose readers rely on hard expiry, including interop keys
-> read by such SDKs. The protocol states this rule
+> function. Any reader that does not set `staleTtl` gets a stale-window value
+> back as an ordinary hit, where without the window it would have missed. In
+> this SDK that is `cache.get()` and every `wrap()` without `staleTtl`: they
+> return the value without revalidating it, and never cache it in L1. Readers
+> that do not check the server's freshness label (cachekit-ts before 0.2.0,
+> cachekit-rs today) also cache it locally as fresh. Do not set `staleTtl` on
+> keys whose readers rely on hard expiry, including interop keys. The protocol states this rule
 > ([`saas-api.md` § Stale-While-Revalidate](https://github.com/cachekit-io/protocol/blob/main/spec/saas-api.md#stale-while-revalidate)).
 
 ## Cross-SDK interop mode

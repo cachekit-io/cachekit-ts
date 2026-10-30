@@ -319,10 +319,11 @@ export class CacheImpl implements SecureCache {
   /** One in-flight cold-miss resolution per cache key (single-flight). */
   private readonly inflight = new Map<string, Promise<unknown>>();
   /**
-   * Keys with a background revalidation of a server-stale hit in flight, to
-   * the time their marker lapses. The marker expires (SWR_REFRESH_MARKER_TTL_MS)
-   * so a recompute that never settles cannot stop the key revalidating for
-   * the life of the cache; a lapsed marker only risks a duplicate revalidation.
+   * Keys with a background revalidation of a server-stale hit in flight, or
+   * held off after one stood down, to the time their marker lapses. The
+   * marker expires (SWR_REFRESH_MARKER_TTL_MS) so a recompute that never
+   * settles cannot stop the key revalidating for the life of the cache; a
+   * lapsed marker only risks a duplicate revalidation.
    */
   private readonly revalidating = new Map<string, number>();
   /**
@@ -1712,8 +1713,10 @@ export class CacheImpl implements SecureCache {
   }
 
   /**
-   * Start the background revalidation of a server-stale hit, at most one per
-   * key in this cache (protocol spec/saas-api.md § Revalidation flow). On a
+   * Start the background revalidation of a server-stale hit, one at a time
+   * per key in this cache; a revalidation still running after
+   * SWR_REFRESH_MARKER_TTL_MS no longer blocks a new one (protocol
+   * spec/saas-api.md § Revalidation flow). On a
    * lock-capable backend it runs only under the server lease: a contested
    * lease means another client is revalidating, so this one stands down
    * without waiting or retrying (API-62). The revalidation re-sends the TTL
@@ -1739,9 +1742,19 @@ export class CacheImpl implements SecureCache {
     this.revalidating.set(cacheKey, marker);
     // Started here, in the request that read the stale entry: on workerd the
     // revalidation's I/O belongs to the request whose waitUntil it rides.
-    const task = this.runRevalidation(cacheKey, interop, compute, options, staleTtl).finally(() => {
+    const task = this.runRevalidation(cacheKey, interop, compute, options, staleTtl).then((ran) => {
       // A revalidation that outlived its marker leaves a newer one alone.
-      if (this.revalidating.get(cacheKey) === marker) this.revalidating.delete(cacheKey);
+      if (this.revalidating.get(cacheKey) !== marker) return;
+      // One that stood down (another client holds the lease) or could not
+      // reach the lock endpoint holds the key off for as long as that lease
+      // can last: otherwise every stale read of a hot key would send
+      // another lock request the server turns away.
+      if (ran) this.revalidating.delete(cacheKey);
+      else
+        this.revalidating.set(
+          cacheKey,
+          Date.now() + Math.min(this.stampede.lockTimeoutMs, SWR_REFRESH_MARKER_TTL_MS)
+        );
     });
     // The task never rejects. A stale ctx makes waitUntil throw, which must
     // cost only this revalidation, never the read that has a value to return.
@@ -1761,16 +1774,22 @@ export class CacheImpl implements SecureCache {
     compute: () => Promise<TResult>,
     options: WrapOptionsBase,
     staleTtl: number
-  ): Promise<void> {
+  ): Promise<boolean> {
     const lockable = this.lockable;
     let lockId: string | null = null;
-    try {
-      if (lockable) {
+    if (lockable) {
+      try {
         // acquireLock returns a lease only for a non-empty lock_id (API-65).
-        // An acquire error is not contention: it abandons this attempt.
         lockId = await lockable.acquireLock(cacheKey, this.stampede.lockTimeoutMs);
-        if (lockId === null) return;
+      } catch (error) {
+        // Not contention, and not a failed revalidation: this attempt is
+        // abandoned (API-62) and counted, never logged per stale read.
+        if (!this.closed) this.recordFailure('lock_acquire', error);
+        return false;
       }
+      if (lockId === null) return false;
+    }
+    try {
       const result = await compute();
       await this.setEntry(
         cacheKey,
@@ -1795,6 +1814,7 @@ export class CacheImpl implements SecureCache {
           .catch((error) => this.recordFailure('lock_release', error));
       }
     }
+    return true;
   }
 
   /**
