@@ -416,8 +416,9 @@ const getReport = cache.wrap(async (id: string) => buildReport(id), {
 
 - Revalidation runs one at a time per key in each cache; one still running
   after 60 seconds no longer blocks a new one. When the backend can lock
-  (`cachekitioWithLocking()`, `cachekitioFull()`, or an `apiKey` config with
-  `stampede.distributedLock`, a flag that otherwise governs only cold misses),
+  (`cachekitioWithLocking()`, `cachekitioFull()`, or on Node an `apiKey`
+  config with `stampede.distributedLock`, a flag that otherwise governs only
+  cold misses; on Workers use `cachekitioWithLocking()`),
   it runs only under the server lease, so one process in the fleet
   revalidates and the rest keep serving stale. A process the lease turns away,
   or that cannot reach the lock endpoint, does not ask again for that key

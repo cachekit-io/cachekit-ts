@@ -326,6 +326,8 @@ export class CacheImpl implements SecureCache {
    * lapsed marker only risks a duplicate revalidation.
    */
   private readonly revalidating = new Map<string, number>();
+  /** revalidating size at which revalidate() next sweeps out lapsed markers. */
+  private revalidatingPruneAt = 64;
   /**
    * The key memos of this cache's wrapped functions (see AutoKeys), held weakly
    * so that a wrapped function nobody holds takes its memo with it, once the
@@ -1738,6 +1740,14 @@ export class CacheImpl implements SecureCache {
   ): void {
     const now = Date.now();
     if ((this.revalidating.get(cacheKey) ?? 0) > now) return;
+    // A lapsed hold is not deleted when it lapses, so sweep before growing:
+    // otherwise every key ever read stale while another client held the lease
+    // would keep an entry for the life of the cache. Doubling the threshold
+    // keeps the sweep amortised O(1) per insert.
+    if (this.revalidating.size >= this.revalidatingPruneAt) {
+      for (const [key, until] of this.revalidating) if (until <= now) this.revalidating.delete(key);
+      this.revalidatingPruneAt = Math.max(64, 2 * this.revalidating.size);
+    }
     const marker = now + SWR_REFRESH_MARKER_TTL_MS;
     this.revalidating.set(cacheKey, marker);
     // Started here, in the request that read the stale entry: on workerd the
@@ -1768,6 +1778,9 @@ export class CacheImpl implements SecureCache {
     }
   }
 
+  /** Resolves false only when nothing ran (lease contested or lock endpoint
+   * unreachable); a recompute or write that failed still resolves true, so a
+   * later stale read retries it at once rather than after a lease-length hold. */
   private async runRevalidation<TResult>(
     cacheKey: string,
     interop: boolean,
@@ -2002,6 +2015,7 @@ export class CacheImpl implements SecureCache {
     // own; callers already awaiting them get the result or a closed-backend
     // error)
     attempt(() => this.inflight.clear());
+    attempt(() => this.revalidating.clear());
 
     // Before the first await: a channel that stalls on stop must not keep the
     // arguments the key memos hold. `closed` stops any call from adding one.

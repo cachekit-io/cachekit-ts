@@ -80,12 +80,15 @@ class StaleGraceBackend implements Backend {
 /** The server lease: one holder per key; `mode` makes every acquire contested or fail. */
 class LockingStaleGraceBackend extends StaleGraceBackend implements LockableBackend {
   mode: 'grant' | 'contested' | 'error' = 'grant';
+  /** When set, every acquire waits for it before answering. */
+  gate: Promise<void> | null = null;
   acquires = 0;
   releases = 0;
   private readonly locks = new Map<string, string>();
 
   async acquireLock(key: string): Promise<string | null> {
     this.acquires++;
+    if (this.gate) await this.gate;
     if (this.mode === 'error') throw new Error('lock endpoint unreachable');
     if (this.mode === 'contested' || this.locks.has(key)) return null;
     const lockId = `lock-${this.acquires}`;
@@ -120,7 +123,7 @@ class PlainBackend implements Backend {
   async close(): Promise<void> {}
 }
 
-/** Keys whose background revalidation this cache still has in flight. */
+/** Keys whose background revalidation this cache has in flight or holds off. */
 const revalidating = (cache: SecureCache) =>
   (cache as unknown as { revalidating: Map<string, number> }).revalidating;
 
@@ -318,7 +321,14 @@ describe('server stale-grace (WrapOptions.staleTtl)', () => {
         vi.useFakeTimers({ toFake: ['Date'] });
         try {
           const marker = () => revalidating(reader).get([...backend.store.keys()][0]!);
+          // Answer the acquire 1 s after the read, so the hold is told apart
+          // from the in-flight marker even where both last 60 s.
+          const gate = deferred<void>();
+          backend.gate = gate.promise;
           expect(await wrapped()).toBe('v1');
+          vi.advanceTimersByTime(1_000);
+          backend.gate = null;
+          gate.resolve();
           // Real-timer polling: vi.waitFor would advance the faked clock.
           while (marker() !== Date.now() + holdMs) await sleep(1);
           expect(await wrapped()).toBe('v1');
@@ -340,6 +350,24 @@ describe('server stale-grace (WrapOptions.staleTtl)', () => {
         }
       }
     );
+
+    it('sweeps lapsed holds instead of keeping one per key read stale', async () => {
+      const backend = new LockingStaleGraceBackend();
+      const writer = process(backend).wrap(async (i: number) => `v${i}`, WRAP);
+      for (let i = 0; i <= 64; i++) await writer(i);
+      backend.expire();
+      backend.mode = 'contested';
+      const reader = process(backend, { stampede: { lockTimeoutMs: 50 } });
+      const wrapped = reader.wrap(async (i: number) => `new${i}`, WRAP);
+
+      for (let i = 0; i < 64; i++) await wrapped(i);
+      await vi.waitFor(() => expect(backend.acquires).toBe(64));
+      await sleep(80); // every 50 ms hold has lapsed
+      expect(revalidating(reader).size).toBe(64);
+
+      await wrapped(64); // the insert that crosses the threshold sweeps
+      expect(revalidating(reader).size).toBe(1);
+    });
   });
 
   it('keeps a failed revalidation from the caller, leaves the entry, and retries on a later stale read', async () => {
