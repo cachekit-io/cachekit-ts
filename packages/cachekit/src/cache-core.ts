@@ -744,7 +744,7 @@ export class CacheImpl implements SecureCache {
    * decrypts at read time) and cachekit-rs with it. Holding post-decrypt
    * plaintext here would put the entire L1 working set into any heap dump,
    * core dump, or Node diagnostic report for the full TTL, and that plaintext
-   * would outlive the key zeroization in close(), since L1 entries are held
+   * would outlive the key release in close(), since L1 entries are held
    * independently of tenant keys.
    *
    * The bytes are copied when they are a window into a larger buffer: a Node
@@ -1738,7 +1738,7 @@ export class CacheImpl implements SecureCache {
     if (this.closed) return;
     this.closed = true;
 
-    // Every step runs even if an earlier one throws — key zeroization, wasm
+    // Every step runs even if an earlier one throws — key release, wasm
     // frees, and the backend connection must not be leaked behind a failing
     // invalidation channel. Errors are collected and re-thrown (never
     // swallowed): the single-failure case keeps its original error type.
@@ -1772,7 +1772,8 @@ export class CacheImpl implements SecureCache {
       }
     }
 
-    // Dispose encryption (zeroizes key material)
+    // Dispose encryption (releases key material: NAPI zeroizes it via the GC
+    // finalizer; on Workers the CryptoKeys are dropped for the GC)
     attempt(() => this.encryption?.dispose());
 
     // Release the envelope codecs (zeroizes/frees wasm resources on Workers;

@@ -60,6 +60,11 @@ rotating.free(); // zeroize the whole keyring when the grace window ends
   Linear memory is a host-readable `ArrayBuffer`, so this is weaker isolation
   than the NAPI binding's Rust heap — on Workers the host is your own
   isolate, making it roughly JS-heap-equivalent in threat model.
+- `deriveKey` reads the master key from the JS `Uint8Array` and returns the
+  derived key as a new JS `Uint8Array`: neither is staged in a linear-memory
+  buffer that is freed unwiped, and the build checks the generated glue for
+  that. The returned key is the caller's to wipe. HKDF's working buffers stay
+  on the stack in linear memory until later calls overwrite them.
 - `blake2b256Hex` copies its input (a cache key's encoded arguments) into
   linear memory and wipes that copy before freeing it. The hasher's last block
   of input, up to 128 bytes and so all of a short key, stays on the stack in

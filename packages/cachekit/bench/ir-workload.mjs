@@ -289,7 +289,9 @@ export const WORKLOADS = {
   // secure cache on Node: AAD v0x03 + AES-256-GCM through the NAPI core, decrypt + encrypt
   'napi-encrypted': napiEncrypted(encoded, 10_000),
   'napi-encrypted-64kb': napiEncrypted(incompressible, 500),
-  // secure cache on Workers: the same through the wasm core
+  // wasm-AES baseline: the same through the wasm core's AES-256-GCM. The
+  // Workers entry encrypts through WebCrypto instead, which Node cannot stand
+  // in for; bench/workers-crypto times that path inside workerd.
   'wasm-encrypted': wasmEncrypted(encoded, 5_000),
   'wasm-encrypted-64kb': wasmEncrypted(incompressible, 50),
   // a secure cache's L2 round trip on Node, L1 off: set + get, each running the

@@ -399,3 +399,85 @@ describe('EncryptionManagerCore keyring config (previousMasterKeys)', () => {
     await expect(inFlight).rejects.toThrow(EncryptionError);
   });
 });
+
+// The Workers bindings are asynchronous (WebCrypto); the seam accepts a
+// Promise from every method and must classify its rejection exactly as it
+// classifies a synchronous throw.
+describe('EncryptionManagerCore over asynchronous bindings', () => {
+  it('maps a rejected encrypt to NonceExhaustedError on exhaustion, EncryptionError otherwise', async () => {
+    const exhausted = mockBindings({
+      encryptWithTenantKeys: vi.fn(() =>
+        Promise.reject(new Error('Nonce counter exhausted - key rotation required'))
+      ),
+    });
+    const other = mockBindings({
+      encryptWithTenantKeys: vi.fn(() => Promise.reject(new Error('boom'))),
+    });
+    const a = new TestManager(async () => exhausted.bindings);
+    const b = new TestManager(async () => other.bindings);
+
+    const error = await a.encrypt(new Uint8Array([1]), 'ns:k').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(NonceExhaustedError);
+    expect((error as Error & { cause?: Error }).cause?.message).toContain(
+      'Nonce counter exhausted'
+    );
+    const otherError = await b.encrypt(new Uint8Array([1]), 'ns:k').catch((e: unknown) => e);
+    expect(otherError).toBeInstanceOf(EncryptionError);
+    expect(otherError).not.toBeInstanceOf(NonceExhaustedError);
+    a.dispose();
+    b.dispose();
+  });
+
+  it('maps a rejected decrypt to EncryptionError', async () => {
+    const { bindings } = mockBindings({
+      decryptWithTenantKeys: vi.fn(() =>
+        Promise.reject(new Error('Authentication verification failed'))
+      ),
+    });
+    const manager = new TestManager(async () => bindings);
+
+    await expect(manager.decrypt(new Uint8Array(28), 'ns:k')).rejects.toThrow(EncryptionError);
+    manager.dispose();
+  });
+
+  it('returns the value an asynchronous encrypt and decrypt resolve to', async () => {
+    const { bindings } = mockBindings({
+      encryptWithTenantKeys: vi.fn(async () => new Uint8Array([7])),
+      decryptWithTenantKeys: vi.fn(async () => new Uint8Array([8])),
+    });
+    const manager = new TestManager(async () => bindings);
+
+    expect(await manager.encrypt(new Uint8Array([1]), 'ns:k')).toEqual(new Uint8Array([7]));
+    expect(await manager.decrypt(new Uint8Array([1]), 'ns:k')).toEqual(new Uint8Array([8]));
+    manager.dispose();
+  });
+
+  it('zero-fills the master-key bytes only after an asynchronous derive settles, on success and on rejection', async () => {
+    for (const outcome of ['resolve', 'reject'] as const) {
+      const { bindings } = mockBindings();
+      const original = vi.mocked(bindings.deriveTenantKeys).getMockImplementation()!;
+      let seen: Uint8Array | undefined;
+      let settle!: () => void;
+      vi.mocked(bindings.deriveTenantKeys).mockImplementation((masterKey, tenantId, previous) => {
+        seen = masterKey;
+        return new Promise<EncryptionTenantKeys>((resolve, reject) => {
+          settle = () =>
+            outcome === 'resolve'
+              ? resolve(original(masterKey, tenantId, previous) as EncryptionTenantKeys)
+              : reject(new Error('importKey failed'));
+        });
+      });
+      const manager = new TestManager(async () => bindings);
+
+      const pending = manager.encrypt(new Uint8Array([1]), 'ns:k');
+      await vi.waitFor(() => expect(seen).toBeDefined());
+      // Still pending: the bytes must be intact for the binding.
+      expect(Array.from(seen!.slice(0, 2))).toEqual([0xab, 0xab]);
+      settle();
+      if (outcome === 'resolve') await pending;
+      else await expect(pending).rejects.toThrow(EncryptionError);
+      expect(seen!.every((b) => b === 0)).toBe(true);
+      manager.dispose();
+    }
+  });
+});

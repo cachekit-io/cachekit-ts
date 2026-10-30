@@ -1,26 +1,25 @@
 /**
  * Cloudflare Workers runtime wiring: CachekitIO backend + wasm32
- * cachekit-core bindings (@cachekit-io/cachekit-core-wasm).
+ * cachekit-core bindings (@cachekit-io/cachekit-core-wasm), with AES-256-GCM
+ * through WebCrypto (./webcrypto.ts).
  *
  * Everything protocol-critical (AAD construction, envelope semantics,
  * interop) is shared with Node via cache-core.ts / manager-core.ts — this
  * file only swaps the platform bindings.
  *
  * Semantics deltas vs Node (documented in the README Workers section):
- * - Keys live in wasm linear memory, which is a host-readable ArrayBuffer —
- *   weaker isolation than NAPI's Rust heap. On Workers, the host is your own
- *   isolate, so the threat model is roughly JS-heap-equivalent; free()
- *   still zeroizes deterministically on dispose().
+ * - wasm cachekit-core derives the keys; each derived AES key is then
+ *   imported once as a non-extractable CryptoKey, and its JS copy and the
+ *   wasm key handle are wiped at init. The master key, like on Node, stays
+ *   in the JS heap as the configured hex string.
  * - wasm instantiation is a one-time synchronous cost per isolate.
  */
 
 import {
   ensureInitialized,
   ByteStorage as WasmByteStorage,
-  TenantKeys as WasmTenantKeys,
+  deriveKey,
   deriveTenantKeys,
-  encryptWithTenantKeys,
-  decryptWithTenantKeys,
 } from '@cachekit-io/cachekit-core-wasm';
 import * as core from '@cachekit-io/cachekit-core-wasm';
 import type { CacheOptions, SecureCache } from '../types/cache.js';
@@ -28,6 +27,7 @@ import type { CachekitIOBackendConfig } from '../backends/types.js';
 import { cachekitio } from '../backends/cachekitio-factory.js';
 import { CacheImpl, type CacheRuntime, type ExecutionContextLike } from '../cache-core.js';
 import { EncryptionManagerCore, type EncryptionBindings } from '../encryption/manager-core.js';
+import { webCryptoEncryptionBindings } from './webcrypto.js';
 import { ConfigurationError } from '../errors.js';
 import { KEY_GEN_MAX_SIZE } from '../constants.js';
 import {
@@ -60,19 +60,14 @@ function initWasm(): void {
   );
 }
 
-function wasmEncryptionBindings(): EncryptionBindings {
+function workersEncryptionBindings(): EncryptionBindings {
   initWasm();
-  return {
-    deriveTenantKeys,
-    encryptWithTenantKeys: (plaintext, aad, tenantKeys) =>
-      encryptWithTenantKeys(plaintext, aad, tenantKeys as WasmTenantKeys),
-    decryptWithTenantKeys: (ciphertext, aad, tenantKeys) =>
-      decryptWithTenantKeys(ciphertext, aad, tenantKeys as WasmTenantKeys),
-  };
+  return webCryptoEncryptionBindings({ deriveKey, deriveTenantKeys });
 }
 
 /**
- * High-level encryption manager backed by the wasm32 cachekit-core build.
+ * High-level encryption manager: keys derived by the wasm32 cachekit-core
+ * build, AES-256-GCM through WebCrypto.
  *
  * Same protocol behavior as the Node EncryptionManager (AAD v0x03,
  * HKDF-SHA256 tenant keys, counter nonces, getEncryptionCount monitoring) —
@@ -89,7 +84,7 @@ export class EncryptionManager extends EncryptionManagerCore {
    *   {@link EncryptionManagerCore} constructor
    */
   constructor(masterKey: string, tenantId?: string, previousMasterKeys?: readonly string[]) {
-    super(masterKey, tenantId, async () => wasmEncryptionBindings(), previousMasterKeys);
+    super(masterKey, tenantId, async () => workersEncryptionBindings(), previousMasterKeys);
   }
 }
 

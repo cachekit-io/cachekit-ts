@@ -137,10 +137,19 @@ export const AAD_VERSION = 0x03;
 /**
  * Maximum AAD size in bytes. Mirrors MAX_AAD_SIZE in both native bindings
  * (packages/cachekit-core-ts/src/lib.rs, packages/cachekit-core-wasm/src/lib.rs),
- * which reject a larger AAD. The AAD carries the full cache key, so this caps
- * the key length a secure cache can store.
+ * which reject a larger AAD; the Workers WebCrypto adapter
+ * (src/workers/webcrypto.ts) enforces it too. The AAD carries the full cache key, so this caps the key length
+ * a secure cache can store.
  */
 export const MAX_AAD_SIZE = 64 * 1024;
+
+/**
+ * Maximum plaintext and ciphertext sizes in bytes, mirroring the native
+ * bindings' MAX_PLAINTEXT_SIZE and MAX_CIPHERTEXT_SIZE (the same two files).
+ * The Workers WebCrypto adapter enforces them itself.
+ */
+export const MAX_PLAINTEXT_SIZE = 100 * 1024 * 1024;
+export const MAX_CIPHERTEXT_SIZE = MAX_PLAINTEXT_SIZE + 1024;
 
 /** Required master key length in bytes (exact — validation rejects any other length) */
 export const MASTER_KEY_BYTES = 32;

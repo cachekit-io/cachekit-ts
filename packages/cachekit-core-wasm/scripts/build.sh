@@ -65,4 +65,21 @@ if [ "$DRIFT" -ne 0 ]; then
   exit 1
 fi
 
+# Key-material glue check: the Workers SDK takes its AES keys from deriveKey,
+# so its generated glue must not stage the master key in linear memory
+# (passArray8ToWasm0) nor copy the derived key out of a linear-memory buffer
+# it then frees unwiped (getArrayU8FromWasm0 + the free export, which
+# wasm-bindgen may rename to __wbindgen_exportN). lib.rs passes both as JS
+# Uint8Array handles instead.
+DERIVE_KEY_GLUE=$(awk '/^export function deriveKey\(/,/^}/' pkg/cachekit_core_wasm.js)
+if [ -z "$DERIVE_KEY_GLUE" ]; then
+  echo "error: deriveKey not found in pkg/cachekit_core_wasm.js" >&2
+  exit 1
+fi
+if grep -qE 'passArray8ToWasm0|getArrayU8FromWasm0|__wbindgen_free|wasm\.__wbindgen_export[0-9]*\([^)]*, 1\)' <<< "$DERIVE_KEY_GLUE"; then
+  echo "error: deriveKey glue copies key bytes through linear memory:" >&2
+  echo "$DERIVE_KEY_GLUE" >&2
+  exit 1
+fi
+
 echo "build OK"

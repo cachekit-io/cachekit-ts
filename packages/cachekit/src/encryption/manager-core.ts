@@ -18,6 +18,14 @@ function aadComponent(text: string): Uint8Array {
   return component;
 }
 
+/**
+ * Whether a binding returned a Promise. The NAPI bindings return plain values,
+ * and awaiting one would still cost a microtask hop on every Node operation.
+ */
+function isThenable<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
+  return typeof (value as { then?: unknown }).then === 'function';
+}
+
 function concatBytes(...parts: Uint8Array[]): Uint8Array {
   const out = new Uint8Array(parts.reduce((sum, p) => sum + p.length, 0));
   let offset = 0;
@@ -29,14 +37,14 @@ function concatBytes(...parts: Uint8Array[]): Uint8Array {
 }
 
 /**
- * Tenant keys handle exposed by a bindings implementation (NAPI or wasm).
- * Keys stay inside the binding's memory (Rust heap under NAPI, wasm linear
- * memory on Workers) — never copied into the JS heap.
+ * Tenant keys handle exposed by a bindings implementation. Under NAPI the
+ * keys stay in the Rust heap, never copied into the JS heap. On Workers they
+ * are non-extractable WebCrypto CryptoKeys, derived by wasm cachekit-core.
  */
 export interface EncryptionTenantKeys {
   readonly tenantId: string;
   encryptionFingerprint(): Uint8Array;
-  /** Get the current nonce counter from the Rust encryptor (for monitoring) */
+  /** Get the current nonce counter from the encryptor (for monitoring) */
   getNonceCounter(): number;
   /**
    * Keyring entries actually built at derivation (1 current key +
@@ -48,20 +56,23 @@ export interface EncryptionTenantKeys {
   keyringEntryCount?(): number;
   /**
    * cachekit-core's AES hardware detection (informational). Optional: older
-   * binding binaries predate it, and the manager reports `null` for those.
+   * binding binaries predate it, and the Workers bindings cannot tell; the
+   * manager reports `null` (unknown) for both.
    */
   hardwareAccelerationEnabled?(): boolean;
   /**
-   * Deterministic zeroize-and-release (wasm bindings). NAPI handles zeroize
-   * via GC finalizer instead and don't expose this.
+   * Deterministic release (Workers bindings). NAPI handles zeroize via GC
+   * finalizer instead and don't expose this.
    */
   free?(): void;
 }
 
 /**
  * The cachekit-core binding surface EncryptionManagerCore drives. Implemented
- * by @cachekit-io/cachekit-core-ts (NAPI, Node) and
- * @cachekit-io/cachekit-core-wasm (wasm32, Cloudflare Workers).
+ * by @cachekit-io/cachekit-core-ts (NAPI, Node, synchronous) and by
+ * src/workers/webcrypto.ts (Cloudflare Workers: WebCrypto AES-GCM on keys
+ * derived by @cachekit-io/cachekit-core-wasm, asynchronous). Each method may
+ * return its result or a Promise of it; the manager awaits either.
  *
  * Error contract: when the encryptor's nonce counter is exhausted,
  * encryptWithTenantKeys MUST throw an Error whose message contains
@@ -73,24 +84,25 @@ export interface EncryptionTenantKeys {
 export interface EncryptionBindings {
   /**
    * `previousMasterKeys` (max 3, each 32 bytes) are decrypt-only keys for a
-   * rotation grace window. The binding constructs the cachekit-core keyring
-   * natively — key bytes cross the boundary once and stay there.
+   * rotation grace window. The binding builds its decrypt keyring once, here.
+   * It must be done with `masterKey` and `previousMasterKeys` by the time it
+   * returns (a Promise or not): the manager zero-fills them after awaiting it.
    */
   deriveTenantKeys(
     masterKey: Uint8Array,
     tenantId: string,
     previousMasterKeys?: Uint8Array[]
-  ): EncryptionTenantKeys;
+  ): EncryptionTenantKeys | Promise<EncryptionTenantKeys>;
   encryptWithTenantKeys(
     plaintext: Uint8Array,
     aad: Uint8Array,
     tenantKeys: EncryptionTenantKeys
-  ): Uint8Array;
+  ): Uint8Array | Promise<Uint8Array>;
   decryptWithTenantKeys(
     ciphertext: Uint8Array,
     aad: Uint8Array,
     tenantKeys: EncryptionTenantKeys
-  ): Uint8Array;
+  ): Uint8Array | Promise<Uint8Array>;
 }
 
 /**
@@ -134,8 +146,8 @@ export class EncryptionManagerCore {
   private readonly aadHead: Uint8Array;
   private readonly aadTailCompressed: Uint8Array;
   private readonly aadTailUncompressed: Uint8Array;
-  // Note: Nonce tracking is done in Rust via getNonceCounter().
-  // The Rust encryptor throws NonceCounterExhausted when the limit is reached.
+  // Note: Nonce tracking is done by the bindings' encryptor via getNonceCounter().
+  // The encryptor throws "Nonce counter exhausted" when the limit is reached.
 
   /**
    * Create an encryption manager core.
@@ -221,8 +233,10 @@ export class EncryptionManagerCore {
   /**
    * Initialize the bindings (lazy loading).
    *
-   * Uses the TenantKeys pattern from cachekit-core - keys stay in binding
-   * memory and are zeroized when the manager is disposed.
+   * Uses the TenantKeys pattern from cachekit-core. Under NAPI the keys stay
+   * in the Rust heap and are zeroized after dispose (GC finalizer). On Workers
+   * the derived bytes cross into JS once, are wiped at init, and are held as
+   * non-extractable CryptoKeys that dispose drops for the GC.
    */
   private async ensureInitialized(): Promise<void> {
     if (this.tenantKeys) return;
@@ -249,15 +263,15 @@ export class EncryptionManagerCore {
       const masterKeyBytes = this.hexToBytes(this.masterKey);
       const previousKeyBytes = this.previousMasterKeys.map((key) => this.hexToBytes(key));
 
-      // Derive tenant keys (uses cachekit-core's derive_tenant_keys with domain "encryption")
-      // Keys stay in binding memory - never copied to the JavaScript heap.
-      // Previous keys build the native decrypt keyring once, here. The decoded
-      // byte buffers are wiped in the finally below as soon as the binding has
-      // consumed them — on error paths too (the hex config strings remain on
-      // the manager for init retry, per the documented masterKey pattern).
+      // Derive tenant keys (uses cachekit-core's derive_tenant_keys with domain "encryption").
+      // Previous keys build the decrypt keyring once, here. The decoded byte
+      // buffers are wiped in the finally below once the binding has consumed
+      // them (its Promise, if any, settled) — on error paths too (the hex
+      // config strings remain on the manager for init retry, per the
+      // documented masterKey pattern).
       let tenantKeys: EncryptionTenantKeys;
       try {
-        tenantKeys = this.native.deriveTenantKeys(
+        tenantKeys = await this.native.deriveTenantKeys(
           masterKeyBytes,
           this.effectiveTenantId,
           previousKeyBytes.length > 0 ? previousKeyBytes : undefined
@@ -284,7 +298,7 @@ export class EncryptionManagerCore {
         }
       }
       if (this.disposed) {
-        // dispose() ran while init was in flight — zeroize immediately
+        // dispose() ran while init was in flight — release immediately
         // instead of parking live key material on a disposed manager.
         tenantKeys.free?.();
         throw new EncryptionError('EncryptionManager has been disposed');
@@ -304,8 +318,9 @@ export class EncryptionManagerCore {
   /**
    * Encrypt data with AAD binding to cache key.
    *
-   * Uses TenantKeys pattern - keys never leave binding memory.
-   * Nonce exhaustion is detected by the Rust encryptor (at u32::MAX = 2^32).
+   * Uses the TenantKeys pattern: the keys stay with the binding (see
+   * ensureInitialized for where each binding holds them).
+   * Nonce exhaustion is detected by the bindings' encryptor (at counter 2^32 - 1).
    *
    * @param data - Plaintext data to encrypt
    * @param cacheKey - Cache key to bind in AAD (prevents ciphertext substitution)
@@ -318,7 +333,9 @@ export class EncryptionManagerCore {
 
     try {
       const aad = this.buildAAD(cacheKey, compressed);
-      return this.native!.encryptWithTenantKeys(data, aad, this.tenantKeys!);
+      const result = this.native!.encryptWithTenantKeys(data, aad, this.tenantKeys!);
+      // Awaited inside the try, so a rejected Promise is classified below.
+      return isThenable(result) ? await result : result;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       // Detect nonce exhaustion from Rust error message
@@ -341,10 +358,12 @@ export class EncryptionManagerCore {
   /**
    * Decrypt data and verify AAD binding.
    *
-   * Uses TenantKeys pattern - keys never leave binding memory.
+   * Uses the TenantKeys pattern: the keys stay with the binding (see
+   * ensureInitialized for where each binding holds them).
    *
    * With previousMasterKeys configured, the binding runs cachekit-core's
-   * keyring loop natively: sequential attempts, current key first, the
+   * keyring loop (natively under NAPI, in JS on Workers): sequential
+   * attempts, current key first, the
    * identical AAD rebuilt for every attempt (ts entries carry no per-entry
    * key identity — protocol spec/encryption.md "Key Rotation (Keyring)").
    *
@@ -358,7 +377,8 @@ export class EncryptionManagerCore {
 
     try {
       const aad = this.buildAAD(cacheKey, compressed);
-      return this.native!.decryptWithTenantKeys(ciphertext, aad, this.tenantKeys!);
+      const result = this.native!.decryptWithTenantKeys(ciphertext, aad, this.tenantKeys!);
+      return isThenable(result) ? await result : result;
     } catch (error) {
       throw new EncryptionError(
         `Decryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -368,10 +388,10 @@ export class EncryptionManagerCore {
   }
 
   /**
-   * Get the current nonce counter from the Rust encryptor.
+   * Get the current nonce counter from the bindings' encryptor.
    *
    * Monitor this value - rotate key before reaching 2^32.
-   * This directly reflects the Rust encryptor's nonce counter,
+   * This directly reflects the encryptor's nonce counter,
    * matching Python's ZeroKnowledgeEncryptor.get_nonce_counter().
    */
   async getEncryptionCount(): Promise<number> {
@@ -391,7 +411,8 @@ export class EncryptionManagerCore {
    * Whether AES-256-GCM is hardware-accelerated on this host, per
    * cachekit-core's detection (informational — see the README). Initialises
    * the bindings if needed, so it answers at startup. `null` = unknown: the
-   * installed binding predates the accessor.
+   * installed binding predates the accessor, or the manager runs on Workers,
+   * where the isolate cannot see whether WebCrypto uses AES instructions.
    *
    * @throws {EncryptionError} if the manager is disposed or bindings fail to load
    */
@@ -408,10 +429,12 @@ export class EncryptionManagerCore {
   }
 
   /**
-   * Dispose of the encryption manager and zeroize keys.
+   * Dispose of the encryption manager and release its keys.
    *
    * NAPI: releasing the reference triggers ZeroizeOnDrop via the GC finalizer.
-   * wasm: free() zeroizes deterministically, right now.
+   * Workers: free() drops the non-extractable CryptoKeys for the GC; a
+   * CryptoKey cannot be zeroized. Their derived bytes were already wiped at
+   * init.
    */
   dispose(): void {
     this.disposed = true;
