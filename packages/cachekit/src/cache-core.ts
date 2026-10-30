@@ -1102,8 +1102,9 @@ export class CacheImpl implements SecureCache {
    * Returns the payload L1 should hold for this entry, so the SWR refresh
    * path (which defers its L1 write to completeRefresh's version check) can
    * store the ciphertext this produced instead of the caller's plaintext.
-   * Null when the value failed to encode, and when an encrypted cache
-   * produced no ciphertext.
+   * Null when the value failed to encode, when an encrypted cache
+   * produced no ciphertext, and when a Workers SWR refresh is skipped
+   * because the key has a write pending (see below).
    *
    * `writeBehind` (a wrap() cold miss with the opt-in on) fills L1 first and
    * returns without waiting for the L2 write, when tryWriteBehind() takes it.
@@ -1218,6 +1219,13 @@ export class CacheImpl implements SecureCache {
       this.fillL1(key, l1Write, ttl, namespace);
       if (this.tryWriteBehind(key, data, ttl, writeBehind.waitUntil)) return l1Write;
     }
+
+    // An SWR refresh (updateL1=false) on Workers runs inside its request's
+    // waitUntil, which workerd caps at 30 s: queued behind a key's pending
+    // write it would wait out KEY_WAIT_CAP_MS and be cancelled as it sends,
+    // leaving its marker stranded and a new tail that never settles. Skip
+    // it; null makes the refresh manager defer the key (one retry a minute).
+    if (!updateL1 && this.swrRequiresWaitUntil && this.keyTails.has(key)) return null;
 
     // Only the backend write runs under retry, the breaker and degradation.
     await this.inKeyOrder(key, () =>

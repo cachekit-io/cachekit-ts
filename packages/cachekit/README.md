@@ -445,7 +445,9 @@ land after the op.
   `ctx.waitUntil`. workerd cancels unregistered work at response return;
 - on Workers, while the key already has a write or delete pending: a
   background write queued behind it would spend workerd's 30 s `waitUntil`
-  budget waiting and be cancelled as it sends;
+  budget waiting and be cancelled as it sends. For the same reason an SWR
+  refresh of such a key sends no write: the key's refresh is deferred for a
+  minute, and the stale value keeps serving;
 - when the write would take the pending writes past 64 or 16 MiB on the
   cache: that write is the caller's, and it still waits behind any pending
   write of the same key, so the older value can never land last.

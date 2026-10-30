@@ -355,6 +355,53 @@ describe('write-behind', () => {
     }
   });
 
+  it('on Workers, an SWR refresh of a key with a write pending sends no PUT and defers', async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = new GatedBackend();
+      let first = true;
+      const realSet = backend.set.bind(backend);
+      backend.set = async (key, value) => {
+        backend.setKeys.push(key);
+        if (first) {
+          first = false;
+          return new Promise<void>(() => {}); // a write workerd cancelled: never settles
+        }
+        return realSet(key, value);
+      };
+      // A threshold ratio above 1 makes every L1 hit stale, so the next read refreshes.
+      const cache = make({ backend, l1: { swrEnabled: true, swrThresholdRatio: 2 } });
+      (cache as unknown as { swrRequiresWaitUntil: boolean }).swrRequiresWaitUntil = true;
+      const registered: Promise<unknown>[] = [];
+      const view = viewOf(cache, { waitUntil: (p) => registered.push(p) });
+      let calls = 0;
+      const fn = view.wrap(async (id: number) => ({ id, call: ++calls }), {
+        namespace: 'wb:swr',
+        ttl: 60,
+        writeBehind: true,
+      });
+
+      await fn(1); // write-behind: its PUT never settles
+      await expect(fn(1)).resolves.toEqual({ id: 1, call: 1 }); // stale L1 hit, refresh scheduled
+      expect(registered).toHaveLength(2); // the write-behind, then the refresh
+      await Promise.race([registered[1], vi.advanceTimersByTimeAsync(1_000)]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(calls).toBe(2); // the refresh computed
+      expect(backend.setKeys).toHaveLength(1); // and sent no PUT behind the stuck write
+      await registered[1]; // the refresh settled instead of waiting out the cap
+
+      // Deferred, not wedged: the next stale read within the minute schedules nothing.
+      await fn(1);
+      expect(registered).toHaveLength(2);
+
+      const closing = cache.close(); // the stuck tail is waited out at the cap
+      await vi.advanceTimersByTimeAsync(30_000);
+      await closing;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('on Workers, a wait behind a pending write that never settles is capped', async () => {
     vi.useFakeTimers();
     try {
