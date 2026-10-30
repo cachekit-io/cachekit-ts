@@ -385,7 +385,8 @@ export interface Cache {
 
   /**
    * Close the cache and release resources. Waits first for every pending
-   * `writeBehind` write; a second call waits for the same close.
+   * L2 write (`writeBehind`, and on Node stale-grace revalidation); a second
+   * call waits for the same close.
    */
   close(): Promise<void>;
 }

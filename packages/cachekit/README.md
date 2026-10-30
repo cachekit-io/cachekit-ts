@@ -497,14 +497,19 @@ const getReport = cache.wrap(async (id: string) => buildReport(id), {
   until the lease could have expired (`stampede.lockTimeoutMs`, at most 60
   seconds). Every write of the key, revalidation included, re-sends the TTL
   and the stale window.
-- The revalidation's write goes through the same per-key queue as
+- The lease is released only after the revalidation's write settles. On
+  Node the write goes through the same per-key queue as
   [Write-Behind](#write-behind) writes and counts against its 64-write /
   16 MiB bound: a later `set()`, `delete()` or `invalidate('params')` of the
-  key in this process waits for it, `close()` drains it, and the lease is
-  released only after it lands. When the queue is full, or on Workers when
-  the key has a write already queued, the write is dropped and counted as
-  `operation="revalidate_dropped"`; the stale entry keeps serving and a later
-  stale read tries again.
+  key in this process waits for it, and `close()` drains it. On Workers,
+  where workerd can cancel it, it stays out of that queue and is unordered
+  against a later write, as without write-behind.
+- When the pending writes are at the bound, or on Workers when the key has a
+  write queued, the revalidation is dropped before it takes the lease or
+  runs the function (or, past the byte bound, before it writes). A drop logs
+  one rate-limited line with a digest of the key and counts as
+  `operation="revalidate_dropped"`; the stale entry keeps serving, and the
+  key is not revalidated again until the lease could have expired.
 - A failed revalidation never reaches the caller: the stale entry stays and
   a later stale read tries again. A function that throws is logged
   (rate-limited); a failed write follows the cache's reliability settings,
@@ -699,7 +704,7 @@ The second call evicts the whole namespace from every peer's L1, and neither
 ### cache.close()
 
 Close connections and release resources. It first waits for every pending
-write-behind write.
+L2 write (write-behind, and on Node stale-grace revalidation).
 
 ## Error Handling
 

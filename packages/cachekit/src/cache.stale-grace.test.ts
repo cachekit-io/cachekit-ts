@@ -731,13 +731,14 @@ describe('stale-grace revalidation write through the per-key write queue', () =>
     expect(backend.log).toContain('write:done');
   });
 
-  it('is dropped and counted when the write queue is full, never blocking the caller', async () => {
+  it('is dropped before the lease and the recompute when the write queue is full, logged and counted', async () => {
+    const logError = vi.spyOn(logger, 'logError').mockImplementation(() => {});
     const backend = new HeldWritesBackend();
     await make(backend).wrap(async () => 'v1', WRAP)();
     backend.expire();
     const reader = make(backend);
     backend.log = []; // drop the seed write's entries
-    const recordOperation = vi.fn(async () => {});
+    const recordOperation = vi.fn(async (_op: string, _status: string) => {});
     const holder = reader as unknown as {
       metrics: { recordOperation: (op: string, status: string) => Promise<void> };
     };
@@ -751,17 +752,148 @@ describe('stale-grace revalidation write through the per-key write queue', () =>
       writeBehind: true,
     });
     await Promise.all(Array.from({ length: 64 }, (_, i) => fill(i)));
+    const acquiresBefore = backend.acquires;
 
     const fn = vi.fn(async () => 'v2');
-    expect(await reader.wrap(fn, WRAP)()).toBe('v1'); // served stale, not blocked
-    await vi.waitFor(() => expect(fn).toHaveBeenCalledTimes(1));
-    await vi.waitFor(() =>
-      expect(recordOperation).toHaveBeenCalledWith('revalidate_dropped', 'error')
-    );
+    const wrapped = reader.wrap(fn, WRAP);
     try {
-      expect(backend.log).not.toContain('write:start'); // the revalidation wrote nothing
+      expect(await wrapped()).toBe('v1'); // served stale, not blocked
+      await vi.waitFor(() =>
+        expect(recordOperation).toHaveBeenCalledWith('revalidate_dropped', 'error')
+      );
+      expect(fn).not.toHaveBeenCalled(); // no origin call
+      expect(backend.acquires).toBe(acquiresBefore); // and no lease taken
+      expect(
+        logError.mock.calls.some((args) => String(args[0]).includes('stale revalidation dropped'))
+      ).toBe(true);
+
+      // The key is held off, not retried on the next stale read.
+      expect(await wrapped()).toBe('v1');
+      await sleep(10);
+      expect(recordOperation.mock.calls.filter(([op]) => op === 'revalidate_dropped')).toHaveLength(
+        1
+      );
     } finally {
       backend.releaseWrites();
     }
+  });
+
+  it('past the byte bound, is dropped after the recompute and holds the key off', async () => {
+    vi.spyOn(logger, 'logError').mockImplementation(() => {});
+    const backend = new HeldWritesBackend();
+    const options = {
+      metrics: false as const,
+      compression: false,
+      serializer: { maxEncodedSize: 32 * 1024 * 1024, maxDecodedSize: 32 * 1024 * 1024 },
+    };
+    const seed = createCache({ backend, ...options });
+    open.push(seed);
+    await seed.wrap(async () => 'v1', WRAP)();
+    backend.expire();
+    const reader = createCache({ backend, ...options });
+    open.push(reader);
+
+    // One held write-behind 1 byte under 16 MiB encoded (a 5-byte msgpack
+    // string header): the count is far from its bound, so the revalidation
+    // runs, and its 3-byte write then crosses the byte bound.
+    backend.holdWrites();
+    const big = 'x'.repeat(16 * 1024 * 1024 - 6);
+    await reader.wrap(async () => big, { namespace: 'svc:big', ttl: 10, writeBehind: true })();
+
+    const fn = vi.fn(async () => 'v2');
+    const wrapped = reader.wrap(fn, WRAP);
+    backend.log = [];
+    try {
+      expect(await wrapped()).toBe('v1');
+      await vi.waitFor(() => expect(backend.log).toContain('release')); // ran under the lease
+      expect(fn).toHaveBeenCalledTimes(1);
+      expect(backend.log).toEqual(['release']); // and wrote nothing
+
+      // Dropped, so the key is held off: the next stale read does not recompute.
+      expect(await wrapped()).toBe('v1');
+      await sleep(10);
+      expect(fn).toHaveBeenCalledTimes(1);
+    } finally {
+      backend.releaseWrites();
+    }
+  });
+
+  it('is queued behind a pending write-behind of the key, and the lease waits for both', async () => {
+    const backend = new HeldWritesBackend();
+    const seed = make(backend);
+    await seed.wrap(async () => 'v1', WRAP)();
+    const [key] = backend.store.keys();
+    const staleBytes = backend.store.get(key)!;
+    backend.store.delete(key);
+
+    // L1 off, so the second call reads L2 again.
+    const reader = createCache({ backend, metrics: false, l1: { enabled: false } });
+    open.push(reader);
+    const wrapped = reader.wrap(async () => 'v2', { ...WRAP, writeBehind: true });
+    backend.holdWrites();
+    expect(await wrapped()).toBe('v2'); // cold miss: its write-behind is held, the key's tail
+    backend.log = [];
+
+    // Another process left a stale entry; this read serves it and revalidates.
+    backend.store.set(key, staleBytes);
+    backend.stale.add(key);
+    expect(await wrapped()).toBe('v1');
+    await sleep(10);
+    expect(backend.log).toEqual([]); // the revalidation write waits behind the held one
+
+    backend.releaseWrites();
+    await vi.waitFor(() => expect(backend.log).toContain('release'));
+    expect(backend.log).toEqual(['write:done', 'write:start', 'write:done', 'release']);
+  });
+
+  it('on Workers, a revalidation write is never a key tail, so a later op does not wait on it', async () => {
+    const backend = new HeldWritesBackend();
+    await make(backend).wrap(async () => 'v1', WRAP)();
+    backend.expire();
+    const [key] = backend.store.keys();
+    const runtime: CacheRuntime = {
+      resolveBackend: () => backend,
+      createByteStorage: () => new ByteStorage(),
+      createEncryption: (config) => new EncryptionManager(config.masterKey, config.tenantId),
+      swrRequiresWaitUntil: true,
+    };
+    const cache = new CacheImpl({ backend, metrics: false }, runtime);
+    open.push(cache);
+    const registered: Promise<unknown>[] = [];
+    const view = cache.withExecutionContext({ waitUntil: (p) => registered.push(p) });
+
+    backend.holdWrites(); // the revalidation's PUT hangs, as one workerd cancelled would
+    expect(await view.wrap(async () => 'v2', WRAP)()).toBe('v1');
+    await vi.waitFor(() => expect(backend.log).toContain('write:start'));
+
+    // A delete of the key runs at once instead of waiting out the 30 s cap
+    // (this test's timeout is 10 s).
+    await expect(cache.delete(key)).resolves.toBe(true);
+    backend.releaseWrites();
+    await registered[0];
+  });
+
+  it('a stale-grace write-behind sends the stale window, in the background and on the caller', async () => {
+    const backend = new HeldWritesBackend();
+    const cache = make(backend);
+    const wrapped = cache.wrap(async (id: number) => `v${id}`, { ...WRAP, writeBehind: true });
+
+    await wrapped(1); // background
+    await vi.waitFor(() => expect(backend.writes).toHaveLength(1));
+    expect(backend.writes).toEqual([WIRE]);
+
+    // A full queue sends the next one to the caller's path.
+    backend.holdWrites();
+    const fill = cache.wrap(async (id: number) => id, {
+      namespace: 'svc:fill',
+      ttl: 10,
+      writeBehind: true,
+    });
+    await Promise.all(Array.from({ length: 64 }, (_, i) => fill(i)));
+    const onCaller = wrapped(2);
+    backend.releaseWrites();
+    await onCaller;
+    await cache.close();
+    expect(backend.writes.filter((w) => w.staleTtl === 60)).toEqual([WIRE, WIRE]);
   });
 });
