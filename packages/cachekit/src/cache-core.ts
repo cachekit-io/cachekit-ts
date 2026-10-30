@@ -1772,7 +1772,8 @@ export class CacheImpl implements SecureCache {
       }
     }
 
-    // Dispose encryption (zeroizes key material)
+    // Dispose encryption (releases key material: NAPI zeroizes it via the GC
+    // finalizer; on Workers the CryptoKeys are dropped for the GC)
     attempt(() => this.encryption?.dispose());
 
     // Release the envelope codecs (zeroizes/frees wasm resources on Workers;

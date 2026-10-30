@@ -233,8 +233,10 @@ export class EncryptionManagerCore {
   /**
    * Initialize the bindings (lazy loading).
    *
-   * Uses the TenantKeys pattern from cachekit-core - keys stay in binding
-   * memory and are zeroized when the manager is disposed.
+   * Uses the TenantKeys pattern from cachekit-core. Under NAPI the keys stay
+   * in the Rust heap and are zeroized after dispose (GC finalizer). On Workers
+   * the derived bytes cross into JS once, are wiped at init, and are held as
+   * non-extractable CryptoKeys that dispose drops for the GC.
    */
   private async ensureInitialized(): Promise<void> {
     if (this.tenantKeys) return;
@@ -296,7 +298,7 @@ export class EncryptionManagerCore {
         }
       }
       if (this.disposed) {
-        // dispose() ran while init was in flight — zeroize immediately
+        // dispose() ran while init was in flight — release immediately
         // instead of parking live key material on a disposed manager.
         tenantKeys.free?.();
         throw new EncryptionError('EncryptionManager has been disposed');
@@ -316,7 +318,8 @@ export class EncryptionManagerCore {
   /**
    * Encrypt data with AAD binding to cache key.
    *
-   * Uses TenantKeys pattern - keys never leave binding memory.
+   * Uses the TenantKeys pattern: the keys stay with the binding (see
+   * ensureInitialized for where each binding holds them).
    * Nonce exhaustion is detected by the bindings' encryptor (at counter 2^32 - 1).
    *
    * @param data - Plaintext data to encrypt
@@ -355,7 +358,8 @@ export class EncryptionManagerCore {
   /**
    * Decrypt data and verify AAD binding.
    *
-   * Uses TenantKeys pattern - keys never leave binding memory.
+   * Uses the TenantKeys pattern: the keys stay with the binding (see
+   * ensureInitialized for where each binding holds them).
    *
    * With previousMasterKeys configured, the binding runs cachekit-core's
    * keyring loop (natively under NAPI, in JS on Workers): sequential
@@ -425,10 +429,12 @@ export class EncryptionManagerCore {
   }
 
   /**
-   * Dispose of the encryption manager and zeroize keys.
+   * Dispose of the encryption manager and release its keys.
    *
    * NAPI: releasing the reference triggers ZeroizeOnDrop via the GC finalizer.
-   * wasm: free() zeroizes deterministically, right now.
+   * Workers: free() drops the non-extractable CryptoKeys for the GC; a
+   * CryptoKey cannot be zeroized. Their derived bytes were already wiped at
+   * init.
    */
   dispose(): void {
     this.disposed = true;

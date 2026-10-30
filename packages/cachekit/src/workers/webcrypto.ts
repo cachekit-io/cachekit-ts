@@ -24,7 +24,7 @@
  */
 
 import type { EncryptionBindings, EncryptionTenantKeys } from '../encryption/manager-core.js';
-import { MAX_AAD_SIZE } from '../constants.js';
+import { MAX_AAD_SIZE, MAX_CIPHERTEXT_SIZE, MAX_PLAINTEXT_SIZE } from '../constants.js';
 
 /** The two cachekit-core-wasm exports this adapter derives keys through. */
 export interface KeyDerivationCore {
@@ -35,10 +35,7 @@ export interface KeyDerivationCore {
   deriveKey(masterKey: Uint8Array, domain: string, tenantSalt: string): Uint8Array;
 }
 
-// The wasm binding's limits (cachekit-core-wasm src/lib.rs) and cachekit-core's
-// minimum ciphertext, nonce(12) + tag(16).
-const MAX_PLAINTEXT_SIZE = 100 * 1024 * 1024;
-const MAX_CIPHERTEXT_SIZE = MAX_PLAINTEXT_SIZE + 1024;
+// cachekit-core's minimum ciphertext, nonce(12) + tag(16).
 const NONCE_BYTES = 12;
 const MIN_CIPHERTEXT_SIZE = NONCE_BYTES + 16;
 /** Counter values at or above this fail: cachekit-core checks `counter >= u32::MAX`. */
@@ -87,17 +84,15 @@ export class WebCryptoTenantKeys implements EncryptionTenantKeys {
   /**
    * The next counter value an encrypt reserves. Advanced by every encrypt
    * that passes the size checks, including one that then fails.
-   *
-   * @internal
    */
-  nonceCounter = 0;
+  private nonceCounter = 0;
   private keys: readonly CryptoKey[] | null;
   /** The nonce's first 8 bytes: the instance id, big-endian. */
   private readonly noncePrefix = new Uint8Array(8);
 
   constructor(
     readonly tenantId: string,
-    readonly instanceId: bigint,
+    instanceId: bigint,
     private readonly fingerprint: Uint8Array,
     keys: readonly CryptoKey[]
   ) {
@@ -111,6 +106,15 @@ export class WebCryptoTenantKeys implements EncryptionTenantKeys {
 
   getNonceCounter(): number {
     return this.nonceCounter;
+  }
+
+  /**
+   * Test seam: set the next counter value an encrypt reserves.
+   *
+   * @internal
+   */
+  setNonceCounterForTesting(value: number): void {
+    this.nonceCounter = value;
   }
 
   keyringEntryCount(): number {

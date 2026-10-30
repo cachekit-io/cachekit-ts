@@ -103,28 +103,13 @@ const median = (xs: number[]) => {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
 
-interface Result {
-  size: number;
-  op: 'encrypt' | 'decrypt';
-  reps: number;
-  a_us: number;
-  b_us: number;
-  aa_us: number;
-  floor: number;
-  gain: number;
-  lo: number;
-  hi: number;
-  verdict: 'PASS' | 'REGRESS' | 'PARITY';
-}
-
 interface Arm {
-  name: 'A' | 'B' | 'A/A';
   ops: Record<'encrypt' | 'decrypt', Op>;
   k: Record<'encrypt' | 'decrypt', number>;
   us: Record<'encrypt' | 'decrypt', number[]>;
 }
 
-async function arm(name: Arm['name'], bindings: EncryptionBindings, data: Uint8Array) {
+async function arm(bindings: EncryptionBindings, data: Uint8Array) {
   const manager = new EncryptionManagerCore(MASTER_KEY, undefined, async () => bindings);
   const ciphertext = await manager.encrypt(data, KEY);
   const ops = {
@@ -132,21 +117,20 @@ async function arm(name: Arm['name'], bindings: EncryptionBindings, data: Uint8A
     decrypt: () => manager.decrypt(ciphertext, KEY),
   };
   const k = { encrypt: await calibrate(ops.encrypt), decrypt: await calibrate(ops.decrypt) };
-  const result: Arm = { name, ops, k, us: { encrypt: [], decrypt: [] } };
+  const result: Arm = { ops, k, us: { encrypt: [], decrypt: [] } };
   return { arm: result, manager };
 }
 
 it('WebCrypto vs wasm AES-256-GCM, interleaved A/B with an A/A row', async () => {
   const rows: string[] = [];
-  const results: Result[] = [];
   let failures = 0;
   for (const size of SIZES) {
     const data = new Uint8Array(size);
     for (let i = 0; i < size; i++) data[i] = (i * 31 + 7) & 0xff;
     const built = [
-      await arm('A', wasmBindings(), data),
-      await arm('B', webCryptoBindings(), data),
-      await arm('A/A', wasmBindings(), data),
+      await arm(wasmBindings(), data), // A
+      await arm(webCryptoBindings(), data), // B
+      await arm(wasmBindings(), data), // A/A
     ];
     const arms = built.map((b) => b.arm);
     for (let rep = 0; rep < reps(size); rep++) {
@@ -166,19 +150,6 @@ it('WebCrypto vs wasm AES-256-GCM, interleaved A/B with an A/A row', async () =>
       const verdict =
         gain > floor || lo > 0 ? 'PASS' : gain < -floor || hi < 0 ? 'REGRESS' : 'PARITY';
       if (verdict !== 'PASS') failures++;
-      results.push({
-        size,
-        op,
-        reps: reps(size),
-        a_us: a,
-        b_us: b,
-        aa_us: aa,
-        floor,
-        gain,
-        lo,
-        hi,
-        verdict,
-      });
       rows.push(
         [
           String(size).padStart(8),
@@ -200,7 +171,6 @@ it('WebCrypto vs wasm AES-256-GCM, interleaved A/B with an A/A row', async () =>
       'AES-256-GCM per op in local workerd (indicative): A = wasm core, B = WebCrypto',
       '    size op           A µs       B µs     A/A µs  A/A flr     gain  speedup     paired 95% CI',
       ...rows,
-      JSON.stringify(results),
     ].join('\n')
   );
   expect(failures).toBe(0);

@@ -27,6 +27,8 @@ import {
   type EncryptionBindings,
 } from '../../src/encryption/manager-core.js';
 import { ConfigurationError, EncryptionError, NonceExhaustedError } from '../../src/errors.js';
+import { MAX_CIPHERTEXT_SIZE, MAX_PLAINTEXT_SIZE } from '../../src/constants.js';
+import { bytesToHex, hexToBytes } from '../fixtures/wire-vectors.js';
 import fixture from './fixtures/encryption.json' with { type: 'json' };
 
 interface EncryptionVector {
@@ -57,20 +59,6 @@ const K1_HEX = '11'.repeat(32);
 const K2_HEX = '22'.repeat(32);
 const K3_HEX = '33'.repeat(32);
 const MiB = 1024 * 1024;
-
-function hexToBytes(hex: string): Uint8Array {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
 
 function realCore(): KeyDerivationCore {
   wasm.ensureInitialized();
@@ -172,7 +160,7 @@ describe('byte parity with the protocol vectors', () => {
       // the instance id, its last 4 the counter.
       setInstanceCounterForTesting(nonce.getBigUint64(0, false));
       const { bindings, tk } = await rawBindings(masterKeyHex, tenantId);
-      tk.nonceCounter = nonce.getUint32(8, false);
+      tk.setNonceCounterForTesting(nonce.getUint32(8, false));
       const out = await bindings.encryptWithTenantKeys(
         hexToBytes(vector.plaintext_hex),
         hexToBytes(vector.aad_hex),
@@ -332,7 +320,7 @@ describe('counter nonces', () => {
   it('writes every byte of the counter big-endian', async () => {
     const { manager, tenantKeys } = spiedManager();
     await manager.encrypt(new Uint8Array([1]), 'ns:k');
-    tenantKeys().nonceCounter = 0xa1b2c3d4;
+    tenantKeys().setNonceCounterForTesting(0xa1b2c3d4);
     const ct = await manager.encrypt(new Uint8Array([1]), 'ns:k');
     expect(bytesToHex(ct.subarray(8, 12))).toBe('a1b2c3d4');
     expect(await manager.decrypt(ct, 'ns:k')).toEqual(new Uint8Array([1]));
@@ -386,7 +374,7 @@ describe('counter nonces', () => {
   it('throws NonceExhaustedError at counter 2^32−1, and again on the next encrypt', async () => {
     const { manager, tenantKeys } = spiedManager();
     await manager.encrypt(new Uint8Array([1]), 'ns:k');
-    tenantKeys().nonceCounter = 2 ** 32 - 1;
+    tenantKeys().setNonceCounterForTesting(2 ** 32 - 1);
 
     for (let attempt = 0; attempt < 2; attempt++) {
       const error = await manager.encrypt(new Uint8Array([1]), 'ns:k').catch((e: unknown) => e);
@@ -433,7 +421,7 @@ describe('input limits are checked before crypto.subtle', () => {
     const { bindings, tk } = await rawBindings(masterKeyHex, tenantId);
     const encrypt = vi.spyOn(crypto.subtle, 'encrypt');
     await expect(
-      bindings.encryptWithTenantKeys(oversize(100 * MiB + 1), new Uint8Array(1), tk)
+      bindings.encryptWithTenantKeys(oversize(MAX_PLAINTEXT_SIZE + 1), new Uint8Array(1), tk)
     ).rejects.toThrow(/Plaintext exceeds maximum size/);
     await expect(
       bindings.encryptWithTenantKeys(new Uint8Array(1), new Uint8Array(64 * 1024 + 1), tk)
@@ -447,7 +435,7 @@ describe('input limits are checked before crypto.subtle', () => {
     const { bindings, tk } = await rawBindings(masterKeyHex, tenantId);
     const decrypt = vi.spyOn(crypto.subtle, 'decrypt');
     await expect(
-      bindings.decryptWithTenantKeys(oversize(100 * MiB + 1025), new Uint8Array(1), tk)
+      bindings.decryptWithTenantKeys(oversize(MAX_CIPHERTEXT_SIZE + 1), new Uint8Array(1), tk)
     ).rejects.toThrow(/Ciphertext exceeds maximum size/);
     await expect(
       bindings.decryptWithTenantKeys(new Uint8Array(28), new Uint8Array(64 * 1024 + 1), tk)
