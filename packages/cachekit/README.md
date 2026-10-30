@@ -432,7 +432,10 @@ overtakes them, and `close()` drains every pending write before it closes the
 backend. On Workers the wait is capped at 30 s, because workerd can cancel a
 pending write, which then never settles. After the cap the op runs anyway, so
 there the ordering holds for 30 s: a write still in flight at the cap can
-land after the op.
+land after the op. Once a cache has a `writeBehind` function, its L2 writes
+and deletes of one key run one at a time in this process, so a write-behind
+never fills L1 ahead of a `set()` still in flight; a cache without one keeps
+same-key writes unordered, as before.
 
 **The write stays on the caller's path:**
 

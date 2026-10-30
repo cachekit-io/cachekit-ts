@@ -349,6 +349,14 @@ export class CacheImpl implements SecureCache {
   /** Write-behind writes started and not yet settled, and their bytes. */
   private pendingWrites = 0;
   private pendingWriteBytes = 0;
+  /**
+   * Set once a function is wrapped with `writeBehind`. From then on every L2
+   * write and delete registers in keyTails while it runs (see inKeyOrder),
+   * so a write-behind sees an in-flight foreground op and queues behind it
+   * instead of filling L1 ahead of it. A cache that never opts in keeps
+   * unordered same-key ops, as before.
+   */
+  private orderKeyWrites = false;
 
   constructor(options: CacheOptions, runtime: CacheRuntime) {
     // Every config check that can throw ConfigurationError runs before
@@ -1344,15 +1352,17 @@ export class CacheImpl implements SecureCache {
 
   /**
    * Run an L2 write or delete of `key` after everything already queued for
-   * the key, and make it the key's new tail. A key with no write-behind
-   * pending runs at once, as it did before write-behind existed: an op
-   * started before a background write is not ordered against it, as two
-   * foreground writes never were.
+   * the key, and make it the key's new tail. Once the cache has a
+   * `writeBehind` function (orderKeyWrites), an op on an idle key registers
+   * too, so a write-behind started while it runs is refused and queues
+   * behind it: its early L1 fill could otherwise land before this op's later
+   * one, leaving L1 older than L2. On a cache without one, an op on an idle
+   * key runs at once, unregistered, as before write-behind existed.
    */
   private inKeyOrder<T>(key: string, op: () => Promise<T>): Promise<T> {
     const tail = this.keyTails.get(key);
-    if (tail === undefined) return op();
-    const result = this.afterTail(tail).then(op);
+    if (tail === undefined && !this.orderKeyWrites) return op();
+    const result = tail === undefined ? op() : this.afterTail(tail).then(op);
     this.setKeyTail(key, result);
     return result;
   }
@@ -1525,6 +1535,7 @@ export class CacheImpl implements SecureCache {
       !interop && !this.encryption && this.l1 !== null ? this.setUnrefTimeout : undefined
     );
     if (autoKeys.memoising) this.trackKeyMemo(autoKeys);
+    if (options.writeBehind) this.orderKeyWrites = true;
     return async (...args: TArgs): Promise<TResult> => {
       // First, and before keying in particular: keying puts the arguments in the
       // key memo, which close() has emptied, and only the timer of a new window

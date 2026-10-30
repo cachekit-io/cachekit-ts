@@ -282,8 +282,37 @@ describe('write-behind', () => {
     await explicit;
     await expect(second).resolves.toEqual({ id: 1, call: 2 });
     // L2 ends with call 2 (1, then 99, then 2); L1 must not keep the older 99.
-    expect(new TextDecoder().decode(backend.store.get(key))).not.toContain('99');
+    await expect(cache.get(key)).resolves.toEqual({ id: 1, call: 2 }); // L1
+    await cache.invalidate('global'); // L1 only, so the next read decodes L2
     await expect(cache.get(key)).resolves.toEqual({ id: 1, call: 2 });
+  });
+
+  it('a set() in flight on an idle key is not overtaken in L1 by a write-behind', async () => {
+    const backend = new GatedBackend();
+    const cache = make({ backend });
+    const counter = { calls: 0 };
+    const wrapped = cache.wrap(async (id: number) => ({ id, call: ++counter.calls }), {
+      namespace: 'wb:idle-set',
+      ttl: 60,
+      writeBehind: true,
+    });
+    await wrapped(1); // learn the key
+    await settle();
+    const [key] = backend.setKeys;
+    await cache.delete(key); // both levels empty, and no write pending
+
+    backend.gate();
+    const explicit = cache.set(key, 99, { ttl: 3600 }); // in flight on an idle key
+    const second = wrapped(1); // misses: computes call 2
+    await settle();
+
+    backend.open(); // the set lands first, then call 2's write
+    await explicit;
+    await expect(second).resolves.toEqual({ id: 1, call: 2 });
+    await settle();
+    await expect(cache.get(key)).resolves.toEqual({ id: 1, call: 2 }); // L1
+    await cache.invalidate('global');
+    await expect(cache.get(key)).resolves.toEqual({ id: 1, call: 2 }); // L2
   });
 
   it('close() drains pending PUTs before the backend closes', async () => {

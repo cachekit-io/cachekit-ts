@@ -66,7 +66,8 @@ export interface WrapOptionsBase {
    * it; a write still pending when the process ends without `close()` is
    * lost. In this process, a later `set`, `delete` or `invalidate('params')`
    * of the key waits for it (on Workers, for at most 30 s), and `close()`
-   * drains it. Another process's
+   * drains it. Once a cache has a `writeBehind` function, its L2 writes and
+   * deletes of one key run one at a time. Another process's
    * `invalidate` or `delete` is not ordered against it, so a value computed
    * before that invalidation can land after it, for its full TTL: do not
    * enable it for authorization decisions or entitlements.
