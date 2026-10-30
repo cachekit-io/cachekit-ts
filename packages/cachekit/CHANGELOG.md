@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.3](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.2.2...cachekit-v0.2.3) (2026-10-29)
+
+
+### Bug Fixes
+
+* **serializer:** honour serializer.maxDepth on encode (LAB-11773) ([#270](https://github.com/cachekit-io/cachekit-ts/issues/270)) ([608c6a9](https://github.com/cachekit-io/cachekit-ts/commit/608c6a9d62a5016204ee57f08d24ce1a7aa571db))
+
+
+### Performance Improvements
+
+* **serializer:** encode auto-mode values in one pass (LAB-7120) ([#268](https://github.com/cachekit-io/cachekit-ts/issues/268)) ([ad2fd01](https://github.com/cachekit-io/cachekit-ts/commit/ad2fd0171c6154a88ccc0e89c0d1f4925807f2a2))
+
 ## [0.2.2](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.2.1...cachekit-v0.2.2) (2026-10-28)
 
 
