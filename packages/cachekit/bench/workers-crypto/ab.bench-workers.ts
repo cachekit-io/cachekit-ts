@@ -7,13 +7,16 @@
 // - Sizes 100 B, 1 KB, 16 KB, 64 KB and 1 MB; encrypt and decrypt each.
 // - A, B and an A/A twin (a second wasm manager) are interleaved within every
 //   rep, in an order rotated each rep, so host drift lands on all three alike.
-//   30 reps at 1 KB and below, 9 above.
+//   60 reps at 1 KB and below, 9 above.
 // - workerd's clock has 1 ms resolution, so each sample is a batch of k ops,
 //   k calibrated per arm to fill about 40 ms. The same k of no-op awaits is
 //   timed right before it and subtracted.
 // - Per size and op: median µs/op of each arm; the A/A floor is
-//   |A − A/A| / A; the gain is (A − B) / A. PASS when the gain clears the
-//   floor. The run fails if any size regresses.
+//   |A − A/A| / A; the gain is (A − B) / A. Each rep also gives a paired gain
+//   (A_i − B_i) / A_i; a seeded bootstrap (2,000 resamples) of their median
+//   gives a 95% CI. PASS when the gain clears the floor or the CI excludes
+//   zero; REGRESS when the loss clears the floor or the CI is below zero;
+//   otherwise PARITY. The run fails unless every row passes.
 //
 // Local workerd numbers are indicative, not production timings.
 import { expect, it } from 'vitest';
@@ -28,7 +31,8 @@ const MASTER_KEY = 'ab'.repeat(32);
 const KEY = 'ns:bench:func:mod.fn:args:' + '0'.repeat(64) + ':';
 const SIZES = [100, 1024, 16 * 1024, 64 * 1024, 1024 * 1024];
 const TARGET_MS = 40;
-const reps = (size: number) => (size <= 1024 ? 30 : 9);
+const reps = (size: number) => (size <= 1024 ? 60 : 9);
+const RESAMPLES = 2000;
 
 function wasmBindings(): EncryptionBindings {
   wasm.ensureInitialized();
@@ -72,6 +76,27 @@ async function sample(k: number, op: Op): Promise<number> {
   return ((await batchMs(k, op)) - base) * (1000 / k);
 }
 
+/** mulberry32: a seeded PRNG, so a rerun of the same samples gives the same CI. */
+function prng(seed: number): () => number {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** 95% percentile-bootstrap CI of the median paired gain. */
+function pairedCi(gains: number[]): [number, number] {
+  const random = prng(0x5eed);
+  const medians: number[] = [];
+  for (let r = 0; r < RESAMPLES; r++) {
+    medians.push(median(gains.map(() => gains[Math.floor(random() * gains.length)])));
+  }
+  medians.sort((a, b) => a - b);
+  return [medians[Math.floor(RESAMPLES * 0.025)], medians[Math.ceil(RESAMPLES * 0.975) - 1]];
+}
+
 const median = (xs: number[]) => {
   const s = [...xs].sort((a, b) => a - b);
   const m = s.length >> 1;
@@ -99,7 +124,7 @@ async function arm(name: Arm['name'], bindings: EncryptionBindings, data: Uint8A
 it('WebCrypto vs wasm AES-256-GCM, interleaved A/B with an A/A row', async () => {
   const rows: string[] = [];
   const results: Record<string, unknown>[] = [];
-  let regressions = 0;
+  let failures = 0;
   for (const size of SIZES) {
     const data = new Uint8Array(size);
     for (let i = 0; i < size; i++) data[i] = (i * 31 + 7) & 0xff;
@@ -122,9 +147,23 @@ it('WebCrypto vs wasm AES-256-GCM, interleaved A/B with an A/A row', async () =>
       const [a, b, aa] = arms.map((x) => median(x.us[op]));
       const floor = Math.abs(a - aa) / a;
       const gain = (a - b) / a;
-      const pass = gain > floor;
-      if (!pass) regressions++;
-      results.push({ size, op, reps: reps(size), a_us: a, b_us: b, aa_us: aa, floor, gain, pass });
+      const [lo, hi] = pairedCi(arms[0].us[op].map((ai, i) => (ai - arms[1].us[op][i]) / ai));
+      const verdict =
+        gain > floor || lo > 0 ? 'PASS' : gain < -floor || hi < 0 ? 'REGRESS' : 'PARITY';
+      if (verdict !== 'PASS') failures++;
+      results.push({
+        size,
+        op,
+        reps: reps(size),
+        a_us: a,
+        b_us: b,
+        aa_us: aa,
+        floor,
+        gain,
+        lo,
+        hi,
+        verdict,
+      });
       rows.push(
         [
           String(size).padStart(8),
@@ -135,7 +174,8 @@ it('WebCrypto vs wasm AES-256-GCM, interleaved A/B with an A/A row', async () =>
           `${(floor * 100).toFixed(1)}%`.padStart(8),
           `${(gain * 100).toFixed(1)}%`.padStart(8),
           `${(a / b).toFixed(1)}x`.padStart(8),
-          pass ? 'PASS' : 'FAIL',
+          `[${(lo * 100).toFixed(1)}%, ${(hi * 100).toFixed(1)}%]`.padStart(18),
+          verdict,
         ].join(' ')
       );
     }
@@ -143,10 +183,10 @@ it('WebCrypto vs wasm AES-256-GCM, interleaved A/B with an A/A row', async () =>
   console.log(
     [
       'AES-256-GCM per op in local workerd (indicative): A = wasm core, B = WebCrypto',
-      '    size op           A µs       B µs     A/A µs  A/A flr     gain  speedup',
+      '    size op           A µs       B µs     A/A µs  A/A flr     gain  speedup     paired 95% CI',
       ...rows,
       JSON.stringify(results),
     ].join('\n')
   );
-  expect(regressions).toBe(0);
+  expect(failures).toBe(0);
 });

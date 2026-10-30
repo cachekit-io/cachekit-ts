@@ -329,6 +329,16 @@ describe('counter nonces', () => {
     setInstanceCounterForTesting();
   });
 
+  it('writes every byte of the counter big-endian', async () => {
+    const { manager, tenantKeys } = spiedManager();
+    await manager.encrypt(new Uint8Array([1]), 'ns:k');
+    tenantKeys().nonceCounter = 0xa1b2c3d4;
+    const ct = await manager.encrypt(new Uint8Array([1]), 'ns:k');
+    expect(bytesToHex(ct.subarray(8, 12))).toBe('a1b2c3d4');
+    expect(await manager.decrypt(ct, 'ns:k')).toEqual(new Uint8Array([1]));
+    manager.dispose();
+  });
+
   it('gives two managers consecutive instance ids, wrapping mod 2^64', async () => {
     setInstanceCounterForTesting(2n ** 64n - 1n);
     const a = new EncryptionManager(masterKeyHex, tenantId);

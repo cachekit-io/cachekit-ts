@@ -92,6 +92,8 @@ export class WebCryptoTenantKeys implements EncryptionTenantKeys {
    */
   nonceCounter = 0;
   private keys: readonly CryptoKey[] | null;
+  /** The nonce's first 8 bytes: the instance id, big-endian. */
+  private readonly noncePrefix = new Uint8Array(8);
 
   constructor(
     readonly tenantId: string,
@@ -100,6 +102,7 @@ export class WebCryptoTenantKeys implements EncryptionTenantKeys {
     keys: readonly CryptoKey[]
   ) {
     this.keys = keys;
+    new DataView(this.noncePrefix.buffer).setBigUint64(0, instanceId, false);
   }
 
   encryptionFingerprint(): Uint8Array {
@@ -133,9 +136,11 @@ export class WebCryptoTenantKeys implements EncryptionTenantKeys {
     const counter = this.nonceCounter++;
     if (counter >= NONCE_COUNTER_LIMIT) throw new Error(NONCE_EXHAUSTED);
     const nonce = new Uint8Array(NONCE_BYTES);
-    const view = new DataView(nonce.buffer);
-    view.setBigUint64(0, this.instanceId, false);
-    view.setUint32(8, counter, false);
+    nonce.set(this.noncePrefix);
+    nonce[8] = counter >>> 24;
+    nonce[9] = counter >>> 16;
+    nonce[10] = counter >>> 8;
+    nonce[11] = counter;
 
     const sealed = await crypto.subtle.encrypt(
       { name: 'AES-GCM', iv: nonce, additionalData: aad as Bytes, tagLength: 128 },
