@@ -276,14 +276,14 @@ export interface CacheRuntime {
 }
 
 /**
- * A key-free label for a failed L2 delete. Every field of a thrown error —
+ * A key-free label for a failed L2 delete or write. Every field of a thrown error —
  * `cause`, `message`, `name`, even `classification` — is written by whoever
  * threw it and can embed the caller's key, so only literals are emitted and
  * `classification` is checked against its known values first. It is read
  * exactly once: a getter could pass the check and then return the key, or
  * throw and turn best-effort invalidation into a rejection.
  */
-function describeDeleteFailure(err: unknown): string {
+function describeBackendFailure(err: unknown): string {
   if (!(err instanceof BackendError)) return err instanceof Error ? 'Error' : 'Unknown error';
   let classification: unknown;
   try {
@@ -707,17 +707,24 @@ export class CacheImpl implements SecureCache {
    * its value long before, so this line and the `write_behind` operation
    * counter are the only places a failure shows: degradation absorbed it,
    * and the breaker and the per-attempt `set` counters saw it as any write
-   * failure. Rate-limited, and the key is digested, for the reasons
-   * warnSetRejected gives.
+   * failure. On Workers, with no Prometheus, the line is the only signal, so
+   * it names the cause: the last attempt's error class, never its text
+   * (describeBackendFailure), or the breaker when no attempt ran.
+   * Rate-limited, and the key is digested, for the reasons warnSetRejected
+   * gives.
    */
-  private writeBehindSettled(key: string, stored: boolean): void {
+  private writeBehindSettled(key: string, stored: boolean, lastError: unknown): void {
     void this.metrics.recordOperation('write_behind', stored ? 'success' : 'error');
     if (stored) return;
     const now = Date.now();
     if (now - this.lastWriteBehindFailedWarnAt < WARN_INTERVAL_MS) return;
     this.lastWriteBehindFailedWarnAt = now;
+    const cause =
+      lastError === undefined
+        ? 'not attempted: circuit breaker open'
+        : describeBackendFailure(lastError);
     logError(
-      `[cachekit] write-behind L2 write failed, value held in this process's L1 only (keyHash=${blake2b16Hex(key)}).`
+      `[cachekit] write-behind L2 write failed, value held in this process's L1 only (keyHash=${blake2b16Hex(key)}): ${cause}.`
     );
   }
 
@@ -1245,8 +1252,9 @@ export class CacheImpl implements SecureCache {
    * Start `key`'s L2 write in the background and return true, or start
    * nothing and return false when the write must stay on the caller's path:
    * the runtime cancels unregistered work (Workers) and no waitUntil is
-   * bound, or registering with it throws, or the write would take the pending
-   * writes past MAX_PENDING_WRITES or MAX_PENDING_WRITE_BYTES. A write the
+   * bound, or registering with it throws, or the key already has something
+   * pending there (see below), or the write would take the pending writes
+   * past MAX_PENDING_WRITES or MAX_PENDING_WRITE_BYTES. A write the
    * bound sends back to the caller still waits behind the key's pending
    * write (inKeyOrder), so the older value can never land last.
    *
@@ -1255,6 +1263,13 @@ export class CacheImpl implements SecureCache {
    * delete() or invalidate('params') issued after wrap() returns is never
    * overtaken. close() waits for it. Its outcome is counted and a failure
    * reported (writeBehindSettled); it never rejects.
+   *
+   * On Workers a write never queues: workerd gives its waitUntil 30 s in
+   * all, the same as the KEY_WAIT_CAP_MS wait behind a tail that may never
+   * settle, so it would reach the network as workerd cancels it. That write
+   * would be lost, would hold its pending slot for good, and would become
+   * the key's next tail that never settles. On the caller's path, the cap
+   * does let it run.
    */
   private tryWriteBehind(
     key: string,
@@ -1264,7 +1279,8 @@ export class CacheImpl implements SecureCache {
   ): boolean {
     // After close() began, the drain may already have run: a write started
     // now would outlive it.
-    if (this.closed || (this.swrRequiresWaitUntil && !waitUntil)) return false;
+    if (this.closed) return false;
+    if (this.swrRequiresWaitUntil && (!waitUntil || this.keyTails.has(key))) return false;
     if (
       this.pendingWrites >= MAX_PENDING_WRITES ||
       this.pendingWriteBytes + data.length > MAX_PENDING_WRITE_BYTES
@@ -1291,17 +1307,25 @@ export class CacheImpl implements SecureCache {
 
     this.pendingWrites++;
     this.pendingWriteBytes += data.length;
-    // The fallback tells a write degradation absorbed from one that landed.
+    // The fallback tells a write degradation absorbed from one that landed;
+    // lastError keeps the cause degradation discards.
+    let lastError: unknown;
     const send = (): Promise<boolean> =>
       this.run('set', key, false, async () => {
-        await this.backend.set(key, data, ttl);
+        try {
+          await this.backend.set(key, data, ttl);
+        } catch (error) {
+          lastError = error;
+          throw error;
+        }
         return true;
       });
     const tail = this.keyTails.get(key);
-    const write = (tail ? this.afterTail(tail).then(send) : send())
+    // Only on Node can a tail be here (see above), and Node needs no cap.
+    const write = (tail ? tail.then(send) : send())
       .then(
-        (stored) => this.writeBehindSettled(key, stored),
-        () => this.writeBehindSettled(key, false)
+        (stored) => this.writeBehindSettled(key, stored, lastError),
+        (error: unknown) => this.writeBehindSettled(key, false, error)
       )
       .finally(() => {
         this.pendingWrites--;
@@ -1935,7 +1959,7 @@ export class CacheImpl implements SecureCache {
         // caller-supplied key itself.
         logError(
           `[cachekit] invalidate("params") L2 delete failed (keyHash=${blake2b16Hex(options.key)}):`,
-          describeDeleteFailure(err)
+          describeBackendFailure(err)
         );
       }
     }

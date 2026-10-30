@@ -65,15 +65,17 @@ export interface WrapOptionsBase {
    * Until that write lands, another process misses the key and recomputes
    * it; a write still pending when the process ends without `close()` is
    * lost. In this process, a later `set`, `delete` or `invalidate('params')`
-   * of the key waits for it, and `close()` drains it. Another process's
+   * of the key waits for it (on Workers, for at most 30 s), and `close()`
+   * drains it. Another process's
    * `invalidate` or `delete` is not ordered against it, so a value computed
    * before that invalidation can land after it, for its full TTL: do not
    * enable it for authorization decisions or entitlements.
    *
    * The write stays on the caller's path while a distributed lock is held
    * (`stampede.distributedLock`), on Workers unless the function was wrapped
-   * through `withExecutionContext`, and when 64 writes or 16 MiB are already
-   * pending. Requires `reliability.degradation` (the default): a failed
+   * through `withExecutionContext`, on Workers while the key already has a
+   * write or delete pending, and when the write would take the pending writes
+   * past 64 or 16 MiB. Requires `reliability.degradation` (the default): a failed
    * background write is logged and counted, never thrown.
    */
   writeBehind?: boolean;

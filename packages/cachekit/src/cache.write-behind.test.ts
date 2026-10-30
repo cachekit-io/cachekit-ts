@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createCache } from './cache.js';
 import { CacheImpl, type ExecutionContextLike } from './cache-core.js';
-import { ConfigurationError } from './errors.js';
+import { BackendError, ConfigurationError } from './errors.js';
 import { setLogger } from './logger.js';
 import type { Backend, LockableBackend } from './backends/types.js';
 import type { CacheOptions, SecureCache } from './types/cache.js';
@@ -308,6 +308,53 @@ describe('write-behind', () => {
     await expect(cache.get(key)).resolves.toBeNull();
   });
 
+  it('on Workers, a write-behind of a key with something pending stays on the caller', async () => {
+    // A tail that never settles stands for a write workerd cancelled. Queued
+    // behind it, a background write would wait out the 30 s cap inside its
+    // own 30 s waitUntil budget and be cancelled as it sends; on the caller's
+    // path the cap lets it run.
+    vi.useFakeTimers();
+    try {
+      const backend = new GatedBackend();
+      let first = true;
+      const realSet = backend.set.bind(backend);
+      backend.set = async (key, value) => {
+        if (first) {
+          first = false;
+          backend.setKeys.push(key);
+          return new Promise<void>(() => {}); // never settles
+        }
+        return realSet(key, value);
+      };
+      const cache = make({ backend, l1: { enabled: false } });
+      (cache as unknown as { swrRequiresWaitUntil: boolean }).swrRequiresWaitUntil = true;
+      const registered: Promise<unknown>[] = [];
+      const view = viewOf(cache, { waitUntil: (p) => registered.push(p) });
+      let calls = 0;
+      const fn = view.wrap(async (id: number) => ({ id, call: ++calls }), {
+        namespace: 'wb:cancelled',
+        ttl: 60,
+        writeBehind: true,
+      });
+
+      await fn(1); // background: its PUT never settles
+      expect(registered).toHaveLength(1);
+      let returned = false;
+      const second = fn(1).then(() => {
+        returned = true;
+      });
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(returned).toBe(false); // on the caller's path, behind the stuck tail
+      expect(registered).toHaveLength(1); // not handed to waitUntil
+      await vi.advanceTimersByTimeAsync(1_000);
+      await second;
+      const key = backend.setKeys[0];
+      expect(backend.store.has(key)).toBe(true); // the second write landed
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('on Workers, a wait behind a pending write that never settles is capped', async () => {
     vi.useFakeTimers();
     try {
@@ -455,7 +502,7 @@ describe('write-behind', () => {
       setLogger(logError);
       const backend = new GatedBackend();
       backend.set = async () => {
-        throw new Error('PUT refused');
+        throw new BackendError('PUT refused', 'timeout');
       };
       const cache = make({ backend });
       const recordOperation = spyRecordOperation(cache);
@@ -466,10 +513,33 @@ describe('write-behind', () => {
 
       expect(recordOperation).toHaveBeenCalledWith('write_behind', 'error');
       const lines = logError.mock.calls.map((args) => args.join(' '));
-      expect(lines.some((line) => line.includes('write-behind L2 write failed'))).toBe(true);
+      const line = lines.find((l) => l.includes('write-behind L2 write failed'));
+      expect(line).toContain(': BackendError(timeout).'); // the cause's class, never its text
       expect(lines.join('\n')).not.toContain('PUT refused');
       // L1 keeps the value, as it keeps a degraded foreground write's.
       await expect(wrapped(7)).resolves.toEqual({ id: 7, call: 1 });
+    });
+
+    it('names the open breaker when no attempt ran', async () => {
+      const logError = vi.fn();
+      setLogger(logError);
+      const backend = new GatedBackend();
+      backend.set = async () => {
+        throw new BackendError('down', 'transient');
+      };
+      const cache = make({
+        backend,
+        reliability: { circuitBreaker: { failureThreshold: 1, timeout: 60_000 } },
+      });
+      await cache.set('trip', 1); // opens the breaker
+      const { wrapped } = counted(cache, true);
+
+      await wrapped(1);
+      await settle();
+      const lines = logError.mock.calls.map((args) => args.join(' '));
+      expect(lines.find((l) => l.includes('write-behind L2 write failed'))).toContain(
+        'not attempted: circuit breaker open'
+      );
     });
 
     it('a landed write is counted as a success', async () => {

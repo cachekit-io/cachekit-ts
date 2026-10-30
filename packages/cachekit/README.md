@@ -427,10 +427,12 @@ that invalidation can be written after it, with its full TTL.
 > another process, such as authorization decisions or entitlements.
 
 **In this process**, a later `set()`, `delete()` or `invalidate('params')` of
-the key waits for its pending write, so a pending write never overtakes them,
-and `close()` drains every pending write before it closes the backend. On
-Workers that wait is capped at 30 s, because workerd can cancel a pending
-write that then never settles; after the cap the op runs anyway.
+the key waits for its pending write, so on Node a pending write never
+overtakes them, and `close()` drains every pending write before it closes the
+backend. On Workers the wait is capped at 30 s, because workerd can cancel a
+pending write, which then never settles. After the cap the op runs anyway, so
+there the ordering holds for 30 s: a write still in flight at the cap can
+land after the op.
 
 **The write stays on the caller's path:**
 
@@ -441,15 +443,18 @@ write that then never settles; after the cap the op runs anyway.
 - on Cloudflare Workers, unless the function was wrapped through
   `cache.withExecutionContext(ctx)`, which registers the write with
   `ctx.waitUntil`. workerd cancels unregistered work at response return;
-- when 64 writes or 16 MiB are already pending on the cache: that write is the
-  caller's, and it still waits behind any pending write of the same key, so
-  the older value can never land last.
+- on Workers, while the key already has a write or delete pending: a
+  background write queued behind it would spend workerd's 30 s `waitUntil`
+  budget waiting and be cancelled as it sends;
+- when the write would take the pending writes past 64 or 16 MiB on the
+  cache: that write is the caller's, and it still waits behind any pending
+  write of the same key, so the older value can never land last.
 
 **Failures.** `writeBehind` requires `reliability.degradation` (the default);
 with degradation off, `wrap()` throws `ConfigurationError`, because a
 background write cannot report its failure to the caller. A failed background
 write keeps the value in this process's L1, logs one rate-limited line with a
-digest of the key, and counts as `operation="write_behind", status="error"` in
+digest of the key and the error's class (never its text), and counts as `operation="write_behind", status="error"` in
 `cachekit_operations_total` (a landed one as `status="success"`).
 
 > [!WARNING]
