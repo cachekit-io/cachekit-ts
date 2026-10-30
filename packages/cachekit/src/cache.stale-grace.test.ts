@@ -120,6 +120,10 @@ class PlainBackend implements Backend {
   async close(): Promise<void> {}
 }
 
+/** Keys whose background revalidation this cache still has in flight. */
+const revalidating = (cache: SecureCache) =>
+  (cache as unknown as { revalidating: Map<string, number> }).revalidating;
+
 /** The cache's live hit/miss counters: what its telemetry headers carry. */
 const outcomes = (cache: SecureCache) => {
   const { l1Hits, l2Hits, misses } = (
@@ -166,10 +170,11 @@ describe('server stale-grace (WrapOptions.staleTtl)', () => {
     await seedStale(backend, options);
     const fn = vi.fn(async () => 'v2');
 
-    expect(await process(backend).wrap(fn, options)()).toBe('v1');
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    const reader = process(backend);
+    expect(await reader.wrap(fn, options)()).toBe('v1');
 
-    expect(fn).not.toHaveBeenCalled(); // no revalidation
+    expect(revalidating(reader).size).toBe(0); // none started
+    expect(fn).not.toHaveBeenCalled();
     expect(backend.writes).toEqual([{ ttl: 10 }]); // set(), no stale window
   });
 
@@ -283,8 +288,9 @@ describe('server stale-grace (WrapOptions.staleTtl)', () => {
       backend.mode = 'contested';
       const fn = vi.fn(async () => 'v2');
 
-      expect(await process(backend).wrap(fn, WRAP)()).toBe('v1');
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      const reader = process(backend);
+      expect(await reader.wrap(fn, WRAP)()).toBe('v1');
+      await vi.waitFor(() => expect(revalidating(reader).size).toBe(0));
 
       expect(backend.acquires).toBe(1); // one attempt; the seed's miss took none (distributedLock off)
       expect(fn).not.toHaveBeenCalled();
@@ -362,7 +368,7 @@ describe('server stale-grace (WrapOptions.staleTtl)', () => {
     expect(await reader.wrap(() => recompute.promise, WRAP)()).toBe('v1');
     await reader.close();
     recompute.resolve('v2');
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await vi.waitFor(() => expect(revalidating(reader).size).toBe(0));
 
     expect(logError).not.toHaveBeenCalled();
     expect(backend.writes).toHaveLength(1);

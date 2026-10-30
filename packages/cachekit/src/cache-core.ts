@@ -1787,7 +1787,13 @@ export class CacheImpl implements SecureCache {
         this.warnRevalidateFailed(cacheKey, error);
       }
     } finally {
-      if (lockId !== null) await lockable!.releaseLock(cacheKey, lockId).catch(() => {});
+      // Best-effort: the lease expires on its own. Counted, so a lock endpoint
+      // that keeps failing shows in the error metrics.
+      if (lockId !== null) {
+        await lockable!
+          .releaseLock(cacheKey, lockId)
+          .catch((error) => this.recordFailure('lock_release', error));
+      }
     }
   }
 
