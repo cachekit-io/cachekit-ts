@@ -259,6 +259,32 @@ describe('write-behind', () => {
     });
   });
 
+  it('a queued set() does not leave L1 older than L2 after a later write-behind', async () => {
+    const backend = new GatedBackend();
+    backend.gate();
+    const cache = make({ backend });
+    const counter = { calls: 0 };
+    // A 1 s TTL lets the first L1 copy expire while its PUT is still pending.
+    const wrapped = cache.wrap(async (id: number) => ({ id, call: ++counter.calls }), {
+      namespace: 'wb:l1-order',
+      ttl: 1,
+      writeBehind: true,
+    });
+
+    await wrapped(1); // L1 = call 1, its PUT pending
+    const [key] = backend.setKeys;
+    const explicit = cache.set(key, 99, { ttl: 3600 }); // queued behind that PUT
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await expect(wrapped(1)).resolves.toEqual({ id: 1, call: 2 }); // L1 = call 2, PUT queued last
+
+    backend.open();
+    await explicit;
+    await settle();
+    // L2 ends with call 2 (1, then 99, then 2); L1 must not keep the older 99.
+    expect(new TextDecoder().decode(backend.store.get(key))).not.toContain('99');
+    await expect(cache.get(key)).resolves.toEqual({ id: 1, call: 2 });
+  });
+
   it('close() drains pending PUTs before the backend closes', async () => {
     const backend = new GatedBackend();
     backend.gate();

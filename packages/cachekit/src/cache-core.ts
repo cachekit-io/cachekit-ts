@@ -346,6 +346,14 @@ export class CacheImpl implements SecureCache {
    * inKeyOrder). Never rejects. A key leaves the map once its tail settles.
    */
   private readonly keyTails = new Map<string, Promise<void>>();
+  /**
+   * Per key with a tail, a token replaced whenever a write-behind fills L1
+   * while ops queued before it are still pending. A queued write fills L1
+   * only after its L2 write, so it checks the token across that wait and
+   * skips its fill when a newer value reached L1 first: otherwise L1 would
+   * keep the older value while L2 ends with the newer one.
+   */
+  private readonly earlyL1Fills = new Map<string, object>();
   /** Write-behind writes started and not yet settled, and their bytes. */
   private pendingWrites = 0;
   private pendingWriteBytes = 0;
@@ -1216,6 +1224,7 @@ export class CacheImpl implements SecureCache {
     // the write sends. If the background write fails, L1 keeps the value, as
     // it keeps a degraded write's below.
     if (writeBehind) {
+      if (this.keyTails.has(key)) this.earlyL1Fills.set(key, {});
       this.fillL1(key, l1Write, ttl, namespace);
       if (this.tryWriteBehind(key, data, ttl, writeBehind.waitUntil)) return l1Write;
     }
@@ -1228,6 +1237,7 @@ export class CacheImpl implements SecureCache {
     if (!updateL1 && this.swrRequiresWaitUntil && this.keyTails.has(key)) return null;
 
     // Only the backend write runs under retry, the breaker and degradation.
+    const earlyFillBefore = this.earlyL1Fills.get(key);
     await this.inKeyOrder(key, () =>
       this.run('set', key, undefined, () => this.backend.set(key, data, ttl))
     );
@@ -1245,7 +1255,9 @@ export class CacheImpl implements SecureCache {
     // L1 but is overwritten in L2 by the refresh's value until the entry next
     // expires or refreshes (a conditional L2 write would need CAS the Backend
     // contract doesn't have).
-    if (updateL1 && !writeBehind) this.fillL1(key, l1Write, ttl, namespace);
+    if (updateL1 && !writeBehind && this.earlyL1Fills.get(key) === earlyFillBefore) {
+      this.fillL1(key, l1Write, ttl, namespace);
+    }
 
     return l1Write;
   }
@@ -1372,7 +1384,9 @@ export class CacheImpl implements SecureCache {
     );
     this.keyTails.set(key, tail);
     void tail.then(() => {
-      if (this.keyTails.get(key) === tail) this.keyTails.delete(key);
+      if (this.keyTails.get(key) !== tail) return;
+      this.keyTails.delete(key);
+      this.earlyL1Fills.delete(key);
     });
   }
 
