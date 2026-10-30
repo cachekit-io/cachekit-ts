@@ -199,8 +199,31 @@ describe('server stale-grace (WrapOptions.staleTtl)', () => {
     // The revalidation re-sends the TTL and the stale window (API-55).
     await vi.waitFor(() => expect(backend.writes).toEqual([WRAP, WRAP].map(timing)));
 
-    expect(await wrapped()).toBe('v2'); // its write filled L1
-    expect(backend.gets).toBe(3);
+    // Its write skipped L1: the next call reads the fresh entry from L2 and
+    // backfills it, and the one after that is an L1 hit.
+    expect(await wrapped()).toBe('v2');
+    expect(await wrapped()).toBe('v2');
+    expect(backend.gets).toBe(4);
+  });
+
+  it('starts a second revalidation once a hung one outlives its marker', async () => {
+    const backend = new StaleGraceBackend();
+    await seedStale(backend);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const fn = vi.fn(() => new Promise<string>(() => {})); // never settles
+      const wrapped = process(backend).wrap(fn, WRAP);
+
+      await wrapped();
+      await wrapped();
+      expect(fn).toHaveBeenCalledTimes(1); // marker held
+
+      vi.advanceTimersByTime(60_001);
+      await wrapped();
+      expect(fn).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('counts a stale serve as one L2 hit and the revalidation as no miss (API-63)', async () => {
@@ -266,6 +289,25 @@ describe('server stale-grace (WrapOptions.staleTtl)', () => {
       expect(backend.acquires).toBe(1); // one attempt; the seed's miss took none (distributedLock off)
       expect(fn).not.toHaveBeenCalled();
       expect(backend.writes).toHaveLength(1);
+    });
+
+    it('computes under the lease when the post-grant double-check finds the entry stale', async () => {
+      const backend = new LockingStaleGraceBackend();
+      await seedStale(backend);
+      // The first read fails, so the call takes the lock path and double-checks.
+      const read = backend.getWithTtl.bind(backend);
+      vi.spyOn(backend, 'getWithTtl')
+        .mockRejectedValueOnce(new Error('read failed'))
+        .mockImplementation(read);
+      vi.spyOn(logger, 'logError').mockImplementation(() => {});
+      const fn = vi.fn(async () => 'v2');
+      const cache = process(backend, { stampede: { distributedLock: true } });
+
+      expect(await cache.wrap(fn, WRAP)()).toBe('v2');
+      expect(fn).toHaveBeenCalledTimes(1);
+      expect(backend.acquires).toBe(1); // no background attempt against our own lease
+      expect(backend.writes).toEqual([WRAP, WRAP].map(timing));
+      expect(backend.heldLocks()).toBe(0);
     });
 
     it('abandons the attempt when the lock endpoint fails, and a later stale read retries', async () => {

@@ -61,6 +61,7 @@ import {
   DEFAULT_LOCK_WAIT_MS,
   DEFAULT_LOCK_POLL_MS,
   DEFAULT_MAX_DECODED_SIZE,
+  SWR_REFRESH_MARKER_TTL_MS,
 } from './constants.js';
 
 /**
@@ -317,8 +318,13 @@ export class CacheImpl implements SecureCache {
   private closed = false;
   /** One in-flight cold-miss resolution per cache key (single-flight). */
   private readonly inflight = new Map<string, Promise<unknown>>();
-  /** Keys with a background revalidation of a server-stale hit in flight. */
-  private readonly revalidating = new Set<string>();
+  /**
+   * Keys with a background revalidation of a server-stale hit in flight, to
+   * the time their marker lapses. The marker expires (SWR_REFRESH_MARKER_TTL_MS)
+   * so a recompute that never settles cannot stop the key revalidating for
+   * the life of the cache; a lapsed marker only risks a duplicate revalidation.
+   */
+  private readonly revalidating = new Map<string, number>();
   /**
    * The key memos of this cache's wrapped functions (see AutoKeys), held weakly
    * so that a wrapped function nobody holds takes its memo with it, once the
@@ -1577,8 +1583,16 @@ export class CacheImpl implements SecureCache {
           // between our miss and this grant — one GET that hits, instead
           // of a duplicate compute + write. Skipped after an uncontended
           // grant on a clean miss (see above).
+          // A stale double-check is a miss here: we hold the lease, so this
+          // call is the revalidation, and a background one would contend with
+          // our own lease and stand down.
           if (attempt > 0 || !cleanMiss) {
-            const filled = await this.wrapRead<TResult>(cacheKey, interop, options.ttl, grace);
+            const filled = await this.wrapRead<TResult>(
+              cacheKey,
+              interop,
+              options.ttl,
+              grace && { ...grace, revalidate: null }
+            );
             if (filled !== null) {
               return filled;
             }
@@ -1699,13 +1713,17 @@ export class CacheImpl implements SecureCache {
 
   /**
    * Start the background revalidation of a server-stale hit, at most one per
-   * key in this process (protocol spec/saas-api.md § Revalidation flow). On a
+   * key in this cache (protocol spec/saas-api.md § Revalidation flow). On a
    * lock-capable backend it runs only under the server lease: a contested
    * lease means another client is revalidating, so this one stands down
    * without waiting or retrying (API-62). The revalidation re-sends the TTL
    * and stale window (API-55), counts no miss (API-63), and on failure leaves
    * the entry as it was: a later stale read tries again, until the store
-   * evicts the entry. Its write fills L1 as a cold miss's does.
+   * evicts the entry. Its write skips L1, which holds no copy of the key (a
+   * stale read is never backfilled): a delete, invalidation or explicit set()
+   * during the recompute must not be overwritten there, and L1's version
+   * token cannot see a delete of an absent key. The next read takes the fresh
+   * entry from L2, bounded by its Fresh-For.
    */
   private revalidate<TResult>(
     cacheKey: string,
@@ -1715,13 +1733,16 @@ export class CacheImpl implements SecureCache {
     staleTtl: number,
     waitUntil?: WaitUntil
   ): void {
-    if (this.revalidating.has(cacheKey)) return;
-    this.revalidating.add(cacheKey);
+    const now = Date.now();
+    if ((this.revalidating.get(cacheKey) ?? 0) > now) return;
+    const marker = now + SWR_REFRESH_MARKER_TTL_MS;
+    this.revalidating.set(cacheKey, marker);
     // Started here, in the request that read the stale entry: on workerd the
     // revalidation's I/O belongs to the request whose waitUntil it rides.
-    const task = this.runRevalidation(cacheKey, interop, compute, options, staleTtl).finally(() =>
-      this.revalidating.delete(cacheKey)
-    );
+    const task = this.runRevalidation(cacheKey, interop, compute, options, staleTtl).finally(() => {
+      // A revalidation that outlived its marker leaves a newer one alone.
+      if (this.revalidating.get(cacheKey) === marker) this.revalidating.delete(cacheKey);
+    });
     // The task never rejects. A stale ctx makes waitUntil throw, which must
     // cost only this revalidation, never the read that has a value to return.
     try {
@@ -1756,7 +1777,7 @@ export class CacheImpl implements SecureCache {
         result,
         { ttl: options.ttl, namespace: options.namespace },
         interop,
-        true,
+        false,
         staleTtl
       );
     } catch (error) {

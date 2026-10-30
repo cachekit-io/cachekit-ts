@@ -414,14 +414,16 @@ const getReport = cache.wrap(async (id: string) => buildReport(id), {
 });
 ```
 
-- One revalidation runs per key per process. With a lock-capable backend
+- One revalidation runs per key in each cache. With a lock-capable backend
   (`stampede.distributedLock`, `cachekitioWithLocking()`, `cachekitioFull()`)
   it runs only under the server lease, so one process in the fleet
   revalidates and the rest keep serving stale. Every write of the key,
   revalidation included, re-sends the TTL and the stale window.
-- A failed revalidation never reaches the caller: the stale entry stays, a
-  rate-limited line is logged, and a later stale read tries again. Past the
-  window the server answers 404 and the call takes the ordinary miss path.
+- A failed revalidation never reaches the caller: the stale entry stays and
+  a later stale read tries again. A function that throws is logged
+  (rate-limited); a failed write follows the cache's reliability settings,
+  like any write. Past the window the server answers 404 and the call takes
+  the ordinary miss path.
 - A stale value never enters L1, and the L1 copy of a written value still
   expires at `ttl`: the window is served by the server only.
 - On Cloudflare Workers the revalidation needs a context bound with

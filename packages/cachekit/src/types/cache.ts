@@ -64,10 +64,11 @@ export interface WrapOptionsBase {
    * `X-CacheKit-Stale-TTL`, so the server keeps an expired entry for this long
    * past `ttl` and serves it labelled stale. When an L2 read comes back stale,
    * the call returns that value at once and re-runs the function in the
-   * background: one revalidation per key per process, under the server lease
-   * when the backend has lock capability. A failed revalidation leaves the
-   * stale entry in place and is only logged; past the window the next call
-   * takes the ordinary miss path. A stale value never enters L1.
+   * background: one revalidation per key in each cache, under the server
+   * lease when the backend has lock capability. A failed revalidation leaves
+   * the stale entry in place and never reaches the caller; a function that
+   * throws is logged. Past the window the next call takes the ordinary miss
+   * path. A stale value never enters L1.
    *
    * On Workers the revalidation needs a bound `waitUntil`
    * (`withExecutionContext`); a function wrapped without one treats a stale
