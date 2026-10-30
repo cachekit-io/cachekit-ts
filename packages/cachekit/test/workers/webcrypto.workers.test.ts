@@ -158,6 +158,8 @@ async function rawBindings(masterHex: string, tenant: string, previous: string[]
 
 afterEach(() => {
   vi.restoreAllMocks();
+  // Tests that seed the instance-id counter must not leak the seed on failure.
+  setInstanceCounterForTesting();
 });
 
 describe('byte parity with the protocol vectors', () => {
@@ -177,7 +179,6 @@ describe('byte parity with the protocol vectors', () => {
         tk
       );
       expect(bytesToHex(out)).toBe(vector.ciphertext_hex);
-      setInstanceCounterForTesting();
     }
   );
 
@@ -326,7 +327,6 @@ describe('counter nonces', () => {
     expect(nonceHex(first)).toBe('010203040506070800000000');
     expect(nonceHex(second)).toBe('010203040506070800000001');
     manager.dispose();
-    setInstanceCounterForTesting();
   });
 
   it('writes every byte of the counter big-endian', async () => {
@@ -349,7 +349,6 @@ describe('counter nonces', () => {
     expect(nonceHex(fromB)).toBe('000000000000000000000000');
     a.dispose();
     b.dispose();
-    setInstanceCounterForTesting();
   });
 
   it('seeds the instance-id counter once per isolate from 8 random bytes', async () => {
@@ -382,7 +381,6 @@ describe('counter nonces', () => {
     expect(nonceHex(fromB)).toBe('aabbccdd0000001100000000');
     a.dispose();
     b.dispose();
-    setInstanceCounterForTesting();
   });
 
   it('throws NonceExhaustedError at counter 2^32−1, and again on the next encrypt', async () => {
@@ -618,6 +616,14 @@ describe('key material', () => {
       fixture.derived_key_fingerprint_hex
     );
     manager.dispose();
+  });
+
+  it('deriveKey rejects a master key that is not 32 bytes', () => {
+    const core = realCore();
+    expect(() => core.deriveKey(new Uint8Array(31), 'encryption', tenantId)).toThrow(/32 bytes/);
+    expect(() => core.deriveKey(new Uint8Array(1024), 'encryption', tenantId)).toThrow(
+      /32 bytes, got 1024/
+    );
   });
 
   it('reports isHardwareAccelerated() as null (unknown) on Workers', async () => {

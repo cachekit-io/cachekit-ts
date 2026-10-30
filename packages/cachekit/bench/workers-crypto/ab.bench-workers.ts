@@ -103,6 +103,20 @@ const median = (xs: number[]) => {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
 
+interface Result {
+  size: number;
+  op: 'encrypt' | 'decrypt';
+  reps: number;
+  a_us: number;
+  b_us: number;
+  aa_us: number;
+  floor: number;
+  gain: number;
+  lo: number;
+  hi: number;
+  verdict: 'PASS' | 'REGRESS' | 'PARITY';
+}
+
 interface Arm {
   name: 'A' | 'B' | 'A/A';
   ops: Record<'encrypt' | 'decrypt', Op>;
@@ -118,12 +132,13 @@ async function arm(name: Arm['name'], bindings: EncryptionBindings, data: Uint8A
     decrypt: () => manager.decrypt(ciphertext, KEY),
   };
   const k = { encrypt: await calibrate(ops.encrypt), decrypt: await calibrate(ops.decrypt) };
-  return { arm: { name, ops, k, us: { encrypt: [], decrypt: [] } } as Arm, manager };
+  const result: Arm = { name, ops, k, us: { encrypt: [], decrypt: [] } };
+  return { arm: result, manager };
 }
 
 it('WebCrypto vs wasm AES-256-GCM, interleaved A/B with an A/A row', async () => {
   const rows: string[] = [];
-  const results: Record<string, unknown>[] = [];
+  const results: Result[] = [];
   let failures = 0;
   for (const size of SIZES) {
     const data = new Uint8Array(size);

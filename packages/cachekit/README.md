@@ -317,9 +317,10 @@ const cache = createCache.secure({
 // or: CACHEKIT_PREVIOUS_MASTER_KEYS=<hex>,<hex> (comma-separated)
 ```
 
-The derived keyring lives behind the NAPI boundary and is zeroized on
-dispose (on Workers, as non-extractable WebCrypto keys; see the Workers
-section); the decoded key buffers are wiped as soon as the keyring is built.
+On Node, the derived keyring lives behind the NAPI boundary and is zeroized
+on dispose. On Workers, the keys are non-extractable WebCrypto keys that
+dispose drops for the garbage collector (see the Workers section). On both
+runtimes, the decoded key buffers are wiped as soon as the keyring is built.
 The hex key strings themselves (config values, environment variables) live in
 JavaScript memory and cannot be reliably scrubbed — treat them as sensitive
 for the lifetime of the process.

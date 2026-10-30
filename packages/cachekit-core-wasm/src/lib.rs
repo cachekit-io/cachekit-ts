@@ -148,13 +148,15 @@ pub fn derive_key(
     domain: &str,
     tenant_salt: &str,
 ) -> Result<js_sys::Uint8Array, JsError> {
-    let master_key = Zeroizing::new(master_key.to_vec());
-    if master_key.len() != 32 {
+    // Checked before the copy: linear memory never shrinks, so copying an
+    // oversized array first would grow it for good.
+    if master_key.length() != 32 {
         return Err(JsError::new(&format!(
             "Master key must be 32 bytes, got {}",
-            master_key.len()
+            master_key.length()
         )));
     }
+    let master_key = Zeroizing::new(master_key.to_vec());
     if domain.is_empty() {
         return Err(JsError::new(
             "Domain cannot be empty - domain separation required for security",
