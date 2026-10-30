@@ -353,7 +353,7 @@ describe('server stale-grace (WrapOptions.staleTtl)', () => {
       }
     );
 
-    it('sweeps lapsed holds instead of keeping one per key read stale', async () => {
+    it('sweeps lapsed holds, not live ones, instead of keeping one per key read stale', async () => {
       const backend = new LockingStaleGraceBackend();
       const writer = process(backend).wrap(async (i: number) => `v${i}`, WRAP);
       for (let i = 0; i <= 64; i++) await writer(i);
@@ -362,13 +362,19 @@ describe('server stale-grace (WrapOptions.staleTtl)', () => {
       const reader = process(backend, { stampede: { lockTimeoutMs: 50 } });
       const wrapped = reader.wrap(async (i: number) => `new${i}`, WRAP);
 
-      for (let i = 0; i < 64; i++) await wrapped(i);
+      // Key 0's revalidation stays in flight: its acquire waits on the gate.
+      const gate = deferred<void>();
+      backend.gate = gate.promise;
+      await wrapped(0);
+      backend.gate = null;
+      for (let i = 1; i < 64; i++) await wrapped(i);
       await vi.waitFor(() => expect(backend.acquires).toBe(64));
-      await sleep(80); // every 50 ms hold has lapsed
+      await sleep(80); // every 50 ms hold has lapsed; key 0's marker has not
       expect(revalidating(reader).size).toBe(64);
 
       await wrapped(64); // the insert that crosses the threshold sweeps
-      expect(revalidating(reader).size).toBe(1);
+      expect(revalidating(reader).size).toBe(2); // key 0's live marker and key 64's
+      gate.resolve();
     });
 
     it('counts a failed lease release without failing the revalidation or logging', async () => {
