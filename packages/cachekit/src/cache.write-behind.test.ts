@@ -481,6 +481,36 @@ describe('write-behind', () => {
     }
   });
 
+  it('on Workers, a foreground set() that never settles does not stall the next op on its key', async () => {
+    // A set whose request workerd cancelled never settles. It is counted as in
+    // flight, not made a key tail, so the next op on the key runs at once
+    // instead of waiting out the 30 s cap (this test's timeout is 10 s).
+    const backend = new GatedBackend();
+    let first = true;
+    const realSet = backend.set.bind(backend);
+    backend.set = async (key, value) => {
+      if (first) {
+        first = false;
+        return new Promise<void>(() => {}); // never settles
+      }
+      return realSet(key, value);
+    };
+    const cache = makeWorkersLike({ backend });
+    const view = viewOf(cache, { waitUntil: () => {} });
+    const wrapped = view.wrap(async (id: number) => ({ id }), {
+      namespace: 'wb:stuck-set',
+      ttl: 60,
+      writeBehind: true,
+    });
+
+    void cache.set('wb:stuck', 1, { ttl: 60 }); // stuck in flight
+    await settle();
+    await cache.set('wb:stuck', 2, { ttl: 60 }); // runs at once
+    await expect(cache.get('wb:stuck')).resolves.toBe(2);
+    await expect(cache.delete('wb:stuck')).resolves.toBe(true);
+    await expect(wrapped(1)).resolves.toEqual({ id: 1 }); // a different, idle key: writes behind
+  });
+
   it('on Workers, a wait behind a pending write that never settles is capped', async () => {
     vi.useFakeTimers();
     try {
