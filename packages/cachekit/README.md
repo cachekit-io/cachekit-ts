@@ -428,7 +428,9 @@ that invalidation can be written after it, with its full TTL.
 
 **In this process**, a later `set()`, `delete()` or `invalidate('params')` of
 the key waits for its pending write, so a pending write never overtakes them,
-and `close()` drains every pending write before it closes the backend.
+and `close()` drains every pending write before it closes the backend. On
+Workers that wait is capped at 30 s, because workerd can cancel a pending
+write that then never settles; after the cap the op runs anyway.
 
 **The write stays on the caller's path:**
 
@@ -839,8 +841,8 @@ export default {
       ttl: 300,
     });
 
-    // Bind THIS request's context: SWR background refreshes then ride
-    // ctx.waitUntil and survive past the response. A cheap request-scoped
+    // Bind THIS request's context: SWR refreshes, lock releases and
+    // writeBehind writes then ride ctx.waitUntil and survive past the response. A cheap request-scoped
     // view over the singleton — same encryptor, same L1.
     const requestCache = cache.withExecutionContext(ctx);
 

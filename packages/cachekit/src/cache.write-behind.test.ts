@@ -87,6 +87,14 @@ const settle = async (): Promise<void> => {
   for (let i = 0; i < 20; i++) await Promise.resolve();
 };
 
+/** Swap the cache's metrics collector for one whose recordOperation is a spy. */
+function spyRecordOperation(cache: SecureCache) {
+  const recordOperation = vi.fn(async () => {});
+  const holder = cache as unknown as { metrics: MetricsCollector };
+  holder.metrics = { ...holder.metrics, recordOperation };
+  return recordOperation;
+}
+
 const outcomes = (cache: SecureCache): { l1Hits: number; l2Hits: number; misses: number } =>
   (cache as unknown as { telemetry: { l1Hits: number; l2Hits: number; misses: number } }).telemetry;
 
@@ -117,23 +125,21 @@ describe('write-behind', () => {
   };
 
   describe('call shape', () => {
-    it('off (the default): a cold miss waits for the GET and the PUT', async () => {
-      const backend = new GatedBackend();
-      const cache = make({ backend });
-      const fn = cache.wrap(async (id: number) => id, { namespace: 'wb:default', ttl: 60 });
+    it.each([undefined, false])(
+      'off (writeBehind: %s): a cold miss waits for the GET and the PUT',
+      async (writeBehind) => {
+        const backend = new GatedBackend();
+        const cache = make({ backend });
+        const fn = cache.wrap(async (id: number) => id, {
+          namespace: 'wb:default',
+          ttl: 60,
+          writeBehind,
+        });
 
-      await fn(1);
-      expect(backend.log).toEqual(['get', 'set']);
-    });
-
-    it('writeBehind: false keeps the same call shape', async () => {
-      const backend = new GatedBackend();
-      const cache = make({ backend });
-      const { wrapped } = counted(cache, false);
-
-      await wrapped(1);
-      expect(backend.log).toEqual(['get', 'set']);
-    });
+        await fn(1);
+        expect(backend.log).toEqual(['get', 'set']);
+      }
+    );
 
     it('on: a cold miss returns after the GET, and the PUT lands afterwards', async () => {
       const backend = new GatedBackend();
@@ -245,6 +251,90 @@ describe('write-behind', () => {
     expect(backend.log.filter((op) => op === 'set')).toHaveLength(3);
     expect(backend.log.at(-1)).toBe('close');
     expect(backend.store.size).toBe(3);
+  });
+
+  it('a second close() waits for the first one’s drain', async () => {
+    const backend = new GatedBackend();
+    backend.gate();
+    const cache = make({ backend });
+    const { wrapped } = counted(cache, true);
+
+    await wrapped(1);
+    let secondDone = false;
+    const first = cache.close();
+    const second = cache.close().then(() => {
+      secondDone = true;
+    });
+    await settle();
+    expect(secondDone).toBe(false);
+
+    backend.open();
+    await Promise.all([first, second]);
+    expect(backend.log.slice(-2)).toEqual(['set', 'close']);
+  });
+
+  it('invalidate("params") evicts an L1 copy refilled while its delete waited', async () => {
+    const backend = new GatedBackend();
+    backend.gate();
+    const cache = make({ backend });
+    const { wrapped } = counted(cache, true);
+
+    await wrapped(9);
+    const [key] = backend.setKeys;
+    let releaseDelete!: () => void;
+    const deleteGate = new Promise<void>((resolve) => {
+      releaseDelete = resolve;
+    });
+    const realDelete = backend.delete.bind(backend);
+    backend.delete = async (k) => {
+      await deleteGate;
+      return realDelete(k);
+    };
+
+    const invalidated = cache.invalidate('params', { key });
+    backend.open(); // the PUT lands; the delete is sent and held
+    await settle();
+    // A read in this window misses L1 and refills it from L2.
+    await expect(cache.get(key)).resolves.toEqual({ id: 9, call: 1 });
+    releaseDelete();
+    await invalidated;
+    expect(backend.store.has(key)).toBe(false);
+    await expect(cache.get(key)).resolves.toBeNull();
+  });
+
+  it('on Workers, a wait behind a pending write that never settles is capped', async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = new GatedBackend();
+      backend.gate(); // never opened: a write workerd cancelled
+      const cache = make({ backend });
+      (cache as unknown as { swrRequiresWaitUntil: boolean }).swrRequiresWaitUntil = true;
+      const view = (cache as CacheImpl).withExecutionContext({ waitUntil: () => {} });
+      const fn = view.wrap(async (id: number) => id, {
+        namespace: 'wb:cap',
+        ttl: 60,
+        writeBehind: true,
+      });
+
+      await fn(1);
+      const [key] = backend.setKeys;
+      let deleted = false;
+      const removed = cache.delete(key).then(() => {
+        deleted = true;
+      });
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(deleted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await removed;
+      expect(backend.log).toContain('delete');
+
+      const closing = cache.close();
+      await vi.advanceTimersByTimeAsync(30_000);
+      await closing;
+      expect(backend.log.at(-1)).toBe('close');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('with L1 off, a caller during the pending PUT misses L2, and that miss is counted', async () => {
@@ -362,11 +452,7 @@ describe('write-behind', () => {
         throw new Error('PUT refused');
       };
       const cache = make({ backend });
-      const recordOperation = vi.fn(async () => {});
-      (cache as unknown as { metrics: Partial<MetricsCollector> }).metrics = {
-        ...(cache as unknown as { metrics: MetricsCollector }).metrics,
-        recordOperation,
-      };
+      const recordOperation = spyRecordOperation(cache);
       const { wrapped } = counted(cache, true);
 
       await expect(wrapped(7)).resolves.toEqual({ id: 7, call: 1 });
@@ -383,11 +469,7 @@ describe('write-behind', () => {
     it('a landed write is counted as a success', async () => {
       const backend = new GatedBackend();
       const cache = make({ backend });
-      const recordOperation = vi.fn(async () => {});
-      (cache as unknown as { metrics: Partial<MetricsCollector> }).metrics = {
-        ...(cache as unknown as { metrics: MetricsCollector }).metrics,
-        recordOperation,
-      };
+      const recordOperation = spyRecordOperation(cache);
       const { wrapped } = counted(cache, true);
 
       await wrapped(8);

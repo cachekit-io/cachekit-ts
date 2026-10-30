@@ -113,10 +113,12 @@ afterEach(async () => {
 describe('CachekitIO call shape: requests per op', () => {
   const N = 10;
 
-  it('wrap miss is GET then PUT', async () => {
+  // writeBehind is opt-in: by default the caller waits on the PUT too.
+  it('wrap miss is GET then PUT, and the caller waits for both', async () => {
     const getUser = cacheFor().wrap(compute, { namespace: 'shape', ttl: 60 });
-    const seen = await shapes(N, (i) => getUser(i));
-    expect(seen).toEqual(Array.from({ length: N }, () => SHAPES['wrap miss']));
+    const { blocking, all } = await blockingShapes(N, (i) => getUser(i));
+    expect(blocking).toEqual(Array.from({ length: N }, () => SHAPES['wrap miss']));
+    expect(all).toEqual(blocking);
   });
 
   it('wrap L2 hit is one GET', async () => {
@@ -134,14 +136,6 @@ describe('CachekitIO call shape: requests per op', () => {
     const getUser = cache.wrap(compute, { namespace: 'shape', ttl: 60 });
     const seen = await shapes(N, (i) => getUser(i));
     expect(seen).toEqual(Array.from({ length: N }, () => SHAPES['locked wrap miss']));
-  });
-
-  // writeBehind is opt-in: the default miss keeps the caller waiting on its PUT.
-  it('wrap miss: the caller waits for the GET and the PUT', async () => {
-    const getUser = cacheFor().wrap(compute, { namespace: 'shape', ttl: 60 });
-    const { blocking, all } = await blockingShapes(N, (i) => getUser(i));
-    expect(blocking).toEqual(Array.from({ length: N }, () => SHAPES['wrap miss']));
-    expect(all).toEqual(blocking);
   });
 
   // 2 blocking requests to 1: the PUT goes in the background. Same requests overall.

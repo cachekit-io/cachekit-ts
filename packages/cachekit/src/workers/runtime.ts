@@ -127,7 +127,8 @@ const workersRuntime: CacheRuntime = {
   // refreshes only schedule through a request context bound via
   // cache.withExecutionContext(ctx) (they ride ctx.waitUntil). Reads
   // without a bound context fall back to plain L1 gets: no marker taken,
-  // nothing to wedge.
+  // nothing to wedge. writeBehind follows the same rule: without a bound
+  // context its L2 write stays on the caller's path.
   swrRequiresWaitUntil: true,
 };
 
@@ -140,10 +141,11 @@ export interface WorkersCache extends SecureCache {
    * Bind the current request's ExecutionContext, returning a request-scoped
    * view (shared state, same nonce counters) whose SWR refreshes are kept
    * alive past response return via `ctx.waitUntil`, as are its
-   * distributed-lock releases. Wrap functions through the view inside the
-   * fetch handler; without it, reads are plain L1 gets (no SWR, fail-safe)
-   * and a lock release can be cancelled, holding the lease for
-   * lockTimeoutMs.
+   * distributed-lock releases and `writeBehind` L2 writes. Wrap functions
+   * through the view inside the fetch handler; without it, reads are plain
+   * L1 gets (no SWR, fail-safe), a lock release can be cancelled, holding
+   * the lease for lockTimeoutMs, and `writeBehind` writes on the caller's
+   * path.
    */
   withExecutionContext(ctx: ExecutionContextLike): SecureCache;
 }
@@ -157,7 +159,8 @@ export interface WorkersCache extends SecureCache {
  * encryption included. Redis backends and cross-instance invalidation are
  * Node-only. SWR background refresh requires binding the request's
  * ExecutionContext per request — `cache.withExecutionContext(ctx)` — so
- * workerd keeps the refresh alive past response return.
+ * workerd keeps the refresh alive past response return; so does deferring
+ * a `writeBehind` L2 write.
  */
 export function createWorkersCache(options: CacheOptions): WorkersCache {
   return new CacheImpl(options, workersRuntime);

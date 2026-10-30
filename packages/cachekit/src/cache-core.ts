@@ -74,10 +74,25 @@ const WARN_INTERVAL_MS = 60_000;
  * Bounds on a cache's pending write-behind L2 writes, matching cachekit-py's
  * write_behind queue (64 entries, 16 MiB). A write that would take the
  * pending set past either bound runs on the caller's path instead (see
- * writeBehind). Module-private on purpose: not a tuning knob.
+ * tryWriteBehind). Module-private on purpose: not a tuning knob.
  */
 const MAX_PENDING_WRITES = 64;
 const MAX_PENDING_WRITE_BYTES = 16 * 1024 * 1024;
+
+/**
+ * How long an L2 op waits behind a key's pending write on a runtime that
+ * cancels unregistered work (Workers), before it runs anyway. There a
+ * pending write can never settle: workerd cancels a waitUntil past its 30 s
+ * limit, and the continuation of a request that went away. Without a cap,
+ * every later op on the key, and close(), would wait forever. Node needs
+ * none: its backend timeouts settle every write. A write that never settles
+ * also stays counted against the bound, so enough of them send later writes
+ * to the caller's path: slower, never wrong.
+ */
+const KEY_WAIT_CAP_MS = 30_000;
+
+/** The flight leader's waitUntil, for a wrap() miss that may write behind. */
+type WriteBehindContext = { waitUntil: WaitUntil | undefined };
 
 /**
  * Sentinel for "the lock path did not resolve the miss — compute without
@@ -310,6 +325,8 @@ export class CacheImpl implements SecureCache {
    */
   private readonly degradationEnabled: boolean;
   private closed = false;
+  /** The first close()'s promise: every later call waits on the same drain. */
+  private closing: Promise<void> | null = null;
   /** One in-flight cold-miss resolution per cache key (single-flight). */
   private readonly inflight = new Map<string, Promise<unknown>>();
   /**
@@ -1082,7 +1099,7 @@ export class CacheImpl implements SecureCache {
    * produced no ciphertext.
    *
    * `writeBehind` (a wrap() cold miss with the opt-in on) fills L1 first and
-   * returns without waiting for the L2 write, when writeBehind() can take it.
+   * returns without waiting for the L2 write, when tryWriteBehind() takes it.
    */
   private async setEntry<T>(
     key: string,
@@ -1090,7 +1107,7 @@ export class CacheImpl implements SecureCache {
     options: SetOptions | undefined,
     interop: boolean,
     updateL1 = true,
-    writeBehind?: { waitUntil: WaitUntil | undefined }
+    writeBehind?: WriteBehindContext
   ): Promise<L1Write | null> {
     this.ensureNotClosed();
 
@@ -1192,7 +1209,7 @@ export class CacheImpl implements SecureCache {
     // it keeps a degraded write's below.
     if (writeBehind) {
       this.fillL1(key, l1Write, ttl, namespace);
-      if (this.writeBehind(key, data, ttl, writeBehind.waitUntil)) return l1Write;
+      if (this.tryWriteBehind(key, data, ttl, writeBehind.waitUntil)) return l1Write;
     }
 
     // Only the backend write runs under retry, the breaker and degradation.
@@ -1239,7 +1256,7 @@ export class CacheImpl implements SecureCache {
    * overtaken. close() waits for it. Its outcome is counted and a failure
    * reported (writeBehindSettled); it never rejects.
    */
-  private writeBehind(
+  private tryWriteBehind(
     key: string,
     data: Uint8Array,
     ttl: number,
@@ -1281,7 +1298,7 @@ export class CacheImpl implements SecureCache {
         return true;
       });
     const tail = this.keyTails.get(key);
-    const write = (tail ? tail.then(send) : send())
+    const write = (tail ? this.afterTail(tail).then(send) : send())
       .then(
         (stored) => this.writeBehindSettled(key, stored),
         () => this.writeBehindSettled(key, false)
@@ -1305,9 +1322,15 @@ export class CacheImpl implements SecureCache {
   private inKeyOrder<T>(key: string, op: () => Promise<T>): Promise<T> {
     const tail = this.keyTails.get(key);
     if (tail === undefined) return op();
-    const result = tail.then(op);
+    const result = this.afterTail(tail).then(op);
     this.setKeyTail(key, result);
     return result;
+  }
+
+  /** A key's tail, capped at KEY_WAIT_CAP_MS where it may never settle. */
+  private afterTail(tail: Promise<void>): Promise<void> {
+    if (!this.swrRequiresWaitUntil) return tail;
+    return Promise.race([tail, sleep(KEY_WAIT_CAP_MS)]);
   }
 
   private setKeyTail(key: string, op: Promise<unknown>): void {
@@ -1756,7 +1779,7 @@ export class CacheImpl implements SecureCache {
     interop: boolean,
     compute: () => Promise<TResult>,
     options: WrapOptionsBase,
-    writeBehind?: { waitUntil: WaitUntil | undefined }
+    writeBehind?: WriteBehindContext
   ): Promise<TResult> {
     // The call runs the function: its one miss, counted before the write so
     // the write's telemetry headers carry it.
@@ -1898,6 +1921,13 @@ export class CacheImpl implements SecureCache {
       const key = options.key;
       try {
         await this.inKeyOrder(key, () => this.backend.delete(key));
+        // Evict again: a read while the delete waited (behind a pending
+        // write, or on the network) can have refilled L1 from L2, as
+        // delete() guards against by evicting after its L2 attempt.
+        if (this.l1) {
+          this.l1.invalidateByKey(key);
+          this.publishL1Stats();
+        }
       } catch (err) {
         // Best-effort L2 invalidation - don't fail the operation, but don't
         // hide it either. The entry stays stale in L2 until its TTL, so name
@@ -1921,8 +1951,13 @@ export class CacheImpl implements SecureCache {
     }
   }
 
-  async close(): Promise<void> {
-    if (this.closed) return;
+  close(): Promise<void> {
+    // A second close() (two shutdown hooks) must not resolve before the
+    // first has drained the pending writes.
+    return (this.closing ??= this.closeOnce());
+  }
+
+  private async closeOnce(): Promise<void> {
     this.closed = true;
 
     // Every step runs even if an earlier one throws — key release, wasm
@@ -1952,10 +1987,17 @@ export class CacheImpl implements SecureCache {
 
     // Drain write-behind writes before anything they use is torn down. `closed`
     // stops new ones; a set() or delete() already past its closed check can
-    // still queue behind a pending write, hence the loop. Tails never reject.
-    // No timeout of its own: it lasts as long as the slowest pending write,
-    // which the backend's own timeout and retry bound.
-    while (this.keyTails.size > 0) await Promise.all(this.keyTails.values());
+    // still queue behind a pending write, hence the loop over tails not yet
+    // waited on. Tails never reject. On Node it lasts as long as the slowest
+    // pending write, which the backend's own timeout and retry bound; on
+    // Workers each wait is capped (afterTail).
+    const drained = new Set<Promise<void>>();
+    for (;;) {
+      const fresh = [...this.keyTails.values()].filter((tail) => !drained.has(tail));
+      if (fresh.length === 0) break;
+      for (const tail of fresh) drained.add(tail);
+      await Promise.all(fresh.map((tail) => this.afterTail(tail)));
+    }
 
     // Stop invalidation channel
     if (this.invalidationChannel) {
