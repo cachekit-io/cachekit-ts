@@ -113,6 +113,28 @@ export function validateTtl(ttl: number): number {
 }
 
 /**
+ * Validate a stale-grace window per the protocol's Stale-While-Revalidate
+ * validation rules (protocol/spec/saas-api.md): negative, non-finite and
+ * values over 2,591,999 are rejected before any arithmetic; fractions are
+ * ceiled (API-54); the window shares the 30-day cap with `wireTtl`, the
+ * already-validated TTL. Returns the whole seconds to send; `0` sends nothing.
+ */
+export function validateStaleTtl(staleTtl: number, wireTtl: number): number {
+  if (!Number.isFinite(staleTtl) || staleTtl < 0 || staleTtl > MAX_TTL_SECONDS - 1) {
+    throw new ConfigurationError(
+      `staleTtl must be at least 0 and at most ${MAX_TTL_SECONDS - 1} seconds, got ${staleTtl}`
+    );
+  }
+  const wire = Math.ceil(staleTtl);
+  if (wireTtl + wire > MAX_TTL_SECONDS) {
+    throw new ConfigurationError(
+      `ttl + staleTtl must be at most ${MAX_TTL_SECONDS} seconds (30 days), got ${wireTtl} + ${wire}`
+    );
+  }
+  return wire;
+}
+
+/**
  * CachekitIO backend — HTTP client for the cachekit.io SaaS.
  *
  * Stores and retrieves opaque bytes via the cachekit.io REST API.
@@ -206,24 +228,26 @@ export class CachekitIOCore implements Backend {
 
   async set(key: string, value: Uint8Array, ttl?: number): Promise<void> {
     this.ensureNotClosed();
-
     const effectiveTtl = validateTtl(ttl ?? this.defaultTtl);
-    const headers: Record<string, string> = { 'X-CacheKit-TTL': String(effectiveTtl) };
-    const url = this.cacheUrl(key);
+    await this.put(key, value, { 'X-CacheKit-TTL': String(effectiveTtl) });
+  }
 
-    try {
-      const response = await this.request('PUT', url, {
-        body: value,
-        headers,
-      });
-
-      if (!response.ok) {
-        throw await this.httpError('set', response);
-      }
-    } catch (error) {
-      if (error instanceof BackendError || error instanceof TimeoutError) throw error;
-      throw this.wrapError('set', error);
-    }
+  /** Backend.setWithStaleTtl capability: the same PUT, also carrying
+   * `X-CacheKit-Stale-TTL`. Validated before any I/O; a `0` window sends no
+   * header, which the server reads the same way. */
+  async setWithStaleTtl(
+    key: string,
+    value: Uint8Array,
+    ttl: number,
+    staleTtl: number
+  ): Promise<void> {
+    this.ensureNotClosed();
+    const effectiveTtl = validateTtl(ttl);
+    const wireStaleTtl = validateStaleTtl(staleTtl, effectiveTtl);
+    await this.put(key, value, {
+      'X-CacheKit-TTL': String(effectiveTtl),
+      ...(wireStaleTtl > 0 && { 'X-CacheKit-Stale-TTL': String(wireStaleTtl) }),
+    });
   }
 
   /** @returns true on every successful delete, whether or not the key
@@ -301,6 +325,30 @@ export class CachekitIOCore implements Backend {
   }
 
   // ── Internal ──────────────────────────────────────────────
+
+  /** PUT the value with `headers`. Validate before calling: the catch
+   * below would wrap a ConfigurationError as a BackendError. */
+  private async put(
+    key: string,
+    value: Uint8Array,
+    headers: Record<string, string>
+  ): Promise<void> {
+    const url = this.cacheUrl(key);
+
+    try {
+      const response = await this.request('PUT', url, {
+        body: value,
+        headers,
+      });
+
+      if (!response.ok) {
+        throw await this.httpError('set', response);
+      }
+    } catch (error) {
+      if (error instanceof BackendError || error instanceof TimeoutError) throw error;
+      throw this.wrapError('set', error);
+    }
+  }
 
   /** Call before the network `try`: encodeKey's ConfigurationError must reach
    * the caller as-is, not wrapped by the catch as a BackendError. */

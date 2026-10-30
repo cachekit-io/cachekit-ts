@@ -232,3 +232,83 @@ describe('SWR via ctx.waitUntil inside workerd', () => {
     await cache.close();
   });
 });
+
+/**
+ * Server stale-grace (WrapOptions.staleTtl) inside workerd: a server-stale L2
+ * read is served at once and revalidated under ctx.waitUntil; without a bound
+ * context it is a plain miss, recomputed in the request.
+ */
+describe('server stale-grace inside workerd', () => {
+  /** The server's view: `stale` keys answer from their stale window; a write freshens. */
+  function staleGraceBackend() {
+    const store = new Map<string, Uint8Array>();
+    const stale = new Set<string>();
+    const writes: { ttl: number; staleTtl: number }[] = [];
+    const backend: Backend = {
+      async get(key) {
+        return store.get(key) ?? null;
+      },
+      async getWithTtl(key) {
+        const value = store.get(key);
+        return value ? { value, ttlSeconds: null, isStale: stale.has(key) } : null;
+      },
+      async set() {
+        throw new Error('a stale-grace wrap writes through setWithStaleTtl');
+      },
+      async setWithStaleTtl(key, value, ttl, staleTtl) {
+        writes.push({ ttl, staleTtl });
+        store.set(key, value);
+        stale.delete(key);
+      },
+      async delete(key) {
+        return store.delete(key);
+      },
+      async exists(key) {
+        return store.has(key);
+      },
+      async close() {},
+    };
+    const expire = () => store.forEach((_value, key) => stale.add(key));
+    return { backend, writes, expire };
+  }
+
+  const options = { namespace: 'swr:grace', ttl: 10, staleTtl: 60 } as const;
+
+  it('serves stale and completes the revalidation under waitUntil', async () => {
+    const { backend, writes, expire } = staleGraceBackend();
+    const seed = createCache({ backend });
+    await seed.wrap(async () => 'v1', options)();
+    await seed.close();
+    expire();
+
+    const reader = createCache({ backend });
+    const ctx = createExecutionContext();
+    let calls = 0;
+    const fn = reader.withExecutionContext(ctx).wrap(async () => `v${++calls + 1}`, options);
+
+    expect(await fn()).toBe('v1');
+    await waitOnExecutionContext(ctx);
+    expect(calls).toBe(1);
+    expect(writes).toEqual([
+      { ttl: 10, staleTtl: 60 },
+      { ttl: 10, staleTtl: 60 },
+    ]);
+    expect(await fn()).toBe('v2'); // the revalidation's write filled L1
+
+    await reader.close();
+  });
+
+  it('recomputes in the request without a bound context', async () => {
+    const { backend, writes, expire } = staleGraceBackend();
+    const seed = createCache({ backend });
+    await seed.wrap(async () => 'v1', options)();
+    await seed.close();
+    expire();
+
+    const reader = createCache({ backend });
+    expect(await reader.wrap(async () => 'v2', options)()).toBe('v2');
+    expect(writes).toHaveLength(2);
+
+    await reader.close();
+  });
+});

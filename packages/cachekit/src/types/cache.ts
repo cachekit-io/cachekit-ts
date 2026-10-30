@@ -58,6 +58,34 @@ export interface WrapOptionsBase {
   ttl: number;
   /** Skip L1 cache for this operation */
   skipL1?: boolean;
+  /**
+   * Opt into the CachekitIO server's stale-grace window, in seconds (off by
+   * default). Every write of this function's entries sends it as
+   * `X-CacheKit-Stale-TTL`, so the server keeps an expired entry for this long
+   * past `ttl` and serves it labelled stale. When an L2 read comes back stale,
+   * the call returns that value at once and re-runs the function in the
+   * background: one revalidation per key per process, under the server lease
+   * when the backend has lock capability. A failed revalidation leaves the
+   * stale entry in place and is only logged; past the window the next call
+   * takes the ordinary miss path. A stale value never enters L1.
+   *
+   * On Workers the revalidation needs a bound `waitUntil`
+   * (`withExecutionContext`); a function wrapped without one treats a stale
+   * read as a miss and recomputes in the request.
+   *
+   * Rules, checked at wrap time (ConfigurationError):
+   * - requires a backend that reads and writes the stale window (CachekitIO);
+   * - refused on encrypted caches, where TTL is often a revocation boundary;
+   * - at most 2,591,999 seconds, and `ttl + staleTtl` at most 2,592,000 (30
+   *   days); fractions round up; `0` turns it off.
+   *
+   * Mixed readers: the window applies to every reader of the key. An SDK that
+   * does not read the server's freshness label (cachekit-ts before 0.2.0,
+   * cachekit-rs today) serves a stale-window value as fresh where it would
+   * have missed, and caches it locally. Do not set this on keys whose
+   * readers rely on hard expiry, interop keys shared with such SDKs included.
+   */
+  staleTtl?: number;
 }
 
 /**

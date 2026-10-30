@@ -3,8 +3,10 @@ import { CachekitIOCore, validateTtl, encodeKey } from './cachekitio.js';
 import { BackendError, TimeoutError } from '../errors.js';
 import { classifyHttpError, classifyNetworkError } from './error-classifier.js';
 
-// Required<…getWithTtl>: tsc, not only tests, enforces the forward.
-export class TTLCachekitIO implements TTLBackend, Required<Pick<Backend, 'getWithTtl'>> {
+// Required<…getWithTtl | setWithStaleTtl>: tsc, not only tests, enforces the forwards.
+export class TTLCachekitIO
+  implements TTLBackend, Required<Pick<Backend, 'getWithTtl' | 'setWithStaleTtl'>>
+{
   constructor(private readonly inner: CachekitIOCore) {}
 
   // Delegating wrappers MUST forward keyPrefix / transformsKeys — see Backend.keyPrefix.
@@ -24,6 +26,10 @@ export class TTLCachekitIO implements TTLBackend, Required<Pick<Backend, 'getWit
   }
   set(key: string, value: Uint8Array, ttl?: number) {
     return this.inner.set(key, value, ttl);
+  }
+  // MUST forward: see Backend.setWithStaleTtl.
+  setWithStaleTtl(key: string, value: Uint8Array, ttl: number, staleTtl: number) {
+    return this.inner.setWithStaleTtl(key, value, ttl, staleTtl);
   }
   // Forwarded like keyPrefix — hiding it would let CacheImpl's reliability
   // stack swallow the inner backend's TTL rejection. See Backend.validateTtl.
