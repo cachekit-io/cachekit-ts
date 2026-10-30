@@ -275,11 +275,12 @@ describe('write-behind', () => {
     const [key] = backend.setKeys;
     const explicit = cache.set(key, 99, { ttl: 3600 }); // queued behind that PUT
     await new Promise((resolve) => setTimeout(resolve, 1_100));
-    await expect(wrapped(1)).resolves.toEqual({ id: 1, call: 2 }); // L1 = call 2, PUT queued last
+    // The key has writes pending, so this write is the caller's, queued last.
+    const second = wrapped(1);
 
     backend.open();
     await explicit;
-    await settle();
+    await expect(second).resolves.toEqual({ id: 1, call: 2 });
     // L2 ends with call 2 (1, then 99, then 2); L1 must not keep the older 99.
     expect(new TextDecoder().decode(backend.store.get(key))).not.toContain('99');
     await expect(cache.get(key)).resolves.toEqual({ id: 1, call: 2 });
@@ -485,13 +486,20 @@ describe('write-behind', () => {
     const { wrapped, counter } = counted(cache, true);
 
     await wrapped(5);
-    await wrapped(5); // the first PUT has not landed: a billed GET miss, a second compute
+    // The first PUT has not landed: a billed GET miss and a second compute.
+    // The key has a write pending, so this write is the caller's, behind it.
+    let returned = false;
+    const second = wrapped(5).then(() => {
+      returned = true;
+    });
+    await settle();
     expect(backend.gets).toBe(2);
     expect(counter.calls).toBe(2);
     expect(outcomes(cache)).toEqual({ l1Hits: 0, l2Hits: 0, misses: 2 });
+    expect(returned).toBe(false);
 
     backend.open();
-    await cache.close();
+    await second;
     expect(backend.log.filter((op) => op === 'set')).toHaveLength(2);
   });
 

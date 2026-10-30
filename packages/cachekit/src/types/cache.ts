@@ -73,8 +73,8 @@ export interface WrapOptionsBase {
    *
    * The write stays on the caller's path while a distributed lock is held
    * (`stampede.distributedLock`), on Workers unless the function was wrapped
-   * through `withExecutionContext`, on Workers while the key already has a
-   * write or delete pending, and when the write would take the pending writes
+   * through `withExecutionContext`, while the key already has a write or
+   * delete pending in this process, and when the write would take the pending writes
    * past 64 or 16 MiB. Requires `reliability.degradation` (the default): a failed
    * background write is logged and counted, never thrown.
    */

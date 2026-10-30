@@ -346,14 +346,6 @@ export class CacheImpl implements SecureCache {
    * inKeyOrder). Never rejects. A key leaves the map once its tail settles.
    */
   private readonly keyTails = new Map<string, Promise<void>>();
-  /**
-   * Per key with a tail, a token replaced whenever a write-behind fills L1
-   * while ops queued before it are still pending. A queued write fills L1
-   * only after its L2 write, so it checks the token across that wait and
-   * skips its fill when a newer value reached L1 first: otherwise L1 would
-   * keep the older value while L2 ends with the newer one.
-   */
-  private readonly earlyL1Fills = new Map<string, object>();
   /** Write-behind writes started and not yet settled, and their bytes. */
   private pendingWrites = 0;
   private pendingWriteBytes = 0;
@@ -1218,15 +1210,18 @@ export class CacheImpl implements SecureCache {
       count,
     };
 
-    // Write-behind: L1 before the L2 write, so this process serves the value
-    // while the write is pending. Encode and encrypt above stay on the
-    // caller's path, so their errors still reach it, and L1 holds the bytes
-    // the write sends. If the background write fails, L1 keeps the value, as
-    // it keeps a degraded write's below.
-    if (writeBehind) {
-      if (this.keyTails.has(key)) this.earlyL1Fills.set(key, {});
+    // Write-behind: L1 is filled as the write starts, before its PUT is sent
+    // (the PUT goes out after the reliability stack's first await), so this
+    // process serves the value while the write is pending. Encode and encrypt
+    // above stay on the caller's path, so their errors still reach it, and L1
+    // holds the bytes the write sends. If the background write fails, L1
+    // keeps the value, as it keeps a degraded write's below. A write sent
+    // back to the caller fills L1 after its L2 write, as with the option off.
+    const wroteBehind =
+      writeBehind !== undefined && this.tryWriteBehind(key, data, ttl, writeBehind.waitUntil);
+    if (wroteBehind) {
       this.fillL1(key, l1Write, ttl, namespace);
-      if (this.tryWriteBehind(key, data, ttl, writeBehind.waitUntil)) return l1Write;
+      return l1Write;
     }
 
     // An SWR refresh (updateL1=false) on Workers runs inside its request's
@@ -1237,7 +1232,6 @@ export class CacheImpl implements SecureCache {
     if (!updateL1 && this.swrRequiresWaitUntil && this.keyTails.has(key)) return null;
 
     // Only the backend write runs under retry, the breaker and degradation.
-    const earlyFillBefore = this.earlyL1Fills.get(key);
     await this.inKeyOrder(key, () =>
       this.run('set', key, undefined, () => this.backend.set(key, data, ttl))
     );
@@ -1255,9 +1249,7 @@ export class CacheImpl implements SecureCache {
     // L1 but is overwritten in L2 by the refresh's value until the entry next
     // expires or refreshes (a conditional L2 write would need CAS the Backend
     // contract doesn't have).
-    if (updateL1 && !writeBehind && this.earlyL1Fills.get(key) === earlyFillBefore) {
-      this.fillL1(key, l1Write, ttl, namespace);
-    }
+    if (updateL1) this.fillL1(key, l1Write, ttl, namespace);
 
     return l1Write;
   }
@@ -1271,25 +1263,21 @@ export class CacheImpl implements SecureCache {
   /**
    * Start `key`'s L2 write in the background and return true, or start
    * nothing and return false when the write must stay on the caller's path:
-   * the runtime cancels unregistered work (Workers) and no waitUntil is
-   * bound, or registering with it throws, or the key already has something
-   * pending there (see below), or the write would take the pending writes
-   * past MAX_PENDING_WRITES or MAX_PENDING_WRITE_BYTES. A write the
-   * bound sends back to the caller still waits behind the key's pending
-   * write (inKeyOrder), so the older value can never land last.
+   * the key already has a write or delete pending, or the runtime cancels
+   * unregistered work (Workers) and no waitUntil is bound, or registering
+   * with it throws, or the write would take the pending writes past
+   * MAX_PENDING_WRITES or MAX_PENDING_WRITE_BYTES. A write sent back to the
+   * caller waits behind the key's pending ops (inKeyOrder), so the older
+   * value can never land last.
    *
-   * The write queues behind any write or delete of the key already pending,
-   * and every later write or delete of the key queues behind it, so a set(),
-   * delete() or invalidate('params') issued after wrap() returns is never
-   * overtaken. close() waits for it. Its outcome is counted and a failure
-   * reported (writeBehindSettled); it never rejects.
-   *
-   * On Workers a write never queues: workerd gives its waitUntil 30 s in
-   * all, the same as the KEY_WAIT_CAP_MS wait behind a tail that may never
-   * settle, so it would reach the network as workerd cancels it. That write
-   * would be lost, would hold its pending slot for good, and would become
-   * the key's next tail that never settles. On the caller's path, the cap
-   * does let it run.
+   * A background write never queues behind another op. Queued, it would
+   * fill L1 before ops queued ahead of it that fill L1 after their L2 write,
+   * leaving L1 older than L2; and on Workers it would wait out
+   * KEY_WAIT_CAP_MS inside its own 30 s waitUntil budget and be cancelled as
+   * it sends. Every later write or delete of the key queues behind it, so a
+   * set(), delete() or invalidate('params') issued after wrap() returns is
+   * not overtaken. close() waits for it. Its outcome is counted and a
+   * failure reported (writeBehindSettled); it never rejects.
    */
   private tryWriteBehind(
     key: string,
@@ -1299,8 +1287,8 @@ export class CacheImpl implements SecureCache {
   ): boolean {
     // After close() began, the drain may already have run: a write started
     // now would outlive it.
-    if (this.closed) return false;
-    if (this.swrRequiresWaitUntil && (!waitUntil || this.keyTails.has(key))) return false;
+    if (this.closed || this.keyTails.has(key)) return false;
+    if (this.swrRequiresWaitUntil && !waitUntil) return false;
     if (
       this.pendingWrites >= MAX_PENDING_WRITES ||
       this.pendingWriteBytes + data.length > MAX_PENDING_WRITE_BYTES
@@ -1340,9 +1328,7 @@ export class CacheImpl implements SecureCache {
         }
         return true;
       });
-    const tail = this.keyTails.get(key);
-    // Only on Node can a tail be here (see above), and Node needs no cap.
-    const write = (tail ? tail.then(send) : send())
+    const write = send()
       .then(
         (stored) => this.writeBehindSettled(key, stored, lastError),
         (error: unknown) => this.writeBehindSettled(key, false, error)
@@ -1384,9 +1370,7 @@ export class CacheImpl implements SecureCache {
     );
     this.keyTails.set(key, tail);
     void tail.then(() => {
-      if (this.keyTails.get(key) !== tail) return;
-      this.keyTails.delete(key);
-      this.earlyL1Fills.delete(key);
+      if (this.keyTails.get(key) === tail) this.keyTails.delete(key);
     });
   }
 
