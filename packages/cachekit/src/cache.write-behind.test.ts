@@ -8,7 +8,7 @@
 import { createHash } from 'node:crypto';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createCache } from './cache.js';
-import { CacheImpl } from './cache-core.js';
+import { CacheImpl, type ExecutionContextLike } from './cache-core.js';
 import { ConfigurationError } from './errors.js';
 import { setLogger } from './logger.js';
 import type { Backend, LockableBackend } from './backends/types.js';
@@ -86,6 +86,12 @@ class GatedLockableBackend extends GatedBackend implements LockableBackend {
 const settle = async (): Promise<void> => {
   for (let i = 0; i < 20; i++) await Promise.resolve();
 };
+
+/** The request-scoped view. The method lives on CacheImpl, not on the Node type. */
+function viewOf(cache: SecureCache, ctx: ExecutionContextLike): SecureCache {
+  if (!(cache instanceof CacheImpl)) throw new Error('createCache() did not return a CacheImpl');
+  return cache.withExecutionContext(ctx);
+}
 
 /** Swap the cache's metrics collector for one whose recordOperation is a spy. */
 function spyRecordOperation(cache: SecureCache) {
@@ -309,7 +315,7 @@ describe('write-behind', () => {
       backend.gate(); // never opened: a write workerd cancelled
       const cache = make({ backend });
       (cache as unknown as { swrRequiresWaitUntil: boolean }).swrRequiresWaitUntil = true;
-      const view = (cache as CacheImpl).withExecutionContext({ waitUntil: () => {} });
+      const view = viewOf(cache, { waitUntil: () => {} });
       const fn = view.wrap(async (id: number) => id, {
         namespace: 'wb:cap',
         ttl: 60,
@@ -484,7 +490,7 @@ describe('write-behind', () => {
       backend.gate();
       const cache = make({ backend });
       const registered: Promise<unknown>[] = [];
-      const view = (cache as CacheImpl).withExecutionContext({
+      const view = viewOf(cache, {
         waitUntil: (p) => registered.push(p),
       });
       const fn = view.wrap(async (id: number) => id, {
@@ -509,7 +515,7 @@ describe('write-behind', () => {
       setLogger(() => {});
       const backend = new GatedBackend();
       const cache = make({ backend });
-      const view = (cache as CacheImpl).withExecutionContext({
+      const view = viewOf(cache, {
         waitUntil: () => {
           throw new Error('stale ctx');
         },

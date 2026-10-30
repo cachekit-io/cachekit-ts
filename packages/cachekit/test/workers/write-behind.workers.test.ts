@@ -11,13 +11,21 @@ import { describe, it, expect } from 'vitest';
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { createCache, type Backend } from '../../src/workers/index.js';
 
+interface GateState {
+  store: Map<string, Uint8Array>;
+  sets: number;
+  hold: Promise<void> | null;
+  gate(): void;
+  open(): void;
+}
+
 /** In-memory Backend whose set() waits while `hold` is set. */
 function gatedBackend() {
   let release: () => void = () => {};
-  const state = {
+  const state: GateState = {
     store: new Map<string, Uint8Array>(),
     sets: 0,
-    hold: null as Promise<void> | null,
+    hold: null,
     gate() {
       state.hold = new Promise<void>((resolve) => {
         release = resolve;
