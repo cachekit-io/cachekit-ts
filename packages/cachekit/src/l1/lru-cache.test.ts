@@ -1031,6 +1031,64 @@ describe('L1Cache', () => {
     });
   });
 
+  describe('replace', () => {
+    it('swaps the value in place: same expiry, version and charge', () => {
+      vi.useFakeTimers({ now: 0 });
+      const c = new L1Cache<Uint8Array>();
+      const from = new Uint8Array([1, 2, 3]);
+      const to = new Uint8Array([1, 2, 3]);
+      c.set('a', from, 1000, 'ns');
+      vi.advanceTimersByTime(500);
+      const { versionToken } = c.getWithSwr('a');
+      const memoryUsed = c.stats.memoryUsed;
+
+      expect(c.replace('a', from, to)).toBe(true);
+
+      expect(c.entry('a')!.value).toBe(to);
+      expect(c.stats.memoryUsed).toBe(memoryUsed);
+      expect(c.getWithSwr('a').versionToken).toBe(versionToken);
+      // Still expires at 1000, not 500 + 1000.
+      vi.advanceTimersByTime(499);
+      expect(c.get('a')).toBe(to);
+      vi.advanceTimersByTime(1);
+      expect(c.get('a')).toBeNull();
+    });
+
+    it('keeps the LRU place', () => {
+      const c = new L1Cache<string>({ maxEntries: 2 });
+      c.set('a', 'from', 1000, 'ns');
+      c.set('b', 'b', 1000, 'ns');
+      c.get('b'); // a is now the least recent
+
+      expect(c.replace('a', 'from', 'to')).toBe(true);
+      c.set('c', 'c', 1000, 'ns');
+
+      expect(c.entry('a')).toBeUndefined();
+      expect(c.entry('b')).toBeDefined();
+    });
+
+    it('changes nothing once the key no longer holds `from`', () => {
+      const from = 'from';
+      const routes: Record<string, (c: L1Cache<string>) => void> = {
+        rewrite: (c) => c.set('a', 'newer', 1000, 'ns'),
+        refresh: (c) => c.completeRefresh('a', 'refreshed', 1000, c.getWithSwr('a').versionToken),
+        invalidation: (c) => c.invalidateByKey('a'),
+        eviction: (c) => {
+          c.set('b', 'b', 1000, 'ns');
+          c.set('c', 'c', 1000, 'ns');
+        },
+      };
+      for (const [route, change] of Object.entries(routes)) {
+        const c = new L1Cache<string>({ maxEntries: 2 });
+        c.set('a', from, 1000, 'ns');
+        change(c);
+        const before = c.get('a');
+        expect(c.replace('a', from, 'to'), route).toBe(false);
+        expect(c.get('a'), route).toBe(before);
+      }
+    });
+  });
+
   describe('invalidation', () => {
     it('invalidateByKey removes single key', () => {
       cache.set('key1', 'value1', 10000, 'ns');

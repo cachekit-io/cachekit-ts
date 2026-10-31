@@ -21,6 +21,7 @@ import {
 } from './cache/background-refresh.js';
 import {
   decodeCounted,
+  decodeTrusted,
   encodeCounted,
   resolveSerializerConfig,
   type ObjectCount,
@@ -43,6 +44,7 @@ import {
   validateInteropSegment,
   encodeInteropValueCounted,
   decodeInteropValueCounted,
+  decodeInteropValueTrusted,
 } from './serialization/interop.js';
 import { createInvalidationEvent } from './invalidation/event.js';
 import {
@@ -332,6 +334,8 @@ function describeBackendFailure(err: unknown): string {
 export class CacheImpl implements SecureCache {
   private readonly backend: Backend;
   private readonly l1: L1Cache | null;
+  /** Copies decodeL1Entry swapped into L1, each with the `interop` mode it walked them in. */
+  private readonly trustedL1 = new WeakMap<Uint8Array, boolean>();
   private readonly reliabilityExecutor: ReliabilityExecutor;
   private readonly backgroundRefresh: BackgroundRefreshManager;
   private readonly encryption: EncryptionLike | null;
@@ -900,11 +904,15 @@ export class CacheImpl implements SecureCache {
    * deserialize. Shared by the L2 read and the L1 read so the two tiers can
    * never drift into decoding the same entry differently — a real hazard once
    * both paths handle AAD (protocol#12 freezes the v0x03 component set).
+   *
+   * `trusted` drops the depth pre-scan, and in auto mode validateDepth. Only
+   * decodeL1Entry passes it, for a copy marked in trustedL1.
    */
   private async decodeEntry<T>(
     bytes: Uint8Array,
     key: string,
-    interop: boolean
+    interop: boolean,
+    trusted = false
   ): Promise<{ value: T; serializedSize: number; count: ObjectCount }> {
     const useEnvelope = this.useEnvelope(interop);
 
@@ -964,10 +972,19 @@ export class CacheImpl implements SecureCache {
     }
     // The decode's depth pre-scan counts the heap objects and values on the
     // way, so L1 can charge for them without another walk (see L1Cache.set).
+    // A trusted decode runs no pre-scan and counts nothing: only an L2 read
+    // charges L1 from the count.
     const count: ObjectCount = { objects: 0, values: 0 };
-    const value = interop
-      ? decodeInteropValueCounted<T>(plaintext, count)
-      : decodeCounted<T>(plaintext, this.serializerConfig, count);
+    let value: T;
+    if (trusted) {
+      value = interop
+        ? decodeInteropValueTrusted<T>(plaintext)
+        : decodeTrusted<T>(plaintext, this.serializerConfig);
+    } else {
+      value = interop
+        ? decodeInteropValueCounted<T>(plaintext, count)
+        : decodeCounted<T>(plaintext, this.serializerConfig, count);
+    }
     // The serialized length, not bytes.byteLength: that is the compressed
     // (and maybe encrypted) envelope, several times smaller, and charging L1
     // for it would let L1 grow well past maxMemory.
@@ -979,6 +996,16 @@ export class CacheImpl implements SecureCache {
    * AAD-verify against the cache key followed by the same unpack/deserialize
    * the L2 path runs — an L1 hit is no longer free, which is the price of not
    * keeping plaintext resident. For a plaintext cache it is a cast.
+   *
+   * Verify once, on the first hit. The bytes a fill gives L1 can be a buffer
+   * the backend still holds (the one it returned, or the one setEntry gave
+   * it), and nothing stops a backend writing to it later. So the first hit
+   * copies them, decodes the copy as an L2 read does, depth walks included,
+   * and swaps the copy into L1 in their place (if L1 still holds them),
+   * marked in trustedL1 with the mode it was walked in. No one outside this
+   * cache can reach the copy, so later hits in that mode skip the depth
+   * pre-scan, and in auto mode validateDepth: both could only pass again.
+   * Fills pay nothing for this.
    *
    * Drops the L1 entry and returns null when a secure entry will not decrypt
    * (rotated key, tampered heap, an entry written under a different envelope
@@ -1008,7 +1035,16 @@ export class CacheImpl implements SecureCache {
           `L1 entry for a secure cache is not ciphertext bytes (got ${typeof stored})`
         );
       }
-      return { value: (await this.decodeEntry<T>(stored, key, interop)).value };
+      if (this.trustedL1.get(stored) === interop) {
+        return { value: (await this.decodeEntry<T>(stored, key, interop, true)).value };
+      }
+      // Copied before the decode, so the copy holds exactly the bytes the walks pass.
+      const own = new Uint8Array(stored);
+      const { value } = await this.decodeEntry<T>(own, key, interop);
+      // A rewrite, refresh, invalidation or eviction since l1.get wins: then
+      // nothing is swapped and the copy is dropped.
+      if (this.l1?.replace(key, stored, own)) this.trustedL1.set(own, interop);
+      return { value };
     } catch (error) {
       this.l1?.invalidateByKey(key);
       this.recordFailure('l1_decrypt', error);

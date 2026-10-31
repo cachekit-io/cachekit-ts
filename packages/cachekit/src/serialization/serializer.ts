@@ -1309,7 +1309,8 @@ export function encodeCounted<T>(
  * (that rejects over-depth input before `decode()` builds the graph 1:1). Kept
  * for good as a cheap post-decode backstop for the hand-rolled pre-scan: if the
  * walker ever under-counts depth, this still catches it before the value is
- * returned.
+ * returned. It runs on every decode of bytes from a backend; only
+ * decodeTrusted skips it.
  */
 function validateDepth(value: unknown, depth: number, maxDepth: number): void {
   if (depth > maxDepth) {
@@ -1337,30 +1338,46 @@ export function decodeCounted<T>(
   config: SerializerConfig,
   count?: ObjectCount
 ): T {
-  // Check input size
-  if (data.length > config.maxDecodedSize) {
-    throw new ValueTooLargeError(`Input size ${data.length} exceeds max ${config.maxDecodedSize}`);
-  }
+  assertDecodeSize(data, config);
 
   // Bound nesting depth before the decoder eagerly preallocates per-header
   // collections — the per-collection cap alone lets nested headers
   // stack preallocations disproportionate to input size.
   const counted = assertDecodeDepth(data, config.maxDepth);
 
+  const decoded = decodeBounded<T>(data, config);
+  // Validate depth of decoded object (DoS protection)
+  validateDepth(decoded, 0, config.maxDepth);
+  if (count) {
+    count.objects += counted.objects;
+    count.values += counted.values;
+  }
+  return decoded;
+}
+
+/**
+ * decodeCounted without the depth pre-scan and the post-decode walk, for bytes
+ * this process already decoded through decodeCounted under `config`, both
+ * walks included: neither could fail on them again. The input cap and the
+ * decoder's collection bounds still apply. Package-internal: only the cache
+ * calls it, on L1's own copy of bytes an earlier hit walked. Never call it on
+ * bytes read from a backend.
+ */
+export function decodeTrusted<T>(data: Uint8Array, config: SerializerConfig): T {
+  assertDecodeSize(data, config);
+  return decodeBounded<T>(data, config);
+}
+
+function assertDecodeSize(data: Uint8Array, config: SerializerConfig): void {
+  if (data.length > config.maxDecodedSize) {
+    throw new ValueTooLargeError(`Input size ${data.length} exceeds max ${config.maxDecodedSize}`);
+  }
+}
+
+/** Decode under the collection bounds; any failure is a SerializationError. */
+function decodeBounded<T>(data: Uint8Array, config: SerializerConfig): T {
   try {
-    const decoded = decode(
-      data,
-      boundedDecodeOptions(config.maxCollectionSize, config.maxDecodedSize)
-    );
-
-    // Validate depth of decoded object (DoS protection)
-    validateDepth(decoded, 0, config.maxDepth);
-
-    if (count) {
-      count.objects += counted.objects;
-      count.values += counted.values;
-    }
-    return decoded as T;
+    return decode(data, boundedDecodeOptions(config.maxCollectionSize, config.maxDecodedSize)) as T;
   } catch (error) {
     if (error instanceof SerializationError) {
       throw error;
