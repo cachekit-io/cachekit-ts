@@ -6,7 +6,10 @@
     "ignoreDeprecations": "6.0",
     "outDir": "./dist/cjs",
     "rootDir": "./src",
-    "tsBuildInfoFile": "./dist/.tsbuildinfo.cjs"
+    "tsBuildInfoFile": "./dist/.tsbuildinfo.cjs",
+    // node10 resolution reads no package.json `imports`. At run time the
+    // CommonJS build always resolves #noble-preload to this module.
+    "paths": { "#noble-preload": ["./src/serialization/no-preload.ts"] }
   },
   "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.test.tsx", "src/workers/**"]
 }

@@ -1,5 +1,6 @@
-import { blake2b } from '@noble/hashes/blake2.js';
-import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
+import type * as Blake2 from '@noble/hashes/blake2.js';
+import * as preloaded from '#noble-preload';
+import { nobleBlake2Resolves, requireNobleBlake2 } from './noble-require.cjs';
 import { logError } from '../logger.js';
 import { CACHE_KEY_HASH_LENGTH } from '../constants.js';
 
@@ -9,29 +10,89 @@ import { CACHE_KEY_HASH_LENGTH } from '../constants.js';
  */
 export type Blake2b256Hex = (data: Uint8Array) => string;
 
+let nobleHash: typeof Blake2.blake2b | undefined;
+
+/**
+ * @noble/hashes' BLAKE2b. In the ES module build, `#noble-preload` (package.json
+ * `imports`) is noble itself, a static import. A lazy require(esm) there would
+ * share noble with the app's own ES module graph, and Node refuses require(esm)
+ * of a module that graph is still loading. In the CommonJS build it is
+ * `no-preload.ts`, and noble loads synchronously, through require(esm), the
+ * first time anything hashes in JS: on Node, keys hash through the binding, and
+ * loading noble costs about 5 ms of a cold start.
+ */
+function noble(): typeof Blake2.blake2b {
+  return (nobleHash ??=
+    (preloaded as Partial<typeof Blake2>).blake2b ??
+    (requireNobleBlake2() as typeof Blake2).blake2b);
+}
+
+// The CommonJS build on Node 22 and 23 (the ES module build has noble already).
+// Node.js 22's module loader keeps the async context a module is first loaded
+// in (a request's AsyncLocalStorage store) for the life of the process; 24's
+// does not. So noble loads here, at import, never inside a request. A load
+// that can never work throws: without require(esm) (22.0 to 22.11) or without
+// @noble/hashes, the package would load without JS hashing and break its error
+// paths, whose log lines carry a `keyHash=` digest. Any other failure means an
+// ES module graph holding noble, one that loads this package through a
+// CommonJS module and imports noble after it, has not finished loading noble:
+// require(esm) throws ERR_REQUIRE_CYCLE_MODULE there on 22.12 to 22.14, and on
+// 22.15, 22.16 and 23 returns noble before its bindings exist. noble then
+// loads on first use. On 22.15 and later such an app loaded with a static
+// require of noble, and this keeps it loading; on 22.18 and later nothing fails.
+if (Number(globalThis.process?.versions?.node?.split('.')[0]) < 24) {
+  try {
+    noble();
+  } catch (error) {
+    if (!globalThis.process?.features?.require_module || !nobleBlake2Resolves()) throw error;
+  }
+}
+
 const HEX_DIGITS = new TextEncoder().encode('0123456789abcdef');
 const hexBytes = new Uint8Array(CACHE_KEY_HASH_LENGTH);
 const hexDecoder = new TextDecoder();
 const nativeHex = typeof (Uint8Array.prototype as { toHex?: unknown }).toHex === 'function';
 
 /**
- * Lowercase hex of a 32-byte digest, as one string. Without a native
- * Uint8Array.prototype.toHex (Node.js 24 and earlier), bytesToHex appends two
- * digits at a time, and V8 keeps every intermediate string inside the result:
- * about 800 bytes more for each key that L1 or a key memo holds.
+ * Lowercase hex of `bytes`, as one string. Without a native
+ * Uint8Array.prototype.toHex (Node.js 24 and earlier), appending two digits at
+ * a time would leave V8 holding every intermediate string inside the result:
+ * about 800 bytes more for each key that L1 or a key memo holds. The digits go
+ * into a byte buffer instead, decoded once.
  */
-function digestHex(digest: Uint8Array): string {
-  if (nativeHex) return bytesToHex(digest);
-  for (let i = 0; i < digest.length; i++) {
-    hexBytes[2 * i] = HEX_DIGITS[digest[i] >> 4];
-    hexBytes[2 * i + 1] = HEX_DIGITS[digest[i] & 15];
+export function bytesToHex(bytes: Uint8Array): string {
+  if (nativeHex) return (bytes as Uint8Array & { toHex(): string }).toHex();
+  const out =
+    bytes.length * 2 <= hexBytes.length
+      ? hexBytes.subarray(0, bytes.length * 2)
+      : new Uint8Array(bytes.length * 2);
+  for (let i = 0; i < bytes.length; i++) {
+    out[2 * i] = HEX_DIGITS[bytes[i] >> 4];
+    out[2 * i + 1] = HEX_DIGITS[bytes[i] & 15];
   }
-  return hexDecoder.decode(hexBytes);
+  return hexDecoder.decode(out);
+}
+
+/** The bytes a binding's hex digest spells. */
+function hexToBytes(hex: string): Uint8Array {
+  if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(hex)) {
+    throw new SyntaxError(
+      `[cachekit] the binding returned a malformed hex digest (${hex.length} characters)`
+    );
+  }
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.slice(2 * i, 2 * i + 2), 16);
+  return bytes;
 }
 
 /** The cache-key hash in JS (@noble/hashes): what keys use without a binding. */
 export function nobleBlake2b256Hex(data: Uint8Array): string {
-  return digestHex(blake2b(data, { dkLen: 32 }));
+  return bytesToHex(noble()(data, { dkLen: 32 }));
+}
+
+/** Unkeyed BLAKE2b-128 of `data` as 32 lowercase hex characters, always in JS. */
+export function nobleBlake2b128Hex(data: Uint8Array): string {
+  return bytesToHex(noble()(data, { dkLen: 16 }));
 }
 
 /**
@@ -114,6 +175,6 @@ export function blake2b256Hex(data: Uint8Array): string {
 /** Unkeyed BLAKE2b-256 of `data`, the 32-byte digest, by the same path. */
 export function blake2b256(data: Uint8Array): Uint8Array {
   return binding === undefined
-    ? blake2b(data, { dkLen: 32 })
+    ? noble()(data, { dkLen: 32 })
     : hexToBytes(viaBinding(binding, data));
 }

@@ -570,7 +570,7 @@ Four backends implement the same `Backend` interface (raw bytes in/out) and plug
 | Memcached         | `memcached` from `@cachekit-io/cachekit/backends/memcached` | Node          | memjs (binary protocol, multi-server); requires the optional `memjs` peer dependency                                                                                                  |
 | File              | `file` from `@cachekit-io/cachekit/backends/file`           | Node          | local disk, on-disk format shared with cachekit-py                                                                                                                                    |
 
-The Memcached and File backends are **Node-runtime only** and live behind subpath exports, so the root entry never loads `memjs` or the File backend. The root entry is itself **Node-only**: it loads `node:crypto` and the NAPI core, whose loader requires `node:fs`. ioredis loads when the app creates a Redis backend, not when it imports the package, so an app that never uses Redis never loads it; commands issued before the load finishes wait for it. Bundlers follow that load, so a bundle that uses Redis carries ioredis. ioredis is CommonJS and requires Node builtins, so an esbuild ESM bundle for Node needs `require` defined (the usual `createRequire` banner). Edge code uses the `workerd` export condition or the `@cachekit-io/cachekit/workers` subpath. Bun resolves the root to the Node entry and runs it, NAPI core included (checked on Bun 1.3.8); the `/workers` subpath does not load on Bun. No entry targets Deno, Deno Deploy or Vercel/Next edge.
+The Memcached and File backends are **Node-runtime only** and live behind subpath exports, so the root entry never loads `memjs` or the File backend. The root entry is itself **Node-only**: it loads `node:crypto` and the NAPI core, whose loader requires `node:fs`. ioredis loads when the app creates a Redis backend, not when it imports the package, so an app that never uses Redis never loads it; commands issued before the load finishes wait for it. Bundlers follow that load, so a bundle that uses Redis carries ioredis. ioredis is CommonJS and requires Node builtins, so an esbuild ESM bundle for Node needs `require` defined (the usual `createRequire` banner). The native core hashes cache keys, so in the CommonJS build on Node.js 24 and later `@noble/hashes` loads only when something hashes in JS: a File backend file name, the `keyHash=` digest in an error log line, or a key the native core cannot hash. On Node 22 and 23, and always in the ES module build, it loads with the package. Edge code uses the `workerd` export condition or the `@cachekit-io/cachekit/workers` subpath. Bun resolves the root to the Node entry and runs it, NAPI core included (checked on Bun 1.3.8); the `/workers` subpath does not load on Bun. No entry targets Deno, Deno Deploy or Vercel/Next edge.
 
 **L1 freshness across processes.** When a plain `get()` hits L2, the value is
 re-populated into this process's L1. On backends that surface the entry's
@@ -1073,7 +1073,7 @@ To print this table for your own machine, run `pnpm install` and `pnpm build`, t
 
 ## Requirements
 
-- Node.js 22+ (Node entrypoint) or Cloudflare Workers (workerd)
+- Node.js 22+ (Node entrypoint) or Cloudflare Workers (workerd). The CommonJS build needs Node.js 22.12+: it loads `@noble/hashes`, an ES module, through `require(esm)`
 - Redis 6+ (Node Redis backends)
 
 ## License

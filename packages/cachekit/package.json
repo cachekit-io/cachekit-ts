@@ -46,13 +46,16 @@
       "default": "./dist/workers/index.js"
     }
   },
+  "imports": {
+    "#noble-preload": "@noble/hashes/blake2.js"
+  },
   "files": [
     "dist",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist/cjs/package.json','{\\\"type\\\":\\\"commonjs\\\"}\\n')\"",
+    "build": "tsc && tsc -p tsconfig.cjs.json && node scripts/write-cjs-package-json.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
