@@ -668,6 +668,15 @@ Options: `namespace`, `ttl`, `skipL1`, `writeBehind` ([Write-Behind](#write-behi
 `staleTtl` ([Server stale-grace](#server-stale-grace-cachekitio)), and the
 `interop` / `interopArity` pair ([Cross-SDK interop mode](#cross-sdk-interop-mode)).
 
+`skipL1: true` makes a call neither read nor fill L1: it reads the backend even
+when L1 holds the key, and the value it reads or computes stays out of L1, so a
+scan does not evict the entries L1 keeps hot. An entry L1 already holds stays
+there. A call that arrives while another call in this process resolves the same
+key's miss still shares that one read and compute
+([Stampede Protection](#stampede-protection)), and the call that started the
+flight decides whether L1 is filled. Before 0.3.0, a `skipL1` call skipped only
+the first L1 lookup: on a miss it still read and filled L1.
+
 ### cache.invalidate(level, options?)
 
 Invalidate cache entries.

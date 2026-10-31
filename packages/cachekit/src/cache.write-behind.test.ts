@@ -481,6 +481,46 @@ describe('write-behind', () => {
     }
   });
 
+  it('on Workers, a skipL1 cold miss of a key with a write pending still sends its PUT', async () => {
+    // Unlike an SWR refresh, which gives way to a pending write (next test),
+    // a skipL1 call is a caller's cold miss: it waits behind the stuck tail
+    // and writes.
+    vi.useFakeTimers();
+    try {
+      const backend = new GatedBackend();
+      let first = true;
+      const realSet = backend.set.bind(backend);
+      backend.set = async (key, value) => {
+        backend.setKeys.push(key);
+        if (first) {
+          first = false;
+          return new Promise<void>(() => {}); // a write workerd cancelled: never settles
+        }
+        return realSet(key, value);
+      };
+      const cache = makeWorkersLike({ backend, l1: { swrEnabled: false } });
+      const view = viewOf(cache, { waitUntil: () => {} });
+      let calls = 0;
+      const compute = async (id: number) => ({ id, call: ++calls });
+      const behind = view.wrap(compute, { namespace: 'wb:skip', ttl: 60, writeBehind: true });
+      const skipping = view.wrap(compute, { namespace: 'wb:skip', ttl: 60, skipL1: true });
+
+      await behind(1); // write-behind: its PUT never settles
+      const second = skipping(1); // misses L2, computes, writes behind the stuck tail
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(second).resolves.toEqual({ id: 1, call: 2 });
+      // L2 holds the skipL1 call's value: its write was sent, not dropped.
+      await expect(skipping(1)).resolves.toEqual({ id: 1, call: 2 });
+      expect(calls).toBe(2);
+
+      const closing = cache.close(); // the stuck tail is waited out at the cap
+      await vi.advanceTimersByTimeAsync(30_000);
+      await closing;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('on Workers, an SWR refresh of a key with a write pending sends no PUT and defers', async () => {
     vi.useFakeTimers();
     try {
@@ -723,9 +763,36 @@ describe('write-behind', () => {
       const lines = logError.mock.calls.map((args) => args.join(' '));
       const line = lines.find((l) => l.includes('write-behind L2 write failed'));
       expect(line).toContain(': BackendError(timeout).'); // the cause's class, never its text
+      expect(line).toContain("value held in this process's L1 only");
       expect(lines.join('\n')).not.toContain('PUT refused');
       // L1 keeps the value, as it keeps a degraded foreground write's.
       await expect(wrapped(7)).resolves.toEqual({ id: 7, call: 1 });
+    });
+
+    it.each([
+      ['a skipL1 call', { l1: { enabled: true } }, true],
+      ['L1 off', { l1: { enabled: false } }, false],
+    ] as const)('with no L1 copy (%s), says the value is not cached', async (_, l1, skipL1) => {
+      const logError = vi.fn();
+      setLogger(logError);
+      const backend = new GatedBackend();
+      backend.set = async () => {
+        throw new BackendError('PUT refused', 'timeout');
+      };
+      const cache = make({ backend, ...l1 });
+      const fn = cache.wrap(async (id: number) => ({ id }), {
+        namespace: 'wb:no-l1-copy',
+        ttl: 60,
+        writeBehind: true,
+        skipL1,
+      });
+
+      await expect(fn(9)).resolves.toEqual({ id: 9 });
+      await settle();
+      const lines = logError.mock.calls.map((args) => args.join(' '));
+      const line = lines.find((l) => l.includes('write-behind L2 write failed'));
+      expect(line).toContain('value not cached');
+      expect(line).not.toContain('L1');
     });
 
     it('names the open breaker when no attempt ran', async () => {
