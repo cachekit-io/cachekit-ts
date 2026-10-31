@@ -1,4 +1,4 @@
-// A/A probe: a comment-only change, so dist differs and nothing it runs does.
+export { ballastLength as _aaBallastLength } from './aa-ballast.js';
 // ============ Main API ============
 export { createCache } from './intents.js';
 export { redis } from './backends/redis.js';
