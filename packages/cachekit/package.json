@@ -48,7 +48,7 @@
   },
   "imports": {
     "#noble-preload": {
-      "module-sync": "./dist/serialization/no-preload.js",
+      "module-sync": "./dist/serialization/esm-preload.js",
       "default": "@noble/hashes/blake2.js"
     }
   },

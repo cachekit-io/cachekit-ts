@@ -34,41 +34,59 @@ beforeAll(() => {
   }
 });
 
-// Without require(esm) (Node 22.0 to 22.11), the ES module build imports
-// noble, which the probe cannot see, and the CommonJS build does not load.
+// The probe sees only a load through require(esm). The ES module build loads
+// noble through its ES module loader on Node 22 and 23 (esm-preload.ts), and
+// without require(esm) (Node 22.0 to 22.11) the CommonJS build does not load.
 describe.skipIf(!process.features.require_module).each(['esm', 'cjs'] as const)(
   'built %s entry',
   (format) => {
-    it('loads @noble/hashes only once something hashes in JS, and hashes the same', async () => {
-      const { stdout } = await run(
-        process.execPath,
-        [join(pkgDir, 'test', 'node-entry', 'noble-probe.mjs'), format, entries[format]],
-        { timeout: 20_000 }
-      );
-      const probe = JSON.parse(stdout) as {
-        afterImport: boolean;
-        afterKey: boolean;
-        afterJsHash: boolean;
-        key: string;
-        fileName: string;
-      };
-      // afterJsHash is the positive control: the probe can see noble at all.
-      expect(probe).toMatchObject({
-        afterImport: loadsOnImport,
-        afterKey: loadsOnImport,
-        afterJsHash: true,
-      });
-      expect(probe.key).toBe(
-        'probe:405f09a3617bcc1425ea95b9840d9c2713e3ecebd5a3227abc599317b732e21a'
-      );
-      expect(probe.fileName).toBe(bytesToHex(blake2b(utf8ToBytes(probe.key), { dkLen: 16 })));
-    });
+    it.skipIf(format === 'esm' && loadsOnImport)(
+      'loads @noble/hashes only once something hashes in JS, and hashes the same',
+      async () => {
+        const { stdout } = await run(
+          process.execPath,
+          [join(pkgDir, 'test', 'node-entry', 'noble-probe.mjs'), format, entries[format]],
+          { timeout: 20_000 }
+        );
+        const probe = JSON.parse(stdout) as {
+          afterImport: boolean;
+          afterKey: boolean;
+          afterJsHash: boolean;
+          key: string;
+          fileName: string;
+        };
+        // afterJsHash is the positive control: the probe can see noble at all.
+        expect(probe).toMatchObject({
+          afterImport: loadsOnImport,
+          afterKey: loadsOnImport,
+          afterJsHash: true,
+        });
+        expect(probe.key).toBe(
+          'probe:405f09a3617bcc1425ea95b9840d9c2713e3ecebd5a3227abc599317b732e21a'
+        );
+        expect(probe.fileName).toBe(bytesToHex(blake2b(utf8ToBytes(probe.key), { dkLen: 16 })));
+      }
+    );
   }
 );
 
-// Node 22.12 and 22.13 refuse to require a module an import graph has linked
-// but not evaluated, which is where noble stands when the package loads here.
-it('loads in an app that imports @noble/hashes itself after the package', async () => {
+// In the ES module build, `#noble-preload` holds noble on Node 22 and 23, so
+// noble is evaluated before the package's own code, and nothing on Node 24 and
+// later. Node 22.18 and later would pass the test below without it, so this
+// one is what CI's Node 22 checks.
+it('preloads @noble/hashes in the ES module build exactly below Node 24', async () => {
+  const { stdout } = await run(
+    process.execPath,
+    [join(pkgDir, 'test', 'node-entry', 'noble-preload-probe.mjs')],
+    { timeout: 20_000 }
+  );
+  expect(stdout.trim()).toBe(loadsOnImport ? 'function' : 'undefined');
+});
+
+// Up to Node 22.17 and on 23, require(esm) fails for a module an import graph
+// has linked but not evaluated, which is where noble stands while the module
+// the app imports first runs and hashes in JS.
+it('hashes in JS from a module the app imports before @noble/hashes', async () => {
   const { stdout } = await run(
     process.execPath,
     [join(pkgDir, 'test', 'node-entry', 'noble-after-probe.mjs')],

@@ -11,5 +11,12 @@
     // CommonJS build always resolves #noble-preload to this module.
     "paths": { "#noble-preload": ["./src/serialization/no-preload.ts"] }
   },
-  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.test.tsx", "src/workers/**"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "src/workers/**",
+    "src/serialization/esm-preload.ts"
+  ]
 }
