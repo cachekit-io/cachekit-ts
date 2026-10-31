@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Encoder } from '@msgpack/msgpack';
 import { createCache } from './cache.js';
 import { CacheImpl, type CacheRuntime, type InvalidationChannelLike } from './cache-core.js';
-import { L1Cache } from './l1/lru-cache.js';
+import { L1Cache, type L1Entry } from './l1/lru-cache.js';
 import { AutoKeys, type UnrefTimeout } from './serialization/auto-keys.js';
 import { generateKey } from './serialization/key-generator.js';
 import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
@@ -35,9 +35,11 @@ const MASTER_KEY = createHash('sha256').update('cachekit key-memo test fixture')
 
 let encodes: ReturnType<typeof vi.spyOn>;
 let lookups: ReturnType<typeof vi.spyOn>;
+let held: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   encodes = vi.spyOn(Encoder.prototype, 'encodeSharedRef');
   lookups = vi.spyOn(L1Cache.prototype, 'getWithSwr');
+  held = vi.spyOn(L1Cache.prototype, 'hit');
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -51,7 +53,17 @@ const encodesDuring = async (call: () => Promise<unknown>): Promise<number> => {
   return encodes.mock.calls.length - before;
 };
 
-const lastL1Key = (): unknown => lookups.mock.calls.at(-1)?.[0];
+/**
+ * The key of the last L1 read: a lookup by key, or a memoised call serving the
+ * entry it holds (L1Cache.hit), whichever came last.
+ */
+const lastL1Key = (): unknown => {
+  const byKey = lookups.mock.invocationCallOrder.at(-1) ?? -1;
+  const byEntry = held.mock.invocationCallOrder.at(-1) ?? -1;
+  return byEntry > byKey
+    ? (held.mock.calls.at(-1)?.[0] as L1Entry<unknown>).key
+    : lookups.mock.calls.at(-1)?.[0];
+};
 
 /** V8's gc(), for the tests of what can be collected. */
 function exposeGc(): () => void {
@@ -162,6 +174,170 @@ describe('wrap() key memo', () => {
     await cache.close();
   });
 
+  describe('a repeat L1 hit holds its entry', () => {
+    const OPTIONS = { namespace: 'svc:getThing', ttl: 60 };
+    const KEY = generateKey(OPTIONS.namespace, [7]);
+    type Wrapped = (id: number) => Promise<{ id: number }>;
+
+    /** Call 7 twice: a miss that fills L1, then an L1 hit by key, whose entry the memo then holds. */
+    async function holding(cache: {
+      wrap: CacheImpl['wrap'];
+    }): Promise<{ fn: Wrapped; stored: { id: number } }> {
+      const fn: Wrapped = cache.wrap(async (id: number) => ({ id }), OPTIONS);
+      await fn(7);
+      const stored = await fn(7);
+      return { fn, stored };
+    }
+
+    it('serves it on one check: no lookup by key, no key generation, one hit counted', async () => {
+      const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
+      const { fn, stored } = await holding(cache);
+      const counted = vi.spyOn(
+        CacheImpl.prototype as unknown as { recordHit(layer: string): void },
+        'recordHit'
+      );
+      const byKey = vi.spyOn(L1Cache.prototype, 'entry');
+      lookups.mockClear();
+      held.mockClear();
+      expect(await encodesDuring(async () => expect(await fn(7)).toBe(stored))).toBe(0);
+      expect(lookups).not.toHaveBeenCalled();
+      expect(byKey).not.toHaveBeenCalled();
+      expect(held).toHaveBeenCalledTimes(1);
+      expect(held).toHaveLastReturnedWith(true);
+      expect(counted.mock.calls).toEqual([['l1']]);
+      await cache.close();
+    });
+
+    it('leaves a stale entry to the lookup by key, which takes the refresh decision', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
+        const { fn, stored } = await holding(cache);
+        // Past the stale point (half the ttl, plus at most 10% jitter), not yet past the ttl.
+        vi.setSystemTime(Date.now() + 40_000);
+        lookups.mockClear();
+        expect(await fn(7)).toBe(stored);
+        expect(held).toHaveLastReturnedWith(false);
+        expect(lookups).toHaveBeenCalledTimes(1);
+        expect(lookups).toHaveLastReturnedWith(expect.objectContaining({ shouldRefresh: true }));
+        await cache.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each<[string, (cache: CacheImpl, deliver: (e: InvalidationEvent) => void) => unknown]>([
+      // Every row but eviction also empties the memo, so the call keys afresh
+      // and never reaches the held entry; eviction reaches it, and L1's release
+      // refuses it. lru-cache.test.ts pins the release for every route.
+      ['delete() (memo emptied)', (cache) => cache.delete(KEY)],
+      ['invalidate("params") (memo emptied)', (cache) => cache.invalidate('params', { key: KEY })],
+      [
+        'invalidate("namespace") (memo emptied)',
+        (cache) => cache.invalidate('namespace', { namespace: OPTIONS.namespace }),
+      ],
+      ['invalidate("global") (memo emptied)', (cache) => cache.invalidate('global')],
+      [
+        'an invalidation event from another instance (memo emptied)',
+        (_, deliver) => deliver(createInvalidationEvent('global', 'another-instance')),
+      ],
+      [
+        'eviction (held entry refused)',
+        (cache) =>
+          cache.wrap(async (id: number) => ({ id }), { ...OPTIONS, namespace: 'other' })(8),
+      ],
+    ])('never serves it once %s has removed it', async (_, remove) => {
+      const { cache, deliver } = cacheWithChannel({ metrics: false, l1: { maxEntries: 1 } });
+      const { fn, stored } = await holding(cache);
+      expect(await fn(7)).toBe(stored);
+      await remove(cache, deliver);
+      const served = await fn(7);
+      expect(served).not.toBe(stored);
+      expect(served).toEqual({ id: 7 });
+      await cache.close();
+    });
+
+    it('never serves a held entry that expires while the call reads its options', async () => {
+      // wrap() reads its options on every call, and a getter there is the
+      // caller's code: the clock a held entry is checked against must be read
+      // after it. The entry is stored under a 1 s ttl and then held in a memo
+      // window opened under 10 s, so the window outlives the entry and only
+      // L1Cache.hit() can refuse it.
+      vi.useFakeTimers({ toFake: ['Date'], now: 0 });
+      try {
+        const backend = new InMemoryBackend();
+        const cache = createCache({ backend, metrics: false, l1: { swrEnabled: false } });
+        let calls = 0;
+        let crossExpiry = false;
+        const options = {
+          ttl: 1,
+          get namespace() {
+            if (crossExpiry) vi.setSystemTime(1001); // past the entry's 1 s ttl, mid-call
+            return 'svc:getThing';
+          },
+        };
+        const fn = cache.wrap(async (id: number) => ({ id, call: ++calls }), options);
+        await fn(7); // stores the entry, which expires at 1000 ms
+        options.ttl = 10; // a call under another ttl empties the memo and opens a window to 10 s
+        await fn(7); // an L1 hit by key, whose entry the memo now holds
+        backend.store.clear(); // only L1 holds it, so a stale serve can come from L1 alone
+        vi.setSystemTime(999);
+        crossExpiry = true;
+        held.mockClear();
+        expect(await fn(7)).toEqual({ id: 7, call: 2 });
+        expect(held).toHaveBeenCalledOnce();
+        expect(held).toHaveLastReturnedWith(false);
+        expect(held.mock.calls[0][1]).toBe(1001);
+        await cache.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('never serves an entry that expires while a call is keyed in full', async () => {
+      // Keying an object argument runs the caller's code (here a getter), so the
+      // L1 lookup that follows must read the clock after it, not before.
+      vi.useFakeTimers({ toFake: ['Date'], now: 0 });
+      try {
+        // SWR off, so no background refresh recomputes the value behind the read.
+        const backend = new InMemoryBackend();
+        const cache = createCache({
+          backend,
+          metrics: false,
+          l1: { swrEnabled: false },
+        });
+        let calls = 0;
+        const fn = cache.wrap(async (arg: { id: number }) => ({ id: arg.id, call: ++calls }), {
+          namespace: 'svc:getThing',
+          ttl: 1,
+        });
+        await fn({ id: 7 });
+        backend.store.clear(); // only L1 holds it, so a stale serve can come from L1 alone
+        vi.setSystemTime(999);
+        const slow = {
+          get id() {
+            vi.setSystemTime(1001); // past the 1 s ttl, mid-keying
+            return 7;
+          },
+        };
+        expect(await fn(slow)).toEqual({ id: 7, call: 2 });
+        await cache.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('never serves it once close() has begun', async () => {
+      const cache = createCache({ backend: new InMemoryBackend(), metrics: false });
+      const { fn } = await holding(cache);
+      const closing = cache.close();
+      held.mockClear();
+      await expect(fn(7)).rejects.toThrow('Cache has been closed');
+      expect(held).not.toHaveBeenCalled();
+      await closing;
+    });
+  });
+
   const OPTIONS = { namespace: 'svc:getThing', ttl: 60 };
   const encrypting = () =>
     createCache({ backend: new InMemoryBackend(), encryption: { masterKey: MASTER_KEY } });
@@ -189,7 +365,7 @@ describe('wrap() key memo', () => {
     ],
   ])('keeps no memo: %s', async (_, build, wrapped) => {
     const cache = build();
-    const memos = vi.spyOn(AutoKeys.prototype, 'key');
+    const memos = vi.spyOn(AutoKeys.prototype, 'slot');
     const fn = wrapped(cache);
     await fn(7);
     await fn(7);
@@ -209,7 +385,7 @@ describe('wrap() key memo', () => {
       const fn = cache.wrap(async (id: string) => ({ id }), OPTIONS);
       await fn('before-close');
       await cache.close();
-      const keyed = vi.spyOn(AutoKeys.prototype, 'key');
+      const keyed = vi.spyOn(AutoKeys.prototype, 'slot');
       await expect(fn('after-close')).rejects.toThrow('Cache has been closed');
       expect(keyed).not.toHaveBeenCalled();
     });
@@ -218,7 +394,7 @@ describe('wrap() key memo', () => {
       const { cache } = cacheWithChannel();
       const fn = cache.wrap(async (id: string) => ({ id }), OPTIONS);
       await fn('held');
-      const keyed = vi.spyOn(AutoKeys.prototype, 'key');
+      const keyed = vi.spyOn(AutoKeys.prototype, 'slot');
       // close() awaits the invalidation channel before it clears L1.
       const closing = cache.close();
       await expect(fn('held')).rejects.toThrow('Cache has been closed');

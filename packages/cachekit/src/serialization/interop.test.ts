@@ -6,13 +6,14 @@ import {
   encodeInteropValue,
   decodeInteropValue,
   encodeInteropValueCounted,
+  decodeInteropValueTrusted,
   decodeInteropValueCounted,
   validateInteropSegment,
   INTEROP_SEGMENT_PATTERN,
   InteropFloat,
 } from './interop.js';
 import { ConfigurationError, SerializationError, ValueTooLargeError } from '../errors.js';
-import { DEFAULT_MAX_COLLECTION_SIZE } from '../constants.js';
+import { DEFAULT_MAX_COLLECTION_SIZE, DEFAULT_MAX_DEPTH } from '../constants.js';
 import { ExtData } from '@msgpack/msgpack';
 
 function hex(bytes: Uint8Array): string {
@@ -565,6 +566,31 @@ describe('interop value decoding', () => {
     expect(decodeInteropValue<{ ts: number }>(encodeInteropValue({ ts: 1704112245123 }))).toEqual({
       ts: 1704112245123,
     });
+  });
+});
+
+// decodeInteropValueCounted without its pre-scan, for bytes an earlier walked
+// decode passed: the reader, its caps and its result stay the same.
+describe('decodeInteropValueTrusted', () => {
+  it('reads as decodeInteropValueCounted does', () => {
+    const bytes = encodeInteropValue({ a: [1, { b: new Date(0) }], big: 2n ** 63n });
+    expect(decodeInteropValueTrusted(bytes)).toEqual(decodeInteropValueCounted(bytes));
+  });
+
+  it('keeps the input cap, the collection cap and the post-decode depth check', () => {
+    expect(() => decodeInteropValueTrusted(new Uint8Array(10 * 1024 * 1024 + 1))).toThrow(
+      ValueTooLargeError
+    );
+    // array16 claiming one element over the cap.
+    const over = DEFAULT_MAX_COLLECTION_SIZE + 1;
+    expect(() => decodeInteropValueTrusted(Uint8Array.of(0xdc, over >> 8, over & 0xff))).toThrow(
+      SerializationError
+    );
+    // One level past the bound, which only the pre-scan or the post-decode
+    // pass sees: the post-decode pass still refuses it.
+    const tooDeep = new Uint8Array(DEFAULT_MAX_DEPTH + 2).fill(0x91);
+    tooDeep[tooDeep.length - 1] = 0x01;
+    expect(() => decodeInteropValueTrusted(tooDeep)).toThrow(/max depth/);
   });
 });
 

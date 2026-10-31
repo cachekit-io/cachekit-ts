@@ -11,6 +11,9 @@ import {
   DEFAULT_L1_FALLBACK_SIZE,
 } from '../constants.js';
 
+/** The top of the SWR jitter band: no draw makes the threshold larger. */
+const SWR_JITTER_MAX = SWR_JITTER_MIN + SWR_JITTER_RANGE;
+
 /**
  * What L1 charges per serialized (MessagePack) byte when the caller passes
  * the serialized length but no count, so maxMemory means about what the
@@ -71,6 +74,17 @@ function isCount(n: number | undefined): n is number {
 }
 
 /**
+ * An entry a caller holds on to so it can serve it again with one check (see
+ * `hit`) instead of a lookup by key. Package-internal.
+ * @internal
+ */
+export interface L1Entry<T> {
+  readonly key: string;
+  /** null once L1 no longer holds the entry: read it only after `hit` returns true. */
+  readonly value: T | null;
+}
+
+/**
  * An entry plus its links in the recency list. The list is what makes LRU
  * O(1): a hit moves its node to the tail, eviction takes the head, and
  * neither scans the Map.
@@ -97,7 +111,8 @@ interface Node<T> extends CacheEntry<T> {
 export class L1Cache<T = unknown> {
   private readonly config: L1Config;
 
-  // Core data structures
+  // Core data structures. Every node that leaves `cache` goes through remove()
+  // or clear(), which release it: a caller may still hold it (see `hit`).
   private readonly cache = new Map<string, Node<T>>();
   // Recency list: head is the least recently used entry, tail the most.
   private head: Node<T> | null = null;
@@ -117,6 +132,14 @@ export class L1Cache<T = unknown> {
 
   // Memory tracking
   private currentMemory = 0;
+
+  /**
+   * The top of the SWR threshold's jitter band, as a share of an entry's ttl
+   * before it expires: above it no draw could make the entry stale, so `hit`
+   * serves it with no refresh decision. 0 with SWR off. Never negative, so
+   * `hit` never serves past expiresAt.
+   */
+  private readonly swrBandTop: number;
 
   // Instance ID for invalidation echo detection (already readonly)
   private readonly instanceId = crypto.randomUUID();
@@ -139,6 +162,11 @@ export class L1Cache<T = unknown> {
         `l1.maxMemory must be a finite number > 0, got ${this.config.maxMemory}`
       );
     }
+    // A NaN ratio stays NaN, so `hit` serves nothing and every read takes
+    // getWithSwr, which finds such an entry stale, as it always has.
+    this.swrBandTop = this.config.swrEnabled
+      ? Math.max(0, this.config.swrThresholdRatio * SWR_JITTER_MAX)
+      : 0;
   }
 
   /**
@@ -192,12 +220,14 @@ export class L1Cache<T = unknown> {
 
     this.touch(entry);
 
-    // Calculate SWR threshold with jitter (±10%)
-    // Use crypto PRNG instead of Math.random for unpredictable timing
-    const jitter = SWR_JITTER_MIN + secureRandomFloat() * SWR_JITTER_RANGE;
-    const swrThreshold = entry.originalTtl * this.config.swrThresholdRatio * jitter;
+    // SWR threshold with ±10% jitter, from the CSPRNG rather than Math.random
+    // so refresh times cannot be predicted. Above the jitter band every draw
+    // finds the entry fresh, so a read there draws nothing.
+    const swrThreshold = entry.originalTtl * this.config.swrThresholdRatio;
     const remainingTtl = entry.expiresAt - now;
-    const isFresh = remainingTtl > swrThreshold;
+    const isFresh =
+      remainingTtl > swrThreshold * SWR_JITTER_MAX ||
+      remainingTtl > swrThreshold * (SWR_JITTER_MIN + secureRandomFloat() * SWR_JITTER_RANGE);
 
     // Should refresh if stale AND SWR enabled AND not already refreshing AND under limit
     const shouldRefresh =
@@ -218,6 +248,50 @@ export class L1Cache<T = unknown> {
       shouldRefresh,
       versionToken: version,
     };
+  }
+
+  /**
+   * The entry L1 holds under `key`, for a caller that will serve it again
+   * with `hit`. Package-internal.
+   * @internal
+   */
+  entry(key: string): L1Entry<T> | undefined {
+    return this.cache.get(key);
+  }
+
+  /**
+   * Serve an entry `entry` returned, at `now` (Date.now()), if it needs no
+   * refresh decision: L1 still holds it, its value is not null (which L1
+   * never serves), and it is above the SWR jitter band (see swrBandTop). Marks
+   * it most recently used and returns true; false sends the caller to
+   * getWithSwr. The one L1 read that takes the caller's clock: read `now`
+   * after the caller's last await and last run of user code, or an entry
+   * that expired in between is served. Package-internal.
+   * @internal
+   */
+  hit(entry: L1Entry<T>, now: number): boolean {
+    const node = entry as Node<T>;
+    // A node L1 no longer holds has a null value (see release).
+    if (node.value === null) return false;
+    if (!(now < node.expiresAt - node.originalTtl * this.swrBandTop)) return false;
+    this.touch(node);
+    return true;
+  }
+
+  /**
+   * Put `to` in place of `from` as the value L1 holds under `key`, if `from`
+   * still is that value, keeping the entry's expiry, LRU place, version and
+   * charge. False, and nothing changes, once the key was rewritten, refreshed,
+   * invalidated or evicted after the caller read `from`. The caller keeps the
+   * charge true: `to` must cost what `from` does (a Uint8Array of the same
+   * byteLength, say). Package-internal.
+   * @internal
+   */
+  replace(key: string, from: T, to: T): boolean {
+    const node = this.cache.get(key);
+    if (node === undefined || node.value !== from) return false;
+    node.value = to;
+    return true;
   }
 
   /**
@@ -452,6 +526,13 @@ export class L1Cache<T = unknown> {
    * Clear all entries.
    */
   clear(): void {
+    for (let node = this.head; node !== null;) {
+      const next: Node<T> | null = node.next;
+      this.release(node);
+      node.prev = null;
+      node.next = null;
+      node = next;
+    }
     this.cache.clear();
     this.head = null;
     this.tail = null;
@@ -587,12 +668,27 @@ export class L1Cache<T = unknown> {
     this.refreshingKeys.delete(oldest.key);
   }
 
-  /** Drop an entry from the Map, the recency list, the memory total and the namespace index. */
+  /**
+   * Drop an entry from the Map, the recency list, the memory total and the
+   * namespace index, and release it. The only route out of the Map besides
+   * clear(): a new removal route must come through here.
+   */
   private remove(node: Node<T>): void {
     this.cache.delete(node.key);
     this.unlink(node);
     this.currentMemory -= node.size;
     this.removeFromNamespaceIndex(node.key, node.namespace);
+    this.release(node);
+  }
+
+  /**
+   * Mark a node L1 no longer holds by nulling its value, so `hit` refuses it,
+   * and so let go of the value: a caller may hold the node a while (a key
+   * memo, up to its window), and must not keep an evicted value alive past
+   * maxMemory.
+   */
+  private release(node: Node<T>): void {
+    (node as Node<T | null>).value = null;
   }
 
   /** Mark an entry most recently used. */

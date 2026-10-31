@@ -204,6 +204,29 @@ const wasmEncrypted = (payload, n) => ({
   },
 });
 
+// An encrypted wrap() L1 hit: keygen, the L1 lookup, then decrypt, unpack and
+// decode of the ciphertext L1 holds. Setup checks the second call is served by
+// L1, so a value L1 refuses cannot pass for a hit.
+const secureWrapHit = (value, n, warmup) => ({
+  n,
+  warmup,
+  setup: async () => {
+    const { createCache } = await load('index.js');
+    const backend = new MemoryBackend();
+    const cache = createCache({ backend, encryption: { masterKey: MASTER_KEY }, metrics: false });
+    const get = cache.wrap(async (_id) => value, { namespace: 'bench', ttl: 3600 });
+    let reads = 0;
+    const read = backend.get.bind(backend);
+    backend.get = (key) => (reads++, read(key));
+    await get(1); // the miss: one L2 read
+    await get(1);
+    if (reads !== 1) throw new Error('the hit read L2: L1 did not keep the entry');
+    return async () => {
+      sink += (await get(1)) ? 1 : 0;
+    };
+  },
+});
+
 /**
  * Each workload's setup(n) gets the n the run executes and returns its op: one
  * call on the path its name gives. The default n is sized so n x Ir/op dwarfs
@@ -353,6 +376,17 @@ export const WORKLOADS = {
       };
     },
   },
+  // an encrypted wrap() L1 hit at 100 B, 10 KB and 1 MB of msgpack (3, 320
+  // and 96 x 320 rows). Each hit allocates the whole decoded value, so a GC
+  // lands in some windows and not others: the n are sized to average over
+  // several.
+  'secure-wrap-l1-hit-100b': secureWrapHit(rowsOf(3), 40_000),
+  'secure-wrap-l1-hit-10kb': secureWrapHit(rowsOf(320), 500),
+  'secure-wrap-l1-hit-1mb': secureWrapHit(
+    { groups: Array.from({ length: 96 }, () => rowsOf(320)) },
+    50,
+    20
+  ),
   // the README benchmark's hit (bench/runtime/probe.mjs): one integer argument,
   // cycling over 64 values that are all in L1
   'wrap-l1-hit-int': {

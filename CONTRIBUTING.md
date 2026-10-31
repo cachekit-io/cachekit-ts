@@ -99,6 +99,48 @@ pnpm --filter @cachekit-io/cachekit test:integration
 pnpm test:coverage
 ```
 
+## Performance practices
+
+These practices come from measured changes in this repo and in the sibling SDKs. Each says what to do, why, and the PR that measured it. Follow them in any change to a hot path: an L1 hit, an L2 hit, a miss, a set, their encrypted variants, and cold start. A perf PR shows its measurement; [Measuring performance](#measuring-performance) describes the harnesses and how to A/B a change.
+
+1. **Do per-call work once.** Anything that depends only on configuration, the tenant, key material or the wrapped function is computed when the client, its tenant keys or the wrapper is built, not on every call: derived keys, fixed AAD parts, key prefixes, encoders and lookup tables.
+   - [#254](https://github.com/cachekit-io/cachekit-ts/pull/254): a key memo per wrapped function cut the instructions of an L1 hit with one integer argument by 91.53%.
+   - [#258](https://github.com/cachekit-io/cachekit-ts/pull/258): pre-encoding the AAD's fixed parts cut an encrypted NAPI round trip by 33.8%. The same PR checks a cheap bound before computing the exact value: UTF-8 never takes more than 3 bytes per UTF-16 unit, so key validation encodes a key only when three bytes per unit could exceed the limit.
+   - A helper call on every hit is not free. Calling `ensureNotClosed()` on the hit path cost 108 instructions per hit, against about 1 for reading the flag inline ([#254](https://github.com/cachekit-io/cachekit-ts/pull/254)).
+   - Limits: never memoise by value where equal values encode differently (in Python, `True`, `1` and `1.0` hash alike but encode differently in an AAD: [cachekit-io/cachekit-py#644](https://github.com/cachekit-io/cachekit-py/pull/644)). Never keep plaintext arguments alive in a memo on an encrypting cache. Bound every memo by entries, bytes and time.
+   - V8 can hold a short string as a slice of a larger one, so a memo stores copied code units, never the strings it was passed. Twelve calls with 128-character ids sliced from 4 MiB strings kept about 50 MB alive on Node.js 22 and 24 ([#254](https://github.com/cachekit-io/cachekit-ts/pull/254)).
+   - Runtime gotchas from the same PR: take timers from `node:timers`, because under Jest's jsdom environment the global `setTimeout` returns a number; and do not assume `WeakRef`, which older Workers lack.
+2. **Use the native cores when the work outweighs the call boundary, and measure the boundary.** Hashing, AEAD and compression belong in the NAPI or wasm core, but each call into it has a fixed cost of its own.
+   - [#259](https://github.com/cachekit-io/cachekit-ts/pull/259): BLAKE2b through the NAPI binding cut key generation by 78.2% at 45 B. Returning a hex string from Rust costs less than returning a `Uint8Array` and hex-encoding it in JS.
+   - [#169](https://github.com/cachekit-io/cachekit-ts/pull/169): building the wasm core at opt-level 3 with `simd128` cut a 1 KB pack from 134,285 to 53,369 instructions (−60%).
+   - [#264](https://github.com/cachekit-io/cachekit-ts/pull/264): the cachekit-core 0.7.2 bump cut a 40 B NAPI envelope round trip from 28,518 to 15,995 instructions (−43.91%).
+   - [#171](https://github.com/cachekit-io/cachekit-ts/pull/171): copying NAPI results into V8-owned `Uint8Array`s beat external backing stores with finalizers. The 1 KB secure hit went from 41,458 to 28,807 instructions (−30.5%).
+   - [#271](https://github.com/cachekit-io/cachekit-ts/pull/271): at 100 B, WebCrypto's fixed per-call cost is close to the wasm core's whole seal. Measure the small sizes, where the boundary dominates.
+   - A named import of a missing export fails the whole entry, so read optional binding exports off the module namespace. A JS fallback hashes before it logs, because its input can be a view of a shared buffer that a logger making a key of its own would overwrite ([#259](https://github.com/cachekit-io/cachekit-ts/pull/259)).
+3. **Allocate once and don't copy.** Size buffers exactly, write in place, and encode in one pass.
+   - [#268](https://github.com/cachekit-io/cachekit-ts/pull/268): encoding an auto-mode value in one walk, instead of a deep copy and a second walk, cut a set by 11.97% at 64 B and 40.71% at 1 MB. A single-walk encoder must reproduce `encode()`'s depth bound and its getter read order and count, or the bytes and errors change.
+   - [#254](https://github.com/cachekit-io/cachekit-ts/pull/254): building hex two digits at a time left about 800 B of intermediate strings per key, because V8 keeps every intermediate string inside the result.
+   - A copy is not always the expensive option: see [#171](https://github.com/cachekit-io/cachekit-ts/pull/171) above.
+4. **Count round trips per operation.** Pipeline dependent commands, skip checks an uncontended path cannot need, and keep follow-up work off the caller's path. The call-shape test pins these counts.
+   - [#209](https://github.com/cachekit-io/cachekit-ts/pull/209): with the distributed lock on, skipping the double-check an uncontended miss cannot need and releasing the lock off the reply path took a cold miss from 5 requests to 4.
+   - [cachekit-io/cachekit-py#660](https://github.com/cachekit-io/cachekit-py/pull/660): SADD and EXPIRE ride the SET's pipeline, 2N → N round trips for N tracked writes. A pipeline does not roll back, and neither would MULTI.
+5. **Cold start is a hot path.** Load optional backends and integrations only when they are used.
+   - [#186](https://github.com/cachekit-io/cachekit-ts/pull/186): loading ioredis with the Redis backend and prom-client off the op path took two one-off costs off every Node cold start. Both savings grow under CPU contention.
+6. **Small values get their own path.** Most cached values are small, and fixed per-call costs dominate them. Benchmark at 40 B, 64 B, 1 KiB, 64 KiB and 1 MiB.
+   - [cachekit-io/cachekit-core#128](https://github.com/cachekit-io/cachekit-core/pull/128): a literals-only LZ4 block below 64 B, −80.8% instructions on a 63 B store. `bench:ir`'s 40 B workloads sit under that cutover.
+7. **Verify once.** Check untrusted bytes where they enter the process. After that, hold a value whose type says it was checked and that only the in-process cache can create, and stop re-running integrity checks and decompression on every hit. Verify lazily on the first hit, not at write time. The same rule applies to connections: don't ping before every operation, and return a connection to the pool only after a fully parsed success, dropping it on any error.
+   - [cachekit-io/cachekit-py#662](https://github.com/cachekit-io/cachekit-py/pull/662): a backed L1 hit of a 1 MB value went from 2,254,711 to 219,522 instructions (−90.3%). Write-time admission cost about 32% more instructions on every miss and lost hits.
+   - [#290](https://github.com/cachekit-io/cachekit-ts/pull/290): once the first encrypted L1 hit has walked a copy of the bytes that only the cache holds, later hits skip the depth pre-scan, and in auto mode the post-decode walk, −39.4% instructions at 10 KB. Copying at every L1 fill instead cost an encrypted 100 B set 5.8% more instructions. Trust a copy only the cache holds, never a buffer a backend still holds: the backend can write to it after you checked it.
+8. **No per-operation cost that grows with the number of entries.** Expiry scans, policy bookkeeping and counts become a heap, an index or a running total.
+   - [cachekit-io/cachekit-py#658](https://github.com/cachekit-io/cachekit-py/pull/658): a deadline heap instead of a scan, −97.2% instructions per put at 10,000 entries. A min-expiry watermark still scanned on 18–51% of puts in simulation: fix the structure, not the heuristic.
+9. **Reserve shared state before you `await`.** JavaScript runs one thread, but any `await` lets another call run first, so reserve a value such as the nonce counter synchronously, before any `await` ([#271](https://github.com/cachekit-io/cachekit-ts/pull/271)).
+10. **Measure it, or it didn't happen.** Use the harnesses in [Measuring performance](#measuring-performance), and publish no figure you did not measure. Three traps from this repo:
+    - GC placement moves results on unchanged code. `l1-set-at-capacity-100k` read +2.64% at n = 2,000 and −10.3% at n = 20,000 on byte-identical code ([#259](https://github.com/cachekit-io/cachekit-ts/pull/259)). Before you claim a delta, check that the workload runs the code you changed.
+    - The A/A floor does not capture code-layout differences between two builds, which can move AES-GCM by about 0.2% on their own ([#264](https://github.com/cachekit-io/cachekit-ts/pull/264)).
+    - Instruction counts are not the whole story. In [#171](https://github.com/cachekit-io/cachekit-ts/pull/171), the 64 KB secure hit's instructions rose 31.6% while its wall time fell 53%. Time large payloads with paired, interleaved runs.
+
+**Sibling paths.** A fix applied to one path tends to leave its siblings slow. When a perf PR changes a hot path, its description lists the sibling paths and says which it changed: NAPI and wasm, Node.js and Workers, plaintext and encrypted, L1-only and backed, `wrap()` and direct `get`/`set`, auto and interop mode, store and retrieve, the ESM and CommonJS entries, and the same path in the other SDKs.
+
 ## Measuring performance
 
 Six harnesses measure the client.

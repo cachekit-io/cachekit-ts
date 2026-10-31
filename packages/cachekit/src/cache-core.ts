@@ -13,7 +13,7 @@ import type { InvalidationEvent } from './l1/types.js';
 import type { MetricsCollector, MetricsConfig } from './metrics/prometheus.js';
 import { checkDefaultLabels } from './metrics/labels.js';
 import { logError } from './logger.js';
-import { L1Cache } from './l1/lru-cache.js';
+import { L1Cache, type L1Entry } from './l1/lru-cache.js';
 import { ReliabilityExecutor } from './reliability/executor.js';
 import {
   BackgroundRefreshManager,
@@ -22,6 +22,7 @@ import {
 } from './cache/background-refresh.js';
 import {
   decodeCounted,
+  decodeTrusted,
   encodeCounted,
   resolveSerializerConfig,
   type ObjectCount,
@@ -44,6 +45,7 @@ import {
   validateInteropSegment,
   encodeInteropValueCounted,
   decodeInteropValueCounted,
+  decodeInteropValueTrusted,
 } from './serialization/interop.js';
 import { createInvalidationEvent } from './invalidation/event.js';
 import {
@@ -335,6 +337,8 @@ function describeBackendFailure(err: unknown): string {
 export class CacheImpl implements SecureCache {
   private readonly backend: Backend;
   private readonly l1: L1Cache | null;
+  /** Copies decodeL1Entry swapped into L1, each with the `interop` mode it walked them in. */
+  private readonly trustedL1 = new WeakMap<Uint8Array, boolean>();
   private readonly reliabilityExecutor: ReliabilityExecutor;
   private readonly backgroundRefresh: BackgroundRefreshManager;
   private readonly encryption: EncryptionLike | null;
@@ -907,11 +911,15 @@ export class CacheImpl implements SecureCache {
    * deserialize. Shared by the L2 read and the L1 read so the two tiers can
    * never drift into decoding the same entry differently — a real hazard once
    * both paths handle AAD (protocol#12 freezes the v0x03 component set).
+   *
+   * `trusted` drops the depth pre-scan, and in auto mode validateDepth. Only
+   * decodeL1Entry passes it, for a copy marked in trustedL1.
    */
   private async decodeEntry<T>(
     bytes: Uint8Array,
     key: string,
-    interop: boolean
+    interop: boolean,
+    trusted = false
   ): Promise<{ value: T; serializedSize: number; count: ObjectCount }> {
     const useEnvelope = this.useEnvelope(interop);
 
@@ -971,10 +979,19 @@ export class CacheImpl implements SecureCache {
     }
     // The decode's depth pre-scan counts the heap objects and values on the
     // way, so L1 can charge for them without another walk (see L1Cache.set).
+    // A trusted decode runs no pre-scan and counts nothing: only an L2 read
+    // charges L1 from the count.
     const count: ObjectCount = { objects: 0, values: 0 };
-    const value = interop
-      ? decodeInteropValueCounted<T>(plaintext, count)
-      : decodeCounted<T>(plaintext, this.serializerConfig, count);
+    let value: T;
+    if (trusted) {
+      value = interop
+        ? decodeInteropValueTrusted<T>(plaintext)
+        : decodeTrusted<T>(plaintext, this.serializerConfig);
+    } else {
+      value = interop
+        ? decodeInteropValueCounted<T>(plaintext, count)
+        : decodeCounted<T>(plaintext, this.serializerConfig, count);
+    }
     // The serialized length, not bytes.byteLength: that is the compressed
     // (and maybe encrypted) envelope, several times smaller, and charging L1
     // for it would let L1 grow well past maxMemory.
@@ -986,6 +1003,16 @@ export class CacheImpl implements SecureCache {
    * AAD-verify against the cache key followed by the same unpack/deserialize
    * the L2 path runs — an L1 hit is no longer free, which is the price of not
    * keeping plaintext resident. For a plaintext cache it is a cast.
+   *
+   * Verify once, on the first hit. The bytes a fill gives L1 can be a buffer
+   * the backend still holds (the one it returned, or the one setEntry gave
+   * it), and nothing stops a backend writing to it later. So the first hit
+   * copies them, decodes the copy as an L2 read does, depth walks included,
+   * and swaps the copy into L1 in their place (if L1 still holds them),
+   * marked in trustedL1 with the mode it was walked in. No one outside this
+   * cache can reach the copy, so later hits in that mode skip the depth
+   * pre-scan, and in auto mode validateDepth: both could only pass again.
+   * Fills pay nothing for this.
    *
    * Drops the L1 entry and returns null when a secure entry will not decrypt
    * (rotated key, tampered heap, an entry written under a different envelope
@@ -1015,7 +1042,16 @@ export class CacheImpl implements SecureCache {
           `L1 entry for a secure cache is not ciphertext bytes (got ${typeof stored})`
         );
       }
-      return { value: (await this.decodeEntry<T>(stored, key, interop)).value };
+      if (this.trustedL1.get(stored) === interop) {
+        return { value: (await this.decodeEntry<T>(stored, key, interop, true)).value };
+      }
+      // Copied before the decode, so the copy holds exactly the bytes the walks pass.
+      const own = new Uint8Array(stored);
+      const { value } = await this.decodeEntry<T>(own, key, interop);
+      // A rewrite, refresh, invalidation or eviction since l1.get wins: then
+      // nothing is swapped and the copy is dropped.
+      if (this.l1?.replace(key, stored, own)) this.trustedL1.set(own, interop);
+      return { value };
     } catch (error) {
       this.l1?.invalidateByKey(key);
       this.recordFailure('l1_decrypt', error);
@@ -1343,11 +1379,12 @@ export class CacheImpl implements SecureCache {
     // Otherwise every wrap() during an L2 outage or a 401/403 recomputes the
     // origin and re-pays the doomed round trips. With degradation off `run`
     // throws and L1 stays empty. On an encrypted cache L1 gets the ciphertext,
-    // never the caller's plaintext. The fill runs inside the op inKeyOrder
-    // tracks, so the key stays pending or in flight until L1 holds this
-    // value: a write-behind admitted between this L2 write and its L1 fill
-    // would publish a newer value that this fill then overwrites. The SWR
-    // refresh path passes l1Mode refresh
+    // never the caller's plaintext. The fill runs inside the op the key's
+    // ordering tracks (queued behind its tail, or counted in keysInFlight),
+    // so the key stays pending or in flight until L1 holds this value: a
+    // write-behind admitted between this L2 write and its L1 fill would
+    // publish a newer value that this fill then overwrites. The SWR refresh
+    // path passes l1Mode refresh
     // and writes L1 only through completeRefresh, whose version token discards
     // the refresh if an explicit write or invalidation landed meanwhile — the
     // guard is authoritative for L1 ONLY. The backend.set above is
@@ -1355,11 +1392,23 @@ export class CacheImpl implements SecureCache {
     // L1 but is overwritten in L2 by the refresh's value until the entry next
     // expires or refreshes (a conditional L2 write would need CAS the Backend
     // contract doesn't have).
-    await this.inKeyOrder(key, async () => {
+    if (this.keyTails.has(key)) {
+      await this.inKeyOrder(key, async () => {
+        await this.run('set', key, undefined, writeL2);
+        if (l1Mode === 'fill') this.fillL1(key, l1Write, ttl, namespace);
+      });
+      return l1Write;
+    }
+    // An idle key: what inKeyOrder does for it, inline. Every plain set()
+    // takes this path, and inKeyOrder's closure and promise chain were most
+    // of what per-key ordering added to it, so the two lines above repeat.
+    this.enterInFlight(key);
+    try {
       await this.run('set', key, undefined, writeL2);
       if (l1Mode === 'fill') this.fillL1(key, l1Write, ttl, namespace);
-    });
-
+    } finally {
+      this.leaveInFlight(key);
+    }
     return l1Write;
   }
 
@@ -1554,12 +1603,8 @@ export class CacheImpl implements SecureCache {
   }
 
   private countInFlight<T>(key: string, op: () => Promise<T>): Promise<T> {
-    this.keysInFlight.set(key, (this.keysInFlight.get(key) ?? 0) + 1);
-    const release = (): void => {
-      const left = (this.keysInFlight.get(key) ?? 1) - 1;
-      if (left > 0) this.keysInFlight.set(key, left);
-      else this.keysInFlight.delete(key);
-    };
+    this.enterInFlight(key);
+    const release = (): void => this.leaveInFlight(key);
     let running: Promise<T>;
     try {
       running = op();
@@ -1568,6 +1613,16 @@ export class CacheImpl implements SecureCache {
       throw error;
     }
     return running.finally(release);
+  }
+
+  private enterInFlight(key: string): void {
+    this.keysInFlight.set(key, (this.keysInFlight.get(key) ?? 0) + 1);
+  }
+
+  private leaveInFlight(key: string): void {
+    const left = (this.keysInFlight.get(key) ?? 1) - 1;
+    if (left > 0) this.keysInFlight.set(key, left);
+    else this.keysInFlight.delete(key);
   }
 
   /** A key's tail, capped at KEY_WAIT_CAP_MS where it may never settle. */
@@ -1736,7 +1791,7 @@ export class CacheImpl implements SecureCache {
     // A cache that encrypts keeps no plaintext argument, and with L1 off a
     // memoised key would save nothing a network call does not dwarf. A memo also
     // needs the runtime's timer to empty itself on time; without one it keeps none.
-    const autoKeys = new AutoKeys(
+    const autoKeys = new AutoKeys<L1Entry<unknown>>(
       !interop && !this.encryption && this.l1 !== null ? this.setUnrefTimeout : undefined
     );
     if (autoKeys.memoising) this.trackKeyMemo(autoKeys);
@@ -1769,9 +1824,26 @@ export class CacheImpl implements SecureCache {
             'or key transform — see Backend.keyPrefix / Backend.transformsKeys'
         );
       }
-      const cacheKey = interop
-        ? generateInteropKey(options.namespace, interopOperation, args)
-        : autoKeys.key(options.namespace, args, !options.skipL1, options.ttl ?? this.defaultTtl);
+      // The options are the caller's object, so reading one can run the
+      // caller's code (a getter): read them before the clock, not after.
+      const namespace = options.namespace;
+      const useL1 = !options.skipL1;
+      const ttl = options.ttl ?? this.defaultTtl;
+      // `now` serves only the memo's window and a held-entry hit; no caller
+      // code runs between this read and either (primitive arguments only).
+      const now = Date.now();
+      const slot = interop ? undefined : autoKeys.slot(namespace, args, useL1, ttl, now);
+      const cacheKey = interop ? generateInteropKey(namespace, interopOperation, args) : slot!.key;
+
+      // A memoised call holds the L1 entry it was last served from: while L1
+      // still holds that entry and it is above its SWR jitter band, serve it on that one check,
+      // with no lookup by key. Only a memo keeps an entry, and a memo means an
+      // unencrypted cache with L1 on, so the stored object is the value.
+      const held = slot?.entry;
+      if (held !== undefined && this.l1!.hit(held, now)) {
+        this.recordHit('l1');
+        return held.value as TResult;
+      }
 
       // Check L1 with SWR. On platforms that cancel fire-and-forget work at
       // response return (Workers), SWR only runs when a per-request
@@ -1779,7 +1851,7 @@ export class CacheImpl implements SecureCache {
       // no refresh marker is taken, so nothing can wedge, and the entry
       // simply expires and recomputes in the request path (fail-safe
       // no-SWR).
-      if (this.l1 && !options.skipL1) {
+      if (this.l1 && useL1) {
         if (this.swrRequiresWaitUntil && !waitUntil) {
           const l1Value = this.l1.get(cacheKey);
           if (l1Value !== null) {
@@ -1790,6 +1862,9 @@ export class CacheImpl implements SecureCache {
             }
           }
         } else {
+          // getWithSwr reads the clock itself: keying a call in full can run
+          // the caller's code (an object argument's getters), so `now` may be
+          // stale here.
           const swrResult = this.l1.getWithSwr(cacheKey);
 
           if (swrResult.value !== null) {
@@ -1812,9 +1887,11 @@ export class CacheImpl implements SecureCache {
                 this.backgroundRefresh.scheduleRefresh(
                   cacheKey,
                   () => fn(...args),
-                  // A JavaScript caller can omit the typed-required ttl; resolve it as
-                  // setEntry does, or the refreshed L1 copy gets NaN ms and never expires.
-                  { ttl: options.ttl ?? this.defaultTtl, namespace: options.namespace },
+                  // A JavaScript caller can omit the typed-required ttl; the `ttl` local
+                  // resolves it as setEntry does, or the refreshed L1 copy gets NaN ms and
+                  // never expires. The locals, not a re-read of the caller's options: a
+                  // getter could tag the refreshed entry with a namespace its key lacks.
+                  { ttl, namespace },
                   swrResult.versionToken,
                   this.l1,
                   // The refresh re-sends the stale window: a PUT replaces the
@@ -1831,6 +1908,11 @@ export class CacheImpl implements SecureCache {
                   waitUntil
                 );
               }
+              // Hold the entry for the memo's next call (see above). A call the
+              // memo does not keep (an object argument, say) has a slot of its
+              // own, discarded with the entry: one Map lookup, against the key
+              // generation that call has already paid for.
+              if (autoKeys.memoising) slot!.entry = this.l1.entry(cacheKey);
               this.recordHit('l1');
               return decoded.value;
             }
