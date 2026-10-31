@@ -283,10 +283,15 @@ function buildHash() {
     const pkg = join(root, 'package.json');
     add(pkg);
     for (const entry of JSON.parse(readFileSync(pkg, 'utf8')).files) {
-      const glob = entry.includes('*') && new RegExp(`^${entry.replace(/\*/g, '[^/]*')}$`);
       const path = join(root, entry);
-      if (glob) {
-        const matches = readdirSync(root).filter((f) => glob.test(f));
+      if (entry.includes('*')) {
+        // Only `*<suffix>` at the package root (`*.node`). Any other glob, or
+        // one that matches nothing, would add nothing and skip a measurement.
+        const suffix = entry.slice(1);
+        const matches = readdirSync(root).filter((f) => f.endsWith(suffix));
+        if (!entry.startsWith('*') || /[*/]/.test(suffix) || matches.length === 0) {
+          throw new Error(`${pkg}: files entry ${entry} is not a *<suffix> that matches a file`);
+        }
         for (const f of matches.sort()) add(join(root, f));
       } else if (!existsSync(path) && optional.includes(entry)) {
         hash.update(`no ${entry} in ${relative(repo, root)}`);
