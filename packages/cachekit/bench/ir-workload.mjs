@@ -351,9 +351,9 @@ export const WORKLOADS = {
     },
   },
   // an encrypted wrap() L1 hit at 100 B, 10 KB and 1 MB of msgpack (3, 320
-  // and 96 x 320 rows). Each hit allocates the whole decoded value, so a GC
-  // lands in some windows and not others: the n are sized to average over
-  // several.
+  // and 96 x 320 rows). On Node 22 and 24 each repeats within 0.01%. On Node
+  // 26 the 100 B and 1 MB hits sometimes have a run up to 1.7% off the rest,
+  // and a 4x larger n did not remove it: gate on Node 22 or 24.
   'secure-wrap-l1-hit-100b': secureWrapHit(rowsOf(3), 40_000),
   'secure-wrap-l1-hit-10kb': secureWrapHit(rowsOf(320), 500),
   'secure-wrap-l1-hit-1mb': secureWrapHit(

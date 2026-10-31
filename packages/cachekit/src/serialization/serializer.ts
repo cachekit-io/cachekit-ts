@@ -1309,8 +1309,8 @@ export function encodeCounted<T>(
  * (that rejects over-depth input before `decode()` builds the graph 1:1). Kept
  * for good as a cheap post-decode backstop for the hand-rolled pre-scan: if the
  * walker ever under-counts depth, this still catches it before the value is
- * returned. It runs on every decode of bytes from a backend; only
- * decodeTrusted skips it.
+ * returned. It runs on every auto-mode decode of backend bytes; interop
+ * decodes never call it, and decodeTrusted skips it.
  */
 function validateDepth(value: unknown, depth: number, maxDepth: number): void {
   if (depth > maxDepth) {
