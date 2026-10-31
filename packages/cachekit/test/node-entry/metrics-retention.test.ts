@@ -35,6 +35,8 @@ describe('pending hit and miss counts after their samples are cleared', () => {
     'by %s, hold no collector that is gone, and keep counting for one that is not',
     async (mode) => {
       expect(await probe(mode)).toEqual({ alive: 0, liveHits: 2 });
-    }
+    },
+    // above the probe's own 20 s limit
+    30_000
   );
 });
