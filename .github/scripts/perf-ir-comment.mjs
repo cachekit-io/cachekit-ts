@@ -52,7 +52,13 @@ const shards = Array.from({ length: Number(opt.shards) }, (_, k) => {
   return {
     sameBuild: read('same-build')?.trim(),
     expected: read('head-workloads.txt')?.split('\n').filter(Boolean),
-    report: JSON.parse(read('report.json') ?? 'null'),
+    report: (() => {
+      try {
+        return JSON.parse(read('report.json') ?? 'null');
+      } catch (error) {
+        throw new Error(`shard ${k + 1} report.json: ${error.message}`, { cause: error });
+      }
+    })(),
   };
 });
 if (shards.length === 0) throw new Error('--shards must be a positive integer');
