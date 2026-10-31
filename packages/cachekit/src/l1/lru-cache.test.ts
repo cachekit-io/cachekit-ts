@@ -882,7 +882,7 @@ describe('L1Cache', () => {
   describe('SWR jitter', () => {
     // ttl 1000 ms, ratio 0.5: the threshold is 500 ms ±10%, so the band runs
     // from 550 ms left (t = 450) to 450 ms left (t = 550).
-    it('is drawn from secureRandomFloat by no read above the band', () => {
+    it('is drawn from secureRandomFloat by no read above the band and once by each read inside it', () => {
       vi.useFakeTimers({ now: 0 });
       const c = new L1Cache<string>({ swrThresholdRatio: 0.5 });
       draws.mockClear();
