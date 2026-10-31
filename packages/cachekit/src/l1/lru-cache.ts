@@ -281,10 +281,10 @@ export class L1Cache<T = unknown> {
   /**
    * Put `to` in place of `from` as the value L1 holds under `key`, if `from`
    * still is that value, keeping the entry's expiry, LRU place, version and
-   * charge. False, and nothing changes, once the key was rewritten, refreshed,
-   * invalidated or evicted after the caller read `from`. The caller keeps the
-   * charge true: `to` must cost what `from` does (a Uint8Array of the same
-   * byteLength, say). Package-internal.
+   * charge. False, and nothing changes, unless L1 still holds this very object
+   * under `key`: the check is identity, so a refill with the same object
+   * passes it. The caller keeps the charge true: `to` must cost what `from`
+   * does (a Uint8Array of the same byteLength, say). Package-internal.
    * @internal
    */
   replace(key: string, from: T, to: T): boolean {
