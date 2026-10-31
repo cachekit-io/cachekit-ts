@@ -227,19 +227,22 @@ describe('wrap() key memo', () => {
     });
 
     it.each<[string, (cache: CacheImpl, deliver: (e: InvalidationEvent) => void) => unknown]>([
-      ['delete()', (cache) => cache.delete(KEY)],
-      ['invalidate("params")', (cache) => cache.invalidate('params', { key: KEY })],
+      // Every row but eviction also empties the memo, so the call keys afresh
+      // and never reaches the held entry; eviction reaches it, and L1's release
+      // refuses it. lru-cache.test.ts pins the release for every route.
+      ['delete() (memo emptied)', (cache) => cache.delete(KEY)],
+      ['invalidate("params") (memo emptied)', (cache) => cache.invalidate('params', { key: KEY })],
       [
-        'invalidate("namespace")',
+        'invalidate("namespace") (memo emptied)',
         (cache) => cache.invalidate('namespace', { namespace: OPTIONS.namespace }),
       ],
-      ['invalidate("global")', (cache) => cache.invalidate('global')],
+      ['invalidate("global") (memo emptied)', (cache) => cache.invalidate('global')],
       [
-        'an invalidation event from another instance',
+        'an invalidation event from another instance (memo emptied)',
         (_, deliver) => deliver(createInvalidationEvent('global', 'another-instance')),
       ],
       [
-        'eviction',
+        'eviction (held entry refused)',
         (cache) =>
           cache.wrap(async (id: number) => ({ id }), { ...OPTIONS, namespace: 'other' })(8),
       ],
@@ -252,6 +255,39 @@ describe('wrap() key memo', () => {
       expect(served).not.toBe(stored);
       expect(served).toEqual({ id: 7 });
       await cache.close();
+    });
+
+    it('never serves an entry that expires while a call is keyed in full', async () => {
+      // Keying an object argument runs the caller's code (here a getter), so the
+      // L1 lookup that follows must read the clock after it, not before.
+      vi.useFakeTimers({ toFake: ['Date'], now: 0 });
+      try {
+        // SWR off, so no background refresh recomputes the value behind the read.
+        const backend = new InMemoryBackend();
+        const cache = createCache({
+          backend,
+          metrics: false,
+          l1: { swrEnabled: false },
+        });
+        let calls = 0;
+        const fn = cache.wrap(async (arg: { id: number }) => ({ id: arg.id, call: ++calls }), {
+          namespace: 'svc:getThing',
+          ttl: 1,
+        });
+        await fn({ id: 7 });
+        backend.store.clear(); // only L1 holds it, so a stale serve can come from L1 alone
+        vi.setSystemTime(999);
+        const slow = {
+          get id() {
+            vi.setSystemTime(1001); // past the 1 s ttl, mid-keying
+            return 7;
+          },
+        };
+        expect(await fn(slow)).toEqual({ id: 7, call: 2 });
+        await cache.close();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('never serves it once close() has begun', async () => {

@@ -918,6 +918,17 @@ describe('L1Cache', () => {
       expect(stale).toMatchObject({ value: 'v', isFresh: false, shouldRefresh: true });
     });
 
+    it('reads its own clock: an extra argument is never taken for the time', () => {
+      // L1Cache is public, so a caller can hand getWithSwr to map(), which
+      // passes the index as a second argument.
+      vi.useFakeTimers({ now: 0 });
+      const c = new L1Cache<string>({ swrThresholdRatio: 0.5 });
+      c.set('k', 'v', 1000, 'ns');
+      vi.setSystemTime(1001);
+      expect(['k'].map(c.getWithSwr, c)[0]).toMatchObject({ value: null, isFresh: false });
+      expect(c.stats.entries).toBe(0);
+    });
+
     it('never turns stale without an expiry', () => {
       vi.useFakeTimers({ now: 0 });
       const c = new L1Cache<string>({ swrThresholdRatio: 0.5 });
@@ -949,7 +960,8 @@ describe('L1Cache', () => {
       expect(c.hit(held, 449)).toBe(true);
       expect(c.hit(held, 450)).toBe(false);
       draws.mockReturnValueOnce(0.5); // stale from t = 500
-      expect(c.getWithSwr('k', 500)).toMatchObject({ value: 'v', shouldRefresh: true });
+      vi.setSystemTime(500);
+      expect(c.getWithSwr('k')).toMatchObject({ value: 'v', shouldRefresh: true });
     });
 
     it.each([-0.5, -Infinity])(
@@ -982,7 +994,13 @@ describe('L1Cache', () => {
     const event = (e: Partial<InvalidationEvent>): InvalidationEvent =>
       ({ sourceInstance: 'another instance', timestamp: Date.now(), ...e }) as InvalidationEvent;
     it.each<[string, (c: L1Cache<string>) => void]>([
-      ['expiry', (c) => c.getWithSwr('k', Date.now() + 20_000)],
+      [
+        'expiry',
+        (c) => {
+          vi.useFakeTimers({ now: Date.now() + 20_000 });
+          c.getWithSwr('k');
+        },
+      ],
       ['eviction', (c) => c.set('other', 'o', 10_000, 'other')],
       ['delete', (c) => c.delete('k')],
       ['invalidateByKey', (c) => c.invalidateByKey('k')],

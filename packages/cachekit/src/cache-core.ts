@@ -1762,7 +1762,7 @@ export class CacheImpl implements SecureCache {
             'or key transform — see Backend.keyPrefix / Backend.transformsKeys'
         );
       }
-      // One clock read serves the key memo's window and L1's freshness.
+      // One clock read serves the key memo's window and a held entry's freshness.
       const now = Date.now();
       const slot = interop
         ? undefined
@@ -1804,7 +1804,10 @@ export class CacheImpl implements SecureCache {
             }
           }
         } else {
-          const swrResult = this.l1.getWithSwr(cacheKey, now);
+          // getWithSwr reads the clock itself: keying a call in full can run
+          // the caller's code (an object argument's getters), so `now` may be
+          // stale here. Only a memo hit, which runs none, uses it.
+          const swrResult = this.l1.getWithSwr(cacheKey);
 
           if (swrResult.value !== null) {
             // Decode before scheduling: an entry that will not decrypt is

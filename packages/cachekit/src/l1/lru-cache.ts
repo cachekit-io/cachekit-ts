@@ -111,7 +111,8 @@ interface Node<T> extends CacheEntry<T> {
 export class L1Cache<T = unknown> {
   private readonly config: L1Config;
 
-  // Core data structures
+  // Core data structures. Every node that leaves `cache` goes through remove()
+  // or clear(), which release it: a caller may still hold it (see `hit`).
   private readonly cache = new Map<string, Node<T>>();
   // Recency list: head is the least recently used entry, tail the most.
   private head: Node<T> | null = null;
@@ -191,14 +192,7 @@ export class L1Cache<T = unknown> {
    * Get with stale-while-revalidate semantics.
    * Returns value even if stale, with refresh hint.
    */
-  getWithSwr(key: string): SwrResult<T>;
-  /**
-   * getWithSwr at a time the caller already read from Date.now(), so a call
-   * reads the clock once. Package-internal.
-   * @internal
-   */
-  getWithSwr(key: string, now: number): SwrResult<T>;
-  getWithSwr(key: string, now = Date.now()): SwrResult<T> {
+  getWithSwr(key: string): SwrResult<T> {
     const entry = this.cache.get(key);
     const version = this.entryVersion.get(key) ?? 0;
 
@@ -210,6 +204,8 @@ export class L1Cache<T = unknown> {
         versionToken: version,
       };
     }
+
+    const now = Date.now();
 
     // Fully expired - don't return value
     if (now >= entry.expiresAt) {
@@ -654,7 +650,11 @@ export class L1Cache<T = unknown> {
     this.refreshingKeys.delete(oldest.key);
   }
 
-  /** Drop an entry from the Map, the recency list, the memory total and the namespace index. */
+  /**
+   * Drop an entry from the Map, the recency list, the memory total and the
+   * namespace index, and release it. The only route out of the Map besides
+   * clear(): a new removal route must come through here.
+   */
   private remove(node: Node<T>): void {
     this.cache.delete(node.key);
     this.unlink(node);
