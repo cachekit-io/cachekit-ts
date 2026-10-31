@@ -71,6 +71,16 @@ function isCount(n: number | undefined): n is number {
 }
 
 /**
+ * An entry a caller holds on to so it can serve it again with one check (see
+ * `hit`) instead of a lookup by key. Package-internal.
+ * @internal
+ */
+export interface L1Entry<T> {
+  readonly key: string;
+  readonly value: T;
+}
+
+/**
  * An entry plus its links in the recency list. The list is what makes LRU
  * O(1): a hit moves its node to the tail, eviction takes the head, and
  * neither scans the Map.
@@ -81,6 +91,19 @@ interface Node<T> extends CacheEntry<T> {
   next: Node<T> | null;
   /** No refresh starts before this time (see deferRefresh). */
   refreshHeldUntil: number;
+  /**
+   * When the entry turns stale for SWR: originalTtl x swrThresholdRatio, with
+   * its ±10% jitter, before expiresAt. The jitter is drawn once, when the
+   * entry is written, so a read draws nothing.
+   */
+  refreshAt: number;
+  /**
+   * Before this time a hit needs no refresh decision, so `hit` serves the
+   * entry on this one check: refreshAt with SWR on, expiresAt with it off.
+   * -Infinity for a null value, which L1 never serves, and from the moment L1
+   * drops the entry, so a caller holding a removed node never serves it.
+   */
+  hitUntil: number;
 }
 
 /**
@@ -164,7 +187,14 @@ export class L1Cache<T = unknown> {
    * Get with stale-while-revalidate semantics.
    * Returns value even if stale, with refresh hint.
    */
-  getWithSwr(key: string): SwrResult<T> {
+  getWithSwr(key: string): SwrResult<T>;
+  /**
+   * getWithSwr at a time the caller already read from Date.now(), so a call
+   * reads the clock once. Package-internal.
+   * @internal
+   */
+  getWithSwr(key: string, now: number): SwrResult<T>;
+  getWithSwr(key: string, now = Date.now()): SwrResult<T> {
     const entry = this.cache.get(key);
     const version = this.entryVersion.get(key) ?? 0;
 
@@ -176,8 +206,6 @@ export class L1Cache<T = unknown> {
         versionToken: version,
       };
     }
-
-    const now = Date.now();
 
     // Fully expired - don't return value
     if (now >= entry.expiresAt) {
@@ -192,12 +220,7 @@ export class L1Cache<T = unknown> {
 
     this.touch(entry);
 
-    // Calculate SWR threshold with jitter (±10%)
-    // Use crypto PRNG instead of Math.random for unpredictable timing
-    const jitter = SWR_JITTER_MIN + secureRandomFloat() * SWR_JITTER_RANGE;
-    const swrThreshold = entry.originalTtl * this.config.swrThresholdRatio * jitter;
-    const remainingTtl = entry.expiresAt - now;
-    const isFresh = remainingTtl > swrThreshold;
+    const isFresh = now < entry.refreshAt;
 
     // Should refresh if stale AND SWR enabled AND not already refreshing AND under limit
     const shouldRefresh =
@@ -218,6 +241,29 @@ export class L1Cache<T = unknown> {
       shouldRefresh,
       versionToken: version,
     };
+  }
+
+  /**
+   * The entry L1 holds under `key`, for a caller that will serve it again
+   * with `hit`. Package-internal.
+   * @internal
+   */
+  entry(key: string): L1Entry<T> | undefined {
+    return this.cache.get(key);
+  }
+
+  /**
+   * Serve an entry `entry` returned, at `now` (Date.now()), if it needs no
+   * refresh decision: L1 still holds it and it is fresh. Marks it most
+   * recently used and returns true; false sends the caller to getWithSwr.
+   * Package-internal.
+   * @internal
+   */
+  hit(entry: L1Entry<T>, now: number): boolean {
+    const node = entry as Node<T>;
+    if (!(now < node.hitUntil)) return false;
+    this.touch(node);
+    return true;
   }
 
   /**
@@ -407,13 +453,26 @@ export class L1Cache<T = unknown> {
       this.evictLRU();
     }
 
+    // ttl <= 0 means "no expiry" (ts-wide Backend contract) —
+    // without this guard `now + 0` expires the entry on the very next
+    // millisecond instead of caching it forever.
+    const expiresAt = ttl > 0 ? Date.now() + ttl : Infinity;
+    // SWR jitter (±10%) from the CSPRNG, not Math.random, so refresh times
+    // cannot be predicted. Never stale without an expiry: Infinity - Infinity
+    // would make refreshAt NaN.
+    const refreshAt =
+      expiresAt === Infinity
+        ? Infinity
+        : expiresAt -
+          ttl *
+            this.config.swrThresholdRatio *
+            (SWR_JITTER_MIN + secureRandomFloat() * SWR_JITTER_RANGE);
     const node: Node<T> = {
       key,
       value,
-      // ttl <= 0 means "no expiry" (ts-wide Backend contract) —
-      // without this guard `now + 0` expires the entry on the very next
-      // millisecond instead of caching it forever.
-      expiresAt: ttl > 0 ? Date.now() + ttl : Infinity,
+      expiresAt,
+      refreshAt,
+      hitUntil: value === null ? -Infinity : this.config.swrEnabled ? refreshAt : expiresAt,
       originalTtl: ttl,
       size,
       namespace,
@@ -452,6 +511,13 @@ export class L1Cache<T = unknown> {
    * Clear all entries.
    */
   clear(): void {
+    for (let node = this.head; node !== null;) {
+      const next: Node<T> | null = node.next;
+      this.drop(node);
+      node.prev = null;
+      node.next = null;
+      node = next;
+    }
     this.cache.clear();
     this.head = null;
     this.tail = null;
@@ -593,6 +659,17 @@ export class L1Cache<T = unknown> {
     this.unlink(node);
     this.currentMemory -= node.size;
     this.removeFromNamespaceIndex(node.key, node.namespace);
+    this.drop(node);
+  }
+
+  /**
+   * Mark a node L1 no longer holds, so `hit` refuses it, and let go of its
+   * value: a caller may hold the node a while (a key memo, up to its window),
+   * and must not keep an evicted value alive past maxMemory.
+   */
+  private drop(node: Node<T>): void {
+    node.hitUntil = -Infinity;
+    (node as Node<T | null>).value = null;
   }
 
   /** Mark an entry most recently used. */

@@ -31,6 +31,17 @@ export type UnrefTimeout = (callback: () => void, ms: number) => () => void;
 type MemoArg = string | number | boolean | null | undefined;
 
 /**
+ * A call's key and, for a memoised call, a place for its caller to keep what
+ * the key led to last time (wrap() keeps the L1 entry there), so a repeat call
+ * reaches it without another lookup. A call that is not memoised gets a slot of
+ * its own, which nothing keeps.
+ */
+export interface KeySlot<E> {
+  readonly key: string;
+  entry: E | undefined;
+}
+
+/**
  * The auto-mode keys of one wrapped function, `{namespace}:{hash}` exactly as
  * generateKey builds them. The `{namespace}:` prefix is the part that does not
  * depend on the arguments, so it is built once and rebuilt only when the
@@ -61,7 +72,7 @@ type MemoArg = string | number | boolean | null | undefined;
  * another ttl empties it too, as a change of namespace does, and a call under
  * a ttl of 0, which never expires, stores no entry.
  */
-export class AutoKeys {
+export class AutoKeys<E = unknown> {
   private namespace: string | undefined;
   private prefix = '';
   /**
@@ -69,9 +80,9 @@ export class AutoKeys {
    * SameValueZero: by type and value, with NaN equal to itself (kept out) and 0
    * equal to -0 (one key).
    */
-  private readonly one = new Map<MemoArg, string>();
+  private readonly one = new Map<MemoArg, KeySlot<E>>();
   /** Calls with no argument or two to eight, keyed by tupleOf(). */
-  private readonly many = new Map<string, string>();
+  private readonly many = new Map<string, KeySlot<E>>();
   /**
    * When its entries expire, one ttl after the first, in Date.now()
    * milliseconds, the clock L1 expires entries by. Its timer empties it at
@@ -95,37 +106,56 @@ export class AutoKeys {
    * `ttlSeconds` is the wrap's ttl.
    */
   key(namespace: string, args: unknown[], useMemo: boolean, ttlSeconds: number): string {
+    return this.slot(namespace, args, useMemo, ttlSeconds).key;
+  }
+
+  /**
+   * key(), as the call's slot. `now` is Date.now() when the caller has read it
+   * already; without it the clock is read only if the memo needs it.
+   */
+  slot(
+    namespace: string,
+    args: unknown[],
+    useMemo: boolean,
+    ttlSeconds: number,
+    now?: number
+  ): KeySlot<E> {
     // A JavaScript caller can pass any namespace: key it as generateKey does.
-    if (typeof namespace !== 'string') return generateKey(namespace, args);
+    if (typeof namespace !== 'string') return unkept(generateKey(namespace, args));
     if (namespace !== this.namespace) {
       this.namespace = namespace;
       this.prefix = `${namespace}:`;
       this.forget(); // every entry holds the old prefix
     }
-    if (this.until !== Infinity && (ttlSeconds !== this.windowTtl || Date.now() >= this.until)) {
+    if (
+      this.until !== Infinity &&
+      (ttlSeconds !== this.windowTtl || (now ?? Date.now()) >= this.until)
+    ) {
       this.forget();
     }
-    if (!this.memoising || !useMemo) return this.prefix + generateParamsHash(args);
+    if (!this.memoising || !useMemo) return unkept(this.prefix + generateParamsHash(args));
     if (args.length === 1) {
       const arg = args[0];
-      if (!isMemoArg(arg) || !withinBudget(arg)) return this.prefix + generateParamsHash(args);
-      let key = this.one.get(arg);
-      if (key === undefined) {
-        key = this.prefix + generateParamsHash(args);
-        if (this.admit(ttlSeconds)) {
-          this.one.set(typeof arg === 'string' ? ownString(arg) : arg, key);
+      if (!isMemoArg(arg) || !withinBudget(arg)) {
+        return unkept(this.prefix + generateParamsHash(args));
+      }
+      let slot = this.one.get(arg);
+      if (slot === undefined) {
+        slot = unkept(this.prefix + generateParamsHash(args));
+        if (this.admit(ttlSeconds, now)) {
+          this.one.set(typeof arg === 'string' ? ownString(arg) : arg, slot);
         }
       }
-      return key;
+      return slot;
     }
     const tuple = tupleOf(args);
-    if (tuple === undefined) return this.prefix + generateParamsHash(args);
-    let key = this.many.get(tuple);
-    if (key === undefined) {
-      key = this.prefix + generateParamsHash(args);
-      if (this.admit(ttlSeconds)) this.many.set(ownString(tuple), key);
+    if (tuple === undefined) return unkept(this.prefix + generateParamsHash(args));
+    let slot = this.many.get(tuple);
+    if (slot === undefined) {
+      slot = unkept(this.prefix + generateParamsHash(args));
+      if (this.admit(ttlSeconds, now)) this.many.set(ownString(tuple), slot);
     }
-    return key;
+    return slot;
   }
 
   /** Drop every memoised argument. */
@@ -142,7 +172,7 @@ export class AutoKeys {
    * none is running. False when the entry must not be stored: a ttl of 0 never
    * expires, and set() rejects a negative, NaN or infinite one.
    */
-  private admit(ttlSeconds: number): boolean {
+  private admit(ttlSeconds: number, now: number | undefined): boolean {
     const setTimer = this.setTimer;
     if (setTimer === undefined || !Number.isFinite(ttlSeconds) || ttlSeconds <= 0) return false;
     if (this.one.size + this.many.size >= MEMO_MAX_ENTRIES) this.forget();
@@ -152,12 +182,17 @@ export class AutoKeys {
       const cancel = setTimer(() => this.forget(), Math.min(ttlSeconds * 1000, MEMO_MAX_WINDOW_MS));
       // A ttl too long to count in milliseconds would make this Infinity, which
       // marks an empty memo, so it counts as the longest finite one.
-      this.until = Date.now() + Math.min(ttlSeconds * 1000, Number.MAX_VALUE);
+      this.until = (now ?? Date.now()) + Math.min(ttlSeconds * 1000, Number.MAX_VALUE);
       this.windowTtl = ttlSeconds;
       this.cancelTimer = cancel;
     }
     return true;
   }
+}
+
+/** The slot of a key nothing keeps. */
+function unkept<E>(key: string): KeySlot<E> {
+  return { key, entry: undefined };
 }
 
 /**

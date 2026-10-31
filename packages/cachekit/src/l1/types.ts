@@ -36,7 +36,8 @@ export interface L1Config {
 
   /**
    * SWR threshold as ratio of TTL (default: 0.5)
-   * Entry is considered stale when remaining TTL < originalTTL * swrThresholdRatio
+   * Entry is considered stale when remaining TTL < originalTTL * swrThresholdRatio,
+   * jittered ±10% per entry: the jitter is drawn once, when the entry is written.
    */
   swrThresholdRatio: number;
 
