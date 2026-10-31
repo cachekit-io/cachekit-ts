@@ -879,10 +879,28 @@ export class CacheImpl implements SecureCache {
    * never pins a pooled slab (a Node Buffer from a backend can be a view onto
    * a shared 8 KiB slab; cachekit-py guards the same edge by refusing
    * memoryview/bytearray in L1Cache.put). A plaintext cache, or one with L1
-   * off, keeps no bytes in L1, so it gets `bytes` back as they are.
+   * off, keeps no bytes in L1, so it gets `bytes` back as they are, and so
+   * does ciphertext decodeEntry refuses for its size, on every read, before
+   * any decode: junk of any length is never copied.
    */
-  private l1Copy(bytes: Uint8Array): Uint8Array {
-    return this.encryption && this.l1 ? new Uint8Array(bytes) : bytes;
+  private l1Copy(bytes: Uint8Array, interop: boolean): Uint8Array {
+    if (!this.encryption || !this.l1 || bytes.length > this.maxCiphertext(interop)) return bytes;
+    return new Uint8Array(bytes);
+  }
+
+  /**
+   * The longest ciphertext decodeEntry decrypts: the longest plaintext this
+   * cache would decode, plus nonce and tag. The AAD binds useEnvelope, so a
+   * compression-off entry that decrypts is a plain serialized value, which
+   * decode() caps at maxDecodedSize.
+   */
+  private maxCiphertext(interop: boolean): number {
+    const maxPlaintext = interop
+      ? DEFAULT_MAX_DECODED_SIZE // decodeInteropValue's fixed input cap
+      : this.useEnvelope(interop)
+        ? maxEnvelopeInputSize(this.serializerConfig.maxDecodedSize)
+        : this.serializerConfig.maxDecodedSize;
+    return maxPlaintext + AEAD_OVERHEAD_BYTES;
   }
 
   /**
@@ -935,16 +953,10 @@ export class CacheImpl implements SecureCache {
       // Refuse ciphertext longer than any plaintext this cache would decode
       // before the codec copies it in: junk of any length otherwise reaches
       // decrypt, which allocates for all of it before the tag check fails.
-      // The AAD binds useEnvelope, so a compression-off entry that decrypts
-      // is a plain serialized value, which decode() caps at maxDecodedSize.
-      const maxPlaintext = interop
-        ? DEFAULT_MAX_DECODED_SIZE // decodeInteropValue's fixed input cap
-        : useEnvelope
-          ? maxEnvelopeInputSize(this.serializerConfig.maxDecodedSize)
-          : this.serializerConfig.maxDecodedSize;
-      if (plaintext.length > maxPlaintext + AEAD_OVERHEAD_BYTES) {
+      const maxCiphertext = this.maxCiphertext(interop);
+      if (plaintext.length > maxCiphertext) {
         throw new ValueTooLargeError(
-          `Ciphertext size ${plaintext.length} exceeds max ${maxPlaintext + AEAD_OVERHEAD_BYTES}`
+          `Ciphertext size ${plaintext.length} exceeds max ${maxCiphertext}`
         );
       }
       // The AAD binds useEnvelope (frozen v0x03 set, protocol#12), so an entry
@@ -1142,7 +1154,7 @@ export class CacheImpl implements SecureCache {
     // A read that may fill L1 decodes L1's own copy, so the bytes L1 keeps are
     // the bytes the depth walks passed, whatever the backend does with its
     // buffer meanwhile (see l1Copy).
-    const data = l1 && !isStale ? this.l1Copy(fetched.data) : fetched.data;
+    const data = l1 && !isStale ? this.l1Copy(fetched.data, interop) : fetched.data;
 
     // Decrypt, unpack, deserialize — the same sequence an L1 hit runs. The
     // failure keeps the degradation contract it had inside the executor:
@@ -1330,7 +1342,7 @@ export class CacheImpl implements SecureCache {
     // refresh gets nothing to store, the stale entry stays, and the refresh
     // re-runs the origin once per refresh-marker window.
     const l1Write: L1Write = {
-      l1: this.l1Payload(value, this.l1Copy(data), interop),
+      l1: this.l1Payload(value, this.l1Copy(data, interop), interop),
       serializedSize: serialized.length,
       count,
     };

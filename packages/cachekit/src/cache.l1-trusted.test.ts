@@ -197,6 +197,22 @@ describe('encrypted L1 hits on trusted bytes', () => {
       expect(await reader.get('users:4')).toEqual({ id: 4 });
       expect(decodes()).toEqual({ ...NONE, trusted: 1 });
     });
+
+    it('but never of ciphertext too long to decode: the size refusal stays ahead of any copy', async () => {
+      // A memory property, which no public call shows, so this reads l1Copy itself.
+      const cache = makeCache(new InMemoryBackend()) as unknown as {
+        l1Copy(bytes: Uint8Array, interop: boolean): Uint8Array;
+        maxCiphertext(interop: boolean): number;
+      };
+      for (const interop of [false, true]) {
+        const max = cache.maxCiphertext(interop);
+        const fits = new Uint8Array(64);
+        const junk = new Uint8Array(max + 1);
+        expect(cache.l1Copy(fits, interop)).not.toBe(fits);
+        expect(cache.l1Copy(fits, interop)).toEqual(fits);
+        expect(cache.l1Copy(junk, interop) === junk, 'copied past the cap').toBe(true);
+      }
+    });
   });
 
   describe('a hostile document', () => {
