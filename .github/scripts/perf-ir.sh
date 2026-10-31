@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Build a pull request and its base side by side and gate the PR's
+# instructions per op against the base's (packages/cachekit/bench/ir.mjs).
+# Run from a checkout of the PR merge commit, with Node, pnpm, Rust, the wasm
+# tools and valgrind on PATH. Writes $OUT/report.json, ir.mjs's --report, or
+# $OUT/same-build when both builds hash alike; exits with ir.mjs's code.
+#
+#   BASE_SHA=<sha> OUT=<dir> [JOBS=4] [IR_ARGS='--shard 1/4'] bash .github/scripts/perf-ir.sh
+#
+# IR_ARGS goes to both ir.mjs runs, word-split: --shard, or --only and
+# --repeats for a quick local try.
+#
+# Both trees use the head's bench/, so both arms measure the same workload
+# definitions, and a workload the PR adds is measured on the base too where
+# the base can run it (ir.mjs --new). They sit at paths of equal length:
+# where a process's heap starts moves with its argv, and the GC-sensitive
+# workloads move with it.
+set -euo pipefail
+: "${BASE_SHA:?}" "${OUT:?}"
+jobs=${JOBS:-4}
+read -ra extra <<< "${IR_ARGS:-}"
+mkdir -p "$OUT"
+
+git cat-file -e "$BASE_SHA^{commit}" 2> /dev/null ||
+  git fetch --quiet --no-tags --depth=1 origin "$BASE_SHA"
+root=$PWD/ir
+git worktree add --quiet --detach "$root/head" HEAD
+git worktree add --quiet --detach "$root/base" "$BASE_SHA"
+
+# The workloads the base's own file defines, before the head's replaces it.
+workloads() {
+  (cd "$1/packages/cachekit" && [[ -f bench/ir-workload.mjs ]] &&
+    node --input-type=module -e \
+      "console.log(Object.keys((await import('./bench/ir-workload.mjs')).WORKLOADS).join('\n'))") || true
+}
+workloads "$root/base" | sort > "$OUT/base-workloads.txt"
+workloads "$root/head" | sort > "$OUT/head-workloads.txt"
+new=$(comm -13 "$OUT/base-workloads.txt" "$OUT/head-workloads.txt" | paste -sd, -)
+rm -rf "${root:?}/base/packages/cachekit/bench"
+cp -R "$root/head/packages/cachekit/bench" "$root/base/packages/cachekit/bench"
+
+for tree in base head; do
+  echo "::group::Build the $tree"
+  (
+    cd "$root/$tree"
+    pnpm install --frozen-lockfile
+    pnpm build
+    pnpm --filter @cachekit-io/cachekit-core-wasm build:wasm
+  )
+  echo "::endgroup::"
+done
+
+ir() { (cd "$root/$1/packages/cachekit" && node bench/ir.mjs "${@:2}"); }
+base_hash=$(ir base --build-hash)
+head_hash=$(ir head --build-hash)
+if [[ $base_hash == "$head_hash" ]]; then
+  echo "Both builds hash to $head_hash: the PR changes nothing the workloads execute."
+  echo "$head_hash" > "$OUT/same-build"
+  exit 0
+fi
+
+# The base run records a workload that fails (exit 4) or repeats noisily
+# (exit 3) in its --save file, and the compare reads them from there.
+status=0
+ir base --jobs "$jobs" "${extra[@]}" --save "$OUT/base.json" || status=$?
+if [[ $status -ne 0 && $status -ne 3 && $status -ne 4 ]]; then
+  echo "::error::the base run failed (exit $status)"
+  exit "$status"
+fi
+ir head --jobs "$jobs" "${extra[@]}" --compare "$OUT/base.json" --new "$new" --report "$OUT/report.json"

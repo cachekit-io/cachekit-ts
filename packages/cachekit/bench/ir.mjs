@@ -1,7 +1,9 @@
 // Instructions per op on the cachekit-ts hot paths, main thread only.
 //
-//   node bench/ir.mjs [--repeats 5] [--jobs 4] [--only a,b] [--wall 9]
-//                     [--save out.json] [--compare base.json]
+//   node bench/ir.mjs [--repeats 5] [--jobs 4] [--only a,b] [--shard 1/3] [--wall 9]
+//                     [--save out.json] [--compare base.json] [--new a,b]
+//                     [--report report.json]
+//   node bench/ir.mjs --build-hash
 //
 // Wall-clock microbenchmarks on a shared or hosted machine cannot resolve the
 // 1-2% changes that matter here; instruction counts can, once three sources of
@@ -27,6 +29,15 @@
 // 1 regression, 2 not comparable (fingerprint or workload-set mismatch, or
 // the same build on both sides), 3 A/A over the limit, 4 the run itself
 // failed (bad arguments, valgrind crash, missing build output).
+//
+// A workload whose run fails does not stop the others: --save records it
+// under `failed`, its row reads INCOMPLETE and the exit code is 4. A workload
+// that only the head's workload file defines may fail on the base build,
+// because the base lacks the API it measures; --new names those, and their
+// rows read `new` without gating. --report writes the rows and verdicts as
+// JSON for CI (bench/ir-comment.mjs renders them). --shard K/N measures every
+// Nth workload, so N machines can split one compare. --build-hash prints the
+// hash of what the workloads execute and exits, without valgrind.
 //
 // --wall K adds K interleaved plain-node processes per workload and prints
 // steady-state ns/op (median, min-max), on screen only. It gives the scale of
@@ -68,17 +79,33 @@ const { values: opt } = parseArgs({
     jobs: { type: 'string', default: String(Math.max(1, Math.floor(availableParallelism() / 4))) },
     only: { type: 'string' },
     wall: { type: 'string', default: '0' },
+    shard: { type: 'string' },
     save: { type: 'string' },
     compare: { type: 'string' },
+    new: { type: 'string' },
+    report: { type: 'string' },
+    'build-hash': { type: 'boolean' },
   },
 });
+if (opt['build-hash']) {
+  console.log(buildHash());
+  process.exit(0);
+}
 const repeats = Number(opt.repeats);
 const jobs = Number(opt.jobs);
 const wallRounds = Number(opt.wall);
+const list = (csv) => (csv ? [...new Set(csv.split(','))] : []);
 // Deduped: two runs of one workload would share a callgrind output prefix.
-const names = opt.only ? [...new Set(opt.only.split(','))] : Object.keys(N);
+let names = opt.only ? list(opt.only) : Object.keys(N);
 for (const name of names) if (!(name in N)) throw new Error(`unknown workload "${name}"`);
 const isInt = (x, min) => Number.isInteger(x) && x >= min;
+if (opt.shard) {
+  const [k, of] = opt.shard.split('/').map(Number);
+  if (!isInt(of, 1) || !isInt(k, 1) || k > of) throw new Error('--shard must be K/N, 1 <= K <= N');
+  names = names.filter((_, i) => i % of === k - 1);
+}
+const newNames = new Set(list(opt.new));
+for (const name of newNames) if (!(name in N)) throw new Error(`--new: unknown workload "${name}"`);
 if (!isInt(repeats, 3))
   throw new Error('--repeats must be an integer >= 3: the A/A spread needs them');
 if (!isInt(jobs, 1)) throw new Error('--jobs must be an integer >= 1');
@@ -109,6 +136,10 @@ if (base) {
         `${opt.compare}: ${name} needs a positive irPerOp and a non-negative aa, got ${JSON.stringify(b)}`
       );
     }
+  }
+  base.failed ??= {};
+  if (typeof base.failed !== 'object' || base.failed === null) {
+    throw new Error(`${opt.compare}: failed must be an object of workload errors`);
   }
 }
 
@@ -236,24 +267,34 @@ function buildHash() {
 const build = buildHash();
 
 const dir = mkdtempSync(join(tmpdir(), 'cachekit-ir-'));
-let irByRun;
+const irByRun = {};
+// The first error of each workload that failed; its other repeats still run.
+const failed = {};
 try {
   const plan = [];
   for (let r = 0; r < repeats; r++) {
     for (const name of names) plan.push({ tag: `${name}.${r}`, name, n: N[name] });
   }
-  irByRun = Object.fromEntries(
-    await pool(
-      plan.map((p) => async () => [p.tag, await windowIr(dir, p.tag, p.name, p.n)]),
-      jobs
-    )
+  await pool(
+    plan.map((p) => async () => {
+      try {
+        irByRun[p.tag] = await windowIr(dir, p.tag, p.name, p.n);
+      } catch (error) {
+        failed[p.name] ??= String(error?.message ?? error).slice(0, 2000);
+      }
+    }),
+    jobs
   );
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }
+for (const [name, message] of Object.entries(failed)) {
+  console.error(`${name}: the run failed\n${message}`);
+}
+const measured = names.filter((name) => !(name in failed));
 
 const benches = {};
-for (const name of names) {
+for (const name of measured) {
   const perOp = Array.from({ length: repeats }, (_, r) => irByRun[`${name}.${r}`] / N[name]);
   const irPerOp = median(perOp);
   benches[name] = {
@@ -272,16 +313,16 @@ for (const name of names) {
 // flags than the Ir, and a stored ratio of the two reads like a saving.
 const wall = {};
 if (wallRounds > 0) {
-  const samples = Object.fromEntries(names.map((name) => [name, []]));
+  const samples = Object.fromEntries(measured.map((name) => [name, []]));
   for (let round = 0; round < wallRounds; round++) {
     // Rotate the order every round so drift on a busy host lands on every arm alike.
-    for (let i = 0; i < names.length; i++) {
-      const name = names[(i + round) % names.length];
+    for (let i = 0; i < measured.length; i++) {
+      const name = measured[(i + round) % measured.length];
       const out = await run(process.execPath, [workload, name, String(N[name]), '--wall']);
       samples[name].push(JSON.parse(out.trim().split('\n').pop()).nsPerOp);
     }
   }
-  for (const name of names) {
+  for (const name of measured) {
     const ns = samples[name];
     wall[name] = {
       nsPerOp: Math.round(median(ns)),
@@ -292,49 +333,62 @@ if (wallRounds > 0) {
   }
 }
 
-const result = { fingerprint, build, repeats, aaLimit: AA_LIMIT, rawIr: irByRun, benches };
+const result = { fingerprint, build, repeats, aaLimit: AA_LIMIT, rawIr: irByRun, benches, failed };
 if (opt.save) writeFileSync(opt.save, JSON.stringify(result, null, 2) + '\n');
 
 const pct = (x) => `${(x * 100).toFixed(2)}%`;
+// Why the compare cannot be read, on stderr and in --report.
+const notes = [];
+const note = (message) => {
+  console.error(message);
+  notes.push(message);
+};
 let mismatch = false;
 let regressed = false;
+let incomplete = false;
 let noisyAny = false;
-const rows = [];
 if (base && base.build === build) {
-  console.error(
-    `same build: base and head both hash to ${build}; rebuild one side before comparing.`
-  );
+  note(`same build: base and head both hash to ${build}; rebuild one side before comparing.`);
   mismatch = true;
 }
 if (base && JSON.stringify(base.fingerprint) !== JSON.stringify(fingerprint)) {
-  console.error(
+  note(
     `fingerprint mismatch: base ${JSON.stringify(base.fingerprint)}\n                     head ${JSON.stringify(fingerprint)}\n` +
       'Ir moves with node, V8 and valgrind versions: rebuild the base on this machine and compare again.'
   );
   mismatch = true;
 }
-const baseNames = base ? Object.keys(base.benches).sort().join(',') : '';
-if (base && baseNames !== [...names].sort().join(',')) {
+const baseNames = base ? [...Object.keys(base.benches), ...Object.keys(base.failed)] : [];
+if (base && baseNames.sort().join(',') !== [...names].sort().join(',')) {
   // A workload missing from either run would get no verdict, and the gate
   // would pass while gating nothing.
-  console.error(
-    `workload mismatch: base measured ${baseNames}, head measured ${[...names].sort().join(',')}`
+  note(
+    `workload mismatch: base ran ${baseNames.join(',')}, head ran ${[...names].sort().join(',')}`
   );
   mismatch = true;
 }
-for (const [name, b] of Object.entries(benches)) {
-  const row = { workload: name, 'Ir/op': b.irPerOp, 'A/A': pct(b.aa) };
-  if (wall[name])
-    Object.assign(row, {
-      'ns/op': wall[name].nsPerOp,
-      'ns min-max': `${wall[name].min}-${wall[name].max}`,
-    });
-  const noisy = b.aa > AA_LIMIT || (base?.benches[name] && base.benches[name].aa > AA_LIMIT);
+const rows = [];
+for (const name of names) {
+  const b = benches[name];
+  const was = base?.benches[name];
+  const row = { workload: name, irPerOp: b?.irPerOp, aa: b?.aa };
+  rows.push(row);
+  if (!b) {
+    row.verdict = 'INCOMPLETE (run failed)';
+    row.error = failed[name];
+    incomplete = true;
+    continue;
+  }
+  const noisy = b.aa > AA_LIMIT || (was && was.aa > AA_LIMIT);
   noisyAny ||= Boolean(noisy);
-  if (base?.benches[name] && !mismatch) {
-    const delta = b.irPerOp / base.benches[name].irPerOp - 1;
-    row['base Ir/op'] = base.benches[name].irPerOp;
-    row.delta = pct(delta);
+  if (base && !mismatch && !was) {
+    row.error = base.failed[name];
+    // A workload the base's own file lacks may measure an API the base lacks.
+    row.verdict = newNames.has(name) ? 'new (base cannot run it)' : 'INCOMPLETE (base run failed)';
+    incomplete ||= !newNames.has(name);
+  } else if (was && !mismatch) {
+    const delta = b.irPerOp / was.irPerOp - 1;
+    Object.assign(row, { baseIrPerOp: was.irPerOp, baseAa: was.aa, delta });
     row.verdict = noisy
       ? 'INCONCLUSIVE (A/A)'
       : delta > FAIL
@@ -348,14 +402,31 @@ for (const [name, b] of Object.entries(benches)) {
   } else if (noisy) {
     row.verdict = 'INCONCLUSIVE (A/A)';
   }
-  rows.push(row);
 }
 console.log(JSON.stringify(fingerprint));
-console.table(rows);
-// A mismatch makes every delta meaningless; a clear regression outranks noise elsewhere.
-const exitCode = mismatch ? 2 : regressed ? 1 : noisyAny ? 3 : 0;
+console.table(
+  rows.map((r) => ({
+    workload: r.workload,
+    'Ir/op': r.irPerOp ?? '-',
+    'A/A': r.aa === undefined ? '-' : pct(r.aa),
+    ...(wall[r.workload] && {
+      'ns/op': wall[r.workload].nsPerOp,
+      'ns min-max': `${wall[r.workload].min}-${wall[r.workload].max}`,
+    }),
+    ...(r.baseIrPerOp !== undefined && { 'base Ir/op': r.baseIrPerOp, delta: pct(r.delta) }),
+    ...(r.verdict && { verdict: r.verdict }),
+  }))
+);
+// A mismatch makes every delta meaningless; a clear regression outranks a
+// missing verdict, and both outrank noise elsewhere.
+const exitCode = mismatch ? 2 : regressed ? 1 : incomplete ? 4 : noisyAny ? 3 : 0;
 if (exitCode === 3)
   console.error(
     `A/A spread over ${pct(AA_LIMIT)}: too noisy to judge; rerun on a quieter machine.`
   );
+if (opt.report) {
+  const thresholds = { fail: FAIL, warn: WARN, aaLimit: AA_LIMIT };
+  const report = { exitCode, fingerprint, build, baseBuild: base?.build, thresholds, notes, rows };
+  writeFileSync(opt.report, JSON.stringify(report, null, 2) + '\n');
+}
 process.exitCode = exitCode;

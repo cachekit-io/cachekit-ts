@@ -1,0 +1,171 @@
+name: Instruction counts
+
+# Gates every PR on instructions per op (packages/cachekit/bench/ir.mjs): it
+# builds the PR (the merge commit checked out here) and its base side by side
+# in one job, on one runner, and runs `bench:ir --compare` on the two builds.
+# Instruction counts move with the machine, Node and valgrind, so nothing is
+# compared against a figure recorded elsewhere. A release-please PR is
+# measured against that package's last release tag instead
+# (.github/scripts/perf-ir-base.sh). The verdict per workload goes to one PR
+# comment, edited in place.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A newer push cancels the run it supersedes; a cancelled run posts nothing,
+# so it cannot overwrite the newer run's comment.
+concurrency:
+  group: instruction-counts-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  gate:
+    name: Instruction counts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Must match the wasm-bindgen version pinned in the crate's Cargo.lock;
+      # scripts/build.sh fails loudly on drift. Same pins as ci.yml.
+      WASM_BINDGEN_VERSION: 0.2.121
+      BINARYEN_VERSION: '131'
+      WASM_BINDGEN_SHA256: 3039f38f65fe237b640cf06a140c919ca8d717ec5012146d145d3f27bb4d6b28 # pragma: allowlist secret
+      BINARYEN_SHA256: b5bf1f0eaf17c63ee588ff7a5954dc8f6ce2c26989051c66f24dfe9ece3e46db # pragma: allowlist secret
+    steps:
+      # A comment that reads INCOMPLETE until the render step writes the
+      # verdict over it. It is always uploaded, so a job that dies early still
+      # replaces an earlier run's PASS.
+      - name: Start with no verdict
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          OUT=$RUNNER_TEMP/perf-ir
+          echo "OUT=$OUT" >> "$GITHUB_ENV"
+          mkdir -p "$OUT"
+          printf '%s\n' '<!-- cachekit-instruction-count -->' '### Instruction counts: INCOMPLETE' '' \
+            'The job ended before it rendered a verdict.' '' "[Run log]($RUN_URL)" > "$OUT/comment.md"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 2 # the merge commit and its first parent
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-pnpm-node
+        with:
+          node-version: '24'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # stable
+        with:
+          toolchain: 1.99.1
+          targets: wasm32-unknown-unknown
+
+      # Dependencies only: rust-cache drops the workspace crates' own
+      # artifacts, so each tree still compiles its own NAPI and wasm crate.
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: perf-ir
+          workspaces: |
+            ir/base/packages/cachekit-core-ts
+            ir/head/packages/cachekit-core-ts
+            ir/base/packages/cachekit-core-wasm
+            ir/head/packages/cachekit-core-wasm
+
+      - name: Install wasm-bindgen + wasm-opt (pinned prebuilts, checksummed)
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL -o /tmp/wasm-bindgen.tar.gz "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          echo "${WASM_BINDGEN_SHA256}  /tmp/wasm-bindgen.tar.gz" | sha256sum -c -
+          tar xzf /tmp/wasm-bindgen.tar.gz -C /tmp
+          cp "/tmp/wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl/wasm-bindgen" "$HOME/.local/bin/"
+          curl -sSfL -o /tmp/binaryen.tar.gz "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz"
+          echo "${BINARYEN_SHA256}  /tmp/binaryen.tar.gz" | sha256sum -c -
+          tar xzf /tmp/binaryen.tar.gz -C /tmp
+          cp "/tmp/binaryen-version_${BINARYEN_VERSION}/bin/wasm-opt" "$HOME/.local/bin/"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install valgrind
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends valgrind
+          valgrind --version
+
+      - name: Pick the base
+        id: base
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: bash .github/scripts/perf-ir-base.sh
+
+      - name: Gate the PR against its base
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+        run: bash .github/scripts/perf-ir.sh
+
+      - name: Render the comment
+        if: ${{ !cancelled() && steps.base.outcome == 'success' }}
+        env:
+          BASE_LABEL: ${{ steps.base.outputs.label }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          status=0
+          node .github/scripts/perf-ir-comment.mjs --out "$OUT" --head "$(git rev-parse HEAD^2)" \
+            --base "\`$BASE_LABEL\`" --run-url "$RUN_URL" > "$OUT/rendered.md" || status=$?
+          [[ -s $OUT/rendered.md ]] && mv "$OUT/rendered.md" "$OUT/comment.md"
+          cat "$OUT/comment.md" >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        if: ${{ !cancelled() }}
+        with:
+          name: instruction-counts
+          path: |
+            ${{ env.OUT }}/comment.md
+            ${{ env.OUT }}/*.json
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true # a re-run attempt replaces the comment
+
+  # Posts the comment with a write token, without checking out the PR's code.
+  # Fork PRs are skipped: their token cannot write to the PR.
+  comment:
+    name: Instruction counts comment
+    needs: gate
+    if: ${{ !cancelled() && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write # enough for a PR's issue comments
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: instruction-counts
+          path: ${{ runner.temp }}/perf-ir
+
+      - name: Post or update the PR comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          body=$RUNNER_TEMP/perf-ir/comment.md
+          # The marker the comment opens with. Only the bot's own comment is edited, whoever copies it.
+          marker='<!-- cachekit-instruction-count -->'
+          if [[ $(head -n 1 "$body") != "$marker" ]]; then
+            echo "::error::comment.md does not open with the marker"
+            exit 1
+          fi
+          ids=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id")
+          id=${ids%%$'\n'*}
+          if [[ -n $id ]]; then
+            jq -n --rawfile body "$body" '{body: $body}' | gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" --input - > /dev/null
+          else
+            jq -n --rawfile body "$body" '{body: $body}' | gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --input - > /dev/null
+          fi
