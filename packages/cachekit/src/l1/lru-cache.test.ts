@@ -14,6 +14,17 @@ import {
 } from '../serialization/serializer.js';
 import { DEFAULT_L1_CONFIG } from './types.js';
 import type { InvalidationEvent, L1Config } from './types.js';
+import { secureRandomFloat } from '../utils/random.js';
+
+// Calls through, so every draw is still the CSPRNG's unless a test pins one.
+vi.mock('../utils/random.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../utils/random.js')>();
+  return { secureRandomFloat: vi.fn(real.secureRandomFloat) };
+});
+const draws = vi.mocked(secureRandomFloat);
+// Drops any queued mockReturnValueOnce a failing test left; on vitest 4 the
+// call-through implementation stays.
+afterEach(() => draws.mockReset());
 
 describe('L1Cache', () => {
   let cache: L1Cache<string>;
@@ -865,6 +876,158 @@ describe('L1Cache', () => {
       vi.advanceTimersByTime(1_500); // 0.5s left, below the 0.9s threshold floor
       expect(cache.getWithSwr('deleted').shouldRefresh).toBe(true);
       expect(cache.getWithSwr('rewritten').shouldRefresh).toBe(true);
+    });
+  });
+
+  describe('SWR jitter', () => {
+    // ttl 1000 ms, ratio 0.5: the threshold is 500 ms ±10%, so the band runs
+    // from 550 ms left (t = 450) to 450 ms left (t = 550).
+    it('is drawn from secureRandomFloat by no read above the band', () => {
+      vi.useFakeTimers({ now: 0 });
+      const c = new L1Cache<string>({ swrThresholdRatio: 0.5 });
+      draws.mockClear();
+      c.set('k', 'v', 1000, 'ns');
+      const held = c.entry('k')!;
+      for (let t = 0; t < 450; t += 50) {
+        vi.setSystemTime(t);
+        c.getWithSwr('k');
+        c.hit(held, t);
+      }
+      expect(draws).not.toHaveBeenCalled();
+      vi.setSystemTime(450);
+      c.getWithSwr('k');
+      vi.setSystemTime(500);
+      c.getWithSwr('k');
+      expect(draws).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      // draw, the jitter it makes, when the entry turns stale
+      [0, 0.9, 550], // 1000 - 1000 x 0.5 x 0.9
+      [0.5, 1.0, 500],
+      [1 - 2 ** -32, 1.1, 451], // 1000 - 549.99..., so still fresh at 450
+    ])('turns stale where a draw of %s puts it (jitter %s): at %s ms', (draw, _, staleAt) => {
+      vi.useFakeTimers({ now: 0 });
+      const c = new L1Cache<string>({ swrThresholdRatio: 0.5 });
+      c.set('k', 'v', 1000, 'ns');
+      draws.mockReturnValueOnce(draw).mockReturnValueOnce(draw);
+      vi.setSystemTime(staleAt - 1);
+      expect(c.getWithSwr('k').isFresh).toBe(true);
+      vi.setSystemTime(staleAt);
+      const stale = c.getWithSwr('k');
+      expect(stale).toMatchObject({ value: 'v', isFresh: false, shouldRefresh: true });
+    });
+
+    it('reads its own clock: an extra argument is never taken for the time', () => {
+      // L1Cache is public, so a caller can hand getWithSwr to map(), which
+      // passes the index as a second argument.
+      vi.useFakeTimers({ now: 0 });
+      const c = new L1Cache<string>({ swrThresholdRatio: 0.5 });
+      c.set('k', 'v', 1000, 'ns');
+      vi.setSystemTime(1001);
+      expect(['k'].map(c.getWithSwr, c)[0]).toMatchObject({ value: null, isFresh: false });
+      expect(c.stats.entries).toBe(0);
+    });
+
+    it('never turns stale without an expiry', () => {
+      vi.useFakeTimers({ now: 0 });
+      const c = new L1Cache<string>({ swrThresholdRatio: 0.5 });
+      c.set('k', 'v', 0, 'ns');
+      vi.setSystemTime(8.64e15); // the last time a Date can hold
+      expect(c.getWithSwr('k')).toMatchObject({ isFresh: true, shouldRefresh: false });
+      expect(c.hit(c.entry('k')!, Date.now())).toBe(true);
+    });
+  });
+
+  describe('a held entry (entry and hit)', () => {
+    it('is served on hit while fresh, and marked most recently used', () => {
+      const c = new L1Cache<string>({ maxEntries: 2 });
+      c.set('a', 'A', 10_000, 'ns');
+      c.set('b', 'B', 10_000, 'ns');
+      const a = c.entry('a')!;
+      expect(a).toMatchObject({ key: 'a', value: 'A' });
+      expect(c.hit(a, Date.now())).toBe(true);
+      c.set('c', 'C', 10_000, 'ns'); // evicts b, now the least recently used
+      expect(c.get('b')).toBeNull();
+      expect(c.get('a')).toBe('A');
+    });
+
+    it('is refused on hit from the top of the jitter band, leaving the refresh decision to getWithSwr', () => {
+      vi.useFakeTimers({ now: 0 });
+      const c = new L1Cache<string>({ swrThresholdRatio: 0.5 });
+      c.set('k', 'v', 1000, 'ns');
+      const held = c.entry('k')!;
+      expect(c.hit(held, 449)).toBe(true);
+      expect(c.hit(held, 450)).toBe(false);
+      draws.mockReturnValueOnce(0.5); // stale from t = 500
+      vi.setSystemTime(500);
+      expect(c.getWithSwr('k')).toMatchObject({ value: 'v', shouldRefresh: true });
+    });
+
+    it.each([-0.5, -Infinity])(
+      'is served on hit only until it expires under a swrThresholdRatio of %s',
+      (swrThresholdRatio) => {
+        vi.useFakeTimers({ now: 0 });
+        const c = new L1Cache<string>({ swrThresholdRatio });
+        c.set('k', 'v', 1000, 'ns');
+        const held = c.entry('k')!;
+        expect(c.hit(held, 999)).toBe(true);
+        expect(c.hit(held, 1000)).toBe(false);
+      }
+    );
+
+    it('is served on hit until it expires when SWR is off', () => {
+      vi.useFakeTimers({ now: 0 });
+      const c = new L1Cache<string>({ swrEnabled: false, swrThresholdRatio: 0.5 });
+      c.set('k', 'v', 1000, 'ns');
+      const held = c.entry('k')!;
+      expect(c.hit(held, 999)).toBe(true);
+      expect(c.hit(held, 1000)).toBe(false);
+    });
+
+    it('is never served on hit when its value is null, which L1 does not serve', () => {
+      const c = new L1Cache<string | null>();
+      c.set('k', null, 10_000, 'ns');
+      expect(c.hit(c.entry('k')!, Date.now())).toBe(false);
+    });
+
+    const event = (e: Partial<InvalidationEvent>): InvalidationEvent =>
+      ({ sourceInstance: 'another instance', timestamp: Date.now(), ...e }) as InvalidationEvent;
+    it.each<[string, (c: L1Cache<string>) => void]>([
+      [
+        'expiry',
+        (c) => {
+          vi.useFakeTimers({ now: Date.now() + 20_000 });
+          c.getWithSwr('k');
+        },
+      ],
+      ['eviction', (c) => c.set('other', 'o', 10_000, 'other')],
+      ['delete', (c) => c.delete('k')],
+      ['invalidateByKey', (c) => c.invalidateByKey('k')],
+      ['invalidateByNamespace', (c) => c.invalidateByNamespace('ns')],
+      ['invalidateAll', (c) => c.invalidateAll()],
+      ['clear', (c) => c.clear()],
+      ['a global invalidation event', (c) => c.handleInvalidationEvent(event({ level: 'global' }))],
+      [
+        'a namespace invalidation event',
+        (c) => c.handleInvalidationEvent(event({ level: 'namespace', namespace: 'ns' })),
+      ],
+      ['a write under its key', (c) => c.set('k', 'new', 10_000, 'ns')],
+      [
+        'a completed refresh',
+        (c) => c.completeRefresh('k', 'new', 10_000, c.getWithSwr('k').versionToken, 'ns'),
+      ],
+      ['a write too large for L1', (c) => c.set('k', 'x'.repeat(4096), 10_000, 'ns')],
+    ])('is never served on hit once %s has removed it, and its value is let go', (_, remove) => {
+      for (const namespaceIndex of [true, false]) {
+        const c = new L1Cache<string>({ maxEntries: 1, maxMemory: 8192, namespaceIndex });
+        c.set('k', 'v', 10_000, 'ns');
+        const held = c.entry('k')!;
+        expect(c.hit(held, Date.now())).toBe(true);
+        remove(c);
+        expect(c.hit(held, Date.now())).toBe(false);
+        expect(held.value).toBeNull();
+      }
     });
   });
 

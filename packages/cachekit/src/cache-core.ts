@@ -12,7 +12,7 @@ import type { Backend, L1Metrics, LockableBackend } from './backends/types.js';
 import type { InvalidationEvent } from './l1/types.js';
 import type { MetricsCollector, MetricsConfig } from './metrics/prometheus.js';
 import { logError } from './logger.js';
-import { L1Cache } from './l1/lru-cache.js';
+import { L1Cache, type L1Entry } from './l1/lru-cache.js';
 import { ReliabilityExecutor } from './reliability/executor.js';
 import {
   BackgroundRefreshManager,
@@ -1729,7 +1729,7 @@ export class CacheImpl implements SecureCache {
     // A cache that encrypts keeps no plaintext argument, and with L1 off a
     // memoised key would save nothing a network call does not dwarf. A memo also
     // needs the runtime's timer to empty itself on time; without one it keeps none.
-    const autoKeys = new AutoKeys(
+    const autoKeys = new AutoKeys<L1Entry<unknown>>(
       !interop && !this.encryption && this.l1 !== null ? this.setUnrefTimeout : undefined
     );
     if (autoKeys.memoising) this.trackKeyMemo(autoKeys);
@@ -1762,9 +1762,26 @@ export class CacheImpl implements SecureCache {
             'or key transform — see Backend.keyPrefix / Backend.transformsKeys'
         );
       }
-      const cacheKey = interop
-        ? generateInteropKey(options.namespace, interopOperation, args)
-        : autoKeys.key(options.namespace, args, !options.skipL1, options.ttl ?? this.defaultTtl);
+      // The options are the caller's object, so reading one can run the
+      // caller's code (a getter): read them before the clock, not after.
+      const namespace = options.namespace;
+      const useL1 = !options.skipL1;
+      const ttl = options.ttl ?? this.defaultTtl;
+      // `now` serves only the memo's window and a held-entry hit; no caller
+      // code runs between this read and either (primitive arguments only).
+      const now = Date.now();
+      const slot = interop ? undefined : autoKeys.slot(namespace, args, useL1, ttl, now);
+      const cacheKey = interop ? generateInteropKey(namespace, interopOperation, args) : slot!.key;
+
+      // A memoised call holds the L1 entry it was last served from: while L1
+      // still holds that entry and it is above its SWR jitter band, serve it on that one check,
+      // with no lookup by key. Only a memo keeps an entry, and a memo means an
+      // unencrypted cache with L1 on, so the stored object is the value.
+      const held = slot?.entry;
+      if (held !== undefined && this.l1!.hit(held, now)) {
+        this.recordHit('l1');
+        return held.value as TResult;
+      }
 
       // Check L1 with SWR. On platforms that cancel fire-and-forget work at
       // response return (Workers), SWR only runs when a per-request
@@ -1772,7 +1789,7 @@ export class CacheImpl implements SecureCache {
       // no refresh marker is taken, so nothing can wedge, and the entry
       // simply expires and recomputes in the request path (fail-safe
       // no-SWR).
-      if (this.l1 && !options.skipL1) {
+      if (this.l1 && useL1) {
         if (this.swrRequiresWaitUntil && !waitUntil) {
           const l1Value = this.l1.get(cacheKey);
           if (l1Value !== null) {
@@ -1783,6 +1800,9 @@ export class CacheImpl implements SecureCache {
             }
           }
         } else {
+          // getWithSwr reads the clock itself: keying a call in full can run
+          // the caller's code (an object argument's getters), so `now` may be
+          // stale here.
           const swrResult = this.l1.getWithSwr(cacheKey);
 
           if (swrResult.value !== null) {
@@ -1824,6 +1844,11 @@ export class CacheImpl implements SecureCache {
                   waitUntil
                 );
               }
+              // Hold the entry for the memo's next call (see above). A call the
+              // memo does not keep (an object argument, say) has a slot of its
+              // own, discarded with the entry: one Map lookup, against the key
+              // generation that call has already paid for.
+              if (autoKeys.memoising) slot!.entry = this.l1.entry(cacheKey);
               this.recordHit('l1');
               return decoded.value;
             }
