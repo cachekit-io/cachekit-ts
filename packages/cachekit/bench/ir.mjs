@@ -409,7 +409,12 @@ for (const name of names) {
   if (base && !mismatch && !was) {
     row.error = base.failed[name];
     // A workload the base's own file lacks may measure an API the base lacks.
-    row.verdict = newNames.has(name) ? 'new (base cannot run it)' : 'INCOMPLETE (base run failed)';
+    // A noisy head run reads INCONCLUSIVE here too, as the exit code says.
+    row.verdict = !newNames.has(name)
+      ? 'INCOMPLETE (base run failed)'
+      : noisy
+        ? 'INCONCLUSIVE (A/A)'
+        : 'new (base cannot run it)';
     incomplete ||= !newNames.has(name);
   } else if (was && !mismatch) {
     const delta = b.irPerOp / was.irPerOp - 1;

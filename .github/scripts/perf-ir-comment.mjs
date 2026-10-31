@@ -24,6 +24,9 @@ const { values: opt } = parseArgs({
     'run-url': { type: 'string' },
   },
 });
+for (const name of ['reports', 'shards', 'head', 'base', 'run-url']) {
+  if (!opt[name]) throw new Error(`--${name} is required`);
+}
 const shards = Array.from({ length: Number(opt.shards) }, (_, k) => {
   const read = (file) => {
     const path = join(opt.reports, `instruction-counts-${k + 1}`, file);
