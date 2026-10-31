@@ -57,8 +57,8 @@ if (sameBuild) {
   lines.push(
     `### Instruction counts: PASS (no runtime change)`,
     '',
-    `Head \`${head}\` and base ${opt.base} build to the same \`dist/\`, NAPI and wasm ` +
-      `(hash \`${sameBuild}\`), so there is nothing to measure.`
+    `Head \`${head}\` and base ${opt.base} hash alike (\`--build-hash\` \`${sameBuild}\`): ` +
+      'nothing the workloads run has changed, so there is nothing to measure.'
   );
 } else {
   const rows = new Map(reports.flatMap((r) => r.rows).map((r) => [r.workload, r]));
@@ -68,7 +68,7 @@ if (sameBuild) {
     : 'INCOMPLETE';
   if (rank(verdict) >= rank('warn')) verdict = 'PASS';
   // A failing exit code with no failing row, or a shard with no report, is still not a pass.
-  const exited = shards.every((s) => s.report?.exitCode === 0 || s.sameBuild);
+  const exited = shards.every((s) => s.report?.exitCode === 0);
   if (verdict === 'PASS' && !exited) verdict = 'INCOMPLETE';
   const t = report?.thresholds;
   const own = [...rows.values()]

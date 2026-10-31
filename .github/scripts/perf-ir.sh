@@ -25,7 +25,8 @@ mkdir -p "$OUT"
 
 # The workloads a tree's own bench file defines, in its order; none when it
 # has no bench file. A file that fails to load fails the step: an empty list
-# would mark every workload new, and new workloads are not gated.
+# would let any workload that fails on the base read `new`, which is not
+# gated, instead of INCOMPLETE.
 workloads() {
   [[ -f $1/packages/cachekit/bench/ir-workload.mjs ]] || return 0
   (cd "$1/packages/cachekit" && node --input-type=module -e \

@@ -73,8 +73,9 @@ const V8_FLAGS = [
 const N = Object.fromEntries(Object.entries(WORKLOADS).map(([name, w]) => [name, w.n]));
 const AA_LIMIT = 0.004;
 const FAIL = 0.02;
-// A workload may set its own `fail` where a measured A/A in CI calls for it;
-// it then warns at half that, as the default does.
+// A workload may set its own `fail` where CI measured it moving on builds whose
+// changes it never runs (see the note beside each in ir-workload.mjs); it then
+// warns at half that, as the default does.
 const failAt = (name) => WORKLOADS[name].fail ?? FAIL;
 
 const { values: opt } = parseArgs({
