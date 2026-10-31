@@ -2,10 +2,9 @@
 # Self-test for `bench/ir.mjs --build-hash`, on a synthetic three-package tree.
 # The instruction-count gate skips measuring when the base and head hashes
 # match, so a file the workloads load that the hash misses lets a regression
-# pass unmeasured. The hash must move when a shipped file of any package
-# changes (here the wasm glue JavaScript, the NAPI loader, a package.json and
-# the lockfile), stay put when an unshipped file changes, and not depend on
-# where the tree sits. Needs node; no build, no valgrind.
+# pass unmeasured. The hash must move when a shipped file of any package or
+# the lockfile changes, stay put when an unshipped file changes, and not
+# depend on where the tree sits. Needs node; no build, no valgrind.
 set -euo pipefail
 src=$(cd "$(dirname "$0")/../../packages/cachekit/bench" && pwd)
 work=$(mktemp -d)
@@ -13,10 +12,11 @@ trap 'rm -rf "${work:?}"' EXIT
 
 tree() {
   local root=$1 sdk=$1/packages/cachekit core=$1/packages/cachekit-core-ts wasm=$1/packages/cachekit-core-wasm
-  mkdir -p "$sdk/dist" "$sdk/bench" "$sdk/node_modules/@cachekit-io" "$core" "$wasm/pkg"
+  mkdir -p "$sdk/dist/serialization" "$sdk/bench" "$sdk/node_modules/@cachekit-io" "$core" "$wasm/pkg"
   cp "$src"/ir.mjs "$src"/ir-workload.mjs "$src"/ir-seconds.json "$sdk/bench/"
   echo '{"files":["dist","README.md"]}' > "$sdk/package.json"
   echo 'export const x = 1;' > "$sdk/dist/index.js"
+  echo 'export const generateKey = () => "";' > "$sdk/dist/serialization/key-generator.js"
   echo 'readme' > "$sdk/README.md"
   echo '{"main":"./index.js","files":["index.js","*.node"]}' > "$core/package.json"
   echo 'module.exports = require("./core.linux-x64-gnu.node");' > "$core/index.js"
@@ -50,7 +50,9 @@ expect() { # expect same|differs <label> <file> <line to append>
 
 tree "$work/a"
 tree "$work/a-copy-at-another-path"
-if [[ $(hash "$work/a") != $(hash "$work/a-copy-at-another-path") ]]; then
+here=$(hash "$work/a")
+there=$(hash "$work/a-copy-at-another-path")
+if [[ $here != "$there" ]]; then
   echo "FAIL: identical trees at different paths hash differently"
   fail=1
 else
@@ -61,7 +63,16 @@ expect differs 'wasm module' packages/cachekit-core-wasm/pkg/glue_bg.wasm 'x'
 expect differs 'NAPI loader' packages/cachekit-core-ts/index.js '// x'
 expect differs 'NAPI binary' packages/cachekit-core-ts/core.linux-x64-gnu.node 'x'
 expect differs 'SDK dist' packages/cachekit/dist/index.js '// x'
+expect differs 'nested SDK dist' packages/cachekit/dist/serialization/key-generator.js '// x'
 expect differs 'package.json' packages/cachekit-core-wasm/package.json ' '
 expect differs 'lockfile' pnpm-lock.yaml '# x'
 expect same 'unshipped README of a core' packages/cachekit-core-ts/README.md 'x'
+# A files glob that matches nothing would add nothing: the hash must refuse it.
+echo '{"main":"./index.js","files":["index.js","*.dylib"]}' > "$work/a/packages/cachekit-core-ts/package.json"
+if hash "$work/a" > /dev/null 2>&1; then
+  echo "FAIL: a files glob that matches nothing was hashed"
+  fail=1
+else
+  echo "ok: a files glob that matches nothing fails the run"
+fi
 exit "$fail"
