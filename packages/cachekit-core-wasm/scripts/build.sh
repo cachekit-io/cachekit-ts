@@ -26,6 +26,9 @@ wasm-bindgen --target web --out-dir pkg \
 # Rust emits bulk-memory / nontrapping-fptoint ops by default, and
 # .cargo/config.toml enables simd128; workerd supports all three, wasm-opt just
 # needs them enabled to validate. -O3 matches the crate's opt-level.
+# Probe: copy the key-hash input in the JS glue (a JavaScript-only change).
+sed -i 's/^export function blake2b256Hex(data) {$/&\n    data = new Uint8Array(Array.from(data));/' pkg/cachekit_core_wasm.js
+
 wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-simd \
   -o pkg/cachekit_core_wasm_bg.wasm pkg/cachekit_core_wasm_bg.wasm
 
