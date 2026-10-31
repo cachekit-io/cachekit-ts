@@ -62,3 +62,16 @@ describe.skipIf(!process.features.require_module).each(['esm', 'cjs'] as const)(
     });
   }
 );
+
+// Node 22.12 and 22.13 refuse to require a module an import graph has linked
+// but not evaluated, which is where noble stands when the package loads here.
+it('loads in an app that imports @noble/hashes itself after the package', async () => {
+  const { stdout } = await run(
+    process.execPath,
+    [join(pkgDir, 'test', 'node-entry', 'noble-after-probe.mjs')],
+    { timeout: 20_000 }
+  );
+  const { key, fileName } = JSON.parse(stdout) as { key: string; fileName: string };
+  expect(key).toBe('probe:405f09a3617bcc1425ea95b9840d9c2713e3ecebd5a3227abc599317b732e21a');
+  expect(fileName).toBe(bytesToHex(blake2b(utf8ToBytes(key), { dkLen: 16 })));
+});

@@ -16,9 +16,10 @@ let nobleHash: typeof Blake2.blake2b | undefined;
  * @noble/hashes' BLAKE2b, loaded the first time anything hashes in JS: on
  * Node, keys hash through the binding, and loading noble costs about 5 ms of a
  * cold start. Every caller is synchronous, so the load is too, through
- * require(esm). `#noble-preload` (package.json `imports`) is noble itself where
- * that cannot run (the ES module build on Node.js 22.0 to 22.11) and in the
- * Workers entry.
+ * require(esm). `#noble-preload` (package.json `imports`) is noble itself for
+ * any resolver without the `module-sync` condition: the ES module build on
+ * Node.js 22.0 to 22.11, where require(esm) cannot run, the Workers bundle and
+ * Vitest. Everywhere else it is `no-preload.ts`.
  */
 function noble(): typeof Blake2.blake2b {
   return (nobleHash ??=
@@ -29,10 +30,20 @@ function noble(): typeof Blake2.blake2b {
 // Node.js 22's module loader keeps the async context a module is first loaded
 // in (a request's AsyncLocalStorage store) for the life of the process; 24's
 // does not. So on Node 22 and 23, noble loads here, at import, never inside a
-// request. A failure throws here too: the CommonJS build on 22.0 to 22.11 has
-// no require(esm), and loading without JS hashing would break its error paths,
-// whose log lines carry a `keyHash=` digest.
-if (Number(globalThis.process?.versions?.node?.split('.')[0]) < 24) noble();
+// request. Without require(esm) (the CommonJS build on 22.0 to 22.11) that
+// failure is final, and it throws: loaded without JS hashing, the package
+// would break its error paths, whose log lines carry a `keyHash=` digest.
+// With it, the load can still fail now and work later: Node 22.12 and 22.13
+// refuse to require a module the app's own import graph has linked but not
+// yet evaluated, as when the app imports @noble/hashes after this package.
+// noble then loads on first use, once that graph has loaded it.
+if (Number(globalThis.process?.versions?.node?.split('.')[0]) < 24) {
+  try {
+    noble();
+  } catch (error) {
+    if (!globalThis.process?.features?.require_module) throw error;
+  }
+}
 
 const HEX_DIGITS = new TextEncoder().encode('0123456789abcdef');
 const hexBytes = new Uint8Array(CACHE_KEY_HASH_LENGTH);
@@ -62,7 +73,9 @@ export function bytesToHex(bytes: Uint8Array): string {
 /** The bytes a binding's hex digest spells. */
 function hexToBytes(hex: string): Uint8Array {
   if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(hex)) {
-    throw new SyntaxError(`[cachekit] the binding returned a malformed hex digest`);
+    throw new SyntaxError(
+      `[cachekit] the binding returned a malformed hex digest (${hex.length} characters)`
+    );
   }
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.slice(2 * i, 2 * i + 2), 16);
