@@ -1,0 +1,3 @@
+# Probe: a root-level cargo profile change only.
+[profile.release]
+opt-level = 1
