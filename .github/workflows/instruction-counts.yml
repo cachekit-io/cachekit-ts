@@ -140,6 +140,9 @@ jobs:
             diff -rq --exclude=node_modules --exclude=target --exclude=src "ir/base/packages/$p" "ir/head/packages/$p" || true
           done
           cmp ir/base/pnpm-lock.yaml ir/head/pnpm-lock.yaml || true
+          diff ir/base/packages/cachekit-core-ts/index.js ir/head/packages/cachekit-core-ts/index.js | head -60 || true
+          diff ir/base/packages/cachekit-core-ts/index.d.ts ir/head/packages/cachekit-core-ts/index.d.ts | head -60 || true
+          for t in base head; do git -C "ir/$t" status --short | head; done
           for t in base head; do (cd "ir/$t/packages/cachekit" && node bench/ir.mjs --build-hash); done
 
       # What the report job reads: report.json or same-build, and the head's
