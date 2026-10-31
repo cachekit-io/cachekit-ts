@@ -902,12 +902,13 @@ export class CacheImpl implements SecureCache {
    * where a ciphertext is marked as checked (checkedL1), and the only place:
    * an L1 hit on it skips the walks, which could only pass again, since
    * decrypt re-authenticates the bytes on every hit. Bytes that reach L1 any
-   * other way are walked on every hit.
+   * other way are walked on every hit. With L1 off nothing is marked: a
+   * backend that keeps the bytes it was given would keep their marks too.
    */
   private l1Payload(value: unknown, bytes: Uint8Array, interop: boolean): unknown {
     if (!this.encryption) return value;
     const held = bytes.byteLength === bytes.buffer.byteLength ? bytes : new Uint8Array(bytes);
-    this.checkedL1.set(held, interop);
+    if (this.l1) this.checkedL1.set(held, interop);
     return held;
   }
 

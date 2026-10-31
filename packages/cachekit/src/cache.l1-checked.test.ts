@@ -93,12 +93,12 @@ describe('encrypted L1 hits on checked entries', () => {
 
   function makeCache(
     backend: Backend,
-    options: { maxDepth?: number; degradation?: boolean; compression?: boolean } = {}
+    options: { maxDepth?: number; degradation?: boolean; compression?: boolean; l1?: boolean } = {}
   ): SecureCache {
     const cache = createCache({
       backend,
       defaultTtl: 3600,
-      l1: { enabled: true, maxEntries: 100 },
+      l1: { enabled: options.l1 ?? true, maxEntries: 100 },
       encryption: { masterKey: MASTER_KEY, tenantId: TENANT },
       ...(options.maxDepth !== undefined ? { serializer: { maxDepth: options.maxDepth } } : {}),
       ...(options.degradation !== undefined
@@ -246,6 +246,19 @@ describe('encrypted L1 hits on checked entries', () => {
         consoleSpy.mockRestore();
       }
     });
+  });
+
+  it('a cache with L1 off marks nothing, so a backend that keeps the bytes keeps no marks', async () => {
+    const marks = (cache: SecureCache) =>
+      (cache as unknown as { checkedL1: WeakMap<Uint8Array, boolean> }).checkedL1;
+    const backend = new InMemoryBackend();
+    const off = makeCache(backend, { l1: false });
+    await off.set('users:10', { id: 10 });
+    expect(marks(off).has(backend.store.get('users:10')!)).toBe(false);
+
+    const on = makeCache(backend);
+    await on.set('users:11', { id: 11 });
+    expect(marks(on).get(backend.store.get('users:11')!)).toBe(false);
   });
 
   it('an interop wrap() hit decodes without the pre-scan', async () => {
