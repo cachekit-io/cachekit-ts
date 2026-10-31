@@ -268,6 +268,8 @@ const build = buildHash();
 
 const dir = mkdtempSync(join(tmpdir(), 'cachekit-ir-'));
 const irByRun = {};
+// Wall seconds under callgrind per workload, all repeats: what a shard costs.
+const seconds = Object.fromEntries(names.map((name) => [name, 0]));
 // The first error of each workload that failed; its other repeats still run.
 const failed = {};
 try {
@@ -277,11 +279,13 @@ try {
   }
   await pool(
     plan.map((p) => async () => {
+      const t0 = performance.now();
       try {
         irByRun[p.tag] = await windowIr(dir, p.tag, p.name, p.n);
       } catch (error) {
         failed[p.name] ??= String(error?.message ?? error).slice(0, 2000);
       }
+      seconds[p.name] += (performance.now() - t0) / 1000;
     }),
     jobs
   );
@@ -302,6 +306,7 @@ for (const name of measured) {
     irPerOp: Math.round(irPerOp),
     aa: (Math.max(...perOp) - Math.min(...perOp)) / irPerOp,
     perRepeat: perOp.map(Math.round),
+    seconds: Math.round(seconds[name]),
   };
   // A verdict on a NaN would read `ok`: refuse rather than pass on nothing measured.
   if (!perOp.every(Number.isFinite) || !(irPerOp > 0)) {
@@ -371,7 +376,7 @@ const rows = [];
 for (const name of names) {
   const b = benches[name];
   const was = base?.benches[name];
-  const row = { workload: name, irPerOp: b?.irPerOp, aa: b?.aa };
+  const row = { workload: name, irPerOp: b?.irPerOp, aa: b?.aa, seconds: b?.seconds };
   rows.push(row);
   if (!b) {
     row.verdict = 'INCOMPLETE (run failed)';

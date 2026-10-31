@@ -1,12 +1,14 @@
 // Render the instruction-count gate's PR comment from what perf-ir.sh left in
-// its output directory, and exit 1 unless the verdict is PASS.
+// each shard's output directory, <reports>/instruction-counts-<K>/, and exit 1
+// unless the verdict is PASS.
 //
-//   node .github/scripts/perf-ir-comment.mjs --out <dir> --head <sha> --base <label> --run-url <url>
+//   node .github/scripts/perf-ir-comment.mjs --reports <dir> --shards <N> \
+//     --head <sha> --base <label> --run-url <url>
 //
 // The verdict is read from the rows, never from a missing file: every workload
 // the head's bench file defines needs a passing row, or the comment reads
-// INCOMPLETE. That covers a run that died before writing its report, a report
-// that dropped a workload, and a compare that could not be read at all.
+// INCOMPLETE. That covers a shard that died before writing its report, a
+// report that dropped a workload, and a compare that could not be read at all.
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -15,16 +17,25 @@ const MARKER = '<!-- cachekit-instruction-count -->';
 
 const { values: opt } = parseArgs({
   options: {
-    out: { type: 'string' },
+    reports: { type: 'string' },
+    shards: { type: 'string' },
     head: { type: 'string' },
     base: { type: 'string' },
     'run-url': { type: 'string' },
   },
 });
-const read = (file) => {
-  const path = join(opt.out, file);
-  return existsSync(path) ? readFileSync(path, 'utf8') : null;
-};
+const shards = Array.from({ length: Number(opt.shards) }, (_, k) => {
+  const read = (file) => {
+    const path = join(opt.reports, `instruction-counts-${k + 1}`, file);
+    return existsSync(path) ? readFileSync(path, 'utf8') : null;
+  };
+  return {
+    sameBuild: read('same-build')?.trim(),
+    expected: read('head-workloads.txt')?.split('\n').filter(Boolean),
+    report: JSON.parse(read('report.json') ?? 'null'),
+  };
+});
+if (shards.length === 0) throw new Error('--shards must be a positive integer');
 const pct = (x, sign = false) => `${sign && x > 0 ? '+' : ''}${(x * 100).toFixed(2)}%`;
 const int = (x) => (x === undefined ? '–' : x.toLocaleString('en-US'));
 // Worst first. `new` passes: the base cannot run a workload for an API it lacks.
@@ -34,9 +45,12 @@ const rank = (verdict) => RANK.indexOf(verdict.split(' ')[0]);
 const head = opt.head.slice(0, 7);
 const lines = [MARKER];
 let verdict;
-const sameBuild = read('same-build');
-const expected = (read('head-workloads.txt') ?? '').split('\n').filter(Boolean);
-const report = JSON.parse(read('report.json') ?? 'null');
+// Every shard builds both trees, so they agree on the hash or none has it.
+const sameBuild = shards.every((s) => s.sameBuild) && shards[0].sameBuild;
+// Every shard lists all the head's workloads; one that lists none died first.
+const expected = shards.find((s) => s.expected)?.expected ?? [];
+const reports = shards.map((s) => s.report).filter(Boolean);
+const report = reports[0];
 
 if (sameBuild) {
   verdict = 'PASS';
@@ -44,18 +58,18 @@ if (sameBuild) {
     `### Instruction counts: PASS (no runtime change)`,
     '',
     `Head \`${head}\` and base ${opt.base} build to the same \`dist/\`, NAPI and wasm ` +
-      `(hash \`${sameBuild.trim()}\`), so there is nothing to measure.`
+      `(hash \`${sameBuild}\`), so there is nothing to measure.`
   );
 } else {
-  const rows = new Map((report?.rows ?? []).map((r) => [r.workload, r]));
-  if (expected.length === 0) expected.push(...rows.keys());
+  const rows = new Map(reports.flatMap((r) => r.rows).map((r) => [r.workload, r]));
   const verdicts = expected.map((name) => rows.get(name)?.verdict ?? 'INCOMPLETE (no row)');
   verdict = verdicts.length
     ? verdicts.reduce((a, b) => (rank(b) < rank(a) ? b : a)).split(' ')[0]
     : 'INCOMPLETE';
   if (['warn', 'improved', 'ok', 'new'].includes(verdict)) verdict = 'PASS';
-  // A failing exit code with no failing row is still not a pass.
-  if (verdict === 'PASS' && report?.exitCode !== 0) verdict = 'INCOMPLETE';
+  // A failing exit code with no failing row, or a shard with no report, is still not a pass.
+  const exited = shards.every((s) => s.report?.exitCode === 0 || s.sameBuild);
+  if (verdict === 'PASS' && !exited) verdict = 'INCOMPLETE';
   const t = report?.thresholds;
   lines.push(
     `### Instruction counts: ${verdict}`,
@@ -70,8 +84,11 @@ if (sameBuild) {
         : ''),
     ''
   );
-  if (!report) lines.push('**The run left no report**: see the job log.', '');
-  for (const n of report?.notes ?? []) lines.push(`> ${n.split('\n')[0]}`, '');
+  shards.forEach((s, k) => {
+    if (!s.report && !s.sameBuild)
+      lines.push(`**Shard ${k + 1} left no report**: see its job log.`, '');
+  });
+  for (const n of new Set(reports.flatMap((r) => r.notes))) lines.push(`> ${n.split('\n')[0]}`, '');
   lines.push(
     '| workload | base Ir/op | head Ir/op | delta | A/A base / head | verdict |',
     '|---|---:|---:|---:|---:|---|'

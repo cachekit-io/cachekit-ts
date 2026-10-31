@@ -8,6 +8,10 @@ name: Instruction counts
 # measured against that package's last release tag instead
 # (.github/scripts/perf-ir-base.sh). The verdict per workload goes to one PR
 # comment, edited in place.
+#
+# The shards split the workloads, each building both trees, so the check
+# finishes inside 30 minutes. The base job picks the base once, so every
+# shard and the comment name the same commit, even when a shard is re-run.
 
 on:
   pull_request:
@@ -26,11 +30,38 @@ defaults:
   run:
     shell: bash
 
+env:
+  SHARDS: 8 # keep in step with the gate job's matrix
+
 jobs:
+  base:
+    name: Instruction counts base
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.base.outputs.sha }}
+      label: ${{ steps.base.outputs.label }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 2 # the merge commit and its first parent
+          persist-credentials: false
+
+      - name: Pick the base
+        id: base
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: bash .github/scripts/perf-ir-base.sh
+
   gate:
-    name: Instruction counts
+    name: Instruction counts (shard ${{ matrix.shard }})
+    needs: base
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       # Must match the wasm-bindgen version pinned in the crate's Cargo.lock;
       # scripts/build.sh fails loudly on drift. Same pins as ci.yml.
@@ -39,18 +70,8 @@ jobs:
       WASM_BINDGEN_SHA256: 3039f38f65fe237b640cf06a140c919ca8d717ec5012146d145d3f27bb4d6b28 # pragma: allowlist secret
       BINARYEN_SHA256: b5bf1f0eaf17c63ee588ff7a5954dc8f6ce2c26989051c66f24dfe9ece3e46db # pragma: allowlist secret
     steps:
-      # A comment that reads INCOMPLETE until the render step writes the
-      # verdict over it. It is always uploaded, so a job that dies early still
-      # replaces an earlier run's PASS.
-      - name: Start with no verdict
-        env:
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          OUT=$RUNNER_TEMP/perf-ir
-          echo "OUT=$OUT" >> "$GITHUB_ENV"
-          mkdir -p "$OUT"
-          printf '%s\n' '<!-- cachekit-instruction-count -->' '### Instruction counts: INCOMPLETE' '' \
-            'The job ended before it rendered a verdict.' '' "[Run log]($RUN_URL)" > "$OUT/comment.md"
+      - name: Output directory
+        run: echo "OUT=$RUNNER_TEMP/perf-ir" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -98,47 +119,70 @@ jobs:
           sudo apt-get install -y -q --no-install-recommends valgrind
           valgrind --version
 
-      - name: Pick the base
-        id: base
-        env:
-          HEAD_REF: ${{ github.head_ref }}
-        run: bash .github/scripts/perf-ir-base.sh
-
       - name: Gate the PR against its base
         env:
-          BASE_SHA: ${{ steps.base.outputs.sha }}
+          BASE_SHA: ${{ needs.base.outputs.sha }}
+          IR_ARGS: --shard ${{ matrix.shard }}/${{ env.SHARDS }}
         run: bash .github/scripts/perf-ir.sh
 
+      # What the report job reads: report.json or same-build, and the head's
+      # workload list. A shard that died early uploads less, and its workloads
+      # read INCOMPLETE.
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        if: ${{ !cancelled() }}
+        with:
+          name: instruction-counts-${{ matrix.shard }}
+          path: ${{ env.OUT }}
+          if-no-files-found: ignore
+          retention-days: 14
+          overwrite: true # a re-run attempt replaces its shard's output
+
+  # The shards' verdicts as one comment body, rendered with read-only scopes.
+  # This job's result is the gate's verdict.
+  report:
+    name: Instruction counts
+    needs: [base, gate]
+    if: ${{ !cancelled() && needs.base.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 2 # the merge commit the shards measured, and its parents
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: instruction-counts-[0-9]*
+          path: ${{ runner.temp }}/reports # one directory per shard
+
       - name: Render the comment
-        if: ${{ !cancelled() && steps.base.outcome == 'success' }}
         env:
-          BASE_LABEL: ${{ steps.base.outputs.label }}
+          BASE_LABEL: ${{ needs.base.outputs.label }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           status=0
-          node .github/scripts/perf-ir-comment.mjs --out "$OUT" --head "$(git rev-parse HEAD^2)" \
-            --base "\`$BASE_LABEL\`" --run-url "$RUN_URL" > "$OUT/rendered.md" || status=$?
-          [[ -s $OUT/rendered.md ]] && mv "$OUT/rendered.md" "$OUT/comment.md"
-          cat "$OUT/comment.md" >> "$GITHUB_STEP_SUMMARY"
+          node .github/scripts/perf-ir-comment.mjs --reports "$RUNNER_TEMP/reports" --shards "$SHARDS" \
+            --head "$(git rev-parse HEAD^2)" --base "\`$BASE_LABEL\`" --run-url "$RUN_URL" \
+            > "$RUNNER_TEMP/comment.md" || status=$?
+          cat "$RUNNER_TEMP/comment.md" >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
         if: ${{ !cancelled() }}
         with:
-          name: instruction-counts
-          path: |
-            ${{ env.OUT }}/comment.md
-            ${{ env.OUT }}/*.json
+          name: instruction-counts-comment
+          path: ${{ runner.temp }}/comment.md
           if-no-files-found: error
           retention-days: 14
-          overwrite: true # a re-run attempt replaces the comment
+          overwrite: true
 
   # Posts the comment with a write token, without checking out the PR's code.
   # Fork PRs are skipped: their token cannot write to the PR.
   comment:
     name: Instruction counts comment
-    needs: gate
-    if: ${{ !cancelled() && github.event.pull_request.head.repo.full_name == github.repository }}
+    needs: report
+    if: ${{ !cancelled() && needs.report.result != 'skipped' && github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -146,7 +190,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: instruction-counts
+          name: instruction-counts-comment
           path: ${{ runner.temp }}/perf-ir
 
       - name: Post or update the PR comment
