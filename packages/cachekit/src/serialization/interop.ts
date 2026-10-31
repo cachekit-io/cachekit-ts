@@ -426,7 +426,6 @@ function encodeCanonical(
   sink: ChunkSink
 ): void {
   const maxDepth = profile === 'args' ? KEY_GEN_MAX_DEPTH : DEFAULT_MAX_DEPTH;
-  // The decode pre-scan's rule: decodeInteropValueTrusted relies on the two matching.
   if (depth > maxDepth) {
     throw new SerializationError(`Interop ${profile} structure exceeds max depth of ${maxDepth}`);
   }
@@ -646,7 +645,7 @@ export function encodeInteropValueCounted(value: unknown, count: ObjectCount): U
 /**
  * Materialise the one MessagePack document in `data`. Call only on bytes
  * assertDecodeDepth accepts (decodeInteropValueCounted runs it first;
- * decodeInteropValueTrusted takes bytes it accepted before, or would): that
+ * decodeInteropValueTrusted takes bytes it accepted before): that
  * walk proves every header is backed by the input and the nesting is within
  * bound, so this reader does no bounds checks of its own. It still checks it
  * ended exactly at `data.length`, so a width disagreement between the two
@@ -896,14 +895,12 @@ export function decodeInteropValueCounted<T>(data: Uint8Array, count?: ObjectCou
 
 /**
  * decodeInteropValueCounted without the depth pre-scan, for bytes this
- * process has already checked: it decoded them through
- * decodeInteropValueCounted, pre-scan included, or wrote them with
- * encodeInteropValueCounted, whose depth bound is the pre-scan's rule (a test
- * pins that). So the pre-scan could not fail on them, and
- * readInteropDocument's precondition holds. The input cap, the collection cap
- * and the post-decode pass (depth, sentinel revival) still run.
- * Package-internal: only the cache calls it, on L1's own copy of bytes it
- * checked. Never call it on bytes read from a backend.
+ * process already decoded through decodeInteropValueCounted, pre-scan
+ * included: it could not fail on them again, so readInteropDocument's
+ * precondition holds. The input cap, the collection cap and the post-decode
+ * pass (depth, sentinel revival) still run. Package-internal: only the cache
+ * calls it, on L1's own copy of bytes an earlier hit walked. Never call it on
+ * bytes read from a backend.
  */
 export function decodeInteropValueTrusted<T>(data: Uint8Array): T {
   assertInteropInput(data);

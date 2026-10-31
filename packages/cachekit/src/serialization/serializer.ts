@@ -476,7 +476,6 @@ export function normalize(
   maxCollectionSize: number,
   walk: NormalizeWalk
 ): unknown {
-  // The decode walks' rule: decodeTrusted relies on the two matching.
   if (depth > maxDepth) {
     throw tooDeep(maxDepth);
   }
@@ -815,7 +814,6 @@ export class ValueEncoder {
 
   /** normalize(value, depth) then encode() at depth + 1, as one step. */
   private value(value: unknown, depth: number): void {
-    // The decode walks' rule: decodeTrusted relies on the two matching.
     if (depth > this.maxDepth) throw tooDeep(this.maxDepth);
     switch (typeof value) {
       case 'undefined':
@@ -1359,12 +1357,11 @@ export function decodeCounted<T>(
 
 /**
  * decodeCounted without the depth pre-scan and the post-decode walk, for bytes
- * this process has already checked under `config`: it decoded them through
- * decodeCounted, both walks included, or wrote them with encodeCounted, whose
- * depth bound is the walks' rule (a test pins that). So neither walk could
- * fail on them. The input cap and the decoder's collection bounds still
- * apply. Package-internal: only the cache calls it, on L1's own copy of bytes
- * it checked. Never call it on bytes read from a backend.
+ * this process already decoded through decodeCounted under `config`, both
+ * walks included: neither could fail on them again. The input cap and the
+ * decoder's collection bounds still apply. Package-internal: only the cache
+ * calls it, on L1's own copy of bytes an earlier hit walked. Never call it on
+ * bytes read from a backend.
  */
 export function decodeTrusted<T>(data: Uint8Array, config: SerializerConfig): T {
   assertDecodeSize(data, config);

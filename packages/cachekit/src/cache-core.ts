@@ -334,7 +334,7 @@ function describeBackendFailure(err: unknown): string {
 export class CacheImpl implements SecureCache {
   private readonly backend: Backend;
   private readonly l1: L1Cache | null;
-  /** L1's ciphertext copies l1Payload marked, each with the `interop` mode it was checked under. */
+  /** Copies decodeL1Entry swapped into L1, each with the `interop` mode it walked them in. */
   private readonly trustedL1 = new WeakMap<Uint8Array, boolean>();
   private readonly reliabilityExecutor: ReliabilityExecutor;
   private readonly backgroundRefresh: BackgroundRefreshManager;
@@ -872,40 +872,8 @@ export class CacheImpl implements SecureCache {
   }
 
   /**
-   * The ciphertext an encrypted L1 keeps: a copy of `bytes` only this cache
-   * holds. A backend may keep the buffer it returned or was given, and nothing
-   * stops it writing to that buffer later; L1's copy is out of its reach,
-   * which is what lets l1Payload trust it. The copy is exact-size too, so it
-   * never pins a pooled slab (a Node Buffer from a backend can be a view onto
-   * a shared 8 KiB slab; cachekit-py guards the same edge by refusing
-   * memoryview/bytearray in L1Cache.put). A plaintext cache, or one with L1
-   * off, keeps no bytes in L1, so it gets `bytes` back as they are, and so
-   * does ciphertext decodeEntry refuses for its size, on every read, before
-   * any decode: junk of any length is never copied.
-   */
-  private l1Copy(bytes: Uint8Array, interop: boolean): Uint8Array {
-    if (!this.encryption || !this.l1 || bytes.length > this.maxCiphertext(interop)) return bytes;
-    return new Uint8Array(bytes);
-  }
-
-  /**
-   * The longest ciphertext decodeEntry decrypts: the longest plaintext this
-   * cache would decode, plus nonce and tag. The AAD binds useEnvelope, so a
-   * compression-off entry that decrypts is a plain serialized value, which
-   * decode() caps at maxDecodedSize.
-   */
-  private maxCiphertext(interop: boolean): number {
-    const maxPlaintext = interop
-      ? DEFAULT_MAX_DECODED_SIZE // decodeInteropValue's fixed input cap
-      : this.useEnvelope(interop)
-        ? maxEnvelopeInputSize(this.serializerConfig.maxDecodedSize)
-        : this.serializerConfig.maxDecodedSize;
-    return maxPlaintext + AEAD_OVERHEAD_BYTES;
-  }
-
-  /**
-   * What L1 should hold for an entry: the ciphertext L2 holds, in L1's own
-   * copy (l1Copy), when the cache is encrypted, the decoded value otherwise.
+   * What L1 should hold for an entry: the same ciphertext L2 holds when the
+   * cache is encrypted, the decoded value otherwise.
    *
    * Zero-knowledge is a property of every layer, not just the backend:
    * it is what cachekit-py does (its L1Cache stores bytes and
@@ -915,21 +883,19 @@ export class CacheImpl implements SecureCache {
    * would outlive the key release in close(), since L1 entries are held
    * independently of tenant keys.
    *
-   * `bytes` comes from l1Copy, and every caller has checked it under
-   * `interop`: getEntry decoded that copy, depth walks included, and setEntry
-   * copied what this process encoded, under the depth rule the walks apply.
-   * So this is the one place a ciphertext is marked as trusted (trustedL1). A
-   * hit on it skips the depth pre-scan, and in auto mode validateDepth: no
-   * one outside this cache can write to the copy, so they could only pass
-   * again. Bytes that reach L1 any other way are walked on every hit. With L1
-   * off, `bytes` is the backend's own buffer, so it is not marked. Ciphertext
-   * over maxCiphertext is never copied, and every hit on it is refused for its
-   * size before decrypt.
+   * The bytes are copied when they are a window into a larger buffer: a Node
+   * Buffer from the backend is a view onto a shared 8 KiB pool slab, and
+   * retaining one for the entry's TTL pins the whole slab. cachekit-py guards
+   * the same edge by refusing memoryview/bytearray in L1Cache.put. This guards
+   * slab pinning only — it does NOT defend against a backend that mutates a
+   * buffer it already handed over. Every in-tree backend returns an owned,
+   * exact-size Uint8Array (redis, memcached, cachekitio, workers-kv,
+   * workers-cache-api) and file.ts's narrower header view lands in the copy
+   * branch; a third-party Backend that recycles buffers must copy on its side.
    */
-  private l1Payload(value: unknown, bytes: Uint8Array, interop: boolean): unknown {
+  private l1Payload(value: unknown, bytes: Uint8Array): unknown {
     if (!this.encryption) return value;
-    if (this.l1) this.trustedL1.set(bytes, interop);
-    return bytes;
+    return bytes.byteLength === bytes.buffer.byteLength ? bytes : new Uint8Array(bytes);
   }
 
   /**
@@ -940,7 +906,7 @@ export class CacheImpl implements SecureCache {
    * both paths handle AAD (protocol#12 freezes the v0x03 component set).
    *
    * `trusted` drops the depth pre-scan, and in auto mode validateDepth. Only
-   * decodeL1Entry passes it, for bytes marked in trustedL1.
+   * decodeL1Entry passes it, for a copy marked in trustedL1.
    */
   private async decodeEntry<T>(
     bytes: Uint8Array,
@@ -955,10 +921,16 @@ export class CacheImpl implements SecureCache {
       // Refuse ciphertext longer than any plaintext this cache would decode
       // before the codec copies it in: junk of any length otherwise reaches
       // decrypt, which allocates for all of it before the tag check fails.
-      const maxCiphertext = this.maxCiphertext(interop);
-      if (plaintext.length > maxCiphertext) {
+      // The AAD binds useEnvelope, so a compression-off entry that decrypts
+      // is a plain serialized value, which decode() caps at maxDecodedSize.
+      const maxPlaintext = interop
+        ? DEFAULT_MAX_DECODED_SIZE // decodeInteropValue's fixed input cap
+        : useEnvelope
+          ? maxEnvelopeInputSize(this.serializerConfig.maxDecodedSize)
+          : this.serializerConfig.maxDecodedSize;
+      if (plaintext.length > maxPlaintext + AEAD_OVERHEAD_BYTES) {
         throw new ValueTooLargeError(
-          `Ciphertext size ${plaintext.length} exceeds max ${maxCiphertext}`
+          `Ciphertext size ${plaintext.length} exceeds max ${maxPlaintext + AEAD_OVERHEAD_BYTES}`
         );
       }
       // The AAD binds useEnvelope (frozen v0x03 set, protocol#12), so an entry
@@ -1022,10 +994,20 @@ export class CacheImpl implements SecureCache {
   /**
    * Decode a value served from L1. For a secure cache that is a decrypt +
    * AAD-verify against the cache key followed by the same unpack/deserialize
-   * the L2 path runs, less the depth pre-scan, and in auto mode validateDepth,
-   * for bytes this cache checked when it stored them (see l1Payload) — an L1
-   * hit is no longer free, which is the price of not keeping plaintext
-   * resident. For a plaintext cache it is a cast.
+   * the L2 path runs — an L1 hit is no longer free, which is the price of not
+   * keeping plaintext resident. For a plaintext cache it is a cast.
+   *
+   * Verify once, on the first hit. The bytes a fill gives L1 can be a buffer
+   * the backend still holds (the one it returned, or the one setEntry gave
+   * it), and nothing stops a backend writing to it later. So the first hit
+   * copies them, decodes the copy as an L2 read does, depth walks included,
+   * and swaps the copy into L1 in their place (if L1 still holds them),
+   * marked in trustedL1 with the mode it was walked in. No one outside this
+   * cache can reach the copy and decrypt re-authenticates it on every hit, so
+   * later hits in that mode skip the depth pre-scan, and in auto mode
+   * validateDepth: both could only pass again. Fills pay nothing for this
+   * (copying at every fill cost an encrypted 100 B set 5.8% more
+   * instructions).
    *
    * Drops the L1 entry and returns null when a secure entry will not decrypt
    * (rotated key, tampered heap, an entry written under a different envelope
@@ -1055,8 +1037,16 @@ export class CacheImpl implements SecureCache {
           `L1 entry for a secure cache is not ciphertext bytes (got ${typeof stored})`
         );
       }
-      const trusted = this.trustedL1.get(stored) === interop;
-      return { value: (await this.decodeEntry<T>(stored, key, interop, trusted)).value };
+      if (this.trustedL1.get(stored) === interop) {
+        return { value: (await this.decodeEntry<T>(stored, key, interop, true)).value };
+      }
+      // Copied before the decode, so the copy holds exactly the bytes the walks pass.
+      const own = new Uint8Array(stored);
+      const { value } = await this.decodeEntry<T>(own, key, interop);
+      // A rewrite, refresh, invalidation or eviction since l1.get wins: then
+      // nothing is swapped and the copy is dropped.
+      if (this.l1?.replace(key, stored, own)) this.trustedL1.set(own, interop);
+      return { value };
     } catch (error) {
       this.l1?.invalidateByKey(key);
       this.recordFailure('l1_decrypt', error);
@@ -1152,11 +1142,7 @@ export class CacheImpl implements SecureCache {
     // A miss (counted above unless probed) or a backend failure degradation
     // absorbed.
     if (fetched === null) return null;
-    const { l1Bound, isStale, receivedAt } = fetched;
-    // A read that may fill L1 decodes L1's own copy, so the bytes L1 keeps are
-    // the bytes the depth walks passed, whatever the backend does with its
-    // buffer meanwhile (see l1Copy).
-    const data = l1 && !isStale ? this.l1Copy(fetched.data, interop) : fetched.data;
+    const { data, l1Bound, isStale, receivedAt } = fetched;
 
     // Decrypt, unpack, deserialize — the same sequence an L1 hit runs. The
     // failure keeps the degradation contract it had inside the executor:
@@ -1204,14 +1190,7 @@ export class CacheImpl implements SecureCache {
         // freshness check into `Infinity > Infinity` — permanently stale,
         // arming a spurious background refresh per marker window, forever.
         const l1TtlMs = Number.isFinite(l1TtlSeconds) ? l1TtlSeconds * 1000 : 0;
-        l1.set(
-          key,
-          this.l1Payload(value, data, interop),
-          l1TtlMs,
-          namespace,
-          serializedSize,
-          count
-        );
+        l1.set(key, this.l1Payload(value, data), l1TtlMs, namespace, serializedSize, count);
         this.publishL1Stats();
       }
     }
@@ -1344,7 +1323,7 @@ export class CacheImpl implements SecureCache {
     // refresh gets nothing to store, the stale entry stays, and the refresh
     // re-runs the origin once per refresh-marker window.
     const l1Write: L1Write = {
-      l1: this.l1Payload(value, this.l1Copy(data, interop), interop),
+      l1: this.l1Payload(value, data),
       serializedSize: serialized.length,
       count,
     };

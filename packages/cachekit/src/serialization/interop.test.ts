@@ -569,11 +569,12 @@ describe('interop value decoding', () => {
   });
 });
 
-// An encrypted L1 hit on an interop entry this process encoded decodes it
-// through decodeInteropValueTrusted, which skips the pre-scan. That holds only
-// if every encoding the value encoder produces passes it.
-describe('decodeInteropValueTrusted on what the encoder wrote', () => {
-  it('passes the pre-scan at and past the depth bound, and reads as the walked decode', () => {
+// An encrypted L1 hit on interop bytes an earlier hit walked decodes them
+// through decodeInteropValueTrusted, so on any input decodeInteropValueCounted
+// accepts it must return what that returns. Checked on the encoder's output
+// at the depth bound.
+describe('decodeInteropValueTrusted on input decodeInteropValueCounted accepts', () => {
+  it('reads as the walked decode does, at and past the depth bound', () => {
     const nest = (levels: number, leaf: unknown, kind: 'array' | 'map' | 'set'): unknown => {
       let v = leaf;
       for (let i = 0; i < levels; i++)

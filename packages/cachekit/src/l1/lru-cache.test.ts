@@ -1031,6 +1031,50 @@ describe('L1Cache', () => {
     });
   });
 
+  describe('replace', () => {
+    it('swaps the value in place: same expiry, LRU place, version and charge', () => {
+      vi.useFakeTimers({ now: 0 });
+      const c = new L1Cache<Uint8Array>({ maxEntries: 2 });
+      const from = new Uint8Array([1, 2, 3]);
+      const to = new Uint8Array([1, 2, 3]);
+      c.set('a', from, 1000, 'ns');
+      c.set('b', new Uint8Array(3), 1000, 'ns');
+      const { versionToken } = c.getWithSwr('a'); // a becomes most recent
+      const memoryUsed = c.stats.memoryUsed;
+
+      expect(c.replace('a', from, to)).toBe(true);
+
+      expect(c.get('a')).toBe(to);
+      expect(c.stats.memoryUsed).toBe(memoryUsed);
+      expect(c.getWithSwr('a').versionToken).toBe(versionToken);
+      c.set('c', new Uint8Array(3), 1000, 'ns'); // evicts b, the least recent
+      expect(c.get('b')).toBeNull();
+      vi.advanceTimersByTime(1000);
+      expect(c.get('a')).toBeNull();
+    });
+
+    it('changes nothing once the key no longer holds `from`', () => {
+      const from = 'from';
+      const routes: Record<string, (c: L1Cache<string>) => void> = {
+        rewrite: (c) => c.set('a', 'newer', 1000, 'ns'),
+        refresh: (c) => c.completeRefresh('a', 'refreshed', 1000, c.getWithSwr('a').versionToken),
+        invalidation: (c) => c.invalidateByKey('a'),
+        eviction: (c) => {
+          c.set('b', 'b', 1000, 'ns');
+          c.set('c', 'c', 1000, 'ns');
+        },
+      };
+      for (const [route, change] of Object.entries(routes)) {
+        const c = new L1Cache<string>({ maxEntries: 2 });
+        c.set('a', from, 1000, 'ns');
+        change(c);
+        const before = c.get('a');
+        expect(c.replace('a', from, 'to'), route).toBe(false);
+        expect(c.get('a'), route).toBe(before);
+      }
+    });
+  });
+
   describe('invalidation', () => {
     it('invalidateByKey removes single key', () => {
       cache.set('key1', 'value1', 10000, 'ns');

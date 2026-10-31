@@ -948,16 +948,17 @@ describe('encodeCounted one-pass encode', () => {
   });
 });
 
-// An encrypted L1 hit on an entry this process encoded decodes it through
-// decodeTrusted, which skips decodeCounted's two depth walks. That holds only
-// if every encoding encodeCounted produces passes both walks.
-describe('decodeTrusted on what encodeCounted wrote', () => {
+// An encrypted L1 hit on bytes an earlier hit walked decodes them through
+// decodeTrusted, so on any input decodeCounted accepts it must return what
+// decodeCounted returns. Checked on encodeCounted output, random and at the
+// depth bound.
+describe('decodeTrusted on input decodeCounted accepts', () => {
   const decodedPair = (bytes: Uint8Array, c: SerializerConfig) => {
     const walked = decodeCounted(bytes, c);
     expect(decodeTrusted(bytes, c)).toEqual(walked);
   };
 
-  it('passes both walks and decodes as decodeCounted does, on seeded random values', () => {
+  it('decodes as decodeCounted does, on seeded random values', () => {
     const seed = Number(process.env.CACHEKIT_ONE_PASS_SEED ?? 0x5eed);
     const r = rng(seed);
     let encoded = 0;
@@ -970,7 +971,7 @@ describe('decodeTrusted on what encodeCounted wrote', () => {
     expect(encoded, `CACHEKIT_ONE_PASS_SEED=${seed}`).toBeGreaterThan(1000);
   });
 
-  it('passes both walks at and past the configured maxDepth', () => {
+  it('decodes as decodeCounted does at and past the configured maxDepth', () => {
     const nest = (levels: number, leaf: unknown, array: boolean): unknown => {
       let v = leaf;
       for (let i = 0; i < levels; i++) v = array ? [v] : { n: v };

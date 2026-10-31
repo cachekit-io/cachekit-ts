@@ -279,6 +279,22 @@ export class L1Cache<T = unknown> {
   }
 
   /**
+   * Put `to` in place of `from` as the value L1 holds under `key`, if `from`
+   * still is that value, keeping the entry's expiry, LRU place, version and
+   * charge. False, and nothing changes, once the key was rewritten, refreshed,
+   * invalidated or evicted after the caller read `from`. The caller keeps the
+   * charge true: `to` must cost what `from` does (a Uint8Array of the same
+   * byteLength, say). Package-internal.
+   * @internal
+   */
+  replace(key: string, from: T, to: T): boolean {
+    const node = this.cache.get(key);
+    if (node === undefined || node.value !== from) return false;
+    node.value = to;
+    return true;
+  }
+
+  /**
    * Complete a SWR refresh, updating the cache if version matches (a value
    * charged above an eighth of maxMemory drops the entry instead; see `set`).
    * Returns false if version changed (stale refresh result).
