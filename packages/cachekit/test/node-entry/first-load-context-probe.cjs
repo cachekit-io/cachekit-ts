@@ -2,7 +2,10 @@
 // first import in a request handler does, and calls a function wrapped there;
 // then reports whether that context outlived the request:
 //
-//   node --expose-gc first-load-context-probe.cjs <path to dist/cjs/index.js> <ttl> <wait ms> [cold]
+//   node --expose-gc first-load-context-probe.cjs <path to dist/cjs/index.js> <ttl> <wait ms> [cold|js-hash]
+//
+// With `js-hash`, the request also makes the process's first hash in JS (a
+// File backend name), the point where Node.js 24 and later load @noble/hashes.
 //
 // By default the entry is loaded once outside the context and its own modules
 // (those in its directory) are then dropped from the module cache, so the load
@@ -50,6 +53,12 @@ async function request() {
     const fn = cache.wrap(async (id) => ({ id }), { namespace: 'probe', ttl: Number(ttl) });
     await fn(1);
     await fn(1);
+    if (mode === 'js-hash') {
+      // The first hash in JS: on Node.js 24 and later, it loads @noble/hashes here.
+      require(path.join(path.dirname(entry), 'serialization', 'key-generator.js')).blake2b16Hex(
+        'probe'
+      );
+    }
   });
   return new WeakRef(store);
 }
