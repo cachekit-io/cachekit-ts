@@ -31,18 +31,19 @@ function noble(): typeof Blake2.blake2b {
 // Node.js 22's module loader keeps the async context a module is first loaded
 // in (a request's AsyncLocalStorage store) for the life of the process; 24's
 // does not. So on Node 22 and 23, noble loads here, at import, never inside a
-// request. Without require(esm) (the CommonJS build on 22.0 to 22.11) that
-// failure is final, and it throws: loaded without JS hashing, the package
-// would break its error paths, whose log lines carry a `keyHash=` digest.
-// With it, the load can still fail now and work later: Node 22.12 and 22.13
-// refuse to require a module the app's own import graph has linked but not
-// yet evaluated, as when the app imports @noble/hashes after this package.
-// noble then loads on first use, once that graph has loaded it.
+// request. A failed load throws: loaded without JS hashing, the package would
+// break its error paths, whose log lines carry a `keyHash=` digest. That
+// covers the CommonJS build on 22.0 to 22.11, which has no require(esm). One
+// failure is only for now: Node 22.12 and 22.13 refuse to require a module the
+// app's own import graph has linked but not yet evaluated, as when the app
+// imports @noble/hashes after this package. noble then loads on first use,
+// once that graph has loaded it.
 if (Number(globalThis.process?.versions?.node?.split('.')[0]) < 24) {
   try {
     noble();
   } catch (error) {
-    if (!globalThis.process?.features?.require_module) throw error;
+    const { cause } = error as { cause?: { code?: unknown } };
+    if (cause?.code !== 'ERR_REQUIRE_CYCLE_MODULE') throw error;
   }
 }
 
