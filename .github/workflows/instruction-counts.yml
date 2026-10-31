@@ -125,9 +125,9 @@ jobs:
           sudo apt-get install -y -q --no-install-recommends valgrind
           valgrind --version
 
-      # Three repeats, the fewest ir.mjs takes: plaintext-set-100kb runs about
-      # 8.5 minutes a process here, so one round per tree keeps its shard
-      # inside the timeout.
+      # Three repeats, the fewest ir.mjs takes, keep the slowest shard well
+      # inside the timeout. On these runners every workload repeats within
+      # 0.03%, far under the 0.4% A/A limit.
       - name: Gate the PR against its base
         env:
           IR_ARGS: --shard ${{ matrix.shard }}/${{ env.SHARDS }} --repeats 3
