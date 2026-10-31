@@ -20,6 +20,7 @@ import {
   type L1Write,
 } from './cache/background-refresh.js';
 import {
+  decodeChecked,
   decodeCounted,
   encodeCounted,
   resolveSerializerConfig,
@@ -42,6 +43,7 @@ import {
   generateInteropKey,
   validateInteropSegment,
   encodeInteropValueCounted,
+  decodeInteropValueChecked,
   decodeInteropValueCounted,
 } from './serialization/interop.js';
 import { createInvalidationEvent } from './invalidation/event.js';
@@ -332,6 +334,12 @@ function describeBackendFailure(err: unknown): string {
 export class CacheImpl implements SecureCache {
   private readonly backend: Backend;
   private readonly l1: L1Cache | null;
+  /**
+   * Each ciphertext this cache gave L1, with the `interop` mode it was checked
+   * under (see l1Payload). An encrypted L1 hit on one decodes without the
+   * depth walks; any other bytes in L1 are walked as an L2 read is.
+   */
+  private readonly checkedL1 = new WeakMap<Uint8Array, boolean>();
   private readonly reliabilityExecutor: ReliabilityExecutor;
   private readonly backgroundRefresh: BackgroundRefreshManager;
   private readonly encryption: EncryptionLike | null;
@@ -888,10 +896,19 @@ export class CacheImpl implements SecureCache {
    * exact-size Uint8Array (redis, memcached, cachekitio, workers-kv,
    * workers-cache-api) and file.ts's narrower header view lands in the copy
    * branch; a third-party Backend that recycles buffers must copy on its side.
+   *
+   * Every caller has checked `bytes` under `interop`: getEntry decoded them,
+   * both depth walks included, and setEntry encoded them itself. So this is
+   * where a ciphertext is marked as checked (checkedL1), and the only place:
+   * an L1 hit on it skips the walks, which could only pass again, since
+   * decrypt re-authenticates the bytes on every hit. Bytes that reach L1 any
+   * other way are walked on every hit.
    */
-  private l1Payload(value: unknown, bytes: Uint8Array): unknown {
+  private l1Payload(value: unknown, bytes: Uint8Array, interop: boolean): unknown {
     if (!this.encryption) return value;
-    return bytes.byteLength === bytes.buffer.byteLength ? bytes : new Uint8Array(bytes);
+    const held = bytes.byteLength === bytes.buffer.byteLength ? bytes : new Uint8Array(bytes);
+    this.checkedL1.set(held, interop);
+    return held;
   }
 
   /**
@@ -900,11 +917,15 @@ export class CacheImpl implements SecureCache {
    * deserialize. Shared by the L2 read and the L1 read so the two tiers can
    * never drift into decoding the same entry differently — a real hazard once
    * both paths handle AAD (protocol#12 freezes the v0x03 component set).
+   *
+   * `checked` drops the depth pre-scan and the post-decode walk. Only
+   * decodeL1Entry passes it, for an entry marked in checkedL1.
    */
   private async decodeEntry<T>(
     bytes: Uint8Array,
     key: string,
-    interop: boolean
+    interop: boolean,
+    checked = false
   ): Promise<{ value: T; serializedSize: number; count: ObjectCount }> {
     const useEnvelope = this.useEnvelope(interop);
 
@@ -964,10 +985,19 @@ export class CacheImpl implements SecureCache {
     }
     // The decode's depth pre-scan counts the heap objects and values on the
     // way, so L1 can charge for them without another walk (see L1Cache.set).
+    // A checked decode runs no pre-scan and counts nothing: only an L2 read
+    // charges L1 from the count.
     const count: ObjectCount = { objects: 0, values: 0 };
-    const value = interop
-      ? decodeInteropValueCounted<T>(plaintext, count)
-      : decodeCounted<T>(plaintext, this.serializerConfig, count);
+    let value: T;
+    if (checked) {
+      value = interop
+        ? decodeInteropValueChecked<T>(plaintext)
+        : decodeChecked<T>(plaintext, this.serializerConfig);
+    } else {
+      value = interop
+        ? decodeInteropValueCounted<T>(plaintext, count)
+        : decodeCounted<T>(plaintext, this.serializerConfig, count);
+    }
     // The serialized length, not bytes.byteLength: that is the compressed
     // (and maybe encrypted) envelope, several times smaller, and charging L1
     // for it would let L1 grow well past maxMemory.
@@ -977,8 +1007,10 @@ export class CacheImpl implements SecureCache {
   /**
    * Decode a value served from L1. For a secure cache that is a decrypt +
    * AAD-verify against the cache key followed by the same unpack/deserialize
-   * the L2 path runs — an L1 hit is no longer free, which is the price of not
-   * keeping plaintext resident. For a plaintext cache it is a cast.
+   * the L2 path runs, less the deserialize's depth walks for an entry this
+   * cache checked when it stored it (see l1Payload) — an L1 hit is no longer
+   * free, which is the price of not keeping plaintext resident. For a
+   * plaintext cache it is a cast.
    *
    * Drops the L1 entry and returns null when a secure entry will not decrypt
    * (rotated key, tampered heap, an entry written under a different envelope
@@ -1008,7 +1040,10 @@ export class CacheImpl implements SecureCache {
           `L1 entry for a secure cache is not ciphertext bytes (got ${typeof stored})`
         );
       }
-      return { value: (await this.decodeEntry<T>(stored, key, interop)).value };
+      // Bytes this cache checked under the same mode skip the depth walks
+      // (see l1Payload); anything else is walked as an L2 read is.
+      const checked = this.checkedL1.get(stored) === interop;
+      return { value: (await this.decodeEntry<T>(stored, key, interop, checked)).value };
     } catch (error) {
       this.l1?.invalidateByKey(key);
       this.recordFailure('l1_decrypt', error);
@@ -1152,7 +1187,14 @@ export class CacheImpl implements SecureCache {
         // freshness check into `Infinity > Infinity` — permanently stale,
         // arming a spurious background refresh per marker window, forever.
         const l1TtlMs = Number.isFinite(l1TtlSeconds) ? l1TtlSeconds * 1000 : 0;
-        l1.set(key, this.l1Payload(value, data), l1TtlMs, namespace, serializedSize, count);
+        l1.set(
+          key,
+          this.l1Payload(value, data, interop),
+          l1TtlMs,
+          namespace,
+          serializedSize,
+          count
+        );
         this.publishL1Stats();
       }
     }
@@ -1285,7 +1327,7 @@ export class CacheImpl implements SecureCache {
     // refresh gets nothing to store, the stale entry stays, and the refresh
     // re-runs the origin once per refresh-marker window.
     const l1Write: L1Write = {
-      l1: this.l1Payload(value, data),
+      l1: this.l1Payload(value, data, interop),
       serializedSize: serialized.length,
       count,
     };

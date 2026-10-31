@@ -643,10 +643,11 @@ export function encodeInteropValueCounted(value: unknown, count: ObjectCount): U
 }
 
 /**
- * Materialise the one MessagePack document in `data`. Call only after
- * assertDecodeDepth has accepted `data`: that walk proves every header is
- * backed by the input and the nesting is within bound, so this reader does no
- * bounds checks of its own. It still checks it ended exactly at `data.length`,
+ * Materialise the one MessagePack document in `data`. Call only on bytes
+ * assertDecodeDepth accepts (decodeInteropValueCounted runs it first;
+ * decodeInteropValueChecked takes bytes already checked): that walk proves
+ * every header is backed by the input and the nesting is within bound, so this
+ * reader does no bounds checks of its own. It still checks it ended exactly at `data.length`,
  * so a width disagreement between the two parsers throws instead of misreading.
  *
  * The SDK reads interop values itself rather than through @msgpack/msgpack
@@ -879,6 +880,35 @@ export function decodeInteropValue<T>(data: Uint8Array): T {
  * ObjectCount). Package-internal.
  */
 export function decodeInteropValueCounted<T>(data: Uint8Array, count?: ObjectCount): T {
+  assertInteropInput(data);
+  // Bound nesting depth before the decoder eagerly preallocates per-header
+  // collections (full rationale: assertDecodeDepth in serializer.ts).
+  const counted = assertDecodeDepth(data, DEFAULT_MAX_DEPTH);
+  const value = readInteropValue<T>(data);
+  if (count) {
+    count.objects += counted.objects;
+    count.values += counted.values;
+  }
+  return value;
+}
+
+/**
+ * decodeInteropValueCounted without the depth pre-scan, for bytes this
+ * process has already checked: it decoded them through
+ * decodeInteropValueCounted, pre-scan included, or its own
+ * encodeInteropValueCounted wrote them, whose walk bounds depth as the
+ * pre-scan does. Reading the same bytes again cannot fail the pre-scan, so
+ * readInteropDocument's precondition still holds. The input cap, the
+ * collection cap and the post-decode pass (depth, sentinel revival) still run.
+ * Package-internal: only the cache calls it, on an L1 entry it marked as
+ * checked when it stored it. Never call it on bytes read from a backend.
+ */
+export function decodeInteropValueChecked<T>(data: Uint8Array): T {
+  assertInteropInput(data);
+  return readInteropValue<T>(data);
+}
+
+function assertInteropInput(data: Uint8Array): void {
   if (data.length >= 2 && data[0] === CK_FRAME_MAGIC_0 && data[1] === CK_FRAME_MAGIC_1) {
     throw new SerializationError(
       'Payload starts with the CK v3 frame magic ("CK") — this is a Python-SDK-internal ' +
@@ -891,9 +921,10 @@ export function decodeInteropValueCounted<T>(data: Uint8Array, count?: ObjectCou
       `Input size ${data.length} exceeds max ${DEFAULT_MAX_DECODED_SIZE}`
     );
   }
-  // Bound nesting depth before the decoder eagerly preallocates per-header
-  // collections (full rationale: assertDecodeDepth in serializer.ts).
-  const counted = assertDecodeDepth(data, DEFAULT_MAX_DEPTH);
+}
+
+/** readInteropDocument, then the post-decode pass (see reviveDecoded). */
+function readInteropValue<T>(data: Uint8Array): T {
   let decoded: unknown;
   try {
     decoded = readInteropDocument(data);
@@ -904,10 +935,5 @@ export function decodeInteropValueCounted<T>(data: Uint8Array, count?: ObjectCou
       { cause: error instanceof Error ? error : undefined }
     );
   }
-  const value = reviveDecoded(decoded, 0) as T;
-  if (count) {
-    count.objects += counted.objects;
-    count.values += counted.values;
-  }
-  return value;
+  return reviveDecoded(decoded, 0) as T;
 }

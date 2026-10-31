@@ -6,13 +6,14 @@ import {
   encodeInteropValue,
   decodeInteropValue,
   encodeInteropValueCounted,
+  decodeInteropValueChecked,
   decodeInteropValueCounted,
   validateInteropSegment,
   INTEROP_SEGMENT_PATTERN,
   InteropFloat,
 } from './interop.js';
 import { ConfigurationError, SerializationError, ValueTooLargeError } from '../errors.js';
-import { DEFAULT_MAX_COLLECTION_SIZE } from '../constants.js';
+import { DEFAULT_MAX_COLLECTION_SIZE, DEFAULT_MAX_DEPTH } from '../constants.js';
 import { ExtData } from '@msgpack/msgpack';
 
 function hex(bytes: Uint8Array): string {
@@ -565,6 +566,56 @@ describe('interop value decoding', () => {
     expect(decodeInteropValue<{ ts: number }>(encodeInteropValue({ ts: 1704112245123 }))).toEqual({
       ts: 1704112245123,
     });
+  });
+});
+
+// An encrypted L1 hit on an interop entry this process encoded decodes it
+// through decodeInteropValueChecked, which skips the pre-scan. That holds only
+// if every encoding the value encoder produces passes it.
+describe('decodeInteropValueChecked on what the encoder wrote', () => {
+  it('passes the pre-scan at and past the depth bound, and reads as the walked decode', () => {
+    const nest = (levels: number, leaf: unknown, kind: 'array' | 'map' | 'set'): unknown => {
+      let v = leaf;
+      for (let i = 0; i < levels; i++)
+        v = kind === 'array' ? [v] : kind === 'map' ? { n: v } : new Set([v]);
+      return v;
+    };
+    let encoded = 0;
+    let refused = 0;
+    for (const levels of [DEFAULT_MAX_DEPTH - 1, DEFAULT_MAX_DEPTH, DEFAULT_MAX_DEPTH + 1]) {
+      for (const leaf of [1, {}, [], new Date(0), new Map([['k', [2]]]), 2n ** 63n]) {
+        for (const kind of ['array', 'map', 'set'] as const) {
+          let bytes: Uint8Array;
+          try {
+            bytes = encodeInteropValue(nest(levels, leaf, kind));
+          } catch {
+            refused++;
+            continue;
+          }
+          encoded++;
+          const walked = decodeInteropValueCounted(bytes);
+          expect(decodeInteropValueChecked(bytes)).toEqual(walked);
+        }
+      }
+    }
+    expect(encoded).toBeGreaterThan(0);
+    expect(refused).toBeGreaterThan(0);
+  });
+
+  it('keeps the input cap, the collection cap and the post-decode depth check', () => {
+    expect(() => decodeInteropValueChecked(new Uint8Array(10 * 1024 * 1024 + 1))).toThrow(
+      ValueTooLargeError
+    );
+    // array16 claiming one element over the cap.
+    const over = DEFAULT_MAX_COLLECTION_SIZE + 1;
+    expect(() => decodeInteropValueChecked(Uint8Array.of(0xdc, over >> 8, over & 0xff))).toThrow(
+      SerializationError
+    );
+    // One level past the bound, which only the pre-scan or the post-decode
+    // pass sees: the post-decode pass still refuses it.
+    const tooDeep = new Uint8Array(DEFAULT_MAX_DEPTH + 2).fill(0x91);
+    tooDeep[tooDeep.length - 1] = 0x01;
+    expect(() => decodeInteropValueChecked(tooDeep)).toThrow(/max depth/);
   });
 });
 
