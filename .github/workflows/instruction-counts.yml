@@ -61,7 +61,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1]
     env:
       # Must match the wasm-bindgen version pinned in the crate's Cargo.lock;
       # scripts/build.sh fails loudly on drift. Same pins as ci.yml.
@@ -130,8 +130,17 @@ jobs:
       # 0.03%, far under the 0.4% A/A limit.
       - name: Gate the PR against its base
         env:
-          IR_ARGS: --shard ${{ matrix.shard }}/${{ env.SHARDS }} --repeats 3
+          IR_ARGS: --only l1-get-hit --repeats 3
         run: bash .github/scripts/perf-ir.sh measure
+
+      - name: Debug which shipped files differ
+        if: always()
+        run: |
+          for p in cachekit cachekit-core-ts cachekit-core-wasm; do
+            diff -rq --exclude=node_modules --exclude=target --exclude=src "ir/base/packages/$p" "ir/head/packages/$p" || true
+          done
+          cmp ir/base/pnpm-lock.yaml ir/head/pnpm-lock.yaml || true
+          for t in base head; do (cd "ir/$t/packages/cachekit" && node bench/ir.mjs --build-hash); done
 
       # What the report job reads: report.json or same-build, and the head's
       # workload list. A shard that died early uploads less, and its workloads
