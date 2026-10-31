@@ -291,6 +291,28 @@ describe('Cache metrics wiring', () => {
     expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l1' })).toBe(1);
   });
 
+  it('a cache counting after a reset joins a cache created since', async () => {
+    const registry = new Registry();
+    const before = makeCache(registry);
+    await before.set('ns:k', 'v');
+    await before.get('ns:k');
+    await vi.waitFor(async () => {
+      expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l1' })).toBe(1);
+    });
+    registry.resetMetrics();
+
+    const since = makeCache(registry);
+    await since.set('ns:k', 'v');
+    await since.get('ns:k');
+    await vi.waitFor(async () => {
+      expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l1' })).toBe(1);
+    });
+    await before.get('ns:k');
+    await before.get('ns:k');
+    expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l1' })).toBe(3);
+    expect(await registry.metrics()).toContain('cachekit_hits_total{layer="l1"} 3');
+  });
+
   it.each(['layer', 'operation', 'status', 'error_type'])(
     'rejects a defaultLabels key the metrics set themselves: %s',
     (label) => {

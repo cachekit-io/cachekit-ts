@@ -33,7 +33,12 @@ type MetricConstructor<T> = new (config: Record<string, unknown>) => T;
 /** Hits or misses for one label set, counted since the last scrape. */
 interface PendingCount {
   readonly labels: Record<string, string>;
+  /** Its key in `cells`. */
+  readonly key: string;
+  /** The counter's cells; this one is in it while `attached`. */
+  readonly cells: Map<string, PendingCount>;
   n: number;
+  attached: boolean;
 }
 
 /**
@@ -65,7 +70,10 @@ function flushPendingCounts(this: Counter): void {
 /**
  * Make the counter's reset() and remove() flush its pending counts first, so
  * they clear counts recorded before them, as they would had each hit been an
- * inc(). registry.resetMetrics() calls reset() on every metric.
+ * inc(). registry.resetMetrics() calls reset() on every metric. They then
+ * detach every cell, all at zero: a cell whose collectors are gone is no
+ * longer held, as prom-client holds no series it has cleared, and a live
+ * collector attaches its cell again at its next count (see add()).
  */
 function flushBeforeClearing(counter: Counter): void {
   const clearing = counter as unknown as Record<string, unknown>;
@@ -74,9 +82,30 @@ function flushBeforeClearing(counter: Counter): void {
     if (typeof clear !== 'function') continue;
     clearing[method] = function (this: Counter, ...args: unknown[]): unknown {
       flushPendingCounts.call(this);
+      const cells = pendingCounts.get(this);
+      for (const cell of cells?.values() ?? []) cell.attached = false;
+      cells?.clear();
       return clear.apply(this, args);
     };
   }
+}
+
+/**
+ * Attach a cell a reset or remove detached, just counted into, and return the
+ * cell its collector keeps. It goes back into its counter's cells, or, when a
+ * newer collector has put one there for the same labels, adds its count to
+ * that one, which the collector keeps from then on.
+ */
+function reattach(cell: PendingCount): PendingCount {
+  const live = cell.cells.get(cell.key);
+  if (live === undefined) {
+    cell.attached = true;
+    cell.cells.set(cell.key, cell);
+    return cell;
+  }
+  live.n += cell.n;
+  cell.n = 0;
+  return live;
 }
 
 /**
@@ -90,7 +119,7 @@ function pendingCount(counter: Counter, labels: Record<string, string>): Pending
   if (!cells || !declared || !Object.keys(labels).every((l) => declared.includes(l))) return null;
   const key = JSON.stringify(Object.entries(labels).sort(([a], [b]) => (a < b ? -1 : 1)));
   let cell = cells.get(key);
-  if (!cell) cells.set(key, (cell = { labels, n: 0 }));
+  if (!cell) cells.set(key, (cell = { labels, key, cells, n: 0, attached: true }));
   return cell;
 }
 
@@ -406,9 +435,19 @@ export class CacheMetrics implements MetricsCollector {
    * only adds to a pending count, which the counter reads when scraped.
    */
   countHit(layer: 'l1' | 'l2'): void {
+    if (!this.addPendingHit(layer) && !this.initFailed) void this.recordHit(layer);
+  }
+
+  /** Add a hit to its pending count; false when there is none. */
+  private addPendingHit(layer: 'l1' | 'l2'): boolean {
     const pending = layer === 'l1' ? this.l1Hits : this.l2Hits;
-    if (pending !== null) pending.n++;
-    else if (!this.initFailed) void this.recordHit(layer);
+    if (pending === null) return false;
+    pending.n++;
+    if (!pending.attached) {
+      if (layer === 'l1') this.l1Hits = reattach(pending);
+      else this.l2Hits = reattach(pending);
+    }
+    return true;
   }
 
   /**
@@ -417,9 +456,7 @@ export class CacheMetrics implements MetricsCollector {
   async recordHit(layer: 'l1' | 'l2'): Promise<void> {
     try {
       if (!(await this.whenReady())) return;
-      const pending = layer === 'l1' ? this.l1Hits : this.l2Hits;
-      if (pending !== null) pending.n++;
-      else this.hitsCounter?.inc({ layer, ...this.defaultLabels });
+      if (!this.addPendingHit(layer)) this.hitsCounter?.inc({ layer, ...this.defaultLabels });
     } catch (error) {
       this.handleError(error, 'recordHit');
     }
@@ -429,8 +466,16 @@ export class CacheMetrics implements MetricsCollector {
    * Count a cache miss, as countHit() counts a hit.
    */
   countMiss(): void {
-    if (this.misses !== null) this.misses.n++;
-    else if (!this.initFailed) void this.recordMiss();
+    if (!this.addPendingMiss() && !this.initFailed) void this.recordMiss();
+  }
+
+  /** Add a miss to its pending count; false when there is none. */
+  private addPendingMiss(): boolean {
+    const pending = this.misses;
+    if (pending === null) return false;
+    pending.n++;
+    if (!pending.attached) this.misses = reattach(pending);
+    return true;
   }
 
   /**
@@ -439,8 +484,7 @@ export class CacheMetrics implements MetricsCollector {
   async recordMiss(): Promise<void> {
     try {
       if (!(await this.whenReady())) return;
-      if (this.misses !== null) this.misses.n++;
-      else this.missesCounter?.inc(this.defaultLabels);
+      if (!this.addPendingMiss()) this.missesCounter?.inc(this.defaultLabels);
     } catch (error) {
       this.handleError(error, 'recordMiss');
     }
