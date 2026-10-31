@@ -325,7 +325,8 @@ export const WORKLOADS = {
       };
     },
   },
-  // the public API's fastest path: keygen + L1 lookup + L1 decode
+  // wrap() with an object among the arguments, which the key memo does not
+  // keep: keygen + L1 lookup, where a plaintext L1 holds the decoded value
   'wrap-l1-hit': {
     n: 10_000,
     setup: async () => {

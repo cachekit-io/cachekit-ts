@@ -1,4 +1,4 @@
-import { describe, it, expect, assert, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, assert, beforeEach, afterEach, onTestFinished, vi } from 'vitest';
 import { decode as msgpackDecode, encode as msgpackEncode } from '@msgpack/msgpack';
 import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 import { promises as fs } from 'node:fs';
@@ -190,8 +190,8 @@ describe('Cache Integration', () => {
         ['with SWR', () => cache],
         [
           'on a runtime whose SWR needs waitUntil, with none bound',
-          () =>
-            new CacheImpl(
+          () => {
+            const workersLike = new CacheImpl(
               { backend, defaultTtl: 3600, metrics: false },
               {
                 resolveBackend: () => backend,
@@ -201,7 +201,10 @@ describe('Cache Integration', () => {
                 },
                 swrRequiresWaitUntil: true,
               }
-            ),
+            );
+            onTestFinished(() => workersLike.close());
+            return workersLike;
+          },
         ],
       ])(
         'from wrap() called with an object, which the key memo does not keep, %s',
@@ -216,7 +219,6 @@ describe('Cache Integration', () => {
           expect(await turnsToSettle(hit)).toBe(alreadySettled);
           expect(await hit).toEqual({ id: 1 });
           expect(fn).toHaveBeenCalledTimes(1);
-          if (subject !== cache) await subject.close();
         }
       );
     });
