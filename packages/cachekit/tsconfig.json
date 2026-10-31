@@ -11,5 +11,12 @@
     "stripInternal": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.test.tsx"]
+  // no-preload.ts is the CommonJS build's `#noble-preload` (tsconfig.cjs.json).
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "src/serialization/no-preload.ts"
+  ]
 }

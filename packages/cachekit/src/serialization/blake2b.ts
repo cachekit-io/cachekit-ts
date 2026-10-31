@@ -13,14 +13,13 @@ export type Blake2b256Hex = (data: Uint8Array) => string;
 let nobleHash: typeof Blake2.blake2b | undefined;
 
 /**
- * @noble/hashes' BLAKE2b, loaded the first time anything hashes in JS: on
- * Node, keys hash through the binding, and loading noble costs about 5 ms of a
- * cold start. Every caller is synchronous, so the load is too, through
- * require(esm). In the ES module build, `#noble-preload` (package.json
- * `imports`) is noble itself for any resolver without the `module-sync`
- * condition (Node.js 22.0 to 22.11, the Workers bundle, Vitest), and
- * `esm-preload.ts` with it, which holds noble on Node 22 and 23. In the
- * CommonJS build it is always `no-preload.ts`.
+ * @noble/hashes' BLAKE2b. In the ES module build, `#noble-preload` (package.json
+ * `imports`) is noble itself, a static import. A lazy require(esm) there would
+ * share noble with the app's own ES module graph, and Node refuses require(esm)
+ * of a module that graph is still loading. In the CommonJS build it is
+ * `no-preload.ts`, and noble loads synchronously, through require(esm), the
+ * first time anything hashes in JS: on Node, keys hash through the binding, and
+ * loading noble costs about 5 ms of a cold start.
  */
 function noble(): typeof Blake2.blake2b {
   return (nobleHash ??=
@@ -28,16 +27,19 @@ function noble(): typeof Blake2.blake2b {
     (requireNobleBlake2() as typeof Blake2).blake2b);
 }
 
-// The CommonJS build on Node 22 and 23 (the ES module build has noble already,
-// from `#noble-preload`). Node.js 22's module loader keeps the async context a
-// module is first loaded in (a request's AsyncLocalStorage store) for the life
-// of the process; 24's does not. So noble loads here, at import, never inside
-// a request. A load that can never work throws: without require(esm) (22.0 to
-// 22.11) or without @noble/hashes, the package would load without JS hashing
-// and break its error paths, whose log lines carry a `keyHash=` digest. Any
-// other failure means an ES module graph holding noble has not finished
-// loading it, and Node 22 and 23 refuse require(esm) of such a module; noble
-// then loads on first use. That case fails on `main` too, at require time.
+// The CommonJS build on Node 22 and 23 (the ES module build has noble already).
+// Node.js 22's module loader keeps the async context a module is first loaded
+// in (a request's AsyncLocalStorage store) for the life of the process; 24's
+// does not. So noble loads here, at import, never inside a request. A load
+// that can never work throws: without require(esm) (22.0 to 22.11) or without
+// @noble/hashes, the package would load without JS hashing and break its error
+// paths, whose log lines carry a `keyHash=` digest. Any other failure means an
+// ES module graph holding noble, one that loads this package through a
+// CommonJS module and imports noble after it, has not finished loading noble:
+// require(esm) throws ERR_REQUIRE_CYCLE_MODULE there on 22.12 to 22.14, and on
+// 22.15, 22.16 and 23 returns noble before its bindings exist. noble then
+// loads on first use. On 22.15 and later such an app loaded with a static
+// require of noble, and this keeps it loading; on 22.18 and later nothing fails.
 if (Number(globalThis.process?.versions?.node?.split('.')[0]) < 24) {
   try {
     noble();
