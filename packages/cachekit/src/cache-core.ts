@@ -1336,11 +1336,12 @@ export class CacheImpl implements SecureCache {
     // Otherwise every wrap() during an L2 outage or a 401/403 recomputes the
     // origin and re-pays the doomed round trips. With degradation off `run`
     // throws and L1 stays empty. On an encrypted cache L1 gets the ciphertext,
-    // never the caller's plaintext. The fill runs inside the op inKeyOrder
-    // tracks, so the key stays pending or in flight until L1 holds this
-    // value: a write-behind admitted between this L2 write and its L1 fill
-    // would publish a newer value that this fill then overwrites. The SWR
-    // refresh path passes l1Mode refresh
+    // never the caller's plaintext. The fill runs inside the op the key's
+    // ordering tracks (queued behind its tail, or counted in keysInFlight),
+    // so the key stays pending or in flight until L1 holds this value: a
+    // write-behind admitted between this L2 write and its L1 fill would
+    // publish a newer value that this fill then overwrites. The SWR refresh
+    // path passes l1Mode refresh
     // and writes L1 only through completeRefresh, whose version token discards
     // the refresh if an explicit write or invalidation landed meanwhile — the
     // guard is authoritative for L1 ONLY. The backend.set above is
@@ -1348,11 +1349,23 @@ export class CacheImpl implements SecureCache {
     // L1 but is overwritten in L2 by the refresh's value until the entry next
     // expires or refreshes (a conditional L2 write would need CAS the Backend
     // contract doesn't have).
-    await this.inKeyOrder(key, async () => {
+    if (this.keyTails.has(key)) {
+      await this.inKeyOrder(key, async () => {
+        await this.run('set', key, undefined, writeL2);
+        if (l1Mode === 'fill') this.fillL1(key, l1Write, ttl, namespace);
+      });
+      return l1Write;
+    }
+    // An idle key: what inKeyOrder does for it, inline. Every plain set()
+    // takes this path, and inKeyOrder's closure and promise chain were most
+    // of what per-key ordering added to it, so the two lines above repeat.
+    this.enterInFlight(key);
+    try {
       await this.run('set', key, undefined, writeL2);
       if (l1Mode === 'fill') this.fillL1(key, l1Write, ttl, namespace);
-    });
-
+    } finally {
+      this.leaveInFlight(key);
+    }
     return l1Write;
   }
 
@@ -1547,12 +1560,8 @@ export class CacheImpl implements SecureCache {
   }
 
   private countInFlight<T>(key: string, op: () => Promise<T>): Promise<T> {
-    this.keysInFlight.set(key, (this.keysInFlight.get(key) ?? 0) + 1);
-    const release = (): void => {
-      const left = (this.keysInFlight.get(key) ?? 1) - 1;
-      if (left > 0) this.keysInFlight.set(key, left);
-      else this.keysInFlight.delete(key);
-    };
+    this.enterInFlight(key);
+    const release = (): void => this.leaveInFlight(key);
     let running: Promise<T>;
     try {
       running = op();
@@ -1561,6 +1570,16 @@ export class CacheImpl implements SecureCache {
       throw error;
     }
     return running.finally(release);
+  }
+
+  private enterInFlight(key: string): void {
+    this.keysInFlight.set(key, (this.keysInFlight.get(key) ?? 0) + 1);
+  }
+
+  private leaveInFlight(key: string): void {
+    const left = (this.keysInFlight.get(key) ?? 1) - 1;
+    if (left > 0) this.keysInFlight.set(key, left);
+    else this.keysInFlight.delete(key);
   }
 
   /** A key's tail, capped at KEY_WAIT_CAP_MS where it may never settle. */
