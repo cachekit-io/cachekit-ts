@@ -1762,20 +1762,16 @@ export class CacheImpl implements SecureCache {
             'or key transform — see Backend.keyPrefix / Backend.transformsKeys'
         );
       }
-      // One clock read serves the key memo's window and a held entry's freshness.
+      // The options are the caller's object, so reading one can run the
+      // caller's code (a getter): read them before the clock, not after.
+      const namespace = options.namespace;
+      const useL1 = !options.skipL1;
+      const ttl = options.ttl ?? this.defaultTtl;
+      // `now` serves only the memo's window and a held-entry hit; no caller
+      // code runs between this read and either (primitive arguments only).
       const now = Date.now();
-      const slot = interop
-        ? undefined
-        : autoKeys.slot(
-            options.namespace,
-            args,
-            !options.skipL1,
-            options.ttl ?? this.defaultTtl,
-            now
-          );
-      const cacheKey = interop
-        ? generateInteropKey(options.namespace, interopOperation, args)
-        : slot!.key;
+      const slot = interop ? undefined : autoKeys.slot(namespace, args, useL1, ttl, now);
+      const cacheKey = interop ? generateInteropKey(namespace, interopOperation, args) : slot!.key;
 
       // A memoised call holds the L1 entry it was last served from: while L1
       // still holds that entry and it is above its SWR jitter band, serve it on that one check,
@@ -1793,7 +1789,7 @@ export class CacheImpl implements SecureCache {
       // no refresh marker is taken, so nothing can wedge, and the entry
       // simply expires and recomputes in the request path (fail-safe
       // no-SWR).
-      if (this.l1 && !options.skipL1) {
+      if (this.l1 && useL1) {
         if (this.swrRequiresWaitUntil && !waitUntil) {
           const l1Value = this.l1.get(cacheKey);
           if (l1Value !== null) {
@@ -1806,7 +1802,7 @@ export class CacheImpl implements SecureCache {
         } else {
           // getWithSwr reads the clock itself: keying a call in full can run
           // the caller's code (an object argument's getters), so `now` may be
-          // stale here. Only a memo hit, which runs none, uses it.
+          // stale here.
           const swrResult = this.l1.getWithSwr(cacheKey);
 
           if (swrResult.value !== null) {

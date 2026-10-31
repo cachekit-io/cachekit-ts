@@ -264,7 +264,9 @@ export class L1Cache<T = unknown> {
    * refresh decision: L1 still holds it, its value is not null (which L1
    * never serves), and it is above the SWR jitter band (see swrBandTop). Marks
    * it most recently used and returns true; false sends the caller to
-   * getWithSwr. Package-internal.
+   * getWithSwr. The one L1 read that takes the caller's clock: read `now`
+   * after the caller's last await and last run of user code, or an entry
+   * that expired in between is served. Package-internal.
    * @internal
    */
   hit(entry: L1Entry<T>, now: number): boolean {

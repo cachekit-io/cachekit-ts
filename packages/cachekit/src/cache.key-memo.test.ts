@@ -257,6 +257,36 @@ describe('wrap() key memo', () => {
       await cache.close();
     });
 
+    it('never serves a held entry that expires while the call reads its options', async () => {
+      // wrap() reads its options on every call, and a getter there is the
+      // caller's code: the clock a held entry is checked against must be read
+      // after it.
+      vi.useFakeTimers({ toFake: ['Date'], now: 0 });
+      try {
+        const backend = new InMemoryBackend();
+        const cache = createCache({ backend, metrics: false, l1: { swrEnabled: false } });
+        let calls = 0;
+        let crossExpiry = false;
+        const options = {
+          ttl: 1,
+          get namespace() {
+            if (crossExpiry) vi.setSystemTime(1001); // past the 1 s ttl, mid-call
+            return 'svc:getThing';
+          },
+        };
+        const fn = cache.wrap(async (id: number) => ({ id, call: ++calls }), options);
+        await fn(7);
+        await fn(7); // an L1 hit by key, whose entry the memo now holds
+        backend.store.clear(); // only L1 holds it, so a stale serve can come from L1 alone
+        vi.setSystemTime(999);
+        crossExpiry = true;
+        expect(await fn(7)).toEqual({ id: 7, call: 2 });
+        await cache.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('never serves an entry that expires while a call is keyed in full', async () => {
       // Keying an object argument runs the caller's code (here a getter), so the
       // L1 lookup that follows must read the clock after it, not before.
