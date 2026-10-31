@@ -22,6 +22,11 @@ jobs:
       - name: Release tarball verifier self-test
         run: bash .github/scripts/verify-tarball-selftest.sh
 
+      # The instruction-count gate skips measuring when base and head hash
+      # alike: the hash must move when any file a workload loads changes.
+      - name: Instruction-count build hash self-test
+        run: bash .github/scripts/perf-ir-hash-selftest.sh
+
       # The release-order gate, run against a stubbed GitHub API: it must
       # refuse an SDK release while a core has an open release PR, or when it
       # cannot tell, and pass one whose cores are released.
