@@ -922,7 +922,9 @@ export class CacheImpl implements SecureCache {
    * hit on it skips the depth pre-scan, and in auto mode validateDepth: no
    * one outside this cache can write to the copy, so they could only pass
    * again. Bytes that reach L1 any other way are walked on every hit. With L1
-   * off, `bytes` is the backend's own buffer, so it is not marked.
+   * off, `bytes` is the backend's own buffer, so it is not marked. Ciphertext
+   * over maxCiphertext is never copied, and every hit on it is refused for its
+   * size before decrypt.
    */
   private l1Payload(value: unknown, bytes: Uint8Array, interop: boolean): unknown {
     if (!this.encryption) return value;
@@ -1020,10 +1022,10 @@ export class CacheImpl implements SecureCache {
   /**
    * Decode a value served from L1. For a secure cache that is a decrypt +
    * AAD-verify against the cache key followed by the same unpack/deserialize
-   * the L2 path runs, less the deserialize's depth walks for bytes this
-   * cache checked when it stored them (see l1Payload) — an L1 hit is no longer
-   * free, which is the price of not keeping plaintext resident. For a
-   * plaintext cache it is a cast.
+   * the L2 path runs, less the depth pre-scan, and in auto mode validateDepth,
+   * for bytes this cache checked when it stored them (see l1Payload) — an L1
+   * hit is no longer free, which is the price of not keeping plaintext
+   * resident. For a plaintext cache it is a cast.
    *
    * Drops the L1 entry and returns null when a secure entry will not decrypt
    * (rotated key, tampered heap, an entry written under a different envelope
