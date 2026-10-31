@@ -233,7 +233,7 @@ export const WORKLOADS = {
   'plaintext-set-10kb': plaintextSet(320, 1_000),
   // 200 warm-up ops, not 2,000: each op encodes 3,200 rows, so V8 has tiered
   // up long before, and the default made one process run ~9 minutes in CI.
-  // The shorter warm-up moved its Ir/op by under 0.2%.
+  // The shorter warm-up moved its Ir/op by +0.4% in CI.
   'plaintext-set-100kb': plaintextSet(3_200, 1_000, 200),
   // the ends of the object-heavy write range: one 64 B object, and 1,005,035 B
   // in 96 groups of 320 rows, so no collection nears the 10,000-element bound
@@ -246,7 +246,7 @@ export const WORKLOADS = {
   // Its own gate threshold (ir.mjs `fail`): 20 ops that each allocate
   // megabytes put several GCs in the window, whose cost follows the live heap.
   // In CI, a PR that only retained 50,000 small objects at load read +4.23%
-  // on it with its code unchanged; every other workload stayed within 0.6%.
+  // on it with its code unchanged; every other workload stayed within 1.5%.
   'plaintext-set-1mb': {
     ...plaintextSetOf({ groups: Array.from({ length: 96 }, () => rowsOf(320)) }, 20, 20),
     fail: 0.1,
@@ -292,8 +292,11 @@ export const WORKLOADS = {
   'wasm-envelope': envelope(wasmStorage, encoded, 10_000),
   'wasm-envelope-40b': envelope(wasmStorage, async () => SMALL, 20_000),
   'wasm-envelope-64kb': envelope(wasmStorage, compressible, 200),
-  // secure cache on Node: AAD v0x03 + AES-256-GCM through the NAPI core, decrypt + encrypt
-  'napi-encrypted': napiEncrypted(encoded, 10_000),
+  // secure cache on Node: AAD v0x03 + AES-256-GCM through the NAPI core, decrypt + encrypt.
+  // Its own gate threshold (ir.mjs `fail`): its Ir/op moves with builds whose
+  // changes it never runs, by up to 1.14% in CI (a comment added to index.ts),
+  // the same on every run of those two builds.
+  'napi-encrypted': { ...napiEncrypted(encoded, 10_000), fail: 0.04 },
   'napi-encrypted-64kb': napiEncrypted(incompressible, 500),
   // wasm-AES baseline: the same through the wasm core's AES-256-GCM. The
   // Workers entry encrypts through WebCrypto instead, which Node cannot stand

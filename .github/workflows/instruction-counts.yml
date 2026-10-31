@@ -1,8 +1,8 @@
 name: Instruction counts
 
-# Gates every PR on instructions per op (packages/cachekit/bench/ir.mjs): it
-# builds the PR (the merge commit checked out here) and its base side by side
-# in one job, on one runner, and runs `bench:ir --compare` on the two builds.
+# Gates every PR on instructions per op (packages/cachekit/bench/ir.mjs): each
+# shard job builds the PR (the merge commit checked out here) and its base side
+# by side on one runner, and runs `bench:ir --compare` on the two builds.
 # Instruction counts move with the machine, Node and valgrind, so nothing is
 # compared against a figure recorded elsewhere. A release-please PR is
 # measured against that package's last release tag instead
@@ -146,11 +146,13 @@ jobs:
           overwrite: true # a re-run attempt replaces its shard's output
 
   # The shards' verdicts as one comment body, rendered with read-only scopes.
-  # This job's result is the gate's verdict.
+  # This job's result is the gate's verdict. It runs when the base job failed
+  # too: a skipped job reads as passed, and with no shard output the comment
+  # reads INCOMPLETE.
   report:
     name: Instruction counts
     needs: [base, gate]
-    if: ${{ !cancelled() && needs.base.result == 'success' }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -166,7 +168,7 @@ jobs:
 
       - name: Render the comment
         env:
-          BASE_LABEL: ${{ needs.base.outputs.label }}
+          BASE_LABEL: ${{ needs.base.outputs.label || 'none (the base job failed)' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           status=0

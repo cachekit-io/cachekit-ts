@@ -8,10 +8,10 @@
 # CI restores the Rust cache into the trees between the two.
 #
 #   BASE_SHA=<sha> OUT=<dir> bash .github/scripts/perf-ir.sh trees
-#   OUT=<dir> [JOBS=4] [IR_ARGS='--shard 1/4'] bash .github/scripts/perf-ir.sh measure
+#   OUT=<dir> [IR_ARGS='--shard 1/4'] bash .github/scripts/perf-ir.sh measure
 #
-# IR_ARGS goes to both ir.mjs runs, word-split: --shard, or --only and
-# --repeats for a quick local try.
+# IR_ARGS goes to both ir.mjs runs after --jobs 4, word-split: --shard, or
+# --only, --repeats and a larger --jobs for a quick local try.
 #
 # Both trees use the head's bench/, so both arms measure the same workload
 # definitions, and a workload the PR adds is measured on the base too where
@@ -23,11 +23,13 @@ set -euo pipefail
 root=$PWD/ir
 mkdir -p "$OUT"
 
-# The workloads a tree's own bench file defines, in its order.
+# The workloads a tree's own bench file defines, in its order; none when it
+# has no bench file. A file that fails to load fails the step: an empty list
+# would mark every workload new, and new workloads are not gated.
 workloads() {
-  (cd "$1/packages/cachekit" && [[ -f bench/ir-workload.mjs ]] &&
-    node --input-type=module -e \
-      "console.log(Object.keys((await import('./bench/ir-workload.mjs')).WORKLOADS).join('\n'))") || true
+  [[ -f $1/packages/cachekit/bench/ir-workload.mjs ]] || return 0
+  (cd "$1/packages/cachekit" && node --input-type=module -e \
+    "console.log(Object.keys((await import('./bench/ir-workload.mjs')).WORKLOADS).join('\n'))")
 }
 
 if [[ ${1:-} == trees ]]; then
@@ -39,8 +41,6 @@ if [[ ${1:-} == trees ]]; then
   # Listed before the head's bench/ replaces the base's.
   workloads "$root/base" > "$OUT/base-workloads.txt"
   workloads "$root/head" > "$OUT/head-workloads.txt"
-  # The comment says so when the PR's own bench/ sets the workloads and thresholds.
-  git diff --quiet "$BASE_SHA" HEAD -- packages/cachekit/bench || touch "$OUT/bench-changed"
   rm -rf "${root:?}/base/packages/cachekit/bench"
   cp -R "$root/head/packages/cachekit/bench" "$root/base/packages/cachekit/bench"
   exit 0
@@ -49,7 +49,6 @@ fi
   echo "usage: perf-ir.sh trees|measure" >&2
   exit 2
 }
-jobs=${JOBS:-4}
 read -ra extra <<< "${IR_ARGS:-}"
 new=$(comm -13 <(sort "$OUT/base-workloads.txt") <(sort "$OUT/head-workloads.txt") | paste -sd, -)
 
@@ -75,10 +74,11 @@ fi
 
 # The base run records a workload that fails (exit 4) or repeats noisily
 # (exit 3) in its --save file, and the compare reads them from there.
+# Exit 4 with no --save file is a run that stopped before measuring.
 status=0
-ir base --jobs "$jobs" "${extra[@]}" --save "$OUT/base.json" || status=$?
-if [[ $status -ne 0 && $status -ne 3 && $status -ne 4 ]]; then
+ir base --jobs 4 "${extra[@]}" --save "$OUT/base.json" || status=$?
+if [[ ($status -ne 0 && $status -ne 3 && $status -ne 4) || ! -f $OUT/base.json ]]; then
   echo "::error::the base run failed (exit $status)"
-  exit "$status"
+  exit "$((status ? status : 4))"
 fi
-ir head --jobs "$jobs" "${extra[@]}" --compare "$OUT/base.json" --new "$new" --report "$OUT/report.json"
+ir head --jobs 4 "${extra[@]}" --compare "$OUT/base.json" --new "$new" --report "$OUT/report.json"
