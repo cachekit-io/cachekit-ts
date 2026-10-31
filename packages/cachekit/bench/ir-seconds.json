@@ -5,7 +5,7 @@
   "l1-set-at-capacity-100k": 24,
   "plaintext-set-1kb": 42,
   "plaintext-set-10kb": 82,
-  "plaintext-set-100kb": 508,
+  "plaintext-set-100kb": 203,
   "plaintext-set-64b": 33,
   "plaintext-set-1mb": 61,
   "plaintext-set-containers": 92,

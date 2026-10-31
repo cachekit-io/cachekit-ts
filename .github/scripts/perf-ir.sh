@@ -39,6 +39,8 @@ if [[ ${1:-} == trees ]]; then
   # Listed before the head's bench/ replaces the base's.
   workloads "$root/base" > "$OUT/base-workloads.txt"
   workloads "$root/head" > "$OUT/head-workloads.txt"
+  # The comment says so when the PR's own bench/ sets the workloads and thresholds.
+  git diff --quiet "$BASE_SHA" HEAD -- packages/cachekit/bench || touch "$OUT/bench-changed"
   rm -rf "${root:?}/base/packages/cachekit/bench"
   cp -R "$root/head/packages/cachekit/bench" "$root/base/packages/cachekit/bench"
   exit 0
