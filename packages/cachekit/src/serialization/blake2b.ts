@@ -16,10 +16,11 @@ let nobleHash: typeof Blake2.blake2b | undefined;
  * @noble/hashes' BLAKE2b, loaded the first time anything hashes in JS: on
  * Node, keys hash through the binding, and loading noble costs about 5 ms of a
  * cold start. Every caller is synchronous, so the load is too, through
- * require(esm). `#noble-preload` (package.json `imports`) is noble itself for
- * any resolver without the `module-sync` condition: the ES module build on
- * Node.js 22.0 to 22.11, where require(esm) cannot run, the Workers bundle and
- * Vitest. Everywhere else it is `no-preload.ts`.
+ * require(esm). In the ES module build, `#noble-preload` (package.json
+ * `imports`) is noble itself for any resolver without the `module-sync`
+ * condition: Node.js 22.0 to 22.11, where require(esm) cannot run, the Workers
+ * bundle and Vitest. Everywhere else, and always in the CommonJS build, it is
+ * `no-preload.ts`.
  */
 function noble(): typeof Blake2.blake2b {
   return (nobleHash ??=

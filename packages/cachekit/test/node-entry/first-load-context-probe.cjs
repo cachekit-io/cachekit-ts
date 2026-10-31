@@ -24,9 +24,7 @@ const path = require('node:path');
 const [entry, ttl, wait, mode] = process.argv.slice(2);
 if (mode === 'cold') {
   if (process.versions.node.split('.')[0] === '22') {
-    for (const sub of ['@noble/hashes/blake2.js', '@noble/hashes/utils.js']) {
-      require(require.resolve(sub, { paths: [path.dirname(entry)] }));
-    }
+    require(require.resolve('@noble/hashes/blake2.js', { paths: [path.dirname(entry)] }));
   }
 } else {
   const own = path.dirname(path.resolve(entry)) + path.sep;
