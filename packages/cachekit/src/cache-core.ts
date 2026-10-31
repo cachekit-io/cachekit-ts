@@ -183,14 +183,14 @@ function isResourceFailure(error: unknown): boolean {
  * metrics disabled). Duplicates NoopMetrics from metrics/prometheus.js
  * deliberately: that module's graph reaches prom-client (Node-only), so
  * cache-core may only import its types — a value import would trip the
- * workers bundle guard. The per-hit methods return one settled promise, so a
- * hit with metrics off allocates nothing for them.
+ * workers bundle guard.
  */
-const SETTLED: Promise<void> = Promise.resolve();
 const NOOP_METRICS: MetricsCollector = {
   async recordOperation() {},
-  recordHit: () => SETTLED,
-  recordMiss: () => SETTLED,
+  async recordHit() {},
+  async recordMiss() {},
+  countHit() {},
+  countMiss() {},
   async recordError() {},
   async startTimer() {
     return () => {};
@@ -551,12 +551,12 @@ export class CacheImpl implements SecureCache {
   private recordHit(layer: 'l1' | 'l2'): void {
     if (layer === 'l1') this.telemetry.l1Hits++;
     else this.telemetry.l2Hits++;
-    void this.metrics.recordHit(layer);
+    this.metrics.countHit(layer);
   }
 
   private recordMiss(): void {
     this.telemetry.misses++;
-    void this.metrics.recordMiss();
+    this.metrics.countMiss();
   }
 
   private recordFailure(operation: string, error: unknown): void {

@@ -342,8 +342,12 @@ export const WORKLOADS = {
       await getUser(...ARGS);
       // prom-client loads on a later turn of the event loop, which a loop of
       // awaited hits never yields: wait here until it has counted the miss.
-      while (!(await registry.metrics()).includes('cachekit_misses_total 1'))
+      const deadline = Date.now() + 5_000;
+      while (!(await registry.metrics()).includes('cachekit_misses_total 1')) {
+        if (Date.now() > deadline)
+          throw new Error('wrap-l1-hit-metrics: prom-client did not count the miss within 5 s');
         await new Promise((resolve) => setTimeout(resolve, 1));
+      }
       return async () => {
         sink += (await getUser(...ARGS)).id;
       };

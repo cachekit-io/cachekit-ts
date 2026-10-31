@@ -29,9 +29,6 @@ interface Registry {
 // Generic constructor type for prom-client metric classes
 type MetricConstructor<T> = new (config: Record<string, unknown>) => T;
 
-/** Shared settled promise: a counted hit or miss allocates nothing. */
-const DONE: Promise<void> = Promise.resolve();
-
 /** Hits or misses for one label set, counted since the last scrape. */
 interface PendingCount {
   readonly labels: Record<string, string>;
@@ -58,7 +55,8 @@ function flushPendingCounts(this: Counter): void {
     } catch (error) {
       // Unreachable once pendingCount() has checked the labels; a throw here
       // would fail the whole scrape, so it is logged instead.
-      logError('[cachekit] metrics: dropped pending counts:', error);
+      const name = (this as { name?: string }).name;
+      logError(`[cachekit] metrics: dropped ${n} pending counts on ${name}:`, error);
     }
   }
 }
@@ -100,6 +98,14 @@ export interface MetricsCollector {
   recordOperation(operation: string, status: 'success' | 'error'): Promise<void>;
   recordHit(layer: 'l1' | 'l2'): Promise<void>;
   recordMiss(): Promise<void>;
+  /**
+   * Count a hit or miss without returning a promise: the cache's per-op path.
+   * No promise is the point: one made as the package loads inside a request
+   * keeps that request's async context alive on Node 22, and one made per
+   * hit costs an allocation.
+   */
+  countHit(layer: 'l1' | 'l2'): void;
+  countMiss(): void;
   recordError(errorType: string): Promise<void>;
   startTimer(operation: string): Promise<() => void>;
   updateL1Stats(entries: number, memoryBytes: number): Promise<void>;
@@ -376,20 +382,19 @@ export class CacheMetrics implements MetricsCollector {
   }
 
   /**
-   * Record a cache hit. Runs on every hit, so once prom-client has loaded it
+   * Count a cache hit. Runs on every hit, so once prom-client has loaded it
    * only adds to a pending count, which the counter reads when scraped.
    */
-  recordHit(layer: 'l1' | 'l2'): Promise<void> {
+  countHit(layer: 'l1' | 'l2'): void {
     const pending = layer === 'l1' ? this.l1Hits : this.l2Hits;
-    if (pending !== null) {
-      pending.n++;
-      return DONE;
-    }
-    if (this.initFailed) return DONE;
-    return this.recordHitWhenReady(layer);
+    if (pending !== null) pending.n++;
+    else if (!this.initFailed) void this.recordHit(layer);
   }
 
-  private async recordHitWhenReady(layer: 'l1' | 'l2'): Promise<void> {
+  /**
+   * Record a cache hit, settling once it is counted.
+   */
+  async recordHit(layer: 'l1' | 'l2'): Promise<void> {
     try {
       if (!(await this.whenReady())) return;
       const pending = layer === 'l1' ? this.l1Hits : this.l2Hits;
@@ -401,18 +406,17 @@ export class CacheMetrics implements MetricsCollector {
   }
 
   /**
-   * Record a cache miss, counted as recordHit() counts a hit.
+   * Count a cache miss, as countHit() counts a hit.
    */
-  recordMiss(): Promise<void> {
-    if (this.misses !== null) {
-      this.misses.n++;
-      return DONE;
-    }
-    if (this.initFailed) return DONE;
-    return this.recordMissWhenReady();
+  countMiss(): void {
+    if (this.misses !== null) this.misses.n++;
+    else if (!this.initFailed) void this.recordMiss();
   }
 
-  private async recordMissWhenReady(): Promise<void> {
+  /**
+   * Record a cache miss, settling once it is counted.
+   */
+  async recordMiss(): Promise<void> {
     try {
       if (!(await this.whenReady())) return;
       if (this.misses !== null) this.misses.n++;
@@ -495,6 +499,8 @@ export class NoopMetrics implements MetricsCollector {
   async recordOperation(): Promise<void> {}
   async recordHit(): Promise<void> {}
   async recordMiss(): Promise<void> {}
+  countHit(): void {}
+  countMiss(): void {}
   async recordError(): Promise<void> {}
   async startTimer(): Promise<() => void> {
     return () => {};
