@@ -155,7 +155,7 @@ if (base) {
     }
   }
   base.failed ??= {};
-  if (typeof base.failed !== 'object' || base.failed === null) {
+  if (typeof base.failed !== 'object') {
     throw new Error(`${opt.compare}: failed must be an object of workload errors`);
   }
 }
@@ -255,7 +255,8 @@ const fingerprint = {
 };
 
 /**
- * Hash of what the workloads execute: dist/, the NAPI binary and the wasm.
+ * Hash of what the workloads execute: dist/, the lockfile that pins the
+ * packages dist/ imports (msgpack, the JS hash), the NAPI binary and the wasm.
  * A compare of a build against itself reads 0% and proves nothing.
  */
 function buildHash() {
@@ -266,6 +267,7 @@ function buildHash() {
     }
   };
   add(fileURLToPath(new URL('../dist/', import.meta.url)), (f) => /\.(js|mjs|cjs)$/.test(f));
+  hash.update(readFileSync(new URL('../../../pnpm-lock.yaml', import.meta.url)));
   const req = createRequire(import.meta.url);
   add(dirname(req.resolve('@cachekit-io/cachekit-core-ts')), (f) => f.endsWith('.node'));
   const wasmPkg = fileURLToPath(
@@ -393,7 +395,7 @@ const rows = [];
 for (const name of names) {
   const b = benches[name];
   const was = base?.benches[name];
-  const row = { workload: name, irPerOp: b?.irPerOp, aa: b?.aa, seconds: b?.seconds };
+  const row = { workload: name, irPerOp: b?.irPerOp, aa: b?.aa };
   rows.push(row);
   if (!b) {
     row.verdict = 'INCOMPLETE (run failed)';
@@ -449,7 +451,7 @@ if (exitCode === 3)
   );
 if (opt.report) {
   const thresholds = { fail: FAIL, warn: FAIL / 2, aaLimit: AA_LIMIT };
-  const report = { exitCode, fingerprint, build, baseBuild: base?.build, thresholds, notes, rows };
+  const report = { exitCode, fingerprint, thresholds, notes, rows };
   writeFileSync(opt.report, JSON.stringify(report, null, 2) + '\n');
 }
 process.exitCode = exitCode;
