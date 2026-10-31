@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.0](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.2.3...cachekit-v0.3.0) (2026-10-31)
+
+
+### Features
+
+* **cachekitio:** opt-in server stale-grace on wrap() with background revalidation (LAB-7167) ([#274](https://github.com/cachekit-io/cachekit-ts/issues/274)) ([dc37caa](https://github.com/cachekit-io/cachekit-ts/commit/dc37caa81579b15f1ea8e20c293de5b502f7583c))
+* **cachekit:** opt-in write-behind for wrap() cold misses (LAB-7129) ([#275](https://github.com/cachekit-io/cachekit-ts/issues/275)) ([253b666](https://github.com/cachekit-io/cachekit-ts/commit/253b66686678730a8d692879b21a65673a13d274))
+
+
+### Bug Fixes
+
+* **cachekit:** key the wrap() SWR refresh with the call's own options reading (LAB-12162) ([#291](https://github.com/cachekit-io/cachekit-ts/issues/291)) ([46fb6ca](https://github.com/cachekit-io/cachekit-ts/commit/46fb6ca901e0d4ff8fc0e47e7553f18676af61a4))
+* **cachekit:** make wrap({ skipL1 }) skip L1 on the cold path (LAB-12031) ([#276](https://github.com/cachekit-io/cachekit-ts/issues/276)) ([0758d48](https://github.com/cachekit-io/cachekit-ts/commit/0758d48b42cdb7271855ed2f4f1290a3205ab3bc))
+
+
+### Performance Improvements
+
+* **cachekit:** serve a memoised wrap() L1 hit from the entry it holds (LAB-12034) ([#277](https://github.com/cachekit-io/cachekit-ts/issues/277)) ([9fb2701](https://github.com/cachekit-io/cachekit-ts/commit/9fb2701b9754164bbd4fd83725e976deb8e9b238))
+* **workers:** encrypt and decrypt through WebCrypto on Workers (LAB-7135) ([#271](https://github.com/cachekit-io/cachekit-ts/issues/271)) ([c6a3f21](https://github.com/cachekit-io/cachekit-ts/commit/c6a3f21c8379bda1272f5230640032dca29befab))
+
 ## [0.2.3](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.2.2...cachekit-v0.2.3) (2026-10-29)
 
 
