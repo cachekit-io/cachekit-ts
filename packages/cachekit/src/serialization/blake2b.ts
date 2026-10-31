@@ -1,6 +1,6 @@
 import type * as Blake2 from '@noble/hashes/blake2.js';
 import * as preloaded from '#noble-preload';
-import { requireNobleBlake2 } from './noble-require.cjs';
+import { nobleBlake2Resolves, requireNobleBlake2 } from './noble-require.cjs';
 import { logError } from '../logger.js';
 import { CACHE_KEY_HASH_LENGTH } from '../constants.js';
 
@@ -31,19 +31,19 @@ function noble(): typeof Blake2.blake2b {
 // Node.js 22's module loader keeps the async context a module is first loaded
 // in (a request's AsyncLocalStorage store) for the life of the process; 24's
 // does not. So on Node 22 and 23, noble loads here, at import, never inside a
-// request. A failed load throws: loaded without JS hashing, the package would
-// break its error paths, whose log lines carry a `keyHash=` digest. That
-// covers the CommonJS build on 22.0 to 22.11, which has no require(esm). One
-// failure is only for now: Node 22.12 and 22.13 refuse to require a module the
-// app's own import graph has linked but not yet evaluated, as when the app
-// imports @noble/hashes after this package. noble then loads on first use,
-// once that graph has loaded it.
+// request. A load that can never work throws: without require(esm) (the
+// CommonJS build on 22.0 to 22.11) or without @noble/hashes, the package would
+// load without JS hashing and break its error paths, whose log lines carry a
+// `keyHash=` digest. Any other failure means the app's own import graph holds
+// noble but has not finished loading it: Node 22 refuses require(esm) of such
+// a module (ERR_REQUIRE_CYCLE_MODULE when the app imports @noble/hashes after
+// this package; an internal assertion when a concurrent import() loads it).
+// noble then loads on first use, once that graph has loaded it.
 if (Number(globalThis.process?.versions?.node?.split('.')[0]) < 24) {
   try {
     noble();
   } catch (error) {
-    const { cause } = error as { cause?: { code?: unknown } };
-    if (cause?.code !== 'ERR_REQUIRE_CYCLE_MODULE') throw error;
+    if (!globalThis.process?.features?.require_module || !nobleBlake2Resolves()) throw error;
   }
 }
 

@@ -1,8 +1,11 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { blake2b } from '@noble/hashes/blake2.js';
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
@@ -74,4 +77,32 @@ it('loads in an app that imports @noble/hashes itself after the package', async 
   const { key, fileName } = JSON.parse(stdout) as { key: string; fileName: string };
   expect(key).toBe('probe:405f09a3617bcc1425ea95b9840d9c2713e3ecebd5a3227abc599317b732e21a');
   expect(fileName).toBe(bytesToHex(blake2b(utf8ToBytes(key), { dkLen: 16 })));
+});
+
+// A concurrent import() whose graph holds the same noble and finishes loading
+// after the package: Node 22.23 refuses require(esm) of it with an internal
+// assertion while it is still loading.
+it('loads beside a concurrent import that loads @noble/hashes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cachekit-noble-race-'));
+  try {
+    const noble = pathToFileURL(createRequire(entries.esm).resolve('@noble/hashes/blake2.js'));
+    const chain = 5;
+    for (let i = 1; i <= chain; i++) {
+      const next = i < chain ? `import './m${i + 1}.mjs';\n` : '';
+      await writeFile(join(dir, `m${i}.mjs`), `${next}export const v = ${i};\n`);
+    }
+    await writeFile(join(dir, 'x.mjs'), `import '${noble.href}';\nimport './m1.mjs';\n`);
+    await writeFile(
+      join(dir, 'app.mjs'),
+      `const [{ generateKey }] = await Promise.all([` +
+        `import('${pathToFileURL(entries.esm).href}'), import('./x.mjs')]);\n` +
+        `console.log(JSON.stringify({ key: generateKey('probe', [1]) }));\n`
+    );
+    const { stdout } = await run(process.execPath, [join(dir, 'app.mjs')], { timeout: 20_000 });
+    expect(JSON.parse(stdout)).toEqual({
+      key: 'probe:405f09a3617bcc1425ea95b9840d9c2713e3ecebd5a3227abc599317b732e21a',
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

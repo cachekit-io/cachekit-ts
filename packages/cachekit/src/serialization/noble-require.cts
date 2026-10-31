@@ -14,3 +14,13 @@ export function requireNobleBlake2() {
     );
   }
 }
+
+/** Whether @noble/hashes' BLAKE2b module can be found from this package. */
+export function nobleBlake2Resolves() {
+  try {
+    require.resolve('@noble/hashes/blake2.js');
+    return true;
+  } catch {
+    return false;
+  }
+}
