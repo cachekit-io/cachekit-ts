@@ -25,7 +25,8 @@
  *   return. Without a bound context, reads fail safe to plain (no-SWR) L1
  *   gets. The same binding keeps a stampede.distributedLock release alive;
  *   without it the release can be cancelled and the lease held for
- *   lockTimeoutMs.
+ *   lockTimeoutMs. It also lets a `writeBehind` L2 write finish after the
+ *   response; without it the write stays on the caller's path.
  *
  * Create the cache ONCE per isolate and reuse it across requests (lazy
  * singleton, as below). Per-request creation derives a fresh encryptor per

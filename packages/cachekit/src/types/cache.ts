@@ -59,6 +59,27 @@ export interface WrapOptionsBase {
   /** Skip L1 cache for this operation */
   skipL1?: boolean;
   /**
+   * Write-behind (opt-in, off by default, matching cachekit-py's
+   * `write_behind`): a cold miss returns once its value is encoded (and
+   * encrypted) and in L1, and its L2 write finishes in the background.
+   * Until that write lands, another process misses the key and recomputes
+   * it; a write still pending when the process ends without `close()` is
+   * lost. In this process, a later `set`, `delete` or `invalidate('params')`
+   * of the key waits for it (on Workers, for at most 30 s), and `close()`
+   * drains it. Another process's
+   * `invalidate` or `delete` is not ordered against it, so a value computed
+   * before that invalidation can land after it, for its full TTL: do not
+   * enable it for authorization decisions or entitlements.
+   *
+   * The write stays on the caller's path while a distributed lock is held
+   * (`stampede.distributedLock`), on Workers unless the function was wrapped
+   * through `withExecutionContext`, while the key already has a write or
+   * delete pending or in flight in this process, and when the write would take the pending writes
+   * past 64 or 16 MiB. Requires `reliability.degradation` (the default): a failed
+   * background write is logged and counted, never thrown.
+   */
+  writeBehind?: boolean;
+  /**
    * Opt into the CachekitIO server's stale-grace window, in seconds (off by
    * default): a stale L2 read is served at once and revalidated in the
    * background. See the README's "Server stale-grace" section.
@@ -363,7 +384,9 @@ export interface Cache {
   ): Promise<void>;
 
   /**
-   * Close the cache and release resources.
+   * Close the cache and release resources. Waits first for every pending
+   * L2 write (`writeBehind`, and on Node stale-grace revalidation); a second
+   * call waits for the same close.
    */
   close(): Promise<void>;
 }

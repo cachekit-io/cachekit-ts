@@ -73,6 +73,37 @@ import {
 const WARN_INTERVAL_MS = 60_000;
 
 /**
+ * Bounds on a cache's pending L2 writes (write-behind, and on Node
+ * stale-grace revalidation), matching cachekit-py's write_behind queue (64
+ * entries, 16 MiB). A write-behind that would take the pending set past
+ * either bound runs on the caller's path instead (tryWriteBehind); a
+ * revalidation write is dropped (queueRevalidationWrite). Module-private on
+ * purpose: not a tuning knob.
+ */
+const MAX_PENDING_WRITES = 64;
+const MAX_PENDING_WRITE_BYTES = 16 * 1024 * 1024;
+
+/**
+ * How long an L2 op waits behind a key's pending write on a runtime that
+ * cancels unregistered work (Workers), before it runs anyway. There a
+ * pending write can never settle: workerd cancels a waitUntil past its 30 s
+ * limit, and the continuation of a request that went away. Without a cap,
+ * every later op on the key, and close(), would wait forever. Node needs
+ * none: its backend timeouts settle every write. A write that never settles
+ * also stays counted against the bound, so enough of them send later writes
+ * to the caller's path: slower, never wrong.
+ */
+const KEY_WAIT_CAP_MS = 30_000;
+
+/**
+ * An L2 write taken off the caller's path: a wrap() cold miss with
+ * `writeBehind` (the flight leader's waitUntil), or a stale-grace
+ * revalidation's write. See setEntry.
+ */
+type DeferredWrite =
+  { kind: 'write-behind'; waitUntil: WaitUntil | undefined } | { kind: 'revalidation' };
+
+/**
  * Sentinel for "the lock path did not resolve the miss — compute without
  * it". Distinct from null: the wrapped function may legitimately resolve
  * null, and conflating the two would compute twice under a held lock.
@@ -253,7 +284,9 @@ export interface CacheRuntime {
    * fire-and-forget work at response return (workerd), which would strand
    * the refresh mid-flight and leave its key marked "refreshing". Reads
    * without a handle fall back to plain (no-SWR) L1 gets rather than
-   * wedging. Unset on Node, where fire-and-forget is safe.
+   * wedging. Write-behind follows the same rule: without a handle, its L2
+   * write stays on the caller's path. Unset on Node, where fire-and-forget
+   * is safe.
    */
   swrRequiresWaitUntil?: boolean;
   /**
@@ -267,14 +300,14 @@ export interface CacheRuntime {
 }
 
 /**
- * A key-free label for a failed L2 delete. Every field of a thrown error —
+ * A key-free label for a failed L2 delete or write. Every field of a thrown error —
  * `cause`, `message`, `name`, even `classification` — is written by whoever
  * threw it and can embed the caller's key, so only literals are emitted and
  * `classification` is checked against its known values first. It is read
  * exactly once: a getter could pass the check and then return the key, or
  * throw and turn best-effort invalidation into a rejection.
  */
-function describeDeleteFailure(err: unknown): string {
+function describeBackendFailure(err: unknown): string {
   if (!(err instanceof BackendError)) return err instanceof Error ? 'Error' : 'Unknown error';
   let classification: unknown;
   try {
@@ -316,6 +349,8 @@ export class CacheImpl implements SecureCache {
    */
   private readonly degradationEnabled: boolean;
   private closed = false;
+  /** The first close()'s promise: every later call waits on the same drain. */
+  private closing: Promise<void> | null = null;
   /** One in-flight cold-miss resolution per cache key (single-flight). */
   private readonly inflight = new Map<string, Promise<unknown>>();
   /**
@@ -339,6 +374,26 @@ export class CacheImpl implements SecureCache {
   private keyMemosPruneAt = 64;
   private readonly stampede: Required<StampedeConfig>;
   private readonly lockable: LockableBackend | null;
+  /**
+   * Per key with a pending L2 write (write-behind, or on Node a stale-grace
+   * revalidation), the promise that settles
+   * when the last write or delete queued for that key settles (see
+   * inKeyOrder). Never rejects. A key leaves the map once its tail settles.
+   */
+  private readonly keyTails = new Map<string, Promise<void>>();
+  /** Pending L2 writes (write-behind and revalidation) not yet settled, and their bytes. */
+  private pendingWrites = 0;
+  private pendingWriteBytes = 0;
+  /**
+   * Per key, the L2 writes and deletes running on an idle key (no tail), so
+   * not in keyTails. A write-behind of such a key is refused and runs on the
+   * caller's path, concurrently, as with the option off: its early L1 fill
+   * could otherwise land before the running op's later one, leaving L1
+   * older than L2. Kept out of keyTails so that an op workerd cancels never
+   * leaves a tail that never settles; a count it leaks only keeps that key's
+   * writes on the caller's path.
+   */
+  private readonly keysInFlight = new Map<string, number>();
 
   constructor(options: CacheOptions, runtime: CacheRuntime) {
     // Every config check that can throw ConfigurationError runs before
@@ -511,8 +566,14 @@ export class CacheImpl implements SecureCache {
   /** Timestamp of the last pack-or-encrypt-failed warning (rate limiting). */
   private lastSetEncryptFailedWarnAt = 0;
 
+  /** Timestamp of the last write-behind-failed warning (rate limiting). */
+  private lastWriteBehindFailedWarnAt = 0;
+
   /** Timestamp of the last revalidation-failed warning (rate limiting). */
   private lastRevalidateFailedWarnAt = 0;
+
+  /** Timestamp of the last revalidation-dropped warning (rate limiting). */
+  private lastRevalidateDroppedWarnAt = 0;
 
   /**
    * Verified unpack of a suspected legacy/foreign ByteStorage envelope on an
@@ -689,6 +750,32 @@ export class CacheImpl implements SecureCache {
             : 'the value could not be packed into its compressed envelope';
     logError(
       `[cachekit] set failed to encrypt or compress, value NOT written to L2 (keyHash=${blake2b16Hex(key)}): ${reason}.`
+    );
+  }
+
+  /**
+   * Count and report a write-behind L2 write once it settles. The caller got
+   * its value long before, so this line and the `write_behind` operation
+   * counter are the only places a failure shows: degradation absorbed it,
+   * and the breaker and the per-attempt `set` counters saw it as any write
+   * failure. On Workers, with no Prometheus, the line is the only signal, so
+   * it names the cause: the last attempt's error class, never its text
+   * (describeBackendFailure), or the breaker when no attempt ran.
+   * Rate-limited, and the key is digested, for the reasons warnSetRejected
+   * gives.
+   */
+  private writeBehindSettled(key: string, stored: boolean, lastError: unknown): void {
+    void this.metrics.recordOperation('write_behind', stored ? 'success' : 'error');
+    if (stored) return;
+    const now = Date.now();
+    if (now - this.lastWriteBehindFailedWarnAt < WARN_INTERVAL_MS) return;
+    this.lastWriteBehindFailedWarnAt = now;
+    const cause =
+      lastError === undefined
+        ? 'not attempted: circuit breaker open'
+        : describeBackendFailure(lastError);
+    logError(
+      `[cachekit] write-behind L2 write failed, value held in this process's L1 only (keyHash=${blake2b16Hex(key)}): ${cause}.`
     );
   }
 
@@ -1070,9 +1157,17 @@ export class CacheImpl implements SecureCache {
    * Returns the payload L1 should hold for this entry, so the SWR refresh
    * path (which defers its L1 write to completeRefresh's version check) can
    * store the ciphertext this produced instead of the caller's plaintext.
-   * Null when the value failed to encode, and when an encrypted cache
-   * produced no ciphertext. A positive `staleTtl` (a stale-grace wrap, checked
-   * at wrap time) rides the write as the server's stale window.
+   * Null when the value failed to encode, when an encrypted cache
+   * produced no ciphertext, when a Workers SWR refresh is skipped because
+   * the key has a write pending (see below), and when a revalidation write
+   * is dropped (see queueRevalidationWrite). A positive `staleTtl` (a
+   * stale-grace wrap, checked at wrap time) rides the write as the server's
+   * stale window.
+   *
+   * `deferred` takes the L2 write off the caller's path: a wrap() cold miss
+   * with `writeBehind` on fills L1 first and returns without waiting for the
+   * L2 write, when tryWriteBehind() takes it; a stale-grace revalidation
+   * queues its write (queueRevalidationWrite).
    */
   private async setEntry<T>(
     key: string,
@@ -1080,7 +1175,8 @@ export class CacheImpl implements SecureCache {
     options: SetOptions | undefined,
     interop: boolean,
     updateL1 = true,
-    staleTtl = 0
+    staleTtl = 0,
+    deferred?: DeferredWrite
   ): Promise<L1Write | null> {
     this.ensureNotClosed();
 
@@ -1175,19 +1271,54 @@ export class CacheImpl implements SecureCache {
       count,
     };
 
-    // Only the backend write runs under retry, the breaker and degradation.
-    await this.run('set', key, undefined, () =>
+    // The L2 write, under retry, the breaker and degradation; the stale
+    // window rides it on a stale-grace wrap.
+    const writeL2 = (): Promise<void> =>
       staleTtl > 0
         ? this.backend.setWithStaleTtl!(key, data, ttl, staleTtl)
-        : this.backend.set(key, data, ttl)
-    );
+        : this.backend.set(key, data, ttl);
+
+    // A stale-grace revalidation never fills L1 (updateL1 is false), and may
+    // be dropped: the stale entry still serves.
+    if (deferred?.kind === 'revalidation') {
+      const queued = this.queueRevalidationWrite(key, data.length, writeL2);
+      if (queued === null) return null;
+      await queued;
+      return l1Write;
+    }
+
+    // Write-behind: L1 is filled as the write starts, before its PUT is sent
+    // (the PUT goes out after the reliability stack's first await), so this
+    // process serves the value while the write is pending. Encode and encrypt
+    // above stay on the caller's path, so their errors still reach it, and L1
+    // holds the bytes the write sends. If the background write fails, L1
+    // keeps the value, as it keeps a degraded write's below. A write sent
+    // back to the caller fills L1 after its L2 write, as with the option off.
+    const wroteBehind =
+      deferred?.kind === 'write-behind' &&
+      this.tryWriteBehind(key, data.length, writeL2, deferred.waitUntil);
+    if (wroteBehind) {
+      this.fillL1(key, l1Write, ttl, namespace);
+      return l1Write;
+    }
+
+    // An SWR refresh (updateL1=false) on Workers runs inside its request's
+    // waitUntil, which workerd caps at 30 s: queued behind a key's pending
+    // write it would wait out KEY_WAIT_CAP_MS and be cancelled as it sends,
+    // leaving its marker stranded and a new tail that never settles. Skip
+    // it; null makes the refresh manager defer the key (one retry a minute).
+    if (!updateL1 && this.swrRequiresWaitUntil && this.keyTails.has(key)) return null;
 
     // Update L1 for direct writes — after `run`, so a backend write that
     // degradation absorbed still fills it, as cachekit-py's sync path does.
     // Otherwise every wrap() during an L2 outage or a 401/403 recomputes the
     // origin and re-pays the doomed round trips. With degradation off `run`
     // throws and L1 stays empty. On an encrypted cache L1 gets the ciphertext,
-    // never the caller's plaintext. The SWR refresh path passes updateL1=false
+    // never the caller's plaintext. The fill runs inside the op inKeyOrder
+    // tracks, so the key stays pending or in flight until L1 holds this
+    // value: a write-behind admitted between this L2 write and its L1 fill
+    // would publish a newer value that this fill then overwrites. The SWR
+    // refresh path passes updateL1=false
     // and writes L1 only through completeRefresh, whose version token discards
     // the refresh if an explicit write or invalidation landed meanwhile — the
     // guard is authoritative for L1 ONLY. The backend.set above is
@@ -1195,12 +1326,235 @@ export class CacheImpl implements SecureCache {
     // L1 but is overwritten in L2 by the refresh's value until the entry next
     // expires or refreshes (a conditional L2 write would need CAS the Backend
     // contract doesn't have).
-    if (updateL1 && this.l1) {
-      this.l1.set(key, l1Write.l1, ttl * 1000, namespace, l1Write.serializedSize, l1Write.count);
-      this.publishL1Stats();
-    }
+    await this.inKeyOrder(key, async () => {
+      await this.run('set', key, undefined, writeL2);
+      if (updateL1) this.fillL1(key, l1Write, ttl, namespace);
+    });
 
     return l1Write;
+  }
+
+  private fillL1(key: string, l1Write: L1Write, ttl: number, namespace: string): void {
+    if (!this.l1) return;
+    this.l1.set(key, l1Write.l1, ttl * 1000, namespace, l1Write.serializedSize, l1Write.count);
+    this.publishL1Stats();
+  }
+
+  /**
+   * Start `key`'s L2 write in the background and return true, or start
+   * nothing and return false when the write must stay on the caller's path:
+   * the key already has a write or delete pending or in flight, or the
+   * runtime cancels unregistered work (Workers) and no waitUntil is bound,
+   * or registering with it throws, or the write would take the pending
+   * writes past the bound (queueFull). A write sent back to the
+   * caller waits behind the key's pending ops (inKeyOrder), so the older
+   * value can never land last.
+   *
+   * A background write never queues behind another op. Queued, it would
+   * fill L1 before ops queued ahead of it that fill L1 after their L2 write,
+   * leaving L1 older than L2; and on Workers it would wait out
+   * KEY_WAIT_CAP_MS inside its own 30 s waitUntil budget and be cancelled as
+   * it sends. Every later write or delete of the key queues behind it, so a
+   * set(), delete() or invalidate('params') issued after wrap() returns is
+   * not overtaken. close() waits for it. Its outcome is counted and a
+   * failure reported (writeBehindSettled); it never rejects.
+   */
+  private tryWriteBehind(
+    key: string,
+    bytes: number,
+    writeL2: () => Promise<void>,
+    waitUntil: WaitUntil | undefined
+  ): boolean {
+    // After close() began, the drain may already have run: a write started
+    // now would outlive it.
+    if (this.closed || this.keyTails.has(key) || this.keysInFlight.has(key)) return false;
+    if (this.swrRequiresWaitUntil && !waitUntil) return false;
+    if (this.queueFull(bytes)) return false;
+    // Register before starting, so a stale ctx (waitUntil throws) sends the
+    // write back to the caller instead of leaving it to be cancelled.
+    let settle!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    if (waitUntil) {
+      try {
+        waitUntil(settled);
+      } catch (error) {
+        logError(
+          '[cachekit] Failed to register write-behind with waitUntil, writing in the foreground:',
+          error instanceof Error ? error.message : 'Unknown error'
+        );
+        return false;
+      }
+    }
+
+    // The fallback tells a write degradation absorbed from one that landed;
+    // lastError keeps the cause degradation discards.
+    let lastError: unknown;
+    const send = (): Promise<boolean> =>
+      this.run('set', key, false, async () => {
+        try {
+          await writeL2();
+        } catch (error) {
+          lastError = error;
+          throw error;
+        }
+        return true;
+      });
+    void this.startPendingWrite(key, bytes, () =>
+      send()
+        .then(
+          (stored) => this.writeBehindSettled(key, stored, lastError),
+          (error: unknown) => this.writeBehindSettled(key, false, error)
+        )
+        .finally(settle)
+    );
+    return true;
+  }
+
+  /** Would a background write of `bytes` take the pending writes past the bound? */
+  private queueFull(bytes: number): boolean {
+    return (
+      this.pendingWrites >= MAX_PENDING_WRITES ||
+      this.pendingWriteBytes + bytes > MAX_PENDING_WRITE_BYTES
+    );
+  }
+
+  /**
+   * Count a background write against the bound until it settles, and make
+   * it the key's tail. The one place the pending counters move, so the two
+   * kinds of background write cannot drift apart.
+   */
+  private startPendingWrite<T>(key: string, bytes: number, start: () => Promise<T>): Promise<T> {
+    this.pendingWrites++;
+    this.pendingWriteBytes += bytes;
+    const write = start().finally(() => {
+      this.pendingWrites--;
+      this.pendingWriteBytes -= bytes;
+    });
+    this.setKeyTail(key, write);
+    return write;
+  }
+
+  /**
+   * Would a revalidation of `key` be dropped before it writes? Checked before
+   * its lease and its recompute, so a full queue costs no origin call: the
+   * write count (the byte bound needs the value, and is checked again when
+   * the write is queued), and on Workers a key with an op queued.
+   */
+  private revalidationWouldDrop(key: string): boolean {
+    return (
+      this.pendingWrites >= MAX_PENDING_WRITES ||
+      (this.swrRequiresWaitUntil && this.keyTails.has(key))
+    );
+  }
+
+  /**
+   * Count a dropped revalidation write and report it, rate-limited, by key
+   * digest. Workers has no Prometheus, so the line is its only trace there.
+   */
+  private revalidationDropped(key: string): void {
+    void this.metrics.recordOperation('revalidate_dropped', 'error');
+    const now = Date.now();
+    if (now - this.lastRevalidateDroppedWarnAt < WARN_INTERVAL_MS) return;
+    this.lastRevalidateDroppedWarnAt = now;
+    logError(
+      `[cachekit] stale revalidation dropped, the stale value stays: the write queue is full or the key has a write queued (keyHash=${blake2b16Hex(key)}).`
+    );
+  }
+
+  /**
+   * Queue a stale-grace revalidation's L2 write and return the promise of it
+   * settling, or drop it (revalidationDropped) and return null. Unlike a
+   * write-behind it may be dropped, because the stale entry still serves and
+   * a later stale read revalidates again: it is dropped when the pending
+   * writes would pass the bound (queueFull), after close() began, and on
+   * Workers when the key has an op queued. It is never put on a caller's
+   * path: the revalidation runs in the background already.
+   *
+   * On Node it queues behind the key's pending ops (it fills no L1, so
+   * queuing cannot leave L1 older than L2), counts against the bound, and
+   * becomes the key's tail: a later set(), delete() or invalidate('params')
+   * orders after it, and close() drains it.
+   *
+   * On Workers it runs as an idle-key op does, counted in keysInFlight only:
+   * it starts after the lease and the recompute, inside the stale reader's
+   * one 30 s waitUntil budget, so workerd can cancel it. As a tail it would
+   * then never settle and stall every later op on the key; counted against
+   * the bound, its slot would leak. So on Workers it is unordered against a
+   * later op and not drained by close(), as before write-behind existed.
+   *
+   * Either way the revalidation awaits it, so its server lease is released
+   * only after this PUT settles.
+   */
+  private queueRevalidationWrite(
+    key: string,
+    bytes: number,
+    writeL2: () => Promise<void>
+  ): Promise<void> | null {
+    if (
+      this.closed ||
+      this.queueFull(bytes) ||
+      (this.swrRequiresWaitUntil && this.keyTails.has(key))
+    ) {
+      this.revalidationDropped(key);
+      return null;
+    }
+    const send = (): Promise<void> => this.run('set', key, undefined, writeL2);
+    // On Workers no tail exists here (checked above), so inKeyOrder counts it in flight.
+    if (this.swrRequiresWaitUntil) return this.inKeyOrder(key, send);
+    return this.startPendingWrite(key, bytes, () => {
+      const tail = this.keyTails.get(key);
+      return tail ? tail.then(send) : send();
+    });
+  }
+
+  /**
+   * Run an L2 write or delete of `key` after everything already queued for
+   * the key, and make it the key's new tail. An op on an idle key runs at
+   * once, as before write-behind existed, counted in keysInFlight while it
+   * runs.
+   */
+  private inKeyOrder<T>(key: string, op: () => Promise<T>): Promise<T> {
+    const tail = this.keyTails.get(key);
+    if (tail === undefined) return this.countInFlight(key, op);
+    const result = this.afterTail(tail).then(op);
+    this.setKeyTail(key, result);
+    return result;
+  }
+
+  private countInFlight<T>(key: string, op: () => Promise<T>): Promise<T> {
+    this.keysInFlight.set(key, (this.keysInFlight.get(key) ?? 0) + 1);
+    const release = (): void => {
+      const left = (this.keysInFlight.get(key) ?? 1) - 1;
+      if (left > 0) this.keysInFlight.set(key, left);
+      else this.keysInFlight.delete(key);
+    };
+    let running: Promise<T>;
+    try {
+      running = op();
+    } catch (error) {
+      release();
+      throw error;
+    }
+    return running.finally(release);
+  }
+
+  /** A key's tail, capped at KEY_WAIT_CAP_MS where it may never settle. */
+  private afterTail(tail: Promise<void>): Promise<void> {
+    if (!this.swrRequiresWaitUntil) return tail;
+    return Promise.race([tail, sleep(KEY_WAIT_CAP_MS)]);
+  }
+
+  private setKeyTail(key: string, op: Promise<unknown>): void {
+    const tail = op.then(
+      () => {},
+      () => {}
+    );
+    this.keyTails.set(key, tail);
+    void tail.then(() => {
+      if (this.keyTails.get(key) === tail) this.keyTails.delete(key);
+    });
   }
 
   async delete(key: string): Promise<boolean> {
@@ -1213,7 +1567,9 @@ export class CacheImpl implements SecureCache {
     // refills L1 from L2 unguarded, so evicting first lets a concurrent read
     // put the old value back before the backend delete lands.
     try {
-      return await this.run('delete', key, false, () => this.backend.delete(key));
+      return await this.inKeyOrder(key, () =>
+        this.run('delete', key, false, () => this.backend.delete(key))
+      );
     } finally {
       if (this.l1) {
         this.l1.invalidateByKey(key);
@@ -1254,9 +1610,9 @@ export class CacheImpl implements SecureCache {
   /**
    * The optional `waitUntil` is not part of the public Cache interface — it
    * is threaded in by withExecutionContext()'s request-scoped view so SWR
-   * refreshes triggered by the wrapped function, and the distributed lock's
-   * release, ride the platform's background-work registration instead of
-   * firing fire-and-forget.
+   * refreshes triggered by the wrapped function, the distributed lock's
+   * release, and write-behind L2 writes ride the platform's background-work
+   * registration instead of firing fire-and-forget.
    */
   wrap<TArgs extends unknown[], TResult>(
     fn: (...args: TArgs) => Promise<TResult>,
@@ -1266,6 +1622,14 @@ export class CacheImpl implements SecureCache {
     const interopOperation = options.interop;
     const interop = interopOperation !== undefined;
     const interopArity = options.interopArity;
+    if (options.writeBehind && !this.degradationEnabled) {
+      // With degradation off a failed L2 write must reach the caller, and a
+      // write the caller no longer waits for cannot.
+      throw new ConfigurationError(
+        'writeBehind requires reliability.degradation (on by default): a background L2 write ' +
+          'cannot report its failure to the caller'
+      );
+    }
     if (!interop && interopArity !== undefined) {
       // A declared contract arity with no operation name means the interop
       // opt-in was dropped (typo, refactor) — auto-mode keys would silently
@@ -1524,7 +1888,16 @@ export class CacheImpl implements SecureCache {
       }
     }
 
-    return this.computeAndStore(cacheKey, interop, compute, options, staleTtl);
+    // Not under the lock: write-behind applies here, also after the lock fell
+    // through, since no lease is held.
+    return this.computeAndStore(
+      cacheKey,
+      interop,
+      compute,
+      options,
+      staleTtl,
+      options.writeBehind ? { kind: 'write-behind', waitUntil } : undefined
+    );
   }
 
   /**
@@ -1545,7 +1918,11 @@ export class CacheImpl implements SecureCache {
    * Returns LOCK_FALLTHROUGH when the lock never resolved the miss
    * (acquire error, or contested past the wait budget): the lease is
    * best-effort stampede mitigation, never a correctness gate, so lock
-   * failure degrades to computing without it. Once we have waited on a
+   * failure degrades to computing without it. The write stays on the
+   * caller's path while the lease is held, write-behind or not, as
+   * cachekit-py's locked path writes inside its lock: a write deferred past
+   * the release would send each waiter's double-check to an empty L2, and
+   * each would recompute. Once we have waited on a
    * holder (the deadline exit, or an acquire error after a contested
    * attempt), L2 is read once more first, as cachekit-py does after its lock
    * wait times out: the holder has usually written by then. An acquire error
@@ -1584,8 +1961,9 @@ export class CacheImpl implements SecureCache {
         try {
           // Double-check: the holder we waited on may have written
           // between our miss and this grant — one GET that hits, instead
-          // of a duplicate compute + write. Skipped after an uncontended
-          // grant on a clean miss (see above).
+          // of a duplicate compute + write. After a failed first read it
+          // retries that read instead. Skipped after an uncontended grant
+          // on a clean miss (see above).
           // A stale double-check is a miss here: we hold the lease, so this
           // call is the revalidation, and a background one would contend with
           // our own lease and stand down.
@@ -1671,7 +2049,8 @@ export class CacheImpl implements SecureCache {
     interop: boolean,
     compute: () => Promise<TResult>,
     options: WrapOptionsBase,
-    staleTtl: number
+    staleTtl: number,
+    deferred?: DeferredWrite
   ): Promise<TResult> {
     // The call runs the function: its one miss, counted before the write so
     // the write's telemetry headers carry it.
@@ -1683,7 +2062,8 @@ export class CacheImpl implements SecureCache {
       { ttl: options.ttl, namespace: options.namespace },
       interop,
       true,
-      staleTtl
+      staleTtl,
+      deferred
     );
     return result;
   }
@@ -1778,9 +2158,11 @@ export class CacheImpl implements SecureCache {
     }
   }
 
-  /** Resolves false only when nothing ran (lease contested or lock endpoint
-   * unreachable); a recompute or write that failed still resolves true, so a
-   * later stale read retries it at once rather than after a lease-length hold. */
+  /** Resolves false when nothing was written by design: the lease was
+   * contested or the lock endpoint unreachable, or the write was dropped (a
+   * full queue, or on Workers a key with an op queued). A recompute or write
+   * that failed still resolves true, so a later stale read retries it at once
+   * rather than after a lease-length hold. */
   private async runRevalidation<TResult>(
     cacheKey: string,
     interop: boolean,
@@ -1788,8 +2170,16 @@ export class CacheImpl implements SecureCache {
     options: WrapOptionsBase,
     staleTtl: number
   ): Promise<boolean> {
+    // Dropped before the lease and the recompute when its write would be:
+    // under a full queue every stale read of a hot key would otherwise take
+    // the lease, run the origin and throw the result away.
+    if (this.revalidationWouldDrop(cacheKey)) {
+      this.revalidationDropped(cacheKey);
+      return false;
+    }
     const lockable = this.lockable;
     let lockId: string | null = null;
+    let ran = true;
     if (lockable) {
       try {
         // acquireLock returns a lease only for a non-empty lock_id (API-65).
@@ -1804,14 +2194,19 @@ export class CacheImpl implements SecureCache {
     }
     try {
       const result = await compute();
-      await this.setEntry(
+      // Null when the write was dropped (or the value would not encode):
+      // report nothing ran, so revalidate() holds the key off instead of
+      // letting the next stale read repeat the lease and the recompute.
+      const stored = await this.setEntry(
         cacheKey,
         result,
         { ttl: options.ttl, namespace: options.namespace },
         interop,
         false,
-        staleTtl
+        staleTtl,
+        { kind: 'revalidation' }
       );
+      ran = stored !== null;
     } catch (error) {
       // After close() every write throws; that is shutdown, not a failure.
       if (!this.closed) {
@@ -1827,7 +2222,7 @@ export class CacheImpl implements SecureCache {
           .catch((error) => this.recordFailure('lock_release', error));
       }
     }
-    return true;
+    return ran;
   }
 
   /**
@@ -1883,9 +2278,9 @@ export class CacheImpl implements SecureCache {
 
   /**
    * Bind a request's execution context, returning a request-scoped view of
-   * this cache whose SWR background refreshes and distributed-lock releases
-   * are registered with the platform (`ctx.waitUntil`) instead of fired
-   * fire-and-forget.
+   * this cache whose SWR background refreshes, distributed-lock releases and
+   * write-behind L2 writes are registered with the platform
+   * (`ctx.waitUntil`) instead of fired fire-and-forget.
    *
    * All state — L1, backend, encryption, refresh tracking — is shared with
    * this cache; the view only carries the handle. Create one per request
@@ -1897,7 +2292,8 @@ export class CacheImpl implements SecureCache {
    * mutable "current context" slot on the singleton would not be.
    *
    * Functions wrapped on the base cache keep working on Workers, just
-   * without SWR (fail-safe plain L1 reads), and with stampede.distributedLock
+   * without SWR (fail-safe plain L1 reads) and with `writeBehind` writing on
+   * the caller's path, and with stampede.distributedLock
    * their lock release can be cancelled at response return, leaving the
    * lease held for lockTimeoutMs while other callers wait out lockWaitMs.
    * On Node this is unnecessary: fire-and-forget work is never cancelled.
@@ -1964,10 +2360,19 @@ export class CacheImpl implements SecureCache {
       this.publishL1Stats();
     }
 
-    // Invalidate L2 for params-level (key deletion)
+    // Invalidate L2 for params-level (key deletion), after any write-behind
+    // write of the key this process started before the call.
     if (level === 'params' && options?.key) {
+      const key = options.key;
       try {
-        await this.backend.delete(options.key);
+        await this.inKeyOrder(key, () => this.backend.delete(key));
+        // Evict again: a read while the delete waited (behind a pending
+        // write, or on the network) can have refilled L1 from L2, as
+        // delete() guards against by evicting after its L2 attempt.
+        if (this.l1) {
+          this.l1.invalidateByKey(key);
+          this.publishL1Stats();
+        }
       } catch (err) {
         // Best-effort L2 invalidation - don't fail the operation, but don't
         // hide it either. The entry stays stale in L2 until its TTL, so name
@@ -1975,7 +2380,7 @@ export class CacheImpl implements SecureCache {
         // caller-supplied key itself.
         logError(
           `[cachekit] invalidate("params") L2 delete failed (keyHash=${blake2b16Hex(options.key)}):`,
-          describeDeleteFailure(err)
+          describeBackendFailure(err)
         );
       }
     }
@@ -1991,8 +2396,13 @@ export class CacheImpl implements SecureCache {
     }
   }
 
-  async close(): Promise<void> {
-    if (this.closed) return;
+  close(): Promise<void> {
+    // A second close() (two shutdown hooks) must not resolve before the
+    // first has drained the pending writes.
+    return (this.closing ??= this.closeOnce());
+  }
+
+  private async closeOnce(): Promise<void> {
     this.closed = true;
 
     // Every step runs even if an earlier one throws — key release, wasm
@@ -2020,6 +2430,20 @@ export class CacheImpl implements SecureCache {
     // Before the first await: a channel that stalls on stop must not keep the
     // arguments the key memos hold. `closed` stops any call from adding one.
     attempt(() => this.forgetKeyArguments());
+
+    // Drain pending L2 writes (write-behind and revalidation) before anything
+    // they use is torn down. `closed` stops new ones; a set() or delete()
+    // already past its closed check can still queue behind a pending write,
+    // hence the loop over tails not yet waited on. Tails never reject. On Node it lasts as long as the slowest
+    // pending write, which the backend's own timeout and retry bound; on
+    // Workers each wait is capped (afterTail).
+    const drained = new Set<Promise<void>>();
+    for (;;) {
+      const fresh = [...this.keyTails.values()].filter((tail) => !drained.has(tail));
+      if (fresh.length === 0) break;
+      for (const tail of fresh) drained.add(tail);
+      await Promise.all(fresh.map((tail) => this.afterTail(tail)));
+    }
 
     // Stop invalidation channel
     if (this.invalidationChannel) {

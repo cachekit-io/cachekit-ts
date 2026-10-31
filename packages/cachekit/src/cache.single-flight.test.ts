@@ -67,10 +67,10 @@ class CountingLockableBackend extends CountingBackend implements LockableBackend
 }
 
 /**
- * Lock that is never granted: another process holds the lease past every
- * wait. `onFirstAcquire` runs inside the first acquire (a holder filling the
- * key while we wait); from acquire `throwFromAcquire` on, the lock endpoint
- * throws instead of refusing.
+ * Lock that is never granted: each acquire is refused, as if another process
+ * held the lease past every wait, until acquire `throwFromAcquire`, from which
+ * the lock endpoint throws instead. `onFirstAcquire` runs inside the first
+ * acquire (a holder filling the key while we wait).
  */
 class ContestedBackend extends CountingBackend implements LockableBackend {
   acquires = 0;
@@ -443,6 +443,9 @@ describe('Cold-miss single-flight', () => {
         backend.onFirstAcquire = () => h.wrapped(5);
 
         await expect(wrapped(5)).resolves.toBe('result-5');
+        // The acquire-error exit served it, not the lockWaitMs deadline exit,
+        // which gives the same counts.
+        expect(backend.acquires).toBe(2);
         // Our miss, the holder's miss, then the re-check after the throw, which hits.
         expect(backend.gets).toBe(3);
         expect(counter.calls).toBe(0);

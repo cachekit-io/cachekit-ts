@@ -389,12 +389,84 @@ lock endpoint is selected automatically), `cachekitioWithLocking()`, or
 `cachekitioFull()`. `createCache` throws `ConfigurationError` if
 `distributedLock` is requested on a backend without `acquireLock`/`releaseLock`.
 
+With `writeBehind` on, a locked miss still waits for its `PUT`: the write
+stays inside the lock (see [Write-Behind](#write-behind)).
+
 There is deliberately no general admission-control cap beyond L1's
 `maxConcurrentRefreshes`: on Node's single-threaded event loop concurrent
 misses don't compete for threads, single-flight collapses the per-key herd,
 and distinct-key miss floods are already bounded by backend timeouts plus the
 circuit breaker. A global semaphore would add queueing latency without a
 failure mode it prevents.
+
+## Write-Behind
+
+`writeBehind: true` is an opt-in per wrapped function, off by default and set
+by no preset, matching cachekit-py's `write_behind`. A cold miss returns once
+the value is encoded (and encrypted) and in L1; its L2 write finishes in the
+background. On CachekitIO that takes the miss from `GET`, `PUT` on the
+caller's path to `GET` alone. The server still confirms the write; only the
+caller stops waiting for it.
+
+```typescript
+const getUser = cache.wrap(async (id: number) => fetchUser(id), {
+  namespace: 'users:getUser',
+  ttl: 300,
+  writeBehind: true,
+});
+```
+
+The cost is visibility. Until the write lands, **another process misses the
+key** and recomputes it (on the metered-misses backend, a billed miss), and so
+does this process when L1 is off. Another process's `invalidate` or `delete` is
+not ordered against this process's pending write, so a value computed before
+that invalidation can be written after it, with its full TTL.
+
+> [!CAUTION]
+> Do not enable it for values that must not outlive an invalidation in
+> another process, such as authorization decisions or entitlements.
+
+**In this process**, a later `set()`, `delete()` or `invalidate('params')` of
+the key waits for its pending write, so on Node a pending write never
+overtakes them, and `close()` drains every pending write before it closes the
+backend. On Workers the wait is capped at 30 s, because workerd can cancel a
+pending write, which then never settles. After the cap the op runs anyway, so
+there the ordering holds for 30 s: a write still in flight at the cap can
+land after the op.
+
+**The write stays on the caller's path:**
+
+- while `stampede.distributedLock` holds the lease: a write deferred past the
+  release would send every waiter's double-check to an empty L2, and each
+  would recompute. A miss that ran without the lock (the lock fell through)
+  writes behind as usual;
+- on Cloudflare Workers, unless the function was wrapped through
+  `cache.withExecutionContext(ctx)`, which registers the write with
+  `ctx.waitUntil`. workerd cancels unregistered work at response return;
+- while the key already has a write or delete pending or in flight in this
+  process: the write runs on the caller's path (behind a pending one,
+  alongside one in flight) and fills L1 after its L2 write, as with the
+  option off, so a write-behind never fills L1 ahead of an earlier write. On Workers
+  a background write queued there would also spend workerd's 30 s
+  `waitUntil` budget waiting and be cancelled as it sends; for that reason an
+  SWR refresh of such a key on Workers sends no write, and the key's refresh
+  is deferred for a minute while the stale value keeps serving;
+- when the write would take the pending writes past 64 or 16 MiB on the
+  cache: that write is the caller's, and it still waits behind any pending
+  write of the same key, so the older value can never land last.
+
+**Failures.** `writeBehind` requires `reliability.degradation` (the default);
+with degradation off, `wrap()` throws `ConfigurationError`, because a
+background write cannot report its failure to the caller. A failed background
+write keeps the value in this process's L1, logs one rate-limited line with a
+digest of the key and the error's class (never its text), and counts as `operation="write_behind", status="error"` in
+`cachekit_operations_total` (a landed one as `status="success"`).
+
+> [!WARNING]
+> Pending writes live in process memory. A process that exits without
+> `await cache.close()` (a crash, `process.exit()`, a frozen serverless
+> instance) loses them. A lost write is only a later miss: the value is
+> recomputed.
 
 ## Server stale-grace (CachekitIO)
 
@@ -425,6 +497,19 @@ const getReport = cache.wrap(async (id: string) => buildReport(id), {
   until the lease could have expired (`stampede.lockTimeoutMs`, at most 60
   seconds). Every write of the key, revalidation included, re-sends the TTL
   and the stale window.
+- The lease is released only after the revalidation's write settles. On
+  Node the write goes through the same per-key queue as
+  [Write-Behind](#write-behind) writes and counts against its 64-write /
+  16 MiB bound: a later `set()`, `delete()` or `invalidate('params')` of the
+  key in this process waits for it, and `close()` drains it. On Workers,
+  where workerd can cancel it, it stays out of that queue and is unordered
+  against a later write, as without write-behind.
+- When the pending writes are at the bound, or on Workers when the key has a
+  write queued, the revalidation is dropped before it takes the lease or
+  runs the function (or, past the byte bound, before it writes). A drop logs
+  one rate-limited line with a digest of the key and counts as
+  `operation="revalidate_dropped"`; the stale entry keeps serving, and the
+  key is not revalidated again until the lease could have expired.
 - A failed revalidation never reaches the caller: the stale entry stays and
   a later stale read tries again. A function that throws is logged
   (rate-limited); a failed write follows the cache's reliability settings,
@@ -579,7 +664,8 @@ const cachedFn = cache.wrap(async (id: number) => fetchData(id), {
 });
 ```
 
-Options: `namespace`, `ttl`, `skipL1`, `staleTtl` ([Server stale-grace](#server-stale-grace-cachekitio)), and the
+Options: `namespace`, `ttl`, `skipL1`, `writeBehind` ([Write-Behind](#write-behind)),
+`staleTtl` ([Server stale-grace](#server-stale-grace-cachekitio)), and the
 `interop` / `interopArity` pair ([Cross-SDK interop mode](#cross-sdk-interop-mode)).
 
 ### cache.invalidate(level, options?)
@@ -617,7 +703,8 @@ The second call evicts the whole namespace from every peer's L1, and neither
 
 ### cache.close()
 
-Close connections and release resources.
+Close connections and release resources. It first waits for every pending
+L2 write (write-behind, and on Node stale-grace revalidation).
 
 ## Error Handling
 
@@ -832,8 +919,8 @@ export default {
       ttl: 300,
     });
 
-    // Bind THIS request's context: SWR background refreshes then ride
-    // ctx.waitUntil and survive past the response. A cheap request-scoped
+    // Bind THIS request's context: SWR refreshes, lock releases and
+    // writeBehind writes then ride ctx.waitUntil and survive past the response. A cheap request-scoped
     // view over the singleton — same encryptor, same L1.
     const requestCache = cache.withExecutionContext(ctx);
 
@@ -939,7 +1026,8 @@ reported through the library logger by key digest.
   expire and recompute in the request path instead. The bound view also
   registers the `stampede.distributedLock` release; from the base cache that
   release can be cancelled, leaving the lease held for `lockTimeoutMs` while
-  other callers wait out `lockWaitMs`.
+  other callers wait out `lockWaitMs`. It also registers `writeBehind` writes;
+  from the base cache they stay on the caller's path.
 - **No Prometheus metrics.**
 - **Key material semantics**: keys are derived in wasm linear memory, a
   host-readable `ArrayBuffer`, then imported once as non-extractable
