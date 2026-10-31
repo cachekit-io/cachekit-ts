@@ -312,6 +312,19 @@ export const WORKLOADS = {
       };
     },
   },
+  // get() served from a plaintext L1, which holds the decoded value: the
+  // lookup and the promises around it (l1-get-hit times L1Cache.get alone)
+  'get-l1-hit': {
+    n: 20_000,
+    setup: async () => {
+      const { createCache } = await load('index.js');
+      const cache = createCache({ backend: new MemoryBackend(), metrics: false });
+      await cache.set(KEY, VALUE, { ttl: 3600 });
+      return async () => {
+        sink += (await cache.get(KEY)).rows.length;
+      };
+    },
+  },
   // the public API's fastest path: keygen + L1 lookup + L1 decode
   'wrap-l1-hit': {
     n: 10_000,
