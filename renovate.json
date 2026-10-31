@@ -9,7 +9,7 @@
       "dependencyDashboardApproval": true
     },
     {
-      "description": "Hold wasm-bindgen and js-sys in packages/cachekit-core-wasm. Both are exact-pinned, and scripts/build.sh fails unless the wasm-bindgen CLI equals the locked wasm-bindgen. CI downloads that CLI by WASM_BINDGEN_VERSION and WASM_BINDGEN_SHA256 in ci.yml, build-wasm.yml and release-please.yml, so the two pins, Cargo.lock and those three workflow pins move together by hand. An update to either crate alone fails the Cargo.lock update, because js-sys pins wasm-bindgen exactly, and both together still fail the wasm build against the pinned CLI, so it waits under Pending Approval on the Dependency Dashboard instead. Vulnerability updates are not held.",
+      "description": "Hold wasm-bindgen and js-sys in packages/cachekit-core-wasm. Both are exact-pinned, and scripts/build.sh fails unless the wasm-bindgen CLI equals the locked wasm-bindgen. CI downloads that CLI by WASM_BINDGEN_VERSION and WASM_BINDGEN_SHA256 in ci.yml, build-wasm.yml, release-please.yml and instruction-counts.yml, so the two pins, Cargo.lock and those four workflow pins move together by hand. The instruction-count gate builds both the PR and its base with that one CLI, so it reads INCOMPLETE on a PR whose base locks another wasm-bindgen: the bump PR, and a release PR whose last tag predates the bump. An update to either crate alone fails the Cargo.lock update, because js-sys pins wasm-bindgen exactly, and both together still fail the wasm build against the pinned CLI, so it waits under Pending Approval on the Dependency Dashboard instead. Vulnerability updates are not held.",
       "matchManagers": ["cargo"],
       "matchPackageNames": ["wasm-bindgen", "js-sys"],
       "groupName": null,

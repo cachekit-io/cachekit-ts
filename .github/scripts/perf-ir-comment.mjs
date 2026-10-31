@@ -15,6 +15,23 @@ import { parseArgs } from 'node:util';
 
 const MARKER = '<!-- cachekit-instruction-count -->';
 
+// A crash (a truncated report, a bad argument) still prints a comment: an
+// empty one would leave the previous push's comment, maybe a PASS, in place.
+// Nothing reaches stdout before the final print, so this is the whole body.
+process.on('uncaughtException', (error) => {
+  const message = String(error?.message ?? error).split('\n')[0];
+  console.log(
+    [
+      MARKER,
+      '### Instruction counts: INCOMPLETE',
+      '',
+      `The comment could not be rendered: ${message}`,
+    ].join('\n')
+  );
+  console.error(error);
+  process.exit(1);
+});
+
 const { values: opt } = parseArgs({
   options: {
     reports: { type: 'string' },

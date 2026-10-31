@@ -237,16 +237,11 @@ async function windowIr(dir, tag, name, n) {
 }
 
 async function pool(tasks, limit) {
-  const results = new Array(tasks.length);
   let next = 0;
   const worker = async () => {
-    while (next < tasks.length) {
-      const i = next++;
-      results[i] = await tasks[i]();
-    }
+    while (next < tasks.length) await tasks[next++]();
   };
   await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker));
-  return results;
 }
 
 const median = (xs) => {
