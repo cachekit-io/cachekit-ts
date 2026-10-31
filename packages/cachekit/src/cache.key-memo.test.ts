@@ -202,7 +202,8 @@ describe('wrap() key memo', () => {
       expect(await encodesDuring(async () => expect(await fn(7)).toBe(stored))).toBe(0);
       expect(lookups).not.toHaveBeenCalled();
       expect(byKey).not.toHaveBeenCalled();
-      expect(held.mock.results.map((r) => r.value)).toEqual([true]);
+      expect(held).toHaveBeenCalledTimes(1);
+      expect(held).toHaveLastReturnedWith(true);
       expect(counted.mock.calls).toEqual([['l1']]);
       await cache.close();
     });
@@ -216,8 +217,9 @@ describe('wrap() key memo', () => {
         vi.setSystemTime(Date.now() + 40_000);
         lookups.mockClear();
         expect(await fn(7)).toBe(stored);
-        expect(held.mock.results.at(-1)?.value).toBe(false);
-        expect(lookups.mock.results.map((r) => r.value.shouldRefresh)).toEqual([true]);
+        expect(held).toHaveLastReturnedWith(false);
+        expect(lookups).toHaveBeenCalledTimes(1);
+        expect(lookups).toHaveLastReturnedWith(expect.objectContaining({ shouldRefresh: true }));
         await cache.close();
       } finally {
         vi.useRealTimers();
