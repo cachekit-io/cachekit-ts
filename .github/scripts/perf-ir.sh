@@ -2,10 +2,13 @@
 # Build a pull request and its base side by side and gate the PR's
 # instructions per op against the base's (packages/cachekit/bench/ir.mjs).
 # Run from a checkout of the PR merge commit, with Node, pnpm, Rust, the wasm
-# tools and valgrind on PATH. Writes $OUT/report.json, ir.mjs's --report, or
-# $OUT/same-build when both builds hash alike; exits with ir.mjs's code.
+# tools and valgrind on PATH. `trees` checks the two trees out under ./ir;
+# `measure` builds them and writes $OUT/report.json, ir.mjs's --report, or
+# $OUT/same-build when both builds hash alike, and exits with ir.mjs's code.
+# CI restores the Rust cache into the trees between the two.
 #
-#   BASE_SHA=<sha> OUT=<dir> [JOBS=4] [IR_ARGS='--shard 1/4'] bash .github/scripts/perf-ir.sh
+#   BASE_SHA=<sha> OUT=<dir> bash .github/scripts/perf-ir.sh trees
+#   OUT=<dir> [JOBS=4] [IR_ARGS='--shard 1/4'] bash .github/scripts/perf-ir.sh measure
 #
 # IR_ARGS goes to both ir.mjs runs, word-split: --shard, or --only and
 # --repeats for a quick local try.
@@ -16,28 +19,37 @@
 # where a process's heap starts moves with its argv, and the GC-sensitive
 # workloads move with it.
 set -euo pipefail
-: "${BASE_SHA:?}" "${OUT:?}"
-jobs=${JOBS:-4}
-read -ra extra <<< "${IR_ARGS:-}"
+: "${OUT:?}"
+root=$PWD/ir
 mkdir -p "$OUT"
 
-git cat-file -e "$BASE_SHA^{commit}" 2> /dev/null ||
-  git fetch --quiet --no-tags --depth=1 origin "$BASE_SHA"
-root=$PWD/ir
-git worktree add --quiet --detach "$root/head" HEAD
-git worktree add --quiet --detach "$root/base" "$BASE_SHA"
-
-# The workloads the base's own file defines, before the head's replaces it.
+# The workloads a tree's own bench file defines, in its order.
 workloads() {
   (cd "$1/packages/cachekit" && [[ -f bench/ir-workload.mjs ]] &&
     node --input-type=module -e \
       "console.log(Object.keys((await import('./bench/ir-workload.mjs')).WORKLOADS).join('\n'))") || true
 }
-workloads "$root/base" | sort > "$OUT/base-workloads.txt"
-workloads "$root/head" | sort > "$OUT/head-workloads.txt"
-new=$(comm -13 "$OUT/base-workloads.txt" "$OUT/head-workloads.txt" | paste -sd, -)
-rm -rf "${root:?}/base/packages/cachekit/bench"
-cp -R "$root/head/packages/cachekit/bench" "$root/base/packages/cachekit/bench"
+
+if [[ ${1:-} == trees ]]; then
+  : "${BASE_SHA:?}"
+  git cat-file -e "$BASE_SHA^{commit}" 2> /dev/null ||
+    git fetch --quiet --no-tags --depth=1 origin "$BASE_SHA"
+  git worktree add --quiet --detach "$root/head" HEAD
+  git worktree add --quiet --detach "$root/base" "$BASE_SHA"
+  # Listed before the head's bench/ replaces the base's.
+  workloads "$root/base" > "$OUT/base-workloads.txt"
+  workloads "$root/head" > "$OUT/head-workloads.txt"
+  rm -rf "${root:?}/base/packages/cachekit/bench"
+  cp -R "$root/head/packages/cachekit/bench" "$root/base/packages/cachekit/bench"
+  exit 0
+fi
+[[ ${1:-} == measure ]] || {
+  echo "usage: perf-ir.sh trees|measure" >&2
+  exit 2
+}
+jobs=${JOBS:-4}
+read -ra extra <<< "${IR_ARGS:-}"
+new=$(comm -13 <(sort "$OUT/base-workloads.txt") <(sort "$OUT/head-workloads.txt") | paste -sd, -)
 
 for tree in base head; do
   echo "::group::Build the $tree"

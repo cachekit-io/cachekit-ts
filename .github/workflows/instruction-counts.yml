@@ -82,6 +82,12 @@ jobs:
         with:
           node-version: '24'
 
+      # Before the Rust cache, which restores into the trees' target dirs.
+      - name: Check out the base and head trees
+        env:
+          BASE_SHA: ${{ needs.base.outputs.sha }}
+        run: bash .github/scripts/perf-ir.sh trees
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # stable
         with:
@@ -121,9 +127,8 @@ jobs:
 
       - name: Gate the PR against its base
         env:
-          BASE_SHA: ${{ needs.base.outputs.sha }}
           IR_ARGS: --shard ${{ matrix.shard }}/${{ env.SHARDS }}
-        run: bash .github/scripts/perf-ir.sh
+        run: bash .github/scripts/perf-ir.sh measure
 
       # What the report job reads: report.json or same-build, and the head's
       # workload list. A shard that died early uploads less, and its workloads
