@@ -56,7 +56,17 @@ export interface WrapOptionsBase {
   namespace: string;
   /** Time-to-live in seconds */
   ttl: number;
-  /** Skip L1 cache for this operation */
+  /**
+   * Skip L1 for this call: it neither reads nor fills L1. It reads the
+   * backend even when L1 holds the key, and the value it reads or computes
+   * stays out of L1 (with `writeBehind` too, so until that write lands this
+   * process misses the key). An entry L1 already holds stays there. Use it
+   * for reads, such as scans, that should not evict the entries L1 keeps hot.
+   *
+   * A call that arrives while another call in this process resolves the same
+   * key's miss still shares that call's read and compute (single-flight), and
+   * the call that started the flight decides whether L1 is filled.
+   */
   skipL1?: boolean;
   /**
    * Write-behind (opt-in, off by default, matching cachekit-py's

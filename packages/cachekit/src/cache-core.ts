@@ -104,6 +104,14 @@ type DeferredWrite =
   { kind: 'write-behind'; waitUntil: WaitUntil | undefined } | { kind: 'revalidation' };
 
 /**
+ * What a write does to L1 (see setEntry): `fill` stores the value there;
+ * `skip` leaves L1 alone (a wrap() call with skipL1, a stale-grace
+ * revalidation); `refresh` is an SWR refresh, which leaves the L1 write to
+ * completeRefresh's version check.
+ */
+type L1Mode = 'fill' | 'skip' | 'refresh';
+
+/**
  * Sentinel for "the lock path did not resolve the miss — compute without
  * it". Distinct from null: the wrapped function may legitimately resolve
  * null, and conflating the two would compute twice under a held lock.
@@ -1018,21 +1026,25 @@ export class CacheImpl implements SecureCache {
    * On CachekitIO the server's freshness headers bound it the
    * same way, and a stale read never re-populates L1. `readFreshness` asks
    * for those headers even with L1 off, so a stale-grace wrap sees the label.
+   * `useL1` false (a wrap() call with skipL1) reads as if L1 were off: L1 is
+   * neither read nor re-populated.
    */
   private async getEntry<T>(
     key: string,
     interop: boolean,
     ttlSeconds?: number,
     probe?: L2ReadProbe,
-    readFreshness = false
+    readFreshness = false,
+    useL1 = true
   ): Promise<T | null> {
     this.ensureNotClosed();
+    const l1 = useL1 ? this.l1 : null;
 
     // Check L1 first. A secure cache holds ciphertext here, so the hit costs a
     // decrypt + AAD verify; an entry that fails to verify is dropped and this
     // falls through to L2 rather than serving or throwing.
-    if (this.l1) {
-      const l1Result = this.l1.get(key);
+    if (l1) {
+      const l1Result = l1.get(key);
       if (l1Result !== null) {
         const decoded = await this.decodeL1Entry<T>(key, l1Result, interop);
         if (decoded !== null) {
@@ -1065,7 +1077,7 @@ export class CacheImpl implements SecureCache {
       let data: Uint8Array | null;
       let l1Bound = Infinity;
       let isStale = false;
-      if ((this.l1 || readFreshness) && this.backend.getWithTtl) {
+      if ((l1 || readFreshness) && this.backend.getWithTtl) {
         const result = await this.backend.getWithTtl(key);
         data = result?.value ?? null;
         l1Bound = Math.min(result?.ttlSeconds ?? Infinity, result?.freshFor ?? Infinity);
@@ -1117,7 +1129,7 @@ export class CacheImpl implements SecureCache {
     // bound too (protocol spec/saas-api.md § Remaining Freshness).
     // The bound decays by the time spent since receipt: a slow decode (a cold
     // native load, a decrypt) must not restart the server's clock.
-    if (this.l1 && !isStale) {
+    if (l1 && !isStale) {
       const namespace = interop ? key.slice(0, key.indexOf(':')) : extractNamespace(key);
       const capSeconds = ttlSeconds ?? this.defaultTtl;
       // ttl <= 0 means "no expiry" (ts-wide Backend contract) — treat it
@@ -1133,7 +1145,7 @@ export class CacheImpl implements SecureCache {
         // freshness check into `Infinity > Infinity` — permanently stale,
         // arming a spurious background refresh per marker window, forever.
         const l1TtlMs = Number.isFinite(l1TtlSeconds) ? l1TtlSeconds * 1000 : 0;
-        this.l1.set(key, this.l1Payload(value, data), l1TtlMs, namespace, serializedSize, count);
+        l1.set(key, this.l1Payload(value, data), l1TtlMs, namespace, serializedSize, count);
         this.publishL1Stats();
       }
     }
@@ -1165,16 +1177,16 @@ export class CacheImpl implements SecureCache {
    * stale window.
    *
    * `deferred` takes the L2 write off the caller's path: a wrap() cold miss
-   * with `writeBehind` on fills L1 first and returns without waiting for the
-   * L2 write, when tryWriteBehind() takes it; a stale-grace revalidation
-   * queues its write (queueRevalidationWrite).
+   * with `writeBehind` on fills L1 first (unless `l1Mode` is `skip`) and
+   * returns without waiting for the L2 write, when tryWriteBehind() takes it;
+   * a stale-grace revalidation queues its write (queueRevalidationWrite).
    */
   private async setEntry<T>(
     key: string,
     value: T,
     options: SetOptions | undefined,
     interop: boolean,
-    updateL1 = true,
+    l1Mode: L1Mode = 'fill',
     staleTtl = 0,
     deferred?: DeferredWrite
   ): Promise<L1Write | null> {
@@ -1278,7 +1290,7 @@ export class CacheImpl implements SecureCache {
         ? this.backend.setWithStaleTtl!(key, data, ttl, staleTtl)
         : this.backend.set(key, data, ttl);
 
-    // A stale-grace revalidation never fills L1 (updateL1 is false), and may
+    // A stale-grace revalidation never fills L1 (its l1Mode is skip), and may
     // be dropped: the stale entry still serves.
     if (deferred?.kind === 'revalidation') {
       const queued = this.queueRevalidationWrite(key, data.length, writeL2);
@@ -1294,20 +1306,22 @@ export class CacheImpl implements SecureCache {
     // holds the bytes the write sends. If the background write fails, L1
     // keeps the value, as it keeps a degraded write's below. A write sent
     // back to the caller fills L1 after its L2 write, as with the option off.
+    // A skipL1 call fills L1 in neither case, so until its write lands this
+    // process misses the key.
     const wroteBehind =
       deferred?.kind === 'write-behind' &&
       this.tryWriteBehind(key, data.length, writeL2, deferred.waitUntil);
     if (wroteBehind) {
-      this.fillL1(key, l1Write, ttl, namespace);
+      if (l1Mode === 'fill') this.fillL1(key, l1Write, ttl, namespace);
       return l1Write;
     }
 
-    // An SWR refresh (updateL1=false) on Workers runs inside its request's
+    // An SWR refresh (l1Mode refresh) on Workers runs inside its request's
     // waitUntil, which workerd caps at 30 s: queued behind a key's pending
     // write it would wait out KEY_WAIT_CAP_MS and be cancelled as it sends,
     // leaving its marker stranded and a new tail that never settles. Skip
     // it; null makes the refresh manager defer the key (one retry a minute).
-    if (!updateL1 && this.swrRequiresWaitUntil && this.keyTails.has(key)) return null;
+    if (l1Mode === 'refresh' && this.swrRequiresWaitUntil && this.keyTails.has(key)) return null;
 
     // Update L1 for direct writes — after `run`, so a backend write that
     // degradation absorbed still fills it, as cachekit-py's sync path does.
@@ -1318,7 +1332,7 @@ export class CacheImpl implements SecureCache {
     // tracks, so the key stays pending or in flight until L1 holds this
     // value: a write-behind admitted between this L2 write and its L1 fill
     // would publish a newer value that this fill then overwrites. The SWR
-    // refresh path passes updateL1=false
+    // refresh path passes l1Mode refresh
     // and writes L1 only through completeRefresh, whose version token discards
     // the refresh if an explicit write or invalidation landed meanwhile — the
     // guard is authoritative for L1 ONLY. The backend.set above is
@@ -1328,7 +1342,7 @@ export class CacheImpl implements SecureCache {
     // contract doesn't have).
     await this.inKeyOrder(key, async () => {
       await this.run('set', key, undefined, writeL2);
-      if (updateL1) this.fillL1(key, l1Write, ttl, namespace);
+      if (l1Mode === 'fill') this.fillL1(key, l1Write, ttl, namespace);
     });
 
     return l1Write;
@@ -1795,7 +1809,7 @@ export class CacheImpl implements SecureCache {
                       value,
                       { ttl: opts.ttl, namespace: opts.namespace },
                       interop,
-                      false,
+                      'refresh',
                       staleTtl
                     ),
                   waitUntil
@@ -1868,7 +1882,7 @@ export class CacheImpl implements SecureCache {
           }
         : null;
     const read: L2ReadProbe = { cleanMiss: false, servedBy: null, stale: false };
-    const cached = await this.wrapRead<TResult>(cacheKey, interop, options.ttl, grace, read);
+    const cached = await this.wrapRead<TResult>(cacheKey, interop, options, grace, read);
     if (cached !== null) {
       return cached;
     }
@@ -1942,7 +1956,7 @@ export class CacheImpl implements SecureCache {
     const { lockTimeoutMs, lockWaitMs, lockPollMs } = this.stampede;
     const deadline = Date.now() + lockWaitMs;
     const recheck = async (): Promise<TResult | typeof LOCK_FALLTHROUGH> => {
-      const filled = await this.wrapRead<TResult>(cacheKey, interop, options.ttl, grace);
+      const filled = await this.wrapRead<TResult>(cacheKey, interop, options, grace);
       return filled !== null ? filled : LOCK_FALLTHROUGH;
     };
 
@@ -1971,7 +1985,7 @@ export class CacheImpl implements SecureCache {
             const filled = await this.wrapRead<TResult>(
               cacheKey,
               interop,
-              options.ttl,
+              options,
               grace && { ...grace, revalidate: null }
             );
             if (filled !== null) {
@@ -2019,21 +2033,23 @@ export class CacheImpl implements SecureCache {
    * the key's revalidation; it counts as an L2 hit. Where no revalidation can
    * run, it is a miss (not a clean one) and the call computes. A wrap without
    * stale-grace serves stale bytes as an ordinary hit, as before; either way
-   * getEntry never backfills L1 from a stale read.
+   * getEntry never backfills L1 from a stale read. A skipL1 call's read
+   * neither reads L1 nor backfills it.
    */
   private async wrapRead<TResult>(
     cacheKey: string,
     interop: boolean,
-    ttlSeconds: number | undefined,
+    options: WrapOptionsBase,
     grace: StaleGrace | null,
     probe: L2ReadProbe = { cleanMiss: false, servedBy: null, stale: false }
   ): Promise<TResult | null> {
     const value = await this.getEntry<TResult>(
       cacheKey,
       interop,
-      ttlSeconds,
+      options.ttl,
       probe,
-      grace !== null
+      grace !== null,
+      !options.skipL1
     );
     if (value === null) return null;
     if (probe.stale && grace) {
@@ -2061,7 +2077,7 @@ export class CacheImpl implements SecureCache {
       result,
       { ttl: options.ttl, namespace: options.namespace },
       interop,
-      true,
+      options.skipL1 ? 'skip' : 'fill',
       staleTtl,
       deferred
     );
@@ -2202,7 +2218,7 @@ export class CacheImpl implements SecureCache {
         result,
         { ttl: options.ttl, namespace: options.namespace },
         interop,
-        false,
+        'skip',
         staleTtl,
         { kind: 'revalidation' }
       );

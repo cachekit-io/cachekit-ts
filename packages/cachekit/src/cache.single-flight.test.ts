@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createCache } from './cache.js';
 import { CacheImpl } from './cache-core.js';
 import { ConfigurationError } from './errors.js';
@@ -561,6 +561,182 @@ describe('Cold-miss single-flight', () => {
       expect(() =>
         createCache({ backend: new CountingBackend(), stampede: { lockWaitMs: Infinity } })
       ).toThrow(ConfigurationError);
+    });
+  });
+});
+
+/** Entries this cache's L1 holds. */
+const l1Entries = (cache: SecureCache): number =>
+  (cache as unknown as { l1: { stats: { entries: number } } }).l1.stats.entries;
+
+describe('wrap() skipL1: the call neither reads nor fills L1', () => {
+  const caches: SecureCache[] = [];
+
+  const make = (options: Parameters<typeof createCache>[0]): SecureCache => {
+    const cache = createCache(options);
+    caches.push(cache);
+    return cache;
+  };
+
+  afterEach(async () => {
+    await Promise.all(caches.splice(0).map((c) => c.close()));
+  });
+
+  /**
+   * Two wraps of one function on one namespace, so their calls share keys:
+   * one reads and fills L1, the other skips it. `counter.computes` counts the
+   * function's runs.
+   */
+  const wraps = (
+    cache: SecureCache,
+    namespace: string,
+    extra: { writeBehind?: boolean } = {},
+    delayMs = 0
+  ) => {
+    const counter = { computes: 0 };
+    const fn = async (id: number): Promise<string> => {
+      counter.computes++;
+      if (delayMs > 0) await sleep(delayMs);
+      return `v-${id}`;
+    };
+    return {
+      counter,
+      normal: cache.wrap(fn, { namespace, ttl: 60 }),
+      skipping: cache.wrap(fn, { namespace, ttl: 60, skipL1: true, ...extra }),
+    };
+  };
+
+  it('reads the backend for a key L1 holds, and counts an L2 hit', async () => {
+    const backend = new CountingBackend();
+    const cache = make({ backend, l1: { enabled: true } });
+    const { counter, normal, skipping } = wraps(cache, 'skip:held');
+
+    await normal(1);
+    expect(l1Entries(cache)).toBe(1);
+
+    await expect(skipping(1)).resolves.toBe('v-1');
+    expect(backend.gets).toBe(2);
+    expect(counter.computes).toBe(1);
+    expect(outcomes(cache)).toEqual({ l1Hits: 0, l2Hits: 1, misses: 1 });
+  });
+
+  it('leaves L1 without a key it computes, and the next normal call fills it', async () => {
+    const backend = new CountingBackend();
+    const cache = make({ backend, l1: { enabled: true } });
+    const { counter, normal, skipping } = wraps(cache, 'skip:cold');
+
+    await expect(skipping(2)).resolves.toBe('v-2');
+    expect(backend.sets).toBe(1);
+    expect(l1Entries(cache)).toBe(0);
+
+    await expect(normal(2)).resolves.toBe('v-2');
+    expect(backend.gets).toBe(2); // L1 had nothing: the normal call read L2
+    expect(counter.computes).toBe(1);
+    expect(l1Entries(cache)).toBe(1);
+    expect(outcomes(cache)).toEqual({ l1Hits: 0, l2Hits: 1, misses: 1 });
+  });
+
+  it('does not backfill L1 from an L2 hit', async () => {
+    const backend = new CountingBackend();
+    const cache = make({ backend, l1: { enabled: true } });
+    const { counter, skipping } = wraps(cache, 'skip:backfill');
+
+    await skipping(3);
+    await expect(skipping(3)).resolves.toBe('v-3');
+    expect(backend.gets).toBe(2);
+    expect(counter.computes).toBe(1);
+    expect(l1Entries(cache)).toBe(0);
+    expect(outcomes(cache)).toEqual({ l1Hits: 0, l2Hits: 1, misses: 1 });
+  });
+
+  it('leaves L1 without the key when its write goes behind', async () => {
+    const backend = new CountingBackend();
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const set = backend.set.bind(backend);
+    backend.set = async (key, value, ttl) => {
+      await hold;
+      await set(key, value, ttl);
+    };
+    const cache = make({ backend, l1: { enabled: true } });
+    const { skipping } = wraps(cache, 'skip:behind', { writeBehind: true });
+
+    try {
+      // Returns with its write still held: the write went behind.
+      await expect(skipping(4)).resolves.toBe('v-4');
+      expect(backend.sets).toBe(0);
+      expect(l1Entries(cache)).toBe(0);
+    } finally {
+      release(); // or close() in afterEach waits on the held write
+    }
+    await vi.waitFor(() => expect(backend.sets).toBe(1));
+    expect(l1Entries(cache)).toBe(0);
+  });
+
+  describe('under the distributed lock', () => {
+    const lockOptions = { distributedLock: true, lockWaitMs: 2000, lockPollMs: 10 };
+
+    it('leaves L1 without a key it computes', async () => {
+      const backend = new CountingLockableBackend();
+      const cache = make({ backend, l1: { enabled: true }, stampede: lockOptions });
+      const { counter, skipping } = wraps(cache, 'skip:locked');
+
+      await expect(skipping(5)).resolves.toBe('v-5');
+      expect(backend.acquires).toBe(1);
+      expect(counter.computes).toBe(1);
+      expect(l1Entries(cache)).toBe(0);
+    });
+
+    it('double-checks L2, not L1, after a waited grant', async () => {
+      const backend = new WaitedGrantBackend();
+      const cache = make({ backend, l1: { enabled: true }, stampede: lockOptions });
+      const { counter, skipping } = wraps(cache, 'skip:double-check');
+      const gets = vi.spyOn(backend, 'get');
+      // While the call waits, this process puts a value for the key in L1 only.
+      backend.onFirstAcquire = async () => {
+        const key = gets.mock.calls[0]![0];
+        await cache.set(key, 'from-l1');
+        backend.store.delete(key);
+      };
+
+      await expect(skipping(6)).resolves.toBe('v-6');
+      expect(backend.gets).toBe(2); // the miss, then the double-check
+      expect(counter.computes).toBe(1);
+      expect(outcomes(cache)).toEqual({ l1Hits: 0, l2Hits: 0, misses: 1 });
+    });
+  });
+
+  describe('in-process flights: a flight runs under its leader’s options', () => {
+    it('a skipL1 call joins a normal call’s flight, which fills L1', async () => {
+      const backend = new CountingBackend();
+      const cache = make({ backend, l1: { enabled: true } });
+      const { counter, normal, skipping } = wraps(cache, 'skip:joins', {}, 20);
+
+      await expect(Promise.all([normal(7), skipping(7)])).resolves.toEqual(['v-7', 'v-7']);
+      expect(backend.gets).toBe(1);
+      expect(counter.computes).toBe(1);
+      expect(l1Entries(cache)).toBe(1);
+      // The joined call was served in process, counted as every joined call is.
+      expect(outcomes(cache)).toEqual({ l1Hits: 1, l2Hits: 0, misses: 1 });
+    });
+
+    it('a normal call joins a skipL1 call’s flight, which leaves L1 alone', async () => {
+      const backend = new CountingBackend();
+      const cache = make({ backend, l1: { enabled: true } });
+      const { counter, normal, skipping } = wraps(cache, 'skip:joined', {}, 20);
+
+      await expect(Promise.all([skipping(8), normal(8)])).resolves.toEqual(['v-8', 'v-8']);
+      expect(backend.gets).toBe(1);
+      expect(counter.computes).toBe(1);
+      expect(l1Entries(cache)).toBe(0);
+      expect(outcomes(cache)).toEqual({ l1Hits: 1, l2Hits: 0, misses: 1 });
+
+      // The next normal call reads L2 and fills L1.
+      await expect(normal(8)).resolves.toBe('v-8');
+      expect(backend.gets).toBe(2);
+      expect(l1Entries(cache)).toBe(1);
     });
   });
 });

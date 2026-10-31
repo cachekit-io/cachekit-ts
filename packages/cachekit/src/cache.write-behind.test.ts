@@ -481,6 +481,46 @@ describe('write-behind', () => {
     }
   });
 
+  it('on Workers, a skipL1 cold miss of a key with a write pending still sends its PUT', async () => {
+    // Unlike an SWR refresh, which gives way to a pending write (next test),
+    // a skipL1 call is a caller's cold miss: it waits behind the stuck tail
+    // and writes.
+    vi.useFakeTimers();
+    try {
+      const backend = new GatedBackend();
+      let first = true;
+      const realSet = backend.set.bind(backend);
+      backend.set = async (key, value) => {
+        backend.setKeys.push(key);
+        if (first) {
+          first = false;
+          return new Promise<void>(() => {}); // a write workerd cancelled: never settles
+        }
+        return realSet(key, value);
+      };
+      const cache = makeWorkersLike({ backend, l1: { swrEnabled: false } });
+      const view = viewOf(cache, { waitUntil: () => {} });
+      let calls = 0;
+      const compute = async (id: number) => ({ id, call: ++calls });
+      const behind = view.wrap(compute, { namespace: 'wb:skip', ttl: 60, writeBehind: true });
+      const skipping = view.wrap(compute, { namespace: 'wb:skip', ttl: 60, skipL1: true });
+
+      await behind(1); // write-behind: its PUT never settles
+      const second = skipping(1); // misses L2, computes, writes behind the stuck tail
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(second).resolves.toEqual({ id: 1, call: 2 });
+      // L2 holds the skipL1 call's value: its write was sent, not dropped.
+      await expect(skipping(1)).resolves.toEqual({ id: 1, call: 2 });
+      expect(calls).toBe(2);
+
+      const closing = cache.close(); // the stuck tail is waited out at the cap
+      await vi.advanceTimersByTimeAsync(30_000);
+      await closing;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('on Workers, an SWR refresh of a key with a write pending sends no PUT and defers', async () => {
     vi.useFakeTimers();
     try {
