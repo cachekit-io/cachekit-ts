@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { Registry } from 'prom-client';
+import { Counter, Registry } from 'prom-client';
 import { createCache } from './cache.js';
+import { ConfigurationError } from './errors.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
 import { InMemoryBackend, metricValue } from '../test/fixtures/metrics.js';
@@ -191,6 +192,155 @@ describe('Cache metrics wiring', () => {
     await vi.waitFor(async () => {
       // Both misses land on the shared counter — second init did not fail
       expect(await metricValue(registry, 'cachekit_misses_total')).toBe(2);
+    });
+  });
+
+  // Hits and misses are counted in plain fields and read into prom-client at
+  // scrape time: every scrape must report each op exactly once.
+  it('scrapes each hit and miss exactly once, however often it scrapes', async () => {
+    const registry = new Registry();
+    const cacheA = makeCache(registry);
+    const cacheB = makeCache(registry);
+    const wrapped = cacheA.wrap(async (id: number) => ({ id }), { namespace: 'n', ttl: 60 });
+
+    await wrapped(1); // miss
+    await vi.waitFor(async () => {
+      expect(await metricValue(registry, 'cachekit_misses_total')).toBe(1);
+    });
+
+    for (let i = 0; i < 5; i++) await wrapped(1); // 5 L1 hits
+    await cacheB.set('ns:k', 'v');
+    expect(await cacheB.get('ns:k')).toBe('v'); // L1 hit on the shared counter
+    expect(await cacheB.get('ns:absent')).toBeNull(); // miss
+    expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l1' })).toBe(6);
+    expect(await metricValue(registry, 'cachekit_misses_total')).toBe(2);
+    // A second scrape with no ops in between adds nothing.
+    expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l1' })).toBe(6);
+    expect(await registry.metrics()).toContain('cachekit_hits_total{layer="l1"} 6');
+
+    await wrapped(1);
+    expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l1' })).toBe(7);
+
+    // A hit recorded before prom-client has loaded lands once it has.
+    const early = new Registry();
+    const noL1 = makeCache(early, { l1: { enabled: false } });
+    await noL1.set('ns:k', 'v');
+    expect(await noL1.get('ns:k')).toBe('v'); // L2 hit
+    await vi.waitFor(async () => {
+      expect(await metricValue(early, 'cachekit_hits_total', { layer: 'l2' })).toBe(1);
+    });
+    await noL1.get('ns:k');
+    expect(await metricValue(early, 'cachekit_hits_total', { layer: 'l2' })).toBe(2);
+  });
+
+  it('defaultLabels label every metric', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const registry = new Registry();
+    const cache = makeCache(registry, { metrics: { registry, defaultLabels: { env: 'prod' } } });
+
+    await cache.set('ns:k', 'v');
+    await cache.get('ns:k'); // L1 hit
+    await cache.get('ns:absent'); // miss
+
+    await vi.waitFor(async () => {
+      expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l1', env: 'prod' })).toBe(
+        1
+      );
+      expect(await metricValue(registry, 'cachekit_misses_total', { env: 'prod' })).toBe(1);
+      expect(
+        await metricValue(registry, 'cachekit_operations_total', {
+          operation: 'set',
+          status: 'success',
+          env: 'prod',
+        })
+      ).toBe(1);
+      expect(await metricValue(registry, 'cachekit_l1_entries', { env: 'prod' })).toBe(1);
+    });
+    expect(consoleSpy).not.toHaveBeenCalled();
+    consoleSpy.mockRestore();
+  });
+
+  it('reset and remove clear hits and misses recorded before them', async () => {
+    const registry = new Registry();
+    const cache = makeCache(registry);
+    await cache.set('ns:k', 'v');
+    await cache.get('ns:k');
+    await vi.waitFor(async () => {
+      expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l1' })).toBe(1);
+    });
+
+    await cache.get('ns:k');
+    await cache.get('ns:absent');
+    registry.resetMetrics();
+    expect(await metricValue(registry, 'cachekit_hits_total')).toBe(0);
+    expect(await metricValue(registry, 'cachekit_misses_total')).toBe(0);
+
+    await cache.get('ns:k');
+    const hits = registry.getSingleMetric('cachekit_hits_total');
+    if (!(hits instanceof Counter)) throw new Error('cachekit_hits_total is not a Counter');
+    hits.reset();
+    expect(await metricValue(registry, 'cachekit_hits_total')).toBe(0);
+
+    await cache.get('ns:k'); // l1
+    hits.inc({ layer: 'l2' }); // a series to keep
+    hits.remove('l1');
+    expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l1' })).toBe(0);
+    expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l2' })).toBe(1);
+
+    await cache.get('ns:k');
+    expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l1' })).toBe(1);
+  });
+
+  it.each(['layer', 'operation', 'status', 'error_type'])(
+    'rejects a defaultLabels key the metrics set themselves: %s',
+    (label) => {
+      expect(() =>
+        createCache({
+          backend: new InMemoryBackend(),
+          metrics: { registry: new Registry(), defaultLabels: { [label]: 'x' } },
+        })
+      ).toThrow(ConfigurationError);
+    }
+  );
+
+  it.each<[string, Partial<Parameters<typeof createCache>[0]>]>([
+    ['an invalid backend URL', { backend: { url: 'not a valid URL' } }],
+    ['distributedLock without a lockable backend', { stampede: { distributedLock: true } }],
+  ])('a cache that fails to construct (%s) registers no metrics', async (_name, options) => {
+    const registry = new Registry();
+    expect(() =>
+      createCache({ backend: new InMemoryBackend(), metrics: { registry }, ...options })
+    ).toThrow(ConfigurationError);
+    // prom-client would load on a later turn: give it two.
+    for (let i = 0; i < 2; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await registry.getMetricsAsJSON()).toHaveLength(0);
+
+    // so a later cache on that registry sets the schema
+    const cache = makeCache(registry, { metrics: { registry, defaultLabels: { env: 'prod' } } });
+    await cache.get('ns:absent');
+    await vi.waitFor(async () => {
+      expect(await metricValue(registry, 'cachekit_misses_total', { env: 'prod' })).toBe(1);
+    });
+  });
+
+  it('counts into a hits counter registered by someone else', async () => {
+    const registry = new Registry();
+    new Counter({
+      name: 'cachekit_hits_total',
+      help: 'registered first by the application',
+      labelNames: ['layer'],
+      registers: [registry],
+    });
+    const cache = makeCache(registry);
+    await cache.set('ns:k', 'v');
+    await cache.get('ns:k');
+
+    await vi.waitFor(async () => {
+      expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l1' })).toBe(1);
+    });
+    await cache.get('ns:k');
+    await vi.waitFor(async () => {
+      expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l1' })).toBe(2);
     });
   });
 

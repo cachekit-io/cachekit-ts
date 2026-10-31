@@ -11,6 +11,7 @@ import type {
 import type { Backend, L1Metrics, LockableBackend } from './backends/types.js';
 import type { InvalidationEvent } from './l1/types.js';
 import type { MetricsCollector, MetricsConfig } from './metrics/prometheus.js';
+import { checkDefaultLabels } from './metrics/labels.js';
 import { logError } from './logger.js';
 import { L1Cache, type L1Entry } from './l1/lru-cache.js';
 import { ReliabilityExecutor } from './reliability/executor.js';
@@ -189,6 +190,8 @@ const NOOP_METRICS: MetricsCollector = {
   async recordOperation() {},
   async recordHit() {},
   async recordMiss() {},
+  countHit() {},
+  countMiss() {},
   async recordError() {},
   async startTimer() {
     return () => {};
@@ -447,20 +450,17 @@ export class CacheImpl implements SecureCache {
     // Initialize L1 cache (its maxMemory check throws ConfigurationError)
     this.l1 = options.l1?.enabled !== false ? new L1Cache(options.l1) : null;
 
+    // The metrics collector is created below, once nothing else can throw:
+    // it registers its metrics, so it must not exist for a cache that fails.
+    const metricsOption = options.metrics ?? false;
+    if (typeof metricsOption === 'object') checkDefaultLabels(metricsOption.defaultLabels);
+
     // Initialize backend. The telemetry getter reads `this` lazily (per
     // request), so constructor field order is safe.
     this.backend = runtime.resolveBackend(options.backend, options.stampede, () => ({
       ...this.telemetry,
       l1Enabled: this.l1 !== null,
     }));
-
-    // Initialize metrics (Prometheus via the runtime; no-op when the
-    // platform has no collector or metrics are off)
-    const metricsOption = options.metrics ?? false;
-    this.metrics =
-      metricsOption !== false && runtime.createMetrics
-        ? runtime.createMetrics(typeof metricsOption === 'object' ? metricsOption : undefined)
-        : NOOP_METRICS;
 
     // Lock capability. Duck-typed like cachekit-py's hasattr check:
     // user-supplied Backend instances aren't required to declare the
@@ -481,6 +481,13 @@ export class CacheImpl implements SecureCache {
           'has no acquireLock/releaseLock'
       );
     }
+
+    // Initialize metrics (Prometheus via the runtime; no-op when the
+    // platform has no collector or metrics are off)
+    this.metrics =
+      metricsOption !== false && runtime.createMetrics
+        ? runtime.createMetrics(typeof metricsOption === 'object' ? metricsOption : undefined)
+        : NOOP_METRICS;
 
     // Initialize reliability executor (composes circuit breaker + retry + degradation)
     this.reliabilityExecutor = new ReliabilityExecutor({
@@ -549,12 +556,12 @@ export class CacheImpl implements SecureCache {
   private recordHit(layer: 'l1' | 'l2'): void {
     if (layer === 'l1') this.telemetry.l1Hits++;
     else this.telemetry.l2Hits++;
-    void this.metrics.recordHit(layer);
+    this.metrics.countHit(layer);
   }
 
   private recordMiss(): void {
     this.telemetry.misses++;
-    void this.metrics.recordMiss();
+    this.metrics.countMiss();
   }
 
   private recordFailure(operation: string, error: unknown): void {
