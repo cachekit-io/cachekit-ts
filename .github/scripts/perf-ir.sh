@@ -2,8 +2,9 @@
 # Build a pull request and its base side by side and gate the PR's
 # instructions per op against the base's (packages/cachekit/bench/ir.mjs).
 # Run from a checkout of the PR merge commit, with Node, pnpm, Rust, the wasm
-# tools and valgrind on PATH. `trees` checks the two trees out under ./ir;
-# `measure` builds them and writes $OUT/report.json, ir.mjs's --report, or
+# tools and valgrind on PATH. `trees` checks the two trees out under $IR_ROOT
+# (default $RUNNER_TEMP/ir, which must lie outside the checkout); `measure`
+# builds them and writes $OUT/report.json, ir.mjs's --report, or
 # $OUT/same-build when both builds hash alike, and exits with ir.mjs's code.
 # CI restores the Rust cache into the trees between the two.
 #
@@ -18,9 +19,14 @@
 # the base can run it (ir.mjs --new). They sit at paths of equal length:
 # where a process's heap starts moves with its argv, and the GC-sensitive
 # workloads move with it.
+#
+# The trees sit outside the checkout: cargo and rustup read .cargo/config.toml
+# and rust-toolchain.toml in every parent directory, so trees nested in the
+# head checkout would both build with the head's copies, and a PR that changes
+# only those would hash alike on both sides and pass unmeasured.
 set -euo pipefail
 : "${OUT:?}"
-root=$PWD/ir
+root=${IR_ROOT:-${RUNNER_TEMP:?set IR_ROOT outside this checkout}/ir}
 mkdir -p "$OUT"
 
 # The workloads a tree's own bench file defines, in its order; none when it

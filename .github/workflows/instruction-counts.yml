@@ -101,10 +101,10 @@ jobs:
         with:
           key: perf-ir
           workspaces: |
-            ir/base/packages/cachekit-core-ts
-            ir/head/packages/cachekit-core-ts
-            ir/base/packages/cachekit-core-wasm
-            ir/head/packages/cachekit-core-wasm
+            ${{ runner.temp }}/ir/base/packages/cachekit-core-ts
+            ${{ runner.temp }}/ir/head/packages/cachekit-core-ts
+            ${{ runner.temp }}/ir/base/packages/cachekit-core-wasm
+            ${{ runner.temp }}/ir/head/packages/cachekit-core-wasm
 
       - name: Install wasm-bindgen + wasm-opt (pinned prebuilts, checksummed)
         run: |
