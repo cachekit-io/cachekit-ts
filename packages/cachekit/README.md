@@ -1073,7 +1073,7 @@ To print this table for your own machine, run `pnpm install` and `pnpm build`, t
 
 ## Requirements
 
-- Node.js 22+ (Node entrypoint) or Cloudflare Workers (workerd). From the CommonJS build, the File backend needs Node.js 22.12+: its file names are hashed in JS by `@noble/hashes`, an ES module that CommonJS loads through `require(esm)`
+- Node.js 22+ (Node entrypoint) or Cloudflare Workers (workerd). The CommonJS build needs Node.js 22.12+: it loads `@noble/hashes`, an ES module, through `require(esm)`
 - Redis 6+ (Node Redis backends)
 
 ## License

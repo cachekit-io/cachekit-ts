@@ -1,9 +1,7 @@
 /**
- * Writes dist/cjs/package.json. The CommonJS build sits inside a
- * `"type": "module"` package, so it needs its own package.json, and that file
- * is then the package scope its `#` imports resolve in. The CommonJS build
- * never preloads @noble/hashes (see src/serialization/blake2b.ts), so
- * #noble-preload is always the module with no exports.
+ * Writes dist/cjs/package.json, which gives the CommonJS build its `type` and
+ * is the package scope its `#` imports resolve in. The CommonJS build never
+ * preloads @noble/hashes (src/serialization/blake2b.ts).
  */
 import { writeFileSync } from 'node:fs';
 

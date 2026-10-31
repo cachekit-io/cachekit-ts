@@ -31,29 +31,34 @@ beforeAll(() => {
   }
 });
 
-describe.each(['esm', 'cjs'] as const)('built %s entry', (format) => {
-  it('loads @noble/hashes only once something hashes in JS, and hashes the same', async () => {
-    const { stdout } = await run(
-      process.execPath,
-      [join(pkgDir, 'test', 'node-entry', 'noble-probe.mjs'), format, entries[format]],
-      { timeout: 20_000 }
-    );
-    const probe = JSON.parse(stdout) as {
-      afterImport: boolean;
-      afterKey: boolean;
-      afterJsHash: boolean;
-      key: string;
-      fileName: string;
-    };
-    // afterJsHash is the positive control: the probe can see noble at all.
-    expect(probe).toMatchObject({
-      afterImport: loadsOnImport,
-      afterKey: loadsOnImport,
-      afterJsHash: true,
+// Without require(esm) (Node 22.0 to 22.11), the ES module build imports
+// noble, which the probe cannot see, and the CommonJS build does not load.
+describe.skipIf(!process.features.require_module).each(['esm', 'cjs'] as const)(
+  'built %s entry',
+  (format) => {
+    it('loads @noble/hashes only once something hashes in JS, and hashes the same', async () => {
+      const { stdout } = await run(
+        process.execPath,
+        [join(pkgDir, 'test', 'node-entry', 'noble-probe.mjs'), format, entries[format]],
+        { timeout: 20_000 }
+      );
+      const probe = JSON.parse(stdout) as {
+        afterImport: boolean;
+        afterKey: boolean;
+        afterJsHash: boolean;
+        key: string;
+        fileName: string;
+      };
+      // afterJsHash is the positive control: the probe can see noble at all.
+      expect(probe).toMatchObject({
+        afterImport: loadsOnImport,
+        afterKey: loadsOnImport,
+        afterJsHash: true,
+      });
+      expect(probe.key).toBe(
+        'probe:405f09a3617bcc1425ea95b9840d9c2713e3ecebd5a3227abc599317b732e21a'
+      );
+      expect(probe.fileName).toBe(bytesToHex(blake2b(utf8ToBytes(probe.key), { dkLen: 16 })));
     });
-    expect(probe.key).toBe(
-      'probe:405f09a3617bcc1425ea95b9840d9c2713e3ecebd5a3227abc599317b732e21a'
-    );
-    expect(probe.fileName).toBe(bytesToHex(blake2b(utf8ToBytes(probe.key), { dkLen: 16 })));
-  });
-});
+  }
+);
