@@ -9,8 +9,8 @@ name: Instruction counts
 # (.github/scripts/perf-ir-base.sh). The verdict per workload goes to one PR
 # comment, edited in place.
 #
-# The shards split the workloads, each building both trees, so the check
-# finishes inside 30 minutes. The base job picks the base once, so every
+# The shards split the workloads (balanced on bench/ir-seconds.json), each
+# building both trees, so the check finishes inside 30 minutes. The base job picks the base once, so every
 # shard and the comment name the same commit, even when a shard is re-run.
 
 on:
@@ -31,7 +31,7 @@ defaults:
     shell: bash
 
 env:
-  SHARDS: 8 # keep in step with the gate job's matrix
+  SHARDS: 4 # keep in step with the gate job's matrix
 
 jobs:
   base:
@@ -61,7 +61,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4]
     env:
       # Must match the wasm-bindgen version pinned in the crate's Cargo.lock;
       # scripts/build.sh fails loudly on drift. Same pins as ci.yml.
@@ -125,9 +125,12 @@ jobs:
           sudo apt-get install -y -q --no-install-recommends valgrind
           valgrind --version
 
+      # Three repeats, the fewest ir.mjs takes: plaintext-set-100kb runs about
+      # 8.5 minutes a process here, so one round per tree keeps its shard
+      # inside the timeout.
       - name: Gate the PR against its base
         env:
-          IR_ARGS: --shard ${{ matrix.shard }}/${{ env.SHARDS }}
+          IR_ARGS: --shard ${{ matrix.shard }}/${{ env.SHARDS }} --repeats 3
         run: bash .github/scripts/perf-ir.sh measure
 
       # What the report job reads: report.json or same-build, and the head's

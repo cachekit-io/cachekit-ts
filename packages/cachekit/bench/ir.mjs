@@ -35,9 +35,10 @@
 // that only the head's workload file defines may fail on the base build,
 // because the base lacks the API it measures; --new names those, and their
 // rows read `new` without gating. --report writes the rows and verdicts as
-// JSON for CI (bench/ir-comment.mjs renders them). --shard K/N measures every
-// Nth workload, so N machines can split one compare. --build-hash prints the
-// hash of what the workloads execute and exits, without valgrind.
+// JSON for CI (.github/scripts/perf-ir-comment.mjs renders them). --shard K/N
+// measures the Kth of N sets of workloads, balanced on ir-seconds.json, so N
+// machines can split one compare. --build-hash prints the hash of what the
+// workloads execute and exits, without valgrind.
 //
 // --wall K adds K interleaved plain-node processes per workload and prints
 // steady-state ns/op (median, min-max), on screen only. It gives the scale of
@@ -102,7 +103,20 @@ const isInt = (x, min) => Number.isInteger(x) && x >= min;
 if (opt.shard) {
   const [k, of] = opt.shard.split('/').map(Number);
   if (!isInt(of, 1) || !isInt(k, 1) || k > of) throw new Error('--shard must be K/N, 1 <= K <= N');
-  names = names.filter((_, i) => i % of === k - 1);
+  // Longest first onto the least-loaded shard, by the seconds one run took in
+  // CI; a workload with no figure yet counts as the slowest. Every shard
+  // computes the same split from the same file.
+  const cost = JSON.parse(readFileSync(new URL('ir-seconds.json', import.meta.url), 'utf8'));
+  const slowest = Math.max(...Object.values(cost));
+  const costOf = (name) => cost[name] ?? slowest;
+  const load = new Array(of).fill(0);
+  const mine = new Set();
+  for (const name of [...names].sort((a, b) => costOf(b) - costOf(a) || a.localeCompare(b))) {
+    const shard = load.indexOf(Math.min(...load));
+    load[shard] += costOf(name);
+    if (shard === k - 1) mine.add(name);
+  }
+  names = names.filter((name) => mine.has(name));
 }
 const newNames = new Set(list(opt.new));
 for (const name of newNames) if (!(name in N)) throw new Error(`--new: unknown workload "${name}"`);
