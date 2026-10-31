@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-core-wasm-v0.2.1...cachekit-core-wasm-v0.2.2) (2026-10-31)
+
+
+### Performance Improvements
+
+* **workers:** encrypt and decrypt through WebCrypto on Workers (LAB-7135) ([#271](https://github.com/cachekit-io/cachekit-ts/issues/271)) ([c6a3f21](https://github.com/cachekit-io/cachekit-ts/commit/c6a3f21c8379bda1272f5230640032dca29befab))
+
 ## [0.2.1](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-core-wasm-v0.2.0...cachekit-core-wasm-v0.2.1) (2026-10-28)
 
 
