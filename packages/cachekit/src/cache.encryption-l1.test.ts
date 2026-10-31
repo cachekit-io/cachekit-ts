@@ -17,7 +17,10 @@
 
 import { createHash } from 'node:crypto';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 import { createCache } from './cache.js';
+import { CacheImpl, type CacheRuntime } from './cache-core.js';
+import { EncryptionManager } from './encryption/manager.js';
 import { generateKey } from './serialization/key-generator.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
@@ -236,6 +239,55 @@ describe('L1 zero-knowledge for encrypted caches', () => {
 
       expect(await cache.exists('users:5')).toBe(false);
       expect(consoleSpy).toHaveBeenCalled();
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it('wrap() decrypts and verifies the L1 entry on a runtime whose SWR needs waitUntil, with none bound', async () => {
+    // Workers cancel background work not registered with waitUntil, so without
+    // one wrap() takes a plain L1 read instead of the SWR read. That read
+    // serves ciphertext too, and must decrypt it like every other hit.
+    const backend = new InMemoryBackend();
+    const runtime: CacheRuntime = {
+      resolveBackend: () => backend,
+      createByteStorage: () => new ByteStorage(),
+      createEncryption: (config) => new EncryptionManager(config.masterKey, config.tenantId),
+      swrRequiresWaitUntil: true,
+    };
+    const cache = new CacheImpl(
+      {
+        backend,
+        defaultTtl: 3600,
+        l1: { enabled: true, maxEntries: 100 },
+        encryption: { masterKey: MASTER_KEY, tenantId: TENANT },
+      },
+      runtime
+    );
+    caches.push(cache);
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const fn = vi.fn(async (id: number) => ({ ssn: LEAK_CANARY, id }));
+      const load = cache.wrap(fn, { namespace: 'users', ttl: 3600 });
+      await load(1);
+      await load(2);
+      const gets = backend.gets;
+
+      expect(await load(1)).toEqual({ ssn: LEAK_CANARY, id: 1 });
+      expect(backend.gets).toBe(gets); // an L1 hit
+
+      // Swap in user 2's ciphertext under user 1's key: the AAD binds the key,
+      // so the hit drops it and reads L2 rather than serving user 2.
+      const stolen = l1Entry(cache, generateKey('users', [2]));
+      l1Of(cache).set(generateKey('users', [1]), stolen, 3600_000, 'users');
+
+      expect(await load(1)).toEqual({ ssn: LEAK_CANARY, id: 1 });
+      expect(consoleSpy).toHaveBeenCalledWith(
+        '[cachekit] L1 decrypt failed — entry dropped:',
+        expect.stringContaining('Authentication verification failed')
+      );
+      expect(fn).toHaveBeenCalledTimes(2);
     } finally {
       consoleSpy.mockRestore();
     }

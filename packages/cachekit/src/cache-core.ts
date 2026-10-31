@@ -848,7 +848,9 @@ export class CacheImpl implements SecureCache {
     return this.execute(() => this.instrument(operation, key, fn), fallback);
   }
 
-  async get<T>(key: string): Promise<T | null> {
+  // Not async: an async function that returns getEntry's promise settles two
+  // microtask turns after it, which a plaintext L1 hit would pay every time.
+  get<T>(key: string): Promise<T | null> {
     return this.getEntry(key, false);
   }
 
@@ -995,7 +997,9 @@ export class CacheImpl implements SecureCache {
    * Decode a value served from L1. For a secure cache that is a decrypt +
    * AAD-verify against the cache key followed by the same unpack/deserialize
    * the L2 path runs — an L1 hit is no longer free, which is the price of not
-   * keeping plaintext resident. For a plaintext cache it is a cast.
+   * keeping plaintext resident. For a plaintext cache it is a cast, so the
+   * hit paths call this only when the cache encrypts and use a plaintext L1
+   * value as it is: awaiting even a settled promise costs a hit a microtask.
    *
    * Verify once, on the first hit. The bytes a fill gives L1 can be a buffer
    * the backend still holds (the one it returned, or the one setEntry gave
@@ -1089,7 +1093,9 @@ export class CacheImpl implements SecureCache {
     if (l1) {
       const l1Result = l1.get(key);
       if (l1Result !== null) {
-        const decoded = await this.decodeL1Entry<T>(key, l1Result, interop);
+        const decoded = this.encryption
+          ? await this.decodeL1Entry<T>(key, l1Result, interop)
+          : { value: l1Result as T };
         if (decoded !== null) {
           if (probe) probe.servedBy = 'l1';
           else this.recordHit('l1');
@@ -1668,7 +1674,10 @@ export class CacheImpl implements SecureCache {
     // cannot disagree, and so the poisoned entry is dropped here too.
     if (this.l1) {
       const l1Value = this.l1.get(key);
-      if (l1Value !== null && (await this.decodeL1Entry(key, l1Value, false)) !== null) {
+      if (
+        l1Value !== null &&
+        (!this.encryption || (await this.decodeL1Entry(key, l1Value, false)) !== null)
+      ) {
         this.recordHit('l1');
         return true;
       }
@@ -1848,7 +1857,9 @@ export class CacheImpl implements SecureCache {
         if (this.swrRequiresWaitUntil && !waitUntil) {
           const l1Value = this.l1.get(cacheKey);
           if (l1Value !== null) {
-            const decoded = await this.decodeL1Entry<TResult>(cacheKey, l1Value, interop);
+            const decoded = this.encryption
+              ? await this.decodeL1Entry<TResult>(cacheKey, l1Value, interop)
+              : { value: l1Value as TResult };
             if (decoded !== null) {
               this.recordHit('l1');
               return decoded.value;
@@ -1866,7 +1877,9 @@ export class CacheImpl implements SecureCache {
             // about to recompute the same key.
             let decoded: { value: TResult } | null = null;
             try {
-              decoded = await this.decodeL1Entry<TResult>(cacheKey, swrResult.value, interop);
+              decoded = this.encryption
+                ? await this.decodeL1Entry<TResult>(cacheKey, swrResult.value, interop)
+                : { value: swrResult.value as TResult };
             } finally {
               // Decode failed — by rethrow (degradation off) or by null
               // (degradation on) — so the entry is dropped either way, and the

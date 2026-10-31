@@ -1,4 +1,4 @@
-import { describe, it, expect, assert, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, assert, beforeEach, afterEach, onTestFinished, vi } from 'vitest';
 import { decode as msgpackDecode, encode as msgpackEncode } from '@msgpack/msgpack';
 import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
 import { promises as fs } from 'node:fs';
@@ -153,6 +153,74 @@ describe('Cache Integration', () => {
       const result = await cache.get('test:l1');
 
       expect(result).toBe('value'); // From L1
+    });
+
+    // A plaintext L1 holds the decoded value, so its hit has nothing to await,
+    // and awaiting even a settled promise costs the hit a microtask turn: the
+    // promise a hit hands back must already be settled.
+    describe('a plaintext L1 hit returns an already-settled promise', () => {
+      const turnsToSettle = async (promise: Promise<unknown>): Promise<number> => {
+        let settled = false;
+        promise.then(
+          () => (settled = true),
+          () => (settled = true)
+        );
+        let turns = 0;
+        while (!settled) {
+          await null;
+          turns++;
+        }
+        return turns;
+      };
+
+      it('from get() and exists()', async () => {
+        const alreadySettled = await turnsToSettle(Promise.resolve());
+        await cache.set('test:settled', { data: 'value' });
+        await backend.delete('test:settled'); // only L1 can serve it now
+
+        const hit = cache.get('test:settled');
+        expect(await turnsToSettle(hit)).toBe(alreadySettled);
+        expect(await hit).toEqual({ data: 'value' });
+        const present = cache.exists('test:settled');
+        expect(await turnsToSettle(present)).toBe(alreadySettled);
+        expect(await present).toBe(true);
+      });
+
+      it.each([
+        ['with SWR', () => cache],
+        [
+          'on a runtime whose SWR needs waitUntil, with none bound',
+          () => {
+            const workersLike = new CacheImpl(
+              { backend, defaultTtl: 3600, metrics: false },
+              {
+                resolveBackend: () => backend,
+                createByteStorage: () => new ByteStorage(),
+                createEncryption: () => {
+                  throw new Error('plaintext cache');
+                },
+                swrRequiresWaitUntil: true,
+              }
+            );
+            onTestFinished(() => workersLike.close());
+            return workersLike;
+          },
+        ],
+      ])(
+        'from wrap() called with an object, which the key memo does not keep, %s',
+        async (_, make) => {
+          const subject = make();
+          const fn = vi.fn(async (query: { id: number }) => ({ id: query.id }));
+          const cached = subject.wrap(fn, { namespace: 'test:settled', ttl: 3600 });
+          await cached({ id: 1 });
+          const alreadySettled = await turnsToSettle(Promise.resolve());
+
+          const hit = cached({ id: 1 });
+          expect(await turnsToSettle(hit)).toBe(alreadySettled);
+          expect(await hit).toEqual({ id: 1 });
+          expect(fn).toHaveBeenCalledTimes(1);
+        }
+      );
     });
   });
 
