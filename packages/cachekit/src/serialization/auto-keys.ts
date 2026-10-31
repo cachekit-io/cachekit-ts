@@ -101,17 +101,17 @@ export class AutoKeys<E = unknown> {
     this.memoising = setTimer !== undefined;
   }
 
-  /**
-   * With `useMemo` false the call is keyed in full and nothing of it is kept.
-   * `ttlSeconds` is the wrap's ttl.
-   */
+  /** The call's key: `slot().key`, for a caller that needs only the key. */
   key(namespace: string, args: unknown[], useMemo: boolean, ttlSeconds: number): string {
     return this.slot(namespace, args, useMemo, ttlSeconds).key;
   }
 
   /**
-   * key(), as the call's slot. `now` is Date.now() when the caller has read it
-   * already; without it the clock is read only if the memo needs it.
+   * The call's slot: its key and, for a call the memo keeps, the entry its
+   * caller last stored there. With `useMemo` false the call is keyed in full
+   * and nothing of it is kept. `ttlSeconds` is the wrap's ttl. `now` is
+   * Date.now() when the caller has read it already; without it the clock is
+   * read only if the memo needs it.
    */
   slot(
     namespace: string,
@@ -121,7 +121,7 @@ export class AutoKeys<E = unknown> {
     now?: number
   ): KeySlot<E> {
     // A JavaScript caller can pass any namespace: key it as generateKey does.
-    if (typeof namespace !== 'string') return unkept(generateKey(namespace, args));
+    if (typeof namespace !== 'string') return newSlot(generateKey(namespace, args));
     if (namespace !== this.namespace) {
       this.namespace = namespace;
       this.prefix = `${namespace}:`;
@@ -133,15 +133,15 @@ export class AutoKeys<E = unknown> {
     ) {
       this.forget();
     }
-    if (!this.memoising || !useMemo) return unkept(this.prefix + generateParamsHash(args));
+    if (!this.memoising || !useMemo) return newSlot(this.prefix + generateParamsHash(args));
     if (args.length === 1) {
       const arg = args[0];
       if (!isMemoArg(arg) || !withinBudget(arg)) {
-        return unkept(this.prefix + generateParamsHash(args));
+        return newSlot(this.prefix + generateParamsHash(args));
       }
       let slot = this.one.get(arg);
       if (slot === undefined) {
-        slot = unkept(this.prefix + generateParamsHash(args));
+        slot = newSlot(this.prefix + generateParamsHash(args));
         if (this.admit(ttlSeconds, now)) {
           this.one.set(typeof arg === 'string' ? ownString(arg) : arg, slot);
         }
@@ -149,10 +149,10 @@ export class AutoKeys<E = unknown> {
       return slot;
     }
     const tuple = tupleOf(args);
-    if (tuple === undefined) return unkept(this.prefix + generateParamsHash(args));
+    if (tuple === undefined) return newSlot(this.prefix + generateParamsHash(args));
     let slot = this.many.get(tuple);
     if (slot === undefined) {
-      slot = unkept(this.prefix + generateParamsHash(args));
+      slot = newSlot(this.prefix + generateParamsHash(args));
       if (this.admit(ttlSeconds, now)) this.many.set(ownString(tuple), slot);
     }
     return slot;
@@ -190,8 +190,8 @@ export class AutoKeys<E = unknown> {
   }
 }
 
-/** The slot of a key nothing keeps. */
-function unkept<E>(key: string): KeySlot<E> {
+/** A slot for `key`, holding no entry yet. */
+function newSlot<E>(key: string): KeySlot<E> {
   return { key, entry: undefined };
 }
 

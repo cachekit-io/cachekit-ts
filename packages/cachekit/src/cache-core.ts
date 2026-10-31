@@ -1778,7 +1778,7 @@ export class CacheImpl implements SecureCache {
         : slot!.key;
 
       // A memoised call holds the L1 entry it was last served from: while L1
-      // still holds that entry and it is fresh, serve it on that one check,
+      // still holds that entry and it is above its SWR jitter band, serve it on that one check,
       // with no lookup by key. Only a memo keeps an entry, and a memo means an
       // unencrypted cache with L1 on, so the stored object is the value.
       const held = slot?.entry;
