@@ -31,7 +31,6 @@ const shards = Array.from({ length: Number(opt.shards) }, (_, k) => {
   };
   return {
     sameBuild: read('same-build')?.trim(),
-    benchChanged: read('bench-changed') !== null,
     expected: read('head-workloads.txt')?.split('\n').filter(Boolean),
     report: JSON.parse(read('report.json') ?? 'null'),
   };
@@ -67,7 +66,7 @@ if (sameBuild) {
   verdict = verdicts.length
     ? verdicts.reduce((a, b) => (rank(b) < rank(a) ? b : a)).split(' ')[0]
     : 'INCOMPLETE';
-  if (['warn', 'improved', 'ok', 'new'].includes(verdict)) verdict = 'PASS';
+  if (rank(verdict) >= rank('warn')) verdict = 'PASS';
   // A failing exit code with no failing row, or a shard with no report, is still not a pass.
   const exited = shards.every((s) => s.report?.exitCode === 0 || s.sameBuild);
   if (verdict === 'PASS' && !exited) verdict = 'INCOMPLETE';
@@ -89,12 +88,6 @@ if (sameBuild) {
         : ''),
     ''
   );
-  if (shards.some((s) => s.benchChanged)) {
-    lines.push(
-      '**This PR changes `packages/cachekit/bench/`**: both builds ran its workloads and thresholds.',
-      ''
-    );
-  }
   shards.forEach((s, k) => {
     if (!s.report && !s.sameBuild)
       lines.push(`**Shard ${k + 1} left no report**: see its job log.`, '');
