@@ -1,3 +1,4 @@
+// A/A probe: a comment-only change, so dist differs and nothing it runs does.
 // ============ Main API ============
 export { createCache } from './intents.js';
 export { redis } from './backends/redis.js';

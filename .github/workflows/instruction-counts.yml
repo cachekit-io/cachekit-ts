@@ -57,7 +57,7 @@ jobs:
     name: Instruction counts (shard ${{ matrix.shard }})
     needs: base
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
