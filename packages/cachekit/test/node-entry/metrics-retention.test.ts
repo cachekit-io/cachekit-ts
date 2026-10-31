@@ -21,20 +21,22 @@ beforeAll(() => {
   if (!existsSync(entry)) throw new Error(`${entry} is missing: run \`pnpm build\` first`);
 });
 
-async function probe(mode: 'reset' | 'remove'): Promise<{ alive: number; liveHits: number }> {
+type Result = { tracked: number; alive: number; liveHits: number };
+
+async function probe(mode: 'reset' | 'remove'): Promise<Result> {
   const { stdout } = await run(
     process.execPath,
     ['--expose-gc', join(pkgDir, 'test', 'node-entry', 'metrics-retention-probe.cjs'), entry, mode],
     { timeout: 20_000 }
   );
-  return JSON.parse(stdout) as { alive: number; liveHits: number };
+  return JSON.parse(stdout) as Result;
 }
 
 describe('pending hit and miss counts after their samples are cleared', () => {
   it.each(['reset', 'remove'] as const)(
     'by %s, hold no collector that is gone, and keep counting for one that is not',
     async (mode) => {
-      expect(await probe(mode)).toEqual({ alive: 0, liveHits: 2 });
+      expect(await probe(mode)).toEqual({ tracked: 1000, alive: 0, liveHits: 2 });
     },
     // above the probe's own 20 s limit
     30_000

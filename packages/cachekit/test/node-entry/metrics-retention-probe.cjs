@@ -1,7 +1,8 @@
 // Builds 500 metrics collectors on one registry, each with its own tenant
 // default label, counts a hit and a miss on each, clears their samples, drops
 // them, and reports how many of their label objects outlive garbage
-// collection, and what a collector kept alive counts after the clear:
+// collection (their default labels and their hit cells' copies), and what a
+// collector kept alive counts after the clear:
 //
 //   node --expose-gc metrics-retention-probe.cjs <path to dist/cjs/index.js> <reset|remove>
 const path = require('node:path');
@@ -23,6 +24,15 @@ function build(registry, refs) {
   return collectors;
 }
 
+// A hit cell holds its own copy of the labels ({ layer, ...defaultLabels });
+// the first flush hands that copy to prom-client, which keeps it as the
+// series' labels and returns it from get(). Track those copies too.
+async function trackHitLabels(hits, refs) {
+  for (const { labels } of (await hits.get()).values) {
+    if (labels.tenant !== 'live') refs.push(new WeakRef(labels));
+  }
+}
+
 (async () => {
   const registry = new Registry();
   const refs = [];
@@ -32,10 +42,11 @@ function build(registry, refs) {
   await Promise.all(collectors.map((c) => c.recordHit('l1')));
   collectors.forEach((c) => c.countMiss());
   await live.recordHit('l1');
-  await registry.metrics();
 
   const hits = registry.getSingleMetric('cachekit_hits_total');
   const misses = registry.getSingleMetric('cachekit_misses_total');
+  await trackHitLabels(hits, refs);
+  await registry.metrics();
   if (mode === 'reset') {
     registry.resetMetrics();
   } else {
@@ -57,5 +68,5 @@ function build(registry, refs) {
     .filter((v) => v.labels.tenant === 'live')
     .reduce((sum, v) => sum + v.value, 0);
   const alive = refs.filter((ref) => ref.deref() !== undefined).length;
-  console.log(JSON.stringify({ alive, liveHits }));
+  console.log(JSON.stringify({ tracked: refs.length, alive, liveHits }));
 })();
