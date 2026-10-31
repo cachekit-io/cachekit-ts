@@ -1,4 +1,4 @@
-export { ballastLength as _aaBallastLength } from './aa-ballast.js';
+export { ballastLength as _aaBallastLength, keepBallast as _aaKeepBallast } from './aa-ballast.js';
 // ============ Main API ============
 export { createCache } from './intents.js';
 export { redis } from './backends/redis.js';
