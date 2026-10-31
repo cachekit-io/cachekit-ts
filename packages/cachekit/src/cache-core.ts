@@ -1825,9 +1825,11 @@ export class CacheImpl implements SecureCache {
                 this.backgroundRefresh.scheduleRefresh(
                   cacheKey,
                   () => fn(...args),
-                  // A JavaScript caller can omit the typed-required ttl; resolve it as
-                  // setEntry does, or the refreshed L1 copy gets NaN ms and never expires.
-                  { ttl: options.ttl ?? this.defaultTtl, namespace: options.namespace },
+                  // A JavaScript caller can omit the typed-required ttl; the `ttl` local
+                  // resolves it as setEntry does, or the refreshed L1 copy gets NaN ms and
+                  // never expires. The locals, not a re-read of the caller's options: a
+                  // getter could tag the refreshed entry with a namespace its key lacks.
+                  { ttl, namespace },
                   swrResult.versionToken,
                   this.l1,
                   // The refresh re-sends the stale window: a PUT replaces the

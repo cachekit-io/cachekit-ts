@@ -1184,6 +1184,40 @@ describe('Cache Integration', () => {
     }
   });
 
+  it('an SWR refresh files its L1 entry under the namespace the call was keyed with', async () => {
+    // The options are the caller's object, so a getter can answer a later read
+    // differently. The refresh must use the call's own reading, or the refreshed
+    // entry is filed under another namespace and invalidating its key's misses it.
+    const swrCache = createCache({
+      backend: new InMemoryBackend(),
+      defaultTtl: 60,
+      l1: { swrEnabled: true, swrThresholdRatio: 2 },
+    });
+    const spy = vi.spyOn(L1Cache.prototype, 'completeRefresh');
+    let readsBeforeMove = Infinity;
+    const options = {
+      ttl: 60,
+      get namespace() {
+        return readsBeforeMove-- > 0 ? 'swr:keyed' : 'swr:moved';
+      },
+    };
+    const fn = swrCache.wrap(async () => 'v', options);
+    const cacheKey = generateKey('swr:keyed', []);
+    try {
+      await fn(); // cold miss
+      readsBeforeMove = 1; // the stale hit's first read keys it; any later one answers 'swr:moved'
+      await fn(); // stale hit, schedules the refresh
+      await vi.waitFor(() => expect(spy).toHaveReturnedWith(true));
+      const l1 = spy.mock.contexts[0] as L1Cache<unknown>;
+      expect(l1.entry(cacheKey)).toBeDefined();
+      await swrCache.invalidate('namespace', { namespace: 'swr:keyed' });
+      expect(l1.entry(cacheKey)).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+      await swrCache.close();
+    }
+  });
+
   describe('SWR refresh persistence (L2-only setEntry + version-guarded L1)', () => {
     // The SWR refresh persists through setEntry with updateL1=false: the
     // ONLY L1 writer on the refresh path is completeRefresh, whose version

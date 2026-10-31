@@ -260,7 +260,9 @@ describe('wrap() key memo', () => {
     it('never serves a held entry that expires while the call reads its options', async () => {
       // wrap() reads its options on every call, and a getter there is the
       // caller's code: the clock a held entry is checked against must be read
-      // after it.
+      // after it. The entry is stored under a 1 s ttl and then held in a memo
+      // window opened under 10 s, so the window outlives the entry and only
+      // L1Cache.hit() can refuse it.
       vi.useFakeTimers({ toFake: ['Date'], now: 0 });
       try {
         const backend = new InMemoryBackend();
@@ -270,17 +272,22 @@ describe('wrap() key memo', () => {
         const options = {
           ttl: 1,
           get namespace() {
-            if (crossExpiry) vi.setSystemTime(1001); // past the 1 s ttl, mid-call
+            if (crossExpiry) vi.setSystemTime(1001); // past the entry's 1 s ttl, mid-call
             return 'svc:getThing';
           },
         };
         const fn = cache.wrap(async (id: number) => ({ id, call: ++calls }), options);
-        await fn(7);
+        await fn(7); // stores the entry, which expires at 1000 ms
+        options.ttl = 10; // a call under another ttl empties the memo and opens a window to 10 s
         await fn(7); // an L1 hit by key, whose entry the memo now holds
         backend.store.clear(); // only L1 holds it, so a stale serve can come from L1 alone
         vi.setSystemTime(999);
         crossExpiry = true;
+        held.mockClear();
         expect(await fn(7)).toEqual({ id: 7, call: 2 });
+        expect(held).toHaveBeenCalledOnce();
+        expect(held).toHaveLastReturnedWith(false);
+        expect(held.mock.calls[0][1]).toBe(1001);
         await cache.close();
       } finally {
         vi.useRealTimers();
