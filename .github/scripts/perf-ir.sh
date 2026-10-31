@@ -58,7 +58,10 @@ for tree in base head; do
   (
     cd "$root/$tree"
     pnpm install --frozen-lockfile
-    pnpm build
+    # turbo shares its cache across worktrees: the second tree would restore
+    # the first tree's outputs, skip `napi build`, and keep a loader the first
+    # tree regenerated. Each tree builds its own.
+    TURBO_FORCE=true pnpm build
     pnpm --filter @cachekit-io/cachekit-core-wasm build:wasm
   )
   echo "::endgroup::"
