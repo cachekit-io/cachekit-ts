@@ -1057,19 +1057,19 @@ What one call costs in the client, on an in-memory backend, so no figure include
 
 | Operation                        |   100 B |  10 KB |
 | :------------------------------- | ------: | -----: |
-| `wrap()` call, L1 hit            |  330 ns | 200 ns |
-| `wrap()` call, L1 hit, encrypted | 11.0 µs | 178 µs |
-| `get`, L2 hit                    |  6.5 µs | 171 µs |
-| `get`, L2 hit, encrypted         |  9.3 µs | 176 µs |
-| `set`                            |  6.4 µs | 142 µs |
-| Key generation (`generateKey`)   |  1.1 µs |      — |
+| `wrap()` call, L1 hit            |  320 ns | 200 ns |
+| `wrap()` call, L1 hit, encrypted | 10.6 µs | 175 µs |
+| `get`, L2 hit                    |  6.5 µs | 168 µs |
+| `get`, L2 hit, encrypted         |  9.2 µs | 173 µs |
+| `set`                            |  6.3 µs | 140 µs |
+| Key generation (`generateKey`)   |  1.0 µs |      — |
 
 - **`wrap()` L1 hit**: the hit returns the stored object as it is, so the value's size barely matters. A wrapped function remembers the key of each call whose arguments are all strings, numbers, booleans, `null` or `undefined`, and the L1 entry that call was last served from. A repeat call is served from that entry on one check, with no key generation and no lookup by key, while L1 still holds the entry and it is fresh; once L1 drops it (expiry, eviction, `delete()`, `invalidate()`, an invalidation event, `close()`) or it is due for a stale-while-revalidate refresh, the call looks its key up in L1 again. It remembers a call only if it has at most 8 arguments, no `NaN`, and strings whose `length` adds up to 256 or less. Every other call generates its key, which adds about the cost of the key generation row: an object, array, `Date`, `Map`, `Set` or binary argument, a call past those limits, a call with `skipL1` or under `ttl: 0`, every `interop` call, and every call on a cache that encrypts or has L1 off, or on Cloudflare Workers.
 - **Key memo**: a wrapped function remembers at most 1,024 keys and starts again when full: about 160 KiB when each call passes one number, and at most about 1 MiB. It holds copies of the arguments, so a cache that encrypts keeps no memo, and `delete()`, `invalidate()`, `close()` and, with `invalidation` configured, an invalidation event from another instance empty every memo of the cache. A timer also empties a memo one second after its first key, or one `ttl` after it if that is sooner, even if the function is not called again, so it is set to drop an argument no later than L1 stops serving a value stored with that `ttl`. The timer can run late, for example when the event loop is busy or the process is suspended, and the memo keeps its arguments until it runs. A call that comes one `ttl` or more after the first key, before the timer has run, empties the memo first. The call that stores the first key sets that timer, which keeps the call's async context, `AsyncLocalStorage` stores included, until it runs: one second or less after it was set, unless it runs late. So a function called again and again with the same arguments generates their key about once a second, or once per `ttl` if that is shorter. Wrap a function once, at module scope: a function wrapped inside each request keeps that request's async context and its memo until the memo's timer runs, one second later or one `ttl` later if that is sooner. With a `ttl` of a second or more, at 1,000 requests a second with a 16 KiB store, that is about 16 MB. A wrap under `ttl: 0`, which never expires, keeps no memo, and nor does a Worker, where a timer can be cancelled when its request ends.
 - **Encrypted L1 hit**: L1 holds the same ciphertext as L2, so every hit also generates the key, decrypts, verifies the AAD and decodes the value. That cost grows with the value.
 - **L2 hit and `set`**: L1 is off, so each call reads or writes the backend and decodes or encodes the value. A real backend adds its round trip, which for Redis or cachekit.io is a network call.
 
-To print this table for your own machine, run `pnpm install` and `pnpm build`, then `node packages/cachekit/bench/readme.mjs`, from a clone of the repository, or run the **Bench** workflow from its Actions tab. Across 8 runs on this CPU model, the 100 B hit took 290-360 ns, 325 ns at the median, and every other cell agreed within 10%. Hosted runners also come with other CPU models, on which the 100 B hit took from 150 ns (an EPYC 9V45) to 310 ns (an Intel Xeon Platinum 8370C) in the same batch of runs, and other machines give other figures.
+To print this table for your own machine, run `pnpm install` and `pnpm build`, then `node packages/cachekit/bench/readme.mjs`, from a clone of the repository, or run the **Bench** workflow from its Actions tab. Across 11 runs on this CPU model, the 100 B hit took 290-360 ns, 320 ns at the median, and every other cell agreed within 10%. Hosted runners also come with other CPU models, on which the 100 B hit took from 160 ns (an EPYC 9V45) to 330 ns (an Intel Xeon Platinum 8370C or 8573C) in the same batch of runs, and other machines give other figures.
 
 ## Requirements
 
