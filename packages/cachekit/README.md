@@ -835,7 +835,8 @@ const cache = createCache({
 //             cachekit_misses_total, cachekit_errors_total{error_type}
 // Histogram:  cachekit_operation_duration_seconds{operation}
 // Gauges:     cachekit_l1_entries, cachekit_l1_memory_bytes, cachekit_circuit_breaker_state
-// Every metric also carries the defaultLabels.
+// Every metric also carries the defaultLabels, whose keys cannot be layer,
+// operation, status or error_type (createCache throws ConfigurationError).
 ```
 
 Hits and misses are counted in plain fields and added to their counters when

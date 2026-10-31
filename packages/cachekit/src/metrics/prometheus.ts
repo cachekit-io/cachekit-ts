@@ -4,7 +4,11 @@
  * Uses prom-client types when available, otherwise provides compatible interface.
  */
 import { setImmediate } from 'node:timers';
+import { ConfigurationError } from '../errors.js';
 import { logError } from '../logger.js';
+
+/** Labels the metrics set per call; a default label of the same name would replace them. */
+const INTRINSIC_LABELS: readonly string[] = ['layer', 'operation', 'status', 'error_type'];
 
 // Types for prom-client (peer dependency)
 interface Counter {
@@ -58,6 +62,23 @@ function flushPendingCounts(this: Counter): void {
       const name = (this as { name?: string }).name;
       logError(`[cachekit] metrics: dropped ${n} pending counts on ${name}:`, error);
     }
+  }
+}
+
+/**
+ * Make the counter's reset() and remove() flush its pending counts first, so
+ * they clear counts recorded before them, as they would had each hit been an
+ * inc(). registry.resetMetrics() calls reset() on every metric.
+ */
+function flushBeforeClearing(counter: Counter): void {
+  const clearing = counter as unknown as Record<string, unknown>;
+  for (const method of ['reset', 'remove']) {
+    const clear = clearing[method];
+    if (typeof clear !== 'function') continue;
+    clearing[method] = function (this: Counter, ...args: unknown[]): unknown {
+      flushPendingCounts.call(this);
+      return clear.apply(this, args);
+    };
   }
 }
 
@@ -185,6 +206,13 @@ export class CacheMetrics implements MetricsCollector {
   constructor(config: MetricsConfig = {}) {
     this.prefix = config.prefix ?? 'cachekit';
     this.defaultLabels = config.defaultLabels ?? {};
+    const reserved = Object.keys(this.defaultLabels).filter((l) => INTRINSIC_LABELS.includes(l));
+    if (reserved.length > 0) {
+      throw new ConfigurationError(
+        `metrics.defaultLabels cannot set ${reserved.join(', ')}: ` +
+          `${INTRINSIC_LABELS.join(', ')} are set by the metrics themselves`
+      );
+    }
     this.registry = config.registry;
     this.errorHandler = config.onError;
     // Load prom-client on the next turn of the event loop, not in this one:
@@ -241,6 +269,7 @@ export class CacheMetrics implements MetricsCollector {
           registers: [registry],
         });
         pendingCounts.set(counter, new Map());
+        flushBeforeClearing(counter);
         return counter;
       };
       // Every metric declares the default labels, or each inc() would throw.

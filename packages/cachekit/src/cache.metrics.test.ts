@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { Counter, Registry } from 'prom-client';
 import { createCache } from './cache.js';
+import { ConfigurationError } from './errors.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
 import { InMemoryBackend, metricValue } from '../test/fixtures/metrics.js';
@@ -258,6 +259,48 @@ describe('Cache metrics wiring', () => {
     expect(consoleSpy).not.toHaveBeenCalled();
     consoleSpy.mockRestore();
   });
+
+  it('reset and remove clear hits and misses recorded before them', async () => {
+    const registry = new Registry();
+    const cache = makeCache(registry);
+    await cache.set('ns:k', 'v');
+    await cache.get('ns:k');
+    await vi.waitFor(async () => {
+      expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l1' })).toBe(1);
+    });
+
+    await cache.get('ns:k');
+    await cache.get('ns:absent');
+    registry.resetMetrics();
+    expect(await metricValue(registry, 'cachekit_hits_total')).toBe(0);
+    expect(await metricValue(registry, 'cachekit_misses_total')).toBe(0);
+
+    await cache.get('ns:k');
+    const hits = registry.getSingleMetric('cachekit_hits_total') as Counter;
+    hits.reset();
+    expect(await metricValue(registry, 'cachekit_hits_total')).toBe(0);
+
+    await cache.get('ns:k'); // l1
+    hits.inc({ layer: 'l2' }); // a series to keep
+    hits.remove('l1');
+    expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l1' })).toBe(0);
+    expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l2' })).toBe(1);
+
+    await cache.get('ns:k');
+    expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l1' })).toBe(1);
+  });
+
+  it.each(['layer', 'operation', 'status', 'error_type'])(
+    'rejects a defaultLabels key the metrics set themselves: %s',
+    (label) => {
+      expect(() =>
+        createCache({
+          backend: new InMemoryBackend(),
+          metrics: { registry: new Registry(), defaultLabels: { [label]: 'x' } },
+        })
+      ).toThrow(ConfigurationError);
+    }
+  );
 
   it('counts into a hits counter registered by someone else', async () => {
     const registry = new Registry();
