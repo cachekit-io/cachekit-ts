@@ -6,7 +6,7 @@ import {
   encodeInteropValue,
   decodeInteropValue,
   encodeInteropValueCounted,
-  decodeInteropValueChecked,
+  decodeInteropValueTrusted,
   decodeInteropValueCounted,
   validateInteropSegment,
   INTEROP_SEGMENT_PATTERN,
@@ -570,9 +570,9 @@ describe('interop value decoding', () => {
 });
 
 // An encrypted L1 hit on an interop entry this process encoded decodes it
-// through decodeInteropValueChecked, which skips the pre-scan. That holds only
+// through decodeInteropValueTrusted, which skips the pre-scan. That holds only
 // if every encoding the value encoder produces passes it.
-describe('decodeInteropValueChecked on what the encoder wrote', () => {
+describe('decodeInteropValueTrusted on what the encoder wrote', () => {
   it('passes the pre-scan at and past the depth bound, and reads as the walked decode', () => {
     const nest = (levels: number, leaf: unknown, kind: 'array' | 'map' | 'set'): unknown => {
       let v = leaf;
@@ -588,13 +588,14 @@ describe('decodeInteropValueChecked on what the encoder wrote', () => {
           let bytes: Uint8Array;
           try {
             bytes = encodeInteropValue(nest(levels, leaf, kind));
-          } catch {
+          } catch (error) {
+            expect((error as Error).message).toMatch(/max depth/i);
             refused++;
             continue;
           }
           encoded++;
           const walked = decodeInteropValueCounted(bytes);
-          expect(decodeInteropValueChecked(bytes)).toEqual(walked);
+          expect(decodeInteropValueTrusted(bytes)).toEqual(walked);
         }
       }
     }
@@ -603,19 +604,19 @@ describe('decodeInteropValueChecked on what the encoder wrote', () => {
   });
 
   it('keeps the input cap, the collection cap and the post-decode depth check', () => {
-    expect(() => decodeInteropValueChecked(new Uint8Array(10 * 1024 * 1024 + 1))).toThrow(
+    expect(() => decodeInteropValueTrusted(new Uint8Array(10 * 1024 * 1024 + 1))).toThrow(
       ValueTooLargeError
     );
     // array16 claiming one element over the cap.
     const over = DEFAULT_MAX_COLLECTION_SIZE + 1;
-    expect(() => decodeInteropValueChecked(Uint8Array.of(0xdc, over >> 8, over & 0xff))).toThrow(
+    expect(() => decodeInteropValueTrusted(Uint8Array.of(0xdc, over >> 8, over & 0xff))).toThrow(
       SerializationError
     );
     // One level past the bound, which only the pre-scan or the post-decode
     // pass sees: the post-decode pass still refuses it.
     const tooDeep = new Uint8Array(DEFAULT_MAX_DEPTH + 2).fill(0x91);
     tooDeep[tooDeep.length - 1] = 0x01;
-    expect(() => decodeInteropValueChecked(tooDeep)).toThrow(/max depth/);
+    expect(() => decodeInteropValueTrusted(tooDeep)).toThrow(/max depth/);
   });
 });
 

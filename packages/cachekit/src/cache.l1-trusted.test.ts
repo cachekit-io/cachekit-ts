@@ -1,13 +1,12 @@
 /**
- * An encrypted L1 hit on an entry this cache checked skips the decode's depth
+ * An encrypted L1 hit on bytes this cache checked skips the decode's depth
  * walks; every byte read from L2, and any bytes that reach L1 another way,
  * are still walked.
  *
  * L1 holds ciphertext, so a hit decrypts, unpacks and decodes. The depth
  * pre-scan and the post-decode walk defend the decode against a hostile
- * document. An entry L1 got from getEntry (after a walked decode) or from
- * setEntry (this process's own encoder) already passed them, and decrypt
- * re-authenticates it on every hit, so its hits decode through decodeChecked.
+ * document. L1 keeps its own copy of bytes getEntry decoded (walks included)
+ * or setEntry encoded, so a hit on that copy decodes through decodeTrusted.
  *
  * The decode functions are wrapped in call-through spies, so these tests see
  * which decode ran; the crypto path is the real one.
@@ -18,8 +17,8 @@ import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { createCache } from './cache.js';
 import { generateKey } from './serialization/key-generator.js';
 import { generateInteropKey } from './serialization/interop.js';
-import { decodeChecked, decodeCounted } from './serialization/serializer.js';
-import { decodeInteropValueChecked, decodeInteropValueCounted } from './serialization/interop.js';
+import { decodeCounted, decodeTrusted } from './serialization/serializer.js';
+import { decodeInteropValueCounted, decodeInteropValueTrusted } from './serialization/interop.js';
 import { SerializationError } from './errors.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
@@ -30,7 +29,7 @@ vi.mock('./serialization/serializer.js', async (importOriginal) => {
   return {
     ...mod,
     decodeCounted: vi.fn(mod.decodeCounted),
-    decodeChecked: vi.fn(mod.decodeChecked),
+    decodeTrusted: vi.fn(mod.decodeTrusted),
   };
 });
 vi.mock('./serialization/interop.js', async (importOriginal) => {
@@ -38,13 +37,14 @@ vi.mock('./serialization/interop.js', async (importOriginal) => {
   return {
     ...mod,
     decodeInteropValueCounted: vi.fn(mod.decodeInteropValueCounted),
-    decodeInteropValueChecked: vi.fn(mod.decodeInteropValueChecked),
+    decodeInteropValueTrusted: vi.fn(mod.decodeInteropValueTrusted),
   };
 });
 
-const MASTER_KEY = createHash('sha256').update('cachekit L1-checked test fixture').digest('hex');
-const TENANT = 'l1-checked';
+const MASTER_KEY = createHash('sha256').update('cachekit L1-trusted test fixture').digest('hex');
+const TENANT = 'l1-trusted';
 
+/** Keeps and returns the very buffers it is given, as a Map-backed store does. */
 class InMemoryBackend implements Backend {
   store = new Map<string, Uint8Array>();
   gets = 0;
@@ -80,25 +80,25 @@ function nested(levels: number): unknown {
 function decodes() {
   return {
     walked: vi.mocked(decodeCounted).mock.calls.length,
-    checked: vi.mocked(decodeChecked).mock.calls.length,
+    trusted: vi.mocked(decodeTrusted).mock.calls.length,
     interopWalked: vi.mocked(decodeInteropValueCounted).mock.calls.length,
-    interopChecked: vi.mocked(decodeInteropValueChecked).mock.calls.length,
+    interopTrusted: vi.mocked(decodeInteropValueTrusted).mock.calls.length,
   };
 }
 
-const NONE = { walked: 0, checked: 0, interopWalked: 0, interopChecked: 0 };
+const NONE = { walked: 0, trusted: 0, interopWalked: 0, interopTrusted: 0 };
 
-describe('encrypted L1 hits on checked entries', () => {
+describe('encrypted L1 hits on trusted bytes', () => {
   const caches: SecureCache[] = [];
 
   function makeCache(
     backend: Backend,
-    options: { maxDepth?: number; degradation?: boolean; compression?: boolean; l1?: boolean } = {}
+    options: { maxDepth?: number; degradation?: boolean; compression?: boolean } = {}
   ): SecureCache {
     const cache = createCache({
       backend,
       defaultTtl: 3600,
-      l1: { enabled: options.l1 ?? true, maxEntries: 100 },
+      l1: { enabled: true, maxEntries: 100 },
       encryption: { masterKey: MASTER_KEY, tenantId: TENANT },
       ...(options.maxDepth !== undefined ? { serializer: { maxDepth: options.maxDepth } } : {}),
       ...(options.degradation !== undefined
@@ -128,7 +128,7 @@ describe('encrypted L1 hits on checked entries', () => {
     expect(await cache.get('users:1')).toEqual({ name: 'ada', tags: [[1, 2], [3]] });
     expect(await cache.get('users:1')).toEqual({ name: 'ada', tags: [[1, 2], [3]] });
 
-    expect(decodes()).toEqual({ ...NONE, checked: 2 });
+    expect(decodes()).toEqual({ ...NONE, trusted: 2 });
     expect(backend.gets).toBe(0);
   });
 
@@ -142,7 +142,7 @@ describe('encrypted L1 hits on checked entries', () => {
     expect(decodes()).toEqual({ ...NONE, walked: 1 });
 
     expect(await reader.get('users:2')).toEqual({ id: 2 });
-    expect(decodes()).toEqual({ ...NONE, walked: 1, checked: 1 });
+    expect(decodes()).toEqual({ ...NONE, walked: 1, trusted: 1 });
     expect(backend.gets).toBe(1);
   });
 
@@ -171,23 +171,32 @@ describe('encrypted L1 hits on checked entries', () => {
     vi.clearAllMocks();
 
     expect(await load(3)).toEqual({ generation: 2 });
-    expect(decodes()).toEqual({ ...NONE, checked: 1 });
+    expect(decodes()).toEqual({ ...NONE, trusted: 1 });
   });
 
-  it('bytes put in L1 another way are walked on every hit', async () => {
-    const backend = new InMemoryBackend();
-    const cache = makeCache(backend);
-    await cache.set('users:4', { id: 4 });
-    // A valid ciphertext for this key, but not the object this cache stored.
-    const copy = new Uint8Array(backend.store.get('users:4')!);
-    l1Of(cache).set('users:4', copy, 3600_000, 'users');
-    vi.clearAllMocks();
+  describe('L1 keeps its own copy, out of the backend’s reach', () => {
+    it('of what set() wrote: overwriting the buffer the backend was given leaves L1 intact', async () => {
+      const backend = new InMemoryBackend();
+      const cache = makeCache(backend);
+      await cache.set('users:3', { id: 3 });
+      backend.store.get('users:3')!.fill(0);
+      vi.clearAllMocks();
 
-    expect(await cache.get('users:4')).toEqual({ id: 4 });
-    expect(await cache.get('users:4')).toEqual({ id: 4 });
+      expect(await cache.get('users:3')).toEqual({ id: 3 });
+      expect(decodes()).toEqual({ ...NONE, trusted: 1 });
+    });
 
-    expect(decodes()).toEqual({ ...NONE, walked: 2 });
-    expect(backend.gets).toBe(0);
+    it('of what get() read: overwriting the buffer the backend returned leaves L1 intact', async () => {
+      const backend = new InMemoryBackend();
+      await makeCache(backend).set('users:4', { id: 4 });
+      const reader = makeCache(backend);
+      await reader.get('users:4');
+      backend.store.get('users:4')!.fill(0);
+      vi.clearAllMocks();
+
+      expect(await reader.get('users:4')).toEqual({ id: 4 });
+      expect(decodes()).toEqual({ ...NONE, trusted: 1 });
+    });
   });
 
   describe('a hostile document', () => {
@@ -199,12 +208,12 @@ describe('encrypted L1 hits on checked entries', () => {
       return backend.store.get(key)!;
     }
 
-    it('from L2 is still rejected, though this cache once checked the key', async () => {
+    it('from L2 is still rejected, though this cache once trusted the key', async () => {
       const backend = new InMemoryBackend();
       const reader = makeCache(backend, { degradation: false });
       await reader.set('users:5', { id: 5 });
       await hostileCiphertext(backend, 'users:5');
-      // The checked entry leaves L1 (expiry, eviction or an invalidation).
+      // The trusted entry leaves L1 (expiry, eviction or an invalidation).
       l1Of(reader).invalidateByKey('users:5');
       vi.clearAllMocks();
 
@@ -212,17 +221,6 @@ describe('encrypted L1 hits on checked entries', () => {
       await expect(reader.get('users:5')).rejects.toThrow(/max depth of 100/i);
       expect(decodes()).toEqual({ ...NONE, walked: 2 });
       expect(l1Of(reader).get('users:5')).toBeNull();
-    });
-
-    it('from L2 reads as a miss with degradation on, and never reaches L1', async () => {
-      const backend = new InMemoryBackend();
-      await hostileCiphertext(backend, 'users:6');
-      const reader = makeCache(backend);
-      vi.clearAllMocks();
-
-      expect(await reader.get('users:6')).toBeNull();
-      expect(decodes()).toEqual({ ...NONE, walked: 1 });
-      expect(l1Of(reader).get('users:6')).toBeNull();
     });
 
     it('put in L1 is walked and refused, and L2 serves', async () => {
@@ -248,19 +246,6 @@ describe('encrypted L1 hits on checked entries', () => {
     });
   });
 
-  it('a cache with L1 off marks nothing, so a backend that keeps the bytes keeps no marks', async () => {
-    const marks = (cache: SecureCache) =>
-      (cache as unknown as { checkedL1: WeakMap<Uint8Array, boolean> }).checkedL1;
-    const backend = new InMemoryBackend();
-    const off = makeCache(backend, { l1: false });
-    await off.set('users:10', { id: 10 });
-    expect(marks(off).has(backend.store.get('users:10')!)).toBe(false);
-
-    const on = makeCache(backend);
-    await on.set('users:11', { id: 11 });
-    expect(marks(on).get(backend.store.get('users:11')!)).toBe(false);
-  });
-
   it('an interop wrap() hit decodes without the pre-scan', async () => {
     const backend = new InMemoryBackend();
     const cache = makeCache(backend);
@@ -274,10 +259,10 @@ describe('encrypted L1 hits on checked entries', () => {
     vi.clearAllMocks();
 
     expect(await getUser(8)).toEqual({ id: 8, at: new Date(0) });
-    expect(decodes()).toEqual({ ...NONE, interopChecked: 1 });
+    expect(decodes()).toEqual({ ...NONE, interopTrusted: 1 });
   });
 
-  it('an entry checked in the other mode is walked', async () => {
+  it('bytes trusted in the other mode are walked', async () => {
     // Compression off: an interop entry and a plain get() of its key share
     // the AAD's compressed flag, so the ciphertext decrypts under either.
     const backend = new InMemoryBackend();

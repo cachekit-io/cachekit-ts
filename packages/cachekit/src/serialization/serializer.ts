@@ -476,6 +476,7 @@ export function normalize(
   maxCollectionSize: number,
   walk: NormalizeWalk
 ): unknown {
+  // The decode walks' rule: decodeTrusted relies on the two matching.
   if (depth > maxDepth) {
     throw tooDeep(maxDepth);
   }
@@ -814,6 +815,7 @@ export class ValueEncoder {
 
   /** normalize(value, depth) then encode() at depth + 1, as one step. */
   private value(value: unknown, depth: number): void {
+    // The decode walks' rule: decodeTrusted relies on the two matching.
     if (depth > this.maxDepth) throw tooDeep(this.maxDepth);
     switch (typeof value) {
       case 'undefined':
@@ -1310,7 +1312,7 @@ export function encodeCounted<T>(
  * for good as a cheap post-decode backstop for the hand-rolled pre-scan: if the
  * walker ever under-counts depth, this still catches it before the value is
  * returned. It runs on every decode of bytes from a backend; only
- * decodeChecked, for bytes that already passed it, skips it.
+ * decodeTrusted skips it.
  */
 function validateDepth(value: unknown, depth: number, maxDepth: number): void {
   if (depth > maxDepth) {
@@ -1345,7 +1347,9 @@ export function decodeCounted<T>(
   // stack preallocations disproportionate to input size.
   const counted = assertDecodeDepth(data, config.maxDepth);
 
-  const decoded = decodeBounded<T>(data, config, true);
+  const decoded = decodeBounded<T>(data, config);
+  // Validate depth of decoded object (DoS protection)
+  validateDepth(decoded, 0, config.maxDepth);
   if (count) {
     count.objects += counted.objects;
     count.values += counted.values;
@@ -1356,16 +1360,15 @@ export function decodeCounted<T>(
 /**
  * decodeCounted without the depth pre-scan and the post-decode walk, for bytes
  * this process has already checked under `config`: it decoded them through
- * decodeCounted, both walks included, or its own encodeCounted wrote them,
- * whose walk bounds depth as the decode walks do. Decoding the same bytes
- * again builds the same graph, so neither walk could fail. The input cap and
- * the decoder's collection bounds still apply. Package-internal: only the
- * cache calls it, on an L1 entry it marked as checked when it stored it.
- * Never call it on bytes read from a backend.
+ * decodeCounted, both walks included, or wrote them with encodeCounted, whose
+ * depth bound is the walks' rule (a test pins that). So neither walk could
+ * fail on them. The input cap and the decoder's collection bounds still
+ * apply. Package-internal: only the cache calls it, on L1's own copy of bytes
+ * it checked. Never call it on bytes read from a backend.
  */
-export function decodeChecked<T>(data: Uint8Array, config: SerializerConfig): T {
+export function decodeTrusted<T>(data: Uint8Array, config: SerializerConfig): T {
   assertDecodeSize(data, config);
-  return decodeBounded<T>(data, config, false);
+  return decodeBounded<T>(data, config);
 }
 
 function assertDecodeSize(data: Uint8Array, config: SerializerConfig): void {
@@ -1374,17 +1377,10 @@ function assertDecodeSize(data: Uint8Array, config: SerializerConfig): void {
   }
 }
 
-/** Decode under the collection bounds, then walk the result's depth when `walk`. */
-function decodeBounded<T>(data: Uint8Array, config: SerializerConfig, walk: boolean): T {
+/** Decode under the collection bounds; any failure is a SerializationError. */
+function decodeBounded<T>(data: Uint8Array, config: SerializerConfig): T {
   try {
-    const decoded = decode(
-      data,
-      boundedDecodeOptions(config.maxCollectionSize, config.maxDecodedSize)
-    );
-
-    // Validate depth of decoded object (DoS protection)
-    if (walk) validateDepth(decoded, 0, config.maxDepth);
-    return decoded as T;
+    return decode(data, boundedDecodeOptions(config.maxCollectionSize, config.maxDecodedSize)) as T;
   } catch (error) {
     if (error instanceof SerializationError) {
       throw error;

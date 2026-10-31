@@ -3,7 +3,7 @@ import { runInNewContext } from 'node:vm';
 import { ExtData, encode as msgpackEncode } from '@msgpack/msgpack';
 import {
   ValueEncoder,
-  decodeChecked,
+  decodeTrusted,
   decodeCounted,
   encodeCounted,
   normalize,
@@ -949,12 +949,12 @@ describe('encodeCounted one-pass encode', () => {
 });
 
 // An encrypted L1 hit on an entry this process encoded decodes it through
-// decodeChecked, which skips decodeCounted's two depth walks. That holds only
+// decodeTrusted, which skips decodeCounted's two depth walks. That holds only
 // if every encoding encodeCounted produces passes both walks.
-describe('decodeChecked on what encodeCounted wrote', () => {
+describe('decodeTrusted on what encodeCounted wrote', () => {
   const decodedPair = (bytes: Uint8Array, c: SerializerConfig) => {
     const walked = decodeCounted(bytes, c);
-    expect(decodeChecked(bytes, c)).toEqual(walked);
+    expect(decodeTrusted(bytes, c)).toEqual(walked);
   };
 
   it('passes both walks and decodes as decodeCounted does, on seeded random values', () => {
@@ -994,6 +994,7 @@ describe('decodeChecked on what encodeCounted wrote', () => {
           for (const array of [false, true]) {
             const outcome = onePass(nest(levels, leaf, array), c);
             if ('error' in outcome) {
+              expect(outcome.message).toMatch(/max depth/i);
               refused++;
               continue;
             }
@@ -1010,8 +1011,8 @@ describe('decodeChecked on what encodeCounted wrote', () => {
 
   it('keeps the input cap and the collection cap', () => {
     const c = resolveSerializerConfig({ maxDecodedSize: 16, maxCollectionSize: 10 });
-    expect(() => decodeChecked(new Uint8Array(17), c)).toThrow(ValueTooLargeError);
+    expect(() => decodeTrusted(new Uint8Array(17), c)).toThrow(ValueTooLargeError);
     // array16 claiming 11 elements.
-    expect(() => decodeChecked(Uint8Array.of(0xdc, 0x00, 0x0b), c)).toThrow(SerializationError);
+    expect(() => decodeTrusted(Uint8Array.of(0xdc, 0x00, 0x0b), c)).toThrow(SerializationError);
   });
 });

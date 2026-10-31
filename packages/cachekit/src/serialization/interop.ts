@@ -426,6 +426,7 @@ function encodeCanonical(
   sink: ChunkSink
 ): void {
   const maxDepth = profile === 'args' ? KEY_GEN_MAX_DEPTH : DEFAULT_MAX_DEPTH;
+  // The decode pre-scan's rule: decodeInteropValueTrusted relies on the two matching.
   if (depth > maxDepth) {
     throw new SerializationError(`Interop ${profile} structure exceeds max depth of ${maxDepth}`);
   }
@@ -645,10 +646,11 @@ export function encodeInteropValueCounted(value: unknown, count: ObjectCount): U
 /**
  * Materialise the one MessagePack document in `data`. Call only on bytes
  * assertDecodeDepth accepts (decodeInteropValueCounted runs it first;
- * decodeInteropValueChecked takes bytes already checked): that walk proves
- * every header is backed by the input and the nesting is within bound, so this
- * reader does no bounds checks of its own. It still checks it ended exactly at `data.length`,
- * so a width disagreement between the two parsers throws instead of misreading.
+ * decodeInteropValueTrusted takes bytes it accepted before, or would): that
+ * walk proves every header is backed by the input and the nesting is within
+ * bound, so this reader does no bounds checks of its own. It still checks it
+ * ended exactly at `data.length`, so a width disagreement between the two
+ * parsers throws instead of misreading.
  *
  * The SDK reads interop values itself rather than through @msgpack/msgpack
  * (3.1.3), which rejects the string map key `__proto__` outright and strips a
@@ -895,15 +897,15 @@ export function decodeInteropValueCounted<T>(data: Uint8Array, count?: ObjectCou
 /**
  * decodeInteropValueCounted without the depth pre-scan, for bytes this
  * process has already checked: it decoded them through
- * decodeInteropValueCounted, pre-scan included, or its own
- * encodeInteropValueCounted wrote them, whose walk bounds depth as the
- * pre-scan does. Reading the same bytes again cannot fail the pre-scan, so
- * readInteropDocument's precondition still holds. The input cap, the
- * collection cap and the post-decode pass (depth, sentinel revival) still run.
- * Package-internal: only the cache calls it, on an L1 entry it marked as
- * checked when it stored it. Never call it on bytes read from a backend.
+ * decodeInteropValueCounted, pre-scan included, or wrote them with
+ * encodeInteropValueCounted, whose depth bound is the pre-scan's rule (a test
+ * pins that). So the pre-scan could not fail on them, and
+ * readInteropDocument's precondition holds. The input cap, the collection cap
+ * and the post-decode pass (depth, sentinel revival) still run.
+ * Package-internal: only the cache calls it, on L1's own copy of bytes it
+ * checked. Never call it on bytes read from a backend.
  */
-export function decodeInteropValueChecked<T>(data: Uint8Array): T {
+export function decodeInteropValueTrusted<T>(data: Uint8Array): T {
   assertInteropInput(data);
   return readInteropValue<T>(data);
 }

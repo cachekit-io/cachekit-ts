@@ -20,8 +20,8 @@ import {
   type L1Write,
 } from './cache/background-refresh.js';
 import {
-  decodeChecked,
   decodeCounted,
+  decodeTrusted,
   encodeCounted,
   resolveSerializerConfig,
   type ObjectCount,
@@ -43,8 +43,8 @@ import {
   generateInteropKey,
   validateInteropSegment,
   encodeInteropValueCounted,
-  decodeInteropValueChecked,
   decodeInteropValueCounted,
+  decodeInteropValueTrusted,
 } from './serialization/interop.js';
 import { createInvalidationEvent } from './invalidation/event.js';
 import {
@@ -334,12 +334,8 @@ function describeBackendFailure(err: unknown): string {
 export class CacheImpl implements SecureCache {
   private readonly backend: Backend;
   private readonly l1: L1Cache | null;
-  /**
-   * Each ciphertext this cache gave L1, with the `interop` mode it was checked
-   * under (see l1Payload). An encrypted L1 hit on one decodes without the
-   * depth walks; any other bytes in L1 are walked as an L2 read is.
-   */
-  private readonly checkedL1 = new WeakMap<Uint8Array, boolean>();
+  /** L1's ciphertext copies l1Payload marked, each with the `interop` mode it was checked under. */
+  private readonly trustedL1 = new WeakMap<Uint8Array, boolean>();
   private readonly reliabilityExecutor: ReliabilityExecutor;
   private readonly backgroundRefresh: BackgroundRefreshManager;
   private readonly encryption: EncryptionLike | null;
@@ -876,8 +872,22 @@ export class CacheImpl implements SecureCache {
   }
 
   /**
-   * What L1 should hold for an entry: the same ciphertext L2 holds when the
-   * cache is encrypted, the decoded value otherwise.
+   * The ciphertext an encrypted L1 keeps: a copy of `bytes` only this cache
+   * holds. A backend may keep the buffer it returned or was given, and nothing
+   * stops it writing to that buffer later; L1's copy is out of its reach,
+   * which is what lets l1Payload trust it. The copy is exact-size too, so it
+   * never pins a pooled slab (a Node Buffer from a backend can be a view onto
+   * a shared 8 KiB slab; cachekit-py guards the same edge by refusing
+   * memoryview/bytearray in L1Cache.put). A plaintext cache, or one with L1
+   * off, keeps no bytes in L1, so it gets `bytes` back as they are.
+   */
+  private l1Copy(bytes: Uint8Array): Uint8Array {
+    return this.encryption && this.l1 ? new Uint8Array(bytes) : bytes;
+  }
+
+  /**
+   * What L1 should hold for an entry: the ciphertext L2 holds, in L1's own
+   * copy (l1Copy), when the cache is encrypted, the decoded value otherwise.
    *
    * Zero-knowledge is a property of every layer, not just the backend:
    * it is what cachekit-py does (its L1Cache stores bytes and
@@ -887,29 +897,19 @@ export class CacheImpl implements SecureCache {
    * would outlive the key release in close(), since L1 entries are held
    * independently of tenant keys.
    *
-   * The bytes are copied when they are a window into a larger buffer: a Node
-   * Buffer from the backend is a view onto a shared 8 KiB pool slab, and
-   * retaining one for the entry's TTL pins the whole slab. cachekit-py guards
-   * the same edge by refusing memoryview/bytearray in L1Cache.put. This guards
-   * slab pinning only — it does NOT defend against a backend that mutates a
-   * buffer it already handed over. Every in-tree backend returns an owned,
-   * exact-size Uint8Array (redis, memcached, cachekitio, workers-kv,
-   * workers-cache-api) and file.ts's narrower header view lands in the copy
-   * branch; a third-party Backend that recycles buffers must copy on its side.
-   *
-   * Every caller has checked `bytes` under `interop`: getEntry decoded them,
-   * both depth walks included, and setEntry encoded them itself. So this is
-   * where a ciphertext is marked as checked (checkedL1), and the only place:
-   * an L1 hit on it skips the walks, which could only pass again, since
-   * decrypt re-authenticates the bytes on every hit. Bytes that reach L1 any
-   * other way are walked on every hit. With L1 off nothing is marked: a
-   * backend that keeps the bytes it was given would keep their marks too.
+   * `bytes` comes from l1Copy, and every caller has checked it under
+   * `interop`: getEntry decoded that copy, depth walks included, and setEntry
+   * copied what this process encoded, under the depth rule the walks apply.
+   * So this is the one place a ciphertext is marked as trusted (trustedL1). A
+   * hit on it skips the depth pre-scan, and in auto mode validateDepth: no
+   * one outside this cache can write to the copy, so they could only pass
+   * again. Bytes that reach L1 any other way are walked on every hit. With L1
+   * off, `bytes` is the backend's own buffer, so it is not marked.
    */
   private l1Payload(value: unknown, bytes: Uint8Array, interop: boolean): unknown {
     if (!this.encryption) return value;
-    const held = bytes.byteLength === bytes.buffer.byteLength ? bytes : new Uint8Array(bytes);
-    if (this.l1) this.checkedL1.set(held, interop);
-    return held;
+    if (this.l1) this.trustedL1.set(bytes, interop);
+    return bytes;
   }
 
   /**
@@ -919,14 +919,14 @@ export class CacheImpl implements SecureCache {
    * never drift into decoding the same entry differently — a real hazard once
    * both paths handle AAD (protocol#12 freezes the v0x03 component set).
    *
-   * `checked` drops the depth pre-scan and the post-decode walk. Only
-   * decodeL1Entry passes it, for an entry marked in checkedL1.
+   * `trusted` drops the depth pre-scan, and in auto mode validateDepth. Only
+   * decodeL1Entry passes it, for bytes marked in trustedL1.
    */
   private async decodeEntry<T>(
     bytes: Uint8Array,
     key: string,
     interop: boolean,
-    checked = false
+    trusted = false
   ): Promise<{ value: T; serializedSize: number; count: ObjectCount }> {
     const useEnvelope = this.useEnvelope(interop);
 
@@ -986,14 +986,14 @@ export class CacheImpl implements SecureCache {
     }
     // The decode's depth pre-scan counts the heap objects and values on the
     // way, so L1 can charge for them without another walk (see L1Cache.set).
-    // A checked decode runs no pre-scan and counts nothing: only an L2 read
+    // A trusted decode runs no pre-scan and counts nothing: only an L2 read
     // charges L1 from the count.
     const count: ObjectCount = { objects: 0, values: 0 };
     let value: T;
-    if (checked) {
+    if (trusted) {
       value = interop
-        ? decodeInteropValueChecked<T>(plaintext)
-        : decodeChecked<T>(plaintext, this.serializerConfig);
+        ? decodeInteropValueTrusted<T>(plaintext)
+        : decodeTrusted<T>(plaintext, this.serializerConfig);
     } else {
       value = interop
         ? decodeInteropValueCounted<T>(plaintext, count)
@@ -1008,8 +1008,8 @@ export class CacheImpl implements SecureCache {
   /**
    * Decode a value served from L1. For a secure cache that is a decrypt +
    * AAD-verify against the cache key followed by the same unpack/deserialize
-   * the L2 path runs, less the deserialize's depth walks for an entry this
-   * cache checked when it stored it (see l1Payload) — an L1 hit is no longer
+   * the L2 path runs, less the deserialize's depth walks for bytes this
+   * cache checked when it stored them (see l1Payload) — an L1 hit is no longer
    * free, which is the price of not keeping plaintext resident. For a
    * plaintext cache it is a cast.
    *
@@ -1041,10 +1041,8 @@ export class CacheImpl implements SecureCache {
           `L1 entry for a secure cache is not ciphertext bytes (got ${typeof stored})`
         );
       }
-      // Bytes this cache checked under the same mode skip the depth walks
-      // (see l1Payload); anything else is walked as an L2 read is.
-      const checked = this.checkedL1.get(stored) === interop;
-      return { value: (await this.decodeEntry<T>(stored, key, interop, checked)).value };
+      const trusted = this.trustedL1.get(stored) === interop;
+      return { value: (await this.decodeEntry<T>(stored, key, interop, trusted)).value };
     } catch (error) {
       this.l1?.invalidateByKey(key);
       this.recordFailure('l1_decrypt', error);
@@ -1140,7 +1138,11 @@ export class CacheImpl implements SecureCache {
     // A miss (counted above unless probed) or a backend failure degradation
     // absorbed.
     if (fetched === null) return null;
-    const { data, l1Bound, isStale, receivedAt } = fetched;
+    const { l1Bound, isStale, receivedAt } = fetched;
+    // A read that may fill L1 decodes L1's own copy, so the bytes L1 keeps are
+    // the bytes the depth walks passed, whatever the backend does with its
+    // buffer meanwhile (see l1Copy).
+    const data = l1 && !isStale ? this.l1Copy(fetched.data) : fetched.data;
 
     // Decrypt, unpack, deserialize — the same sequence an L1 hit runs. The
     // failure keeps the degradation contract it had inside the executor:
@@ -1328,7 +1330,7 @@ export class CacheImpl implements SecureCache {
     // refresh gets nothing to store, the stale entry stays, and the refresh
     // re-runs the origin once per refresh-marker window.
     const l1Write: L1Write = {
-      l1: this.l1Payload(value, data, interop),
+      l1: this.l1Payload(value, this.l1Copy(data), interop),
       serializedSize: serialized.length,
       count,
     };
