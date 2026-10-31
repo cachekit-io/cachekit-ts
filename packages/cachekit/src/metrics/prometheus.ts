@@ -4,11 +4,8 @@
  * Uses prom-client types when available, otherwise provides compatible interface.
  */
 import { setImmediate } from 'node:timers';
-import { ConfigurationError } from '../errors.js';
 import { logError } from '../logger.js';
-
-/** Labels the metrics set per call; a default label of the same name would replace them. */
-const INTRINSIC_LABELS: readonly string[] = ['layer', 'operation', 'status', 'error_type'];
+import { checkDefaultLabels } from './labels.js';
 
 // Types for prom-client (peer dependency)
 interface Counter {
@@ -205,14 +202,8 @@ export class CacheMetrics implements MetricsCollector {
 
   constructor(config: MetricsConfig = {}) {
     this.prefix = config.prefix ?? 'cachekit';
+    checkDefaultLabels(config.defaultLabels);
     this.defaultLabels = config.defaultLabels ?? {};
-    const reserved = Object.keys(this.defaultLabels).filter((l) => INTRINSIC_LABELS.includes(l));
-    if (reserved.length > 0) {
-      throw new ConfigurationError(
-        `metrics.defaultLabels cannot set ${reserved.join(', ')}: ` +
-          `${INTRINSIC_LABELS.join(', ')} are set by the metrics themselves`
-      );
-    }
     this.registry = config.registry;
     this.errorHandler = config.onError;
     // Load prom-client on the next turn of the event loop, not in this one:

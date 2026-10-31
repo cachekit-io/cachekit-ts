@@ -11,6 +11,7 @@ import type {
 import type { Backend, L1Metrics, LockableBackend } from './backends/types.js';
 import type { InvalidationEvent } from './l1/types.js';
 import type { MetricsCollector, MetricsConfig } from './metrics/prometheus.js';
+import { checkDefaultLabels } from './metrics/labels.js';
 import { logError } from './logger.js';
 import { L1Cache } from './l1/lru-cache.js';
 import { ReliabilityExecutor } from './reliability/executor.js';
@@ -449,14 +450,10 @@ export class CacheImpl implements SecureCache {
     // Initialize L1 cache (its maxMemory check throws ConfigurationError)
     this.l1 = options.l1?.enabled !== false ? new L1Cache(options.l1) : null;
 
-    // Initialize metrics (Prometheus via the runtime; no-op when the
-    // platform has no collector or metrics are off). Its defaultLabels check
-    // throws ConfigurationError.
+    // The metrics collector is created below, once nothing else can throw:
+    // it registers its metrics, so it must not exist for a cache that fails.
     const metricsOption = options.metrics ?? false;
-    this.metrics =
-      metricsOption !== false && runtime.createMetrics
-        ? runtime.createMetrics(typeof metricsOption === 'object' ? metricsOption : undefined)
-        : NOOP_METRICS;
+    if (typeof metricsOption === 'object') checkDefaultLabels(metricsOption.defaultLabels);
 
     // Initialize backend. The telemetry getter reads `this` lazily (per
     // request), so constructor field order is safe.
@@ -484,6 +481,13 @@ export class CacheImpl implements SecureCache {
           'has no acquireLock/releaseLock'
       );
     }
+
+    // Initialize metrics (Prometheus via the runtime; no-op when the
+    // platform has no collector or metrics are off)
+    this.metrics =
+      metricsOption !== false && runtime.createMetrics
+        ? runtime.createMetrics(typeof metricsOption === 'object' ? metricsOption : undefined)
+        : NOOP_METRICS;
 
     // Initialize reliability executor (composes circuit breaker + retry + degradation)
     this.reliabilityExecutor = new ReliabilityExecutor({

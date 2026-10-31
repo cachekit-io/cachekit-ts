@@ -303,6 +303,26 @@ describe('Cache metrics wiring', () => {
     }
   );
 
+  it.each<[string, Partial<Parameters<typeof createCache>[0]>]>([
+    ['an invalid backend URL', { backend: { url: 'not a valid URL' } }],
+    ['distributedLock without a lockable backend', { stampede: { distributedLock: true } }],
+  ])('a cache that fails to construct (%s) registers no metrics', async (_name, options) => {
+    const registry = new Registry();
+    expect(() =>
+      createCache({ backend: new InMemoryBackend(), metrics: { registry }, ...options })
+    ).toThrow(ConfigurationError);
+    // prom-client would load on a later turn: give it two.
+    for (let i = 0; i < 2; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await registry.getMetricsAsJSON()).toHaveLength(0);
+
+    // so a later cache on that registry sets the schema
+    const cache = makeCache(registry, { metrics: { registry, defaultLabels: { env: 'prod' } } });
+    await cache.get('ns:absent');
+    await vi.waitFor(async () => {
+      expect(await metricValue(registry, 'cachekit_misses_total', { env: 'prod' })).toBe(1);
+    });
+  });
+
   it('counts into a hits counter registered by someone else', async () => {
     const registry = new Registry();
     new Counter({
