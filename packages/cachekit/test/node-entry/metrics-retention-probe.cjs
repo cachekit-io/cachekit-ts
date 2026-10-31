@@ -60,13 +60,18 @@ async function trackHitLabels(hits, refs) {
   await live.recordHit('l1');
   await live.recordHit('l1');
 
-  for (let i = 0; i < 10; i++) {
+  // No number of collections is guaranteed to clear a WeakRef, so collect
+  // until none is left or 5 s pass. A deref() keeps its target until the end
+  // of the turn, so each count runs after the collection, on a new turn.
+  const deadline = Date.now() + 5_000;
+  let alive;
+  do {
     await new Promise((resolve) => setTimeout(resolve, 20));
     global.gc();
-  }
+    alive = refs.filter((ref) => ref.deref() !== undefined).length;
+  } while (alive > 0 && Date.now() < deadline);
   const liveHits = (await hits.get()).values
     .filter((v) => v.labels.tenant === 'live')
     .reduce((sum, v) => sum + v.value, 0);
-  const alive = refs.filter((ref) => ref.deref() !== undefined).length;
   console.log(JSON.stringify({ tracked: refs.length, alive, liveHits }));
 })();
