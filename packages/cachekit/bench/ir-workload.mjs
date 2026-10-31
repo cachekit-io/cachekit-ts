@@ -327,6 +327,28 @@ export const WORKLOADS = {
       };
     },
   },
+  // probe: a workload the base can run too
+  'probe-l1-get': {
+    n: 20_000,
+    setup: async () => {
+      const { L1Cache } = await load('l1/lru-cache.js');
+      const l1 = new L1Cache({ maxEntries: 100 });
+      l1.set('k', 1, 3_600_000, 'bench');
+      return () => {
+        sink += l1.get('k') ?? 0;
+      };
+    },
+  },
+  // probe: a workload for an API only the head has
+  'probe-api-missing': {
+    n: 20_000,
+    setup: async () => {
+      const { probeSum } = await load('probe-api.js');
+      return () => {
+        sink += probeSum([1, 2, 3]);
+      };
+    },
+  },
   // the README benchmark's hit (bench/runtime/probe.mjs): one integer argument,
   // cycling over 64 values that are all in L1
   'wrap-l1-hit-int': {
