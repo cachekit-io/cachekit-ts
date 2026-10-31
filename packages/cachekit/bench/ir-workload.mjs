@@ -138,7 +138,7 @@ const plaintextSetOf = (value, n, warmup) => ({
 });
 // Rows as in VALUE, ~33 B of msgpack each.
 const rowsOf = (rows) => ({ rows: Array.from({ length: rows }, (_, i) => VALUE.rows[i % 32]) });
-const plaintextSet = (rows, n) => plaintextSetOf(rowsOf(rows), n);
+const plaintextSet = (rows, n, warmup) => plaintextSetOf(rowsOf(rows), n, warmup);
 
 /**
  * generateKey(args) as wrap() runs it: after the Node entry has loaded, or, with
@@ -231,7 +231,10 @@ export const WORKLOADS = {
   'l1-set-at-capacity-100k': l1AtCapacity(100_000, 2_000),
   'plaintext-set-1kb': plaintextSet(32, 5_000),
   'plaintext-set-10kb': plaintextSet(320, 1_000),
-  'plaintext-set-100kb': plaintextSet(3_200, 1_000),
+  // 200 warm-up ops, not 2,000: each op encodes 3,200 rows, so V8 has tiered
+  // up long before, and the default made one process run ~9 minutes in CI.
+  // The shorter warm-up moved its Ir/op by under 0.2%.
+  'plaintext-set-100kb': plaintextSet(3_200, 1_000, 200),
   // the ends of the object-heavy write range: one 64 B object, and 1,005,035 B
   // in 96 groups of 320 rows, so no collection nears the 10,000-element bound
   // and the whole stays under the 1 MiB encode limit. A 1 MB op runs long

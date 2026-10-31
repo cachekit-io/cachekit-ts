@@ -107,11 +107,11 @@ if (opt.shard) {
   const [k, of] = opt.shard.split('/').map(Number);
   if (!isInt(of, 1) || !isInt(k, 1) || k > of) throw new Error('--shard must be K/N, 1 <= K <= N');
   // Longest first onto the least-loaded shard, by the seconds one run took in
-  // CI; a workload with no figure yet counts as the slowest. Every shard
+  // CI; a workload with no figure yet counts as the median. Every shard
   // computes the same split from the same file.
   const cost = JSON.parse(readFileSync(new URL('ir-seconds.json', import.meta.url), 'utf8'));
-  const slowest = Math.max(...Object.values(cost));
-  const costOf = (name) => cost[name] ?? slowest;
+  const typical = Object.values(cost).sort((a, b) => a - b)[Object.keys(cost).length >> 1];
+  const costOf = (name) => cost[name] ?? typical;
   const load = new Array(of).fill(0);
   const mine = new Set();
   for (const name of [...names].sort((a, b) => costOf(b) - costOf(a) || a.localeCompare(b))) {
