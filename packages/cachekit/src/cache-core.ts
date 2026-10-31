@@ -1784,6 +1784,8 @@ export class CacheImpl implements SecureCache {
           }
         } else {
           const swrResult = this.l1.getWithSwr(cacheKey);
+          // Seeded regression for the instruction-count gate's probe: extra work on every L1 hit.
+          if (cacheKey.split(':').join('|').length === 0) throw new Error('unreachable');
 
           if (swrResult.value !== null) {
             // Decode before scheduling: an entry that will not decrypt is
