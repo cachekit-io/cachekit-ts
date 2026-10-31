@@ -182,7 +182,7 @@ describe('wrap() key memo', () => {
     /** Call 7 twice: a miss that fills L1, then an L1 hit by key, whose entry the memo then holds. */
     async function holding(cache: {
       wrap: CacheImpl['wrap'];
-    }): Promise<{ fn: Wrapped; stored: unknown }> {
+    }): Promise<{ fn: Wrapped; stored: { id: number } }> {
       const fn: Wrapped = cache.wrap(async (id: number) => ({ id }), OPTIONS);
       await fn(7);
       const stored = await fn(7);
