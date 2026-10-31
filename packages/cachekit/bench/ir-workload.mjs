@@ -327,6 +327,28 @@ export const WORKLOADS = {
       };
     },
   },
+  // wrap-l1-hit with metrics on, the production, secure and io default
+  'wrap-l1-hit-metrics': {
+    n: 10_000,
+    setup: async () => {
+      const { createCache } = await load('index.js');
+      const { Registry } = await import('prom-client');
+      const registry = new Registry();
+      const cache = createCache({ backend: new MemoryBackend(), metrics: { registry } });
+      const getUser = cache.wrap(async (id, kind, opts) => ({ id, kind, opts }), {
+        namespace: 'bench',
+        ttl: 3600,
+      });
+      await getUser(...ARGS);
+      // prom-client loads on a later turn of the event loop, which a loop of
+      // awaited hits never yields: wait here until it has counted the miss.
+      while (!(await registry.metrics()).includes('cachekit_misses_total 1'))
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      return async () => {
+        sink += (await getUser(...ARGS)).id;
+      };
+    },
+  },
   // the README benchmark's hit (bench/runtime/probe.mjs): one integer argument,
   // cycling over 64 values that are all in L1
   'wrap-l1-hit-int': {

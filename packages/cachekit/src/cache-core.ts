@@ -183,12 +183,14 @@ function isResourceFailure(error: unknown): boolean {
  * metrics disabled). Duplicates NoopMetrics from metrics/prometheus.js
  * deliberately: that module's graph reaches prom-client (Node-only), so
  * cache-core may only import its types — a value import would trip the
- * workers bundle guard.
+ * workers bundle guard. The per-hit methods return one settled promise, so a
+ * hit with metrics off allocates nothing for them.
  */
+const SETTLED: Promise<void> = Promise.resolve();
 const NOOP_METRICS: MetricsCollector = {
   async recordOperation() {},
-  async recordHit() {},
-  async recordMiss() {},
+  recordHit: () => SETTLED,
+  recordMiss: () => SETTLED,
   async recordError() {},
   async startTimer() {
     return () => {};
