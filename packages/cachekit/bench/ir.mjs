@@ -46,10 +46,18 @@
 // an Ir delta, never a measured saving.
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
 import { availableParallelism, tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { WORKLOADS } from './ir-workload.mjs';
@@ -256,32 +264,50 @@ const fingerprint = {
 };
 
 /**
- * Hash of what the workloads execute: dist/, the lockfile that pins the
- * packages dist/ imports (msgpack, the JS hash), the NAPI binary and the wasm.
- * A compare of a build against itself reads 0% and proves nothing.
+ * Hash of everything the workloads can load: for this package and both cores,
+ * package.json (how imports resolve) and every file its `files` list ships
+ * (dist/, the NAPI loader and binary, the wasm glue and module), whatever the
+ * extension; and the lockfile, which pins the packages those import from
+ * node_modules. Equal hashes skip the measurement, so a loaded file missing
+ * here is a regression that passes unmeasured. A compare of a build against
+ * itself reads 0% and proves nothing.
  */
 function buildHash() {
   const hash = createHash('sha256');
-  const add = (dir, filter) => {
-    for (const f of readdirSync(dir, { recursive: true }).filter(filter).sort()) {
-      hash.update(f).update(readFileSync(join(dir, f)));
+  // Paths relative to the repository, so the base and head trees can match.
+  const repo = fileURLToPath(new URL('../../../', import.meta.url));
+  const add = (path) => {
+    hash.update(relative(repo, path)).update(readFileSync(path));
+  };
+  const addPackage = (root, optional = []) => {
+    const pkg = join(root, 'package.json');
+    add(pkg);
+    for (const entry of JSON.parse(readFileSync(pkg, 'utf8')).files) {
+      const glob = entry.includes('*') && new RegExp(`^${entry.replace(/\*/g, '[^/]*')}$`);
+      const path = join(root, entry);
+      if (glob) {
+        const matches = readdirSync(root).filter((f) => glob.test(f));
+        for (const f of matches.sort()) add(join(root, f));
+      } else if (!existsSync(path) && optional.includes(entry)) {
+        hash.update(`no ${entry} in ${relative(repo, root)}`);
+      } else if (statSync(path).isDirectory()) {
+        for (const f of readdirSync(path, { recursive: true }).sort()) {
+          if (statSync(join(path, f)).isFile()) add(join(path, f));
+        }
+      } else {
+        add(path);
+      }
     }
   };
-  add(fileURLToPath(new URL('../dist/', import.meta.url)), (f) => /\.(js|mjs|cjs)$/.test(f));
-  hash.update(readFileSync(new URL('../../../pnpm-lock.yaml', import.meta.url)));
+  // Both cores keep their entry (index.js) at the package root.
   const req = createRequire(import.meta.url);
-  add(dirname(req.resolve('@cachekit-io/cachekit-core-ts')), (f) => f.endsWith('.node'));
-  const wasmPkg = fileURLToPath(
-    new URL('pkg/', import.meta.resolve('@cachekit-io/cachekit-core-wasm'))
-  );
-  try {
-    add(wasmPkg, (f) => f.endsWith('.wasm'));
-  } catch (error) {
-    // Only an absent build is a state; any other read failure would drop the
-    // wasm that ran from the hash.
-    if (error?.code !== 'ENOENT') throw error;
-    hash.update('no wasm build');
-  }
+  addPackage(fileURLToPath(new URL('..', import.meta.url)));
+  addPackage(dirname(req.resolve('@cachekit-io/cachekit-core-ts')));
+  // The wasm build is optional: `pnpm build` does not make it.
+  addPackage(dirname(fileURLToPath(import.meta.resolve('@cachekit-io/cachekit-core-wasm'))), [
+    'pkg/',
+  ]);
+  add(join(repo, 'pnpm-lock.yaml'));
   return hash.digest('hex').slice(0, 16);
 }
 const build = buildHash();
