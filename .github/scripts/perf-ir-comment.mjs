@@ -31,6 +31,7 @@ const shards = Array.from({ length: Number(opt.shards) }, (_, k) => {
   };
   return {
     sameBuild: read('same-build')?.trim(),
+    benchChanged: read('bench-changed') !== null,
     expected: read('head-workloads.txt')?.split('\n').filter(Boolean),
     report: JSON.parse(read('report.json') ?? 'null'),
   };
@@ -71,6 +72,9 @@ if (sameBuild) {
   const exited = shards.every((s) => s.report?.exitCode === 0 || s.sameBuild);
   if (verdict === 'PASS' && !exited) verdict = 'INCOMPLETE';
   const t = report?.thresholds;
+  const own = [...rows.values()]
+    .filter((r) => r.fail !== undefined && r.fail !== t?.fail)
+    .map((r) => `\`${r.workload}\` at +${pct(r.fail)}`);
   lines.push(
     `### Instruction counts: ${verdict}`,
     '',
@@ -79,30 +83,52 @@ if (sameBuild) {
       `. Instructions per op on the main thread (\`bench:ir --compare\`); median of the repeats, ` +
       `A/A = (max − min) / median.` +
       (t
-        ? ` A workload fails above +${pct(t.fail)} and warns above +${pct(t.warn)}; ` +
-          `an A/A over ${pct(t.aaLimit)} reads INCONCLUSIVE.`
+        ? ` A workload fails above +${pct(t.fail)} and warns above +${pct(t.warn)}` +
+          (own.length ? ` (its own threshold: ${own.join(', ')}, warning at half)` : '') +
+          `; an A/A over ${pct(t.aaLimit)} reads INCONCLUSIVE.`
         : ''),
     ''
   );
+  if (shards.some((s) => s.benchChanged)) {
+    lines.push(
+      '**This PR changes `packages/cachekit/bench/`**: both builds ran its workloads and thresholds.',
+      ''
+    );
+  }
   shards.forEach((s, k) => {
     if (!s.report && !s.sameBuild)
       lines.push(`**Shard ${k + 1} left no report**: see its job log.`, '');
   });
   for (const n of new Set(reports.flatMap((r) => r.notes))) lines.push(`> ${n.split('\n')[0]}`, '');
-  lines.push(
+  const header = [
     '| workload | base Ir/op | head Ir/op | delta | A/A base / head | verdict |',
-    '|---|---:|---:|---:|---:|---|'
-  );
-  expected.forEach((name, i) => {
+    '|---|---:|---:|---:|---:|---|',
+  ];
+  const row = (name, i) => {
     const r = rows.get(name) ?? {};
     const aa = [r.baseAa, r.aa].map((x) => (x === undefined ? '–' : pct(x))).join(' / ');
     const delta = r.delta === undefined ? '–' : pct(r.delta, true);
     const v = verdicts[i];
     const bold = rank(v) <= rank('INCONCLUSIVE') ? `**${v}**` : v;
-    lines.push(
-      `| \`${name}\` | ${int(r.baseIrPerOp)} | ${int(r.irPerOp)} | ${delta} | ${aa} | ${bold} |`
-    );
-  });
+    return `| \`${name}\` | ${int(r.baseIrPerOp)} | ${int(r.irPerOp)} | ${delta} | ${aa} | ${bold} |`;
+  };
+  // Every verdict but `ok` up front; every workload in the fold.
+  const counts = {};
+  for (const v of verdicts) counts[v] = (counts[v] ?? 0) + 1;
+  const tally = Object.entries(counts)
+    .sort(([a], [b]) => rank(a) - rank(b))
+    .map(([v, n]) => `${n} ${v}`)
+    .join(', ');
+  const flagged = expected.flatMap((name, i) => (verdicts[i] === 'ok' ? [] : [row(name, i)]));
+  if (flagged.length) lines.push(...header, ...flagged, '');
+  lines.push(
+    `<details><summary>All ${expected.length} workloads: ${tally || 'none'}</summary>`,
+    '',
+    ...header,
+    ...expected.map(row),
+    '',
+    '</details>'
+  );
   const errors = [...rows.values()].filter((r) => r.error);
   if (errors.length) {
     lines.push('', '<details><summary>Run errors</summary>', '');
