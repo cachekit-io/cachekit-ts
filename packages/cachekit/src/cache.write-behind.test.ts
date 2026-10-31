@@ -763,9 +763,36 @@ describe('write-behind', () => {
       const lines = logError.mock.calls.map((args) => args.join(' '));
       const line = lines.find((l) => l.includes('write-behind L2 write failed'));
       expect(line).toContain(': BackendError(timeout).'); // the cause's class, never its text
+      expect(line).toContain("value held in this process's L1 only");
       expect(lines.join('\n')).not.toContain('PUT refused');
       // L1 keeps the value, as it keeps a degraded foreground write's.
       await expect(wrapped(7)).resolves.toEqual({ id: 7, call: 1 });
+    });
+
+    it.each([
+      ['a skipL1 call', { l1: { enabled: true } }, true],
+      ['L1 off', { l1: { enabled: false } }, false],
+    ] as const)('with no L1 copy (%s), says the value is not cached', async (_, l1, skipL1) => {
+      const logError = vi.fn();
+      setLogger(logError);
+      const backend = new GatedBackend();
+      backend.set = async () => {
+        throw new BackendError('PUT refused', 'timeout');
+      };
+      const cache = make({ backend, ...l1 });
+      const fn = cache.wrap(async (id: number) => ({ id }), {
+        namespace: 'wb:no-l1-copy',
+        ttl: 60,
+        writeBehind: true,
+        skipL1,
+      });
+
+      await expect(fn(9)).resolves.toEqual({ id: 9 });
+      await settle();
+      const lines = logError.mock.calls.map((args) => args.join(' '));
+      const line = lines.find((l) => l.includes('write-behind L2 write failed'));
+      expect(line).toContain('value not cached');
+      expect(line).not.toContain('L1');
     });
 
     it('names the open breaker when no attempt ran', async () => {

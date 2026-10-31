@@ -770,9 +770,15 @@ export class CacheImpl implements SecureCache {
    * it names the cause: the last attempt's error class, never its text
    * (describeBackendFailure), or the breaker when no attempt ran.
    * Rate-limited, and the key is digested, for the reasons warnSetRejected
-   * gives.
+   * gives. `heldInL1` is false when the write filled no L1 copy (L1 off, or
+   * a skipL1 call), so the line does not claim one.
    */
-  private writeBehindSettled(key: string, stored: boolean, lastError: unknown): void {
+  private writeBehindSettled(
+    key: string,
+    stored: boolean,
+    lastError: unknown,
+    heldInL1: boolean
+  ): void {
     void this.metrics.recordOperation('write_behind', stored ? 'success' : 'error');
     if (stored) return;
     const now = Date.now();
@@ -782,8 +788,9 @@ export class CacheImpl implements SecureCache {
       lastError === undefined
         ? 'not attempted: circuit breaker open'
         : describeBackendFailure(lastError);
+    const held = heldInL1 ? "value held in this process's L1 only" : 'value not cached';
     logError(
-      `[cachekit] write-behind L2 write failed, value held in this process's L1 only (keyHash=${blake2b16Hex(key)}): ${cause}.`
+      `[cachekit] write-behind L2 write failed, ${held} (keyHash=${blake2b16Hex(key)}): ${cause}.`
     );
   }
 
@@ -1308,9 +1315,10 @@ export class CacheImpl implements SecureCache {
     // back to the caller fills L1 after its L2 write, as with the option off.
     // A skipL1 call fills L1 in neither case, so until its write lands this
     // process misses the key.
+    const fillsL1 = l1Mode === 'fill' && this.l1 !== null;
     const wroteBehind =
       deferred?.kind === 'write-behind' &&
-      this.tryWriteBehind(key, data.length, writeL2, deferred.waitUntil);
+      this.tryWriteBehind(key, data.length, writeL2, deferred.waitUntil, fillsL1);
     if (wroteBehind) {
       if (l1Mode === 'fill') this.fillL1(key, l1Write, ttl, namespace);
       return l1Write;
@@ -1377,7 +1385,8 @@ export class CacheImpl implements SecureCache {
     key: string,
     bytes: number,
     writeL2: () => Promise<void>,
-    waitUntil: WaitUntil | undefined
+    waitUntil: WaitUntil | undefined,
+    heldInL1: boolean
   ): boolean {
     // After close() began, the drain may already have run: a write started
     // now would outlive it.
@@ -1418,8 +1427,8 @@ export class CacheImpl implements SecureCache {
     void this.startPendingWrite(key, bytes, () =>
       send()
         .then(
-          (stored) => this.writeBehindSettled(key, stored, lastError),
-          (error: unknown) => this.writeBehindSettled(key, false, error)
+          (stored) => this.writeBehindSettled(key, stored, lastError, heldInL1),
+          (error: unknown) => this.writeBehindSettled(key, false, error, heldInL1)
         )
         .finally(settle)
     );
