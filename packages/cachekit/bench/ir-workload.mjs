@@ -240,11 +240,14 @@ export const WORKLOADS = {
     { id: 7, name: 'item-7', score: 10.5, ok: true, tags: ['a', 'b'], owner: 'user-424242' },
     20_000
   ),
-  'plaintext-set-1mb': plaintextSetOf(
-    { groups: Array.from({ length: 96 }, () => rowsOf(320)) },
-    20,
-    20
-  ),
+  // Its own gate threshold (ir.mjs `fail`): 20 ops that each allocate
+  // megabytes put several GCs in the window, whose cost follows the live heap.
+  // In CI, a PR that only retained 50,000 small objects at load read +4.23%
+  // on it with its code unchanged; every other workload stayed within 0.6%.
+  'plaintext-set-1mb': {
+    ...plaintextSetOf({ groups: Array.from({ length: 96 }, () => rowsOf(320)) }, 20, 20),
+    fail: 0.1,
+  },
   // the worst case for L1's container count: 2,000 empty objects, one
   // MessagePack byte each, so the count is a large share of the write
   'plaintext-set-containers': {

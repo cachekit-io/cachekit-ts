@@ -25,7 +25,8 @@
 // judge: the exit code says so instead of passing.
 //
 // --compare gates a head run against a base run made on the same machine and
-// toolchain (fingerprint): +2% per op fails, +1% warns. Exit codes: 0 pass,
+// toolchain (fingerprint): +2% per op fails, +1% warns, unless the workload
+// sets its own `fail` (and warns at half of it). Exit codes: 0 pass,
 // 1 regression, 2 not comparable (fingerprint or workload-set mismatch, or
 // the same build on both sides), 3 A/A over the limit, 4 the run itself
 // failed (bad arguments, valgrind crash, missing build output).
@@ -72,7 +73,9 @@ const V8_FLAGS = [
 const N = Object.fromEntries(Object.entries(WORKLOADS).map(([name, w]) => [name, w.n]));
 const AA_LIMIT = 0.004;
 const FAIL = 0.02;
-const WARN = 0.01;
+// A workload may set its own `fail` where a measured A/A in CI calls for it;
+// it then warns at half that, as the default does.
+const failAt = (name) => WORKLOADS[name].fail ?? FAIL;
 
 const { values: opt } = parseArgs({
   options: {
@@ -407,14 +410,15 @@ for (const name of names) {
     incomplete ||= !newNames.has(name);
   } else if (was && !mismatch) {
     const delta = b.irPerOp / was.irPerOp - 1;
-    Object.assign(row, { baseIrPerOp: was.irPerOp, baseAa: was.aa, delta });
+    const fail = failAt(name);
+    Object.assign(row, { baseIrPerOp: was.irPerOp, baseAa: was.aa, delta, fail });
     row.verdict = noisy
       ? 'INCONCLUSIVE (A/A)'
-      : delta > FAIL
+      : delta > fail
         ? 'FAIL'
-        : delta > WARN
+        : delta > fail / 2
           ? 'warn'
-          : delta < -FAIL
+          : delta < -fail
             ? 'improved'
             : 'ok';
     regressed ||= row.verdict === 'FAIL';
@@ -444,7 +448,7 @@ if (exitCode === 3)
     `A/A spread over ${pct(AA_LIMIT)}: too noisy to judge; rerun on a quieter machine.`
   );
 if (opt.report) {
-  const thresholds = { fail: FAIL, warn: WARN, aaLimit: AA_LIMIT };
+  const thresholds = { fail: FAIL, warn: FAIL / 2, aaLimit: AA_LIMIT };
   const report = { exitCode, fingerprint, build, baseBuild: base?.build, thresholds, notes, rows };
   writeFileSync(opt.report, JSON.stringify(report, null, 2) + '\n');
 }
