@@ -1003,11 +1003,9 @@ export class CacheImpl implements SecureCache {
    * copies them, decodes the copy as an L2 read does, depth walks included,
    * and swaps the copy into L1 in their place (if L1 still holds them),
    * marked in trustedL1 with the mode it was walked in. No one outside this
-   * cache can reach the copy and decrypt re-authenticates it on every hit, so
-   * later hits in that mode skip the depth pre-scan, and in auto mode
-   * validateDepth: both could only pass again. Fills pay nothing for this
-   * (copying at every fill cost an encrypted 100 B set 5.8% more
-   * instructions).
+   * cache can reach the copy, so later hits in that mode skip the depth
+   * pre-scan, and in auto mode validateDepth: both could only pass again.
+   * Fills pay nothing for this.
    *
    * Drops the L1 entry and returns null when a secure entry will not decrypt
    * (rotated key, tampered heap, an entry written under a different envelope

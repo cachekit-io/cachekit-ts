@@ -1032,25 +1032,39 @@ describe('L1Cache', () => {
   });
 
   describe('replace', () => {
-    it('swaps the value in place: same expiry, LRU place, version and charge', () => {
+    it('swaps the value in place: same expiry, version and charge', () => {
       vi.useFakeTimers({ now: 0 });
-      const c = new L1Cache<Uint8Array>({ maxEntries: 2 });
+      const c = new L1Cache<Uint8Array>();
       const from = new Uint8Array([1, 2, 3]);
       const to = new Uint8Array([1, 2, 3]);
       c.set('a', from, 1000, 'ns');
-      c.set('b', new Uint8Array(3), 1000, 'ns');
-      const { versionToken } = c.getWithSwr('a'); // a becomes most recent
+      vi.advanceTimersByTime(500);
+      const { versionToken } = c.getWithSwr('a');
       const memoryUsed = c.stats.memoryUsed;
 
       expect(c.replace('a', from, to)).toBe(true);
 
-      expect(c.get('a')).toBe(to);
+      expect(c.entry('a')!.value).toBe(to);
       expect(c.stats.memoryUsed).toBe(memoryUsed);
       expect(c.getWithSwr('a').versionToken).toBe(versionToken);
-      c.set('c', new Uint8Array(3), 1000, 'ns'); // evicts b, the least recent
-      expect(c.get('b')).toBeNull();
-      vi.advanceTimersByTime(1000);
+      // Still expires at 1000, not 500 + 1000.
+      vi.advanceTimersByTime(499);
+      expect(c.get('a')).toBe(to);
+      vi.advanceTimersByTime(1);
       expect(c.get('a')).toBeNull();
+    });
+
+    it('keeps the LRU place', () => {
+      const c = new L1Cache<string>({ maxEntries: 2 });
+      c.set('a', 'from', 1000, 'ns');
+      c.set('b', 'b', 1000, 'ns');
+      c.get('b'); // a is now the least recent
+
+      expect(c.replace('a', 'from', 'to')).toBe(true);
+      c.set('c', 'c', 1000, 'ns');
+
+      expect(c.entry('a')).toBeUndefined();
+      expect(c.entry('b')).toBeDefined();
     });
 
     it('changes nothing once the key no longer holds `from`', () => {

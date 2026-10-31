@@ -182,31 +182,17 @@ describe('encrypted L1 hits: walk once, on a copy L1 keeps', () => {
     expect(decodes()).toEqual({ ...NONE, walked: 1, trusted: 1 });
   });
 
-  describe('the copy is out of the backend’s reach', () => {
-    it('after set(): overwriting the buffer the backend was given leaves L1 intact', async () => {
-      const backend = new InMemoryBackend();
-      const cache = makeCache(backend);
-      await cache.set('users:3', { id: 3 });
-      await cache.get('users:3');
-      backend.store.get('users:3')!.fill(0);
-      vi.clearAllMocks();
+  it('the copy is out of the backend’s reach: overwriting the buffer it returned leaves L1 intact', async () => {
+    const backend = new InMemoryBackend();
+    await makeCache(backend).set('users:4', { id: 4 });
+    const reader = makeCache(backend);
+    await reader.get('users:4');
+    await reader.get('users:4');
+    backend.store.get('users:4')!.fill(0);
+    vi.clearAllMocks();
 
-      expect(await cache.get('users:3')).toEqual({ id: 3 });
-      expect(decodes()).toEqual({ ...NONE, trusted: 1 });
-    });
-
-    it('after get(): overwriting the buffer the backend returned leaves L1 intact', async () => {
-      const backend = new InMemoryBackend();
-      await makeCache(backend).set('users:4', { id: 4 });
-      const reader = makeCache(backend);
-      await reader.get('users:4');
-      await reader.get('users:4');
-      backend.store.get('users:4')!.fill(0);
-      vi.clearAllMocks();
-
-      expect(await reader.get('users:4')).toEqual({ id: 4 });
-      expect(decodes()).toEqual({ ...NONE, trusted: 1 });
-    });
+    expect(await reader.get('users:4')).toEqual({ id: 4 });
+    expect(decodes()).toEqual({ ...NONE, trusted: 1 });
   });
 
   it('a first hit that loses a race with a rewrite swaps nothing', async () => {

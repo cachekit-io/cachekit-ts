@@ -11,6 +11,7 @@ import {
   assertDecodeDepth,
   boundedDecodeOptions,
   decodeCounted,
+  decodeTrusted,
   encodeCounted,
   resolveSerializerConfig,
 } from './serializer.js';
@@ -811,5 +812,24 @@ describe('MessagePackSerializer', () => {
       expect(MessagePackSerializer.prototype.encode.length).toBe(1);
       expect(MessagePackSerializer.prototype.decode.length).toBe(1);
     });
+  });
+});
+
+// decodeCounted without its two depth walks, for bytes an earlier walked
+// decode passed: the decoder, its caps and its result stay the same.
+describe('decodeTrusted', () => {
+  it('decodes as decodeCounted does', () => {
+    const config = resolveSerializerConfig();
+    const bytes = encodeCounted({ a: [1, { b: new Date(0) }], c: new Uint8Array([7]) }, config);
+    expect(decodeTrusted(bytes, config)).toEqual(decodeCounted(bytes, config));
+  });
+
+  it('keeps the input cap and the collection cap', () => {
+    const config = resolveSerializerConfig({ maxDecodedSize: 16, maxCollectionSize: 10 });
+    expect(() => decodeTrusted(new Uint8Array(17), config)).toThrow(ValueTooLargeError);
+    // array16 claiming 11 elements.
+    expect(() => decodeTrusted(Uint8Array.of(0xdc, 0x00, 0x0b), config)).toThrow(
+      SerializationError
+    );
   });
 });

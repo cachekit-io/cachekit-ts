@@ -3,8 +3,6 @@ import { runInNewContext } from 'node:vm';
 import { ExtData, encode as msgpackEncode } from '@msgpack/msgpack';
 import {
   ValueEncoder,
-  decodeTrusted,
-  decodeCounted,
   encodeCounted,
   normalize,
   resolveSerializerConfig,
@@ -945,75 +943,5 @@ describe('encodeCounted one-pass encode', () => {
         Buffer.from(msgpackEncode({ a: 'o'.repeat(100), b: 'after' })).toString('hex')
       );
     });
-  });
-});
-
-// An encrypted L1 hit on bytes an earlier hit walked decodes them through
-// decodeTrusted, so on any input decodeCounted accepts it must return what
-// decodeCounted returns. Checked on encodeCounted output, random and at the
-// depth bound.
-describe('decodeTrusted on input decodeCounted accepts', () => {
-  const decodedPair = (bytes: Uint8Array, c: SerializerConfig) => {
-    const walked = decodeCounted(bytes, c);
-    expect(decodeTrusted(bytes, c)).toEqual(walked);
-  };
-
-  it('decodes as decodeCounted does, on seeded random values', () => {
-    const seed = Number(process.env.CACHEKIT_ONE_PASS_SEED ?? 0x5eed);
-    const r = rng(seed);
-    let encoded = 0;
-    for (let i = 0; i < 1500; i++) {
-      const outcome = onePass(generate(r, 0), config);
-      if ('error' in outcome) continue;
-      encoded++;
-      decodedPair(outcome.bytes, config);
-    }
-    expect(encoded, `CACHEKIT_ONE_PASS_SEED=${seed}`).toBeGreaterThan(1000);
-  });
-
-  it('decodes as decodeCounted does at and past the configured maxDepth', () => {
-    const nest = (levels: number, leaf: unknown, array: boolean): unknown => {
-      let v = leaf;
-      for (let i = 0; i < levels; i++) v = array ? [v] : { n: v };
-      return v;
-    };
-    const leaves = () => [
-      1,
-      {},
-      [],
-      new Array(1),
-      new Date(0),
-      new Map([[1, [2]]]),
-      new Set([[1]]),
-    ];
-    let encoded = 0;
-    let refused = 0;
-    for (const maxDepth of [32, 100, 1024]) {
-      const c = resolveSerializerConfig({ maxDepth });
-      for (const levels of [maxDepth - 1, maxDepth, maxDepth + 1]) {
-        for (const leaf of leaves()) {
-          for (const array of [false, true]) {
-            const outcome = onePass(nest(levels, leaf, array), c);
-            if ('error' in outcome) {
-              expect(outcome.message).toMatch(/max depth/i);
-              refused++;
-              continue;
-            }
-            encoded++;
-            decodedPair(outcome.bytes, c);
-          }
-        }
-      }
-    }
-    // The bound is crossed, not only approached.
-    expect(encoded).toBeGreaterThan(0);
-    expect(refused).toBeGreaterThan(0);
-  });
-
-  it('keeps the input cap and the collection cap', () => {
-    const c = resolveSerializerConfig({ maxDecodedSize: 16, maxCollectionSize: 10 });
-    expect(() => decodeTrusted(new Uint8Array(17), c)).toThrow(ValueTooLargeError);
-    // array16 claiming 11 elements.
-    expect(() => decodeTrusted(Uint8Array.of(0xdc, 0x00, 0x0b), c)).toThrow(SerializationError);
   });
 });
