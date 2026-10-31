@@ -1845,7 +1845,10 @@ export class CacheImpl implements SecureCache {
                   waitUntil
                 );
               }
-              // Hold the entry for the memo's next call (see above).
+              // Hold the entry for the memo's next call (see above). A call the
+              // memo does not keep (an object argument, say) has a slot of its
+              // own, discarded with the entry: one Map lookup, against the key
+              // generation that call has already paid for.
               if (autoKeys.memoising) slot!.entry = this.l1.entry(cacheKey);
               this.recordHit('l1');
               return decoded.value;

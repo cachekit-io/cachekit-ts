@@ -11,6 +11,9 @@ import {
   DEFAULT_L1_FALLBACK_SIZE,
 } from '../constants.js';
 
+/** The top of the SWR jitter band: no draw makes the threshold larger. */
+const SWR_JITTER_MAX = SWR_JITTER_MIN + SWR_JITTER_RANGE;
+
 /**
  * What L1 charges per serialized (MessagePack) byte when the caller passes
  * the serialized length but no count, so maxMemory means about what the
@@ -77,7 +80,8 @@ function isCount(n: number | undefined): n is number {
  */
 export interface L1Entry<T> {
   readonly key: string;
-  readonly value: T;
+  /** null once L1 has dropped the entry: read it only after `hit` returns true. */
+  readonly value: T | null;
 }
 
 /**
@@ -91,19 +95,6 @@ interface Node<T> extends CacheEntry<T> {
   next: Node<T> | null;
   /** No refresh starts before this time (see deferRefresh). */
   refreshHeldUntil: number;
-  /**
-   * When the entry turns stale for SWR: originalTtl x swrThresholdRatio, with
-   * its ±10% jitter, before expiresAt. The jitter is drawn once, when the
-   * entry is written, so a read draws nothing.
-   */
-  refreshAt: number;
-  /**
-   * Before this time a hit needs no refresh decision, so `hit` serves the
-   * entry on this one check: refreshAt with SWR on, expiresAt with it off.
-   * -Infinity for a null value, which L1 never serves, and from the moment L1
-   * drops the entry, so a caller holding a removed node never serves it.
-   */
-  hitUntil: number;
 }
 
 /**
@@ -141,6 +132,14 @@ export class L1Cache<T = unknown> {
   // Memory tracking
   private currentMemory = 0;
 
+  /**
+   * The share of an entry's ttl, before it expires, from which a hit may need
+   * a refresh decision (see `hit`): the top of the SWR threshold's jitter
+   * band, where no draw could make the entry stale, or 0 with SWR off. Never
+   * negative, so `hit` never serves past expiresAt.
+   */
+  private readonly hitBand: number;
+
   // Instance ID for invalidation echo detection (already readonly)
   private readonly instanceId = crypto.randomUUID();
 
@@ -162,6 +161,11 @@ export class L1Cache<T = unknown> {
         `l1.maxMemory must be a finite number > 0, got ${this.config.maxMemory}`
       );
     }
+    // A NaN ratio stays NaN, so `hit` serves nothing and every read takes
+    // getWithSwr, which finds such an entry stale, as it always has.
+    this.hitBand = this.config.swrEnabled
+      ? Math.max(0, this.config.swrThresholdRatio * SWR_JITTER_MAX)
+      : 0;
   }
 
   /**
@@ -220,7 +224,14 @@ export class L1Cache<T = unknown> {
 
     this.touch(entry);
 
-    const isFresh = now < entry.refreshAt;
+    // SWR threshold with ±10% jitter, from the CSPRNG rather than Math.random
+    // so refresh times cannot be predicted. Above the jitter band every draw
+    // finds the entry fresh, so only a read inside the band draws.
+    const swrThreshold = entry.originalTtl * this.config.swrThresholdRatio;
+    const remainingTtl = entry.expiresAt - now;
+    const isFresh =
+      remainingTtl > swrThreshold * SWR_JITTER_MAX ||
+      remainingTtl > swrThreshold * (SWR_JITTER_MIN + secureRandomFloat() * SWR_JITTER_RANGE);
 
     // Should refresh if stale AND SWR enabled AND not already refreshing AND under limit
     const shouldRefresh =
@@ -254,14 +265,17 @@ export class L1Cache<T = unknown> {
 
   /**
    * Serve an entry `entry` returned, at `now` (Date.now()), if it needs no
-   * refresh decision: L1 still holds it and it is fresh. Marks it most
-   * recently used and returns true; false sends the caller to getWithSwr.
-   * Package-internal.
+   * refresh decision: L1 still holds it, its value is not null (which L1
+   * never serves), and it is above the SWR jitter band (see hitBand). Marks
+   * it most recently used and returns true; false sends the caller to
+   * getWithSwr. Package-internal.
    * @internal
    */
   hit(entry: L1Entry<T>, now: number): boolean {
     const node = entry as Node<T>;
-    if (!(now < node.hitUntil)) return false;
+    // A node L1 has dropped holds a null value (see drop).
+    if (node.value === null) return false;
+    if (!(now < node.expiresAt - node.originalTtl * this.hitBand)) return false;
     this.touch(node);
     return true;
   }
@@ -453,26 +467,13 @@ export class L1Cache<T = unknown> {
       this.evictLRU();
     }
 
-    // ttl <= 0 means "no expiry" (ts-wide Backend contract) —
-    // without this guard `now + 0` expires the entry on the very next
-    // millisecond instead of caching it forever.
-    const expiresAt = ttl > 0 ? Date.now() + ttl : Infinity;
-    // SWR jitter (±10%) from the CSPRNG, not Math.random, so refresh times
-    // cannot be predicted. Never stale without an expiry: Infinity - Infinity
-    // would make refreshAt NaN.
-    const refreshAt =
-      expiresAt === Infinity
-        ? Infinity
-        : expiresAt -
-          ttl *
-            this.config.swrThresholdRatio *
-            (SWR_JITTER_MIN + secureRandomFloat() * SWR_JITTER_RANGE);
     const node: Node<T> = {
       key,
       value,
-      expiresAt,
-      refreshAt,
-      hitUntil: value === null ? -Infinity : this.config.swrEnabled ? refreshAt : expiresAt,
+      // ttl <= 0 means "no expiry" (ts-wide Backend contract) —
+      // without this guard `now + 0` expires the entry on the very next
+      // millisecond instead of caching it forever.
+      expiresAt: ttl > 0 ? Date.now() + ttl : Infinity,
       originalTtl: ttl,
       size,
       namespace,
@@ -663,12 +664,12 @@ export class L1Cache<T = unknown> {
   }
 
   /**
-   * Mark a node L1 no longer holds, so `hit` refuses it, and let go of its
-   * value: a caller may hold the node a while (a key memo, up to its window),
-   * and must not keep an evicted value alive past maxMemory.
+   * Mark a node L1 no longer holds by nulling its value, so `hit` refuses it,
+   * and so let go of the value: a caller may hold the node a while (a key
+   * memo, up to its window), and must not keep an evicted value alive past
+   * maxMemory.
    */
   private drop(node: Node<T>): void {
-    node.hitUntil = -Infinity;
     (node as Node<T | null>).value = null;
   }
 

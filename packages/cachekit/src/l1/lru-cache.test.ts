@@ -877,20 +877,25 @@ describe('L1Cache', () => {
   });
 
   describe('SWR jitter', () => {
-    it('is drawn from secureRandomFloat once, when the entry is written, never on a read', () => {
-      vi.useFakeTimers();
+    // ttl 1000 ms, ratio 0.5: the threshold is 500 ms ±10%, so the band runs
+    // from 550 ms left (t = 450) to 450 ms left (t = 550).
+    it('is drawn from secureRandomFloat only by a read inside the band', () => {
+      vi.useFakeTimers({ now: 0 });
       const c = new L1Cache<string>({ swrThresholdRatio: 0.5 });
       draws.mockClear();
       c.set('k', 'v', 1000, 'ns');
-      expect(draws).toHaveBeenCalledTimes(1);
       const held = c.entry('k')!;
-      for (let t = 0; t < 1000; t += 50) {
+      for (let t = 0; t < 450; t += 50) {
         vi.setSystemTime(t);
         c.getWithSwr('k');
-        c.get('k');
-        c.hit(held, Date.now());
+        c.hit(held, t);
       }
-      expect(draws).toHaveBeenCalledTimes(1);
+      expect(draws).not.toHaveBeenCalled();
+      vi.setSystemTime(450);
+      c.getWithSwr('k');
+      vi.setSystemTime(500);
+      c.getWithSwr('k');
+      expect(draws).toHaveBeenCalledTimes(2);
     });
 
     it.each([
@@ -901,8 +906,8 @@ describe('L1Cache', () => {
     ])('turns stale where a draw of %s puts it (jitter %s): at %s ms', (draw, _, staleAt) => {
       vi.useFakeTimers({ now: 0 });
       const c = new L1Cache<string>({ swrThresholdRatio: 0.5 });
-      draws.mockReturnValueOnce(draw);
       c.set('k', 'v', 1000, 'ns');
+      draws.mockReturnValueOnce(draw).mockReturnValueOnce(draw);
       vi.setSystemTime(staleAt - 1);
       expect(c.getWithSwr('k').isFresh).toBe(true);
       vi.setSystemTime(staleAt);
@@ -933,24 +938,36 @@ describe('L1Cache', () => {
       expect(c.get('a')).toBe('A');
     });
 
-    it('is refused on hit once stale, leaving the refresh decision to getWithSwr', () => {
+    it('is refused on hit from the top of the jitter band, leaving the refresh decision to getWithSwr', () => {
       vi.useFakeTimers({ now: 0 });
       const c = new L1Cache<string>({ swrThresholdRatio: 0.5 });
-      draws.mockReturnValueOnce(0.5); // stale at 500
       c.set('k', 'v', 1000, 'ns');
       const held = c.entry('k')!;
-      expect(c.hit(held, 499)).toBe(true);
-      expect(c.hit(held, 500)).toBe(false);
+      expect(c.hit(held, 449)).toBe(true);
+      expect(c.hit(held, 450)).toBe(false);
+      draws.mockReturnValueOnce(0.5); // stale from t = 500
       expect(c.getWithSwr('k', 500)).toMatchObject({ value: 'v', shouldRefresh: true });
     });
 
+    it.each([-0.5, -Infinity])(
+      'is served on hit only until it expires under a swrThresholdRatio of %s',
+      (swrThresholdRatio) => {
+        vi.useFakeTimers({ now: 0 });
+        const c = new L1Cache<string>({ swrThresholdRatio });
+        c.set('k', 'v', 1000, 'ns');
+        const held = c.entry('k')!;
+        expect(c.hit(held, 999)).toBe(true);
+        expect(c.hit(held, 1000)).toBe(false);
+      }
+    );
+
     it('is served on hit until it expires when SWR is off', () => {
+      vi.useFakeTimers({ now: 0 });
       const c = new L1Cache<string>({ swrEnabled: false, swrThresholdRatio: 0.5 });
       c.set('k', 'v', 1000, 'ns');
       const held = c.entry('k')!;
-      const now = Date.now();
-      expect(c.hit(held, now + 998)).toBe(true);
-      expect(c.hit(held, now + 2000)).toBe(false);
+      expect(c.hit(held, 999)).toBe(true);
+      expect(c.hit(held, 1000)).toBe(false);
     });
 
     it('is never served on hit when its value is null, which L1 does not serve', () => {
