@@ -276,7 +276,8 @@ describe('Cache metrics wiring', () => {
     expect(await metricValue(registry, 'cachekit_misses_total')).toBe(0);
 
     await cache.get('ns:k');
-    const hits = registry.getSingleMetric('cachekit_hits_total') as Counter;
+    const hits = registry.getSingleMetric('cachekit_hits_total');
+    if (!(hits instanceof Counter)) throw new Error('cachekit_hits_total is not a Counter');
     hits.reset();
     expect(await metricValue(registry, 'cachekit_hits_total')).toBe(0);
 

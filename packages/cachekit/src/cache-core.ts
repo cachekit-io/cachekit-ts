@@ -449,20 +449,21 @@ export class CacheImpl implements SecureCache {
     // Initialize L1 cache (its maxMemory check throws ConfigurationError)
     this.l1 = options.l1?.enabled !== false ? new L1Cache(options.l1) : null;
 
+    // Initialize metrics (Prometheus via the runtime; no-op when the
+    // platform has no collector or metrics are off). Its defaultLabels check
+    // throws ConfigurationError.
+    const metricsOption = options.metrics ?? false;
+    this.metrics =
+      metricsOption !== false && runtime.createMetrics
+        ? runtime.createMetrics(typeof metricsOption === 'object' ? metricsOption : undefined)
+        : NOOP_METRICS;
+
     // Initialize backend. The telemetry getter reads `this` lazily (per
     // request), so constructor field order is safe.
     this.backend = runtime.resolveBackend(options.backend, options.stampede, () => ({
       ...this.telemetry,
       l1Enabled: this.l1 !== null,
     }));
-
-    // Initialize metrics (Prometheus via the runtime; no-op when the
-    // platform has no collector or metrics are off)
-    const metricsOption = options.metrics ?? false;
-    this.metrics =
-      metricsOption !== false && runtime.createMetrics
-        ? runtime.createMetrics(typeof metricsOption === 'object' ? metricsOption : undefined)
-        : NOOP_METRICS;
 
     // Lock capability. Duck-typed like cachekit-py's hasattr check:
     // user-supplied Backend instances aren't required to declare the
