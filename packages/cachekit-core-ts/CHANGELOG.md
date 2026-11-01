@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-core-ts-v0.2.1...cachekit-core-ts-v0.2.2) (2026-11-01)
+
+
+### Performance Improvements
+
+* **deps:** bump cachekit-core to 0.7.4 (LAB-12129) ([#289](https://github.com/cachekit-io/cachekit-ts/issues/289)) ([ac259b5](https://github.com/cachekit-io/cachekit-ts/commit/ac259b57590a6d76bc9a59e874efa606efdb49b5))
+
 ## [0.2.1](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-core-ts-v0.2.0...cachekit-core-ts-v0.2.1) (2026-10-27)
 
 
