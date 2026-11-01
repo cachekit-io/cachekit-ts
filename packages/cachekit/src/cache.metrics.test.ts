@@ -408,6 +408,36 @@ describe('Cache metrics wiring', () => {
     });
   });
 
+  // Anything else writing the gauge directly (an older SDK copy on the same
+  // registry, or the application) writes after the states pending before it,
+  // so its value must win at the next scrape, and a later op's must win over it.
+  it('a direct write to the breaker gauge orders with the states pending around it', async () => {
+    const registry = new Registry();
+    const cache = makeCache(registry, {
+      l1: { enabled: false },
+      reliability: { circuitBreaker: { failureThreshold: 5 } },
+    });
+    await cache.set('ns:k', 'v');
+    await vi.waitFor(async () => {
+      expect(await registry.metrics()).toContain('cachekit_circuit_breaker_state 0');
+    });
+    const gauge = registry.getSingleMetric('cachekit_circuit_breaker_state') as Gauge;
+    const breaker = () => metricValue(registry, 'cachekit_circuit_breaker_state');
+
+    await cache.get('ns:k'); // closed, pending
+    gauge.set(1);
+    expect(await breaker()).toBe(1);
+    expect(await breaker()).toBe(1);
+
+    await cache.get('ns:k');
+    gauge.inc(0.5);
+    expect(await breaker()).toBe(0.5);
+
+    gauge.set(1);
+    await cache.get('ns:k'); // closed, pending after the direct write
+    expect(await breaker()).toBe(0);
+  });
+
   it('counts attempts and the breaker state into metrics registered by someone else', async () => {
     const registry = new Registry();
     new Counter({

@@ -81,15 +81,33 @@ function flushBeforeClearing<M>(
   cells: Map<string, { attached: boolean }>,
   flush: (metric: M) => void
 ): void {
-  const clearing = metric as unknown as Record<string, unknown>;
-  for (const method of ['reset', 'remove']) {
-    const clear = clearing[method];
-    if (typeof clear !== 'function') continue;
-    clearing[method] = function (this: M, ...args: unknown[]): unknown {
-      flush(this);
-      for (const cell of cells.values()) cell.attached = false;
-      cells.clear();
-      return clear.apply(this, args);
+  runFirst(metric, ['reset', 'remove'], (cleared) => {
+    flush(cleared);
+    for (const cell of cells.values()) cell.attached = false;
+    cells.clear();
+  });
+}
+
+/**
+ * Make the gauge's own writers set its pending values first, so a direct
+ * write from anything else on the registry (an SDK copy from before pending
+ * values, or the application) lands after the states set before it and wins
+ * at the next scrape, as it would had each state been a set(). The flush
+ * itself writes through the unwrapped set().
+ */
+function flushBeforeWriting(gauge: Gauge, flush: (gauge: Gauge) => void): void {
+  runFirst(gauge, ['set', 'inc', 'dec', 'setToCurrentTime'], flush);
+}
+
+/** Make each of the metric's `methods` run `first` before itself. */
+function runFirst<M>(metric: M, methods: readonly string[], first: (metric: M) => void): void {
+  const target = metric as unknown as Record<string, unknown>;
+  for (const method of methods) {
+    const original = target[method];
+    if (typeof original !== 'function') continue;
+    target[method] = function (this: M, ...args: unknown[]): unknown {
+      first(this);
+      return original.apply(this, args);
     };
   }
 }
@@ -153,12 +171,16 @@ const PENDING_VALUES = Symbol.for('@cachekit-io/cachekit:metrics:pending-values:
 type Valued = { [PENDING_VALUES]?: Map<string, PendingValue> };
 
 /** Set `gauge` to each value set since it last read them. */
-function flushPendingValues(gauge: Gauge, cells: Map<string, PendingValue>): void {
+function flushPendingValues(
+  gauge: Gauge,
+  cells: Map<string, PendingValue>,
+  set: Gauge['set']
+): void {
   for (const cell of cells.values()) {
     if (!cell.set) continue;
     cell.set = false;
     try {
-      gauge.set(cell.labels, cell.value);
+      set.call(gauge, cell.labels, cell.value);
     } catch (error) {
       // Unreachable once pendingValue() has checked the labels: as above.
       const name = (gauge as { name?: string }).name;
@@ -390,15 +412,18 @@ export class CacheMetrics implements MetricsCollector {
         const existing = registry.getSingleMetric?.(cfg.name as string);
         if (existing) return existing as Gauge;
         const cells = new Map<string, PendingValue>();
+        const set = (GaugeClass.prototype as Gauge).set;
+        const flush = (gauge: Gauge): void => flushPendingValues(gauge, cells, set);
         const gauge = new GaugeClass({
           ...cfg,
           collect(this: Gauge) {
-            flushPendingValues(this, cells);
+            flush(this);
           },
           registers: [registry],
         });
         (gauge as Valued)[PENDING_VALUES] = cells;
-        flushBeforeClearing(gauge, cells, (g) => flushPendingValues(g, cells));
+        flushBeforeWriting(gauge, flush);
+        flushBeforeClearing(gauge, cells, flush);
         return gauge;
       };
       // Every metric declares the default labels, or each inc() would throw.
