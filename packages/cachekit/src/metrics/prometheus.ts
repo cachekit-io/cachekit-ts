@@ -140,11 +140,17 @@ interface PendingValue {
 }
 
 /**
- * Values set per gauge this module created, one per label set and shared by
- * every collector writing to that gauge, so the last write wins at scrape as
- * it would had each been a set(). As pendingCounts, for a gauge.
+ * Where a gauge created here keeps its values set, one per label set and
+ * shared by every collector writing to that gauge, so the last write wins at
+ * scrape as it would had each been a set(). As pendingCounts, for a gauge,
+ * but a property of the gauge under a process-wide symbol rather than a
+ * module-local map: a process can load both the ESM and the CommonJS build,
+ * and a collector of one would otherwise set a gauge the other created
+ * directly, which that build's older pending value then overwrote at scrape.
+ * Counts need no such care, since they add up in any order.
  */
-const pendingValues = new WeakMap<object, Map<string, PendingValue>>();
+const PENDING_VALUES = Symbol.for('@cachekit-io/cachekit:metrics:pending-values:v1');
+type Valued = { [PENDING_VALUES]?: Map<string, PendingValue> };
 
 /** Set `gauge` to each value set since it last read them. */
 function flushPendingValues(gauge: Gauge, cells: Map<string, PendingValue>): void {
@@ -186,7 +192,7 @@ function declaresLabels(metric: object, labels: Record<string, string>): boolean
 
 /** The pending value for `labels` on `gauge`, or null, as pendingCount(). */
 function pendingValue(gauge: Gauge, labels: Record<string, string>): PendingValue | null {
-  const cells = pendingValues.get(gauge);
+  const cells = (gauge as Valued)[PENDING_VALUES];
   if (!cells || !declaresLabels(gauge, labels)) return null;
   const key = labelsKey(labels);
   let cell = cells.get(key);
@@ -297,7 +303,7 @@ export class CacheMetrics implements MetricsCollector {
   // Pending operation counts by operation, one map per status
   private readonly successes = new Map<string, PendingCount>();
   private readonly failures = new Map<string, PendingCount>();
-  // The breaker state's pending value (see pendingValues)
+  // The breaker state's pending value (see PENDING_VALUES)
   private circuitBreakerState: PendingValue | null = null;
 
   /**
@@ -391,7 +397,7 @@ export class CacheMetrics implements MetricsCollector {
           },
           registers: [registry],
         });
-        pendingValues.set(gauge, cells);
+        (gauge as Valued)[PENDING_VALUES] = cells;
         flushBeforeClearing(gauge, cells, (g) => flushPendingValues(g, cells));
         return gauge;
       };
