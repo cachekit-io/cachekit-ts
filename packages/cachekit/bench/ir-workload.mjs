@@ -430,9 +430,9 @@ export const WORKLOADS = {
   // duration histogram, breaker gauge) around an unpack and a decode
   'get-l2-hit-metrics': {
     n: 10_000,
-    // 2,000 ops leave ~40 TurboFan compiles inside the window (node --trace-opt
-    // with markers at the window); 30,000 leave none on Node 22.
-    warmup: 30_000,
+    // 4,000 warm-up ops: the hit reads through Node's TextDecoder, whose
+    // decode V8 compiles with TurboFan at ~2,400 ops on Node 24.
+    warmup: 4_000,
     setup: async () => {
       const { createCache } = await load('index.js');
       const { Registry } = await import('prom-client');
@@ -491,9 +491,11 @@ export const WORKLOADS = {
     },
   },
   // wrap-l1-hit-int on the same CachekitIO backend: the memoised hit, where
-  // the timing draw is the largest share of a hit
+  // the timing draw is the largest share of a hit. 4,000 warm-up ops: on Node
+  // 24 V8 compiles the wrap() closure with TurboFan at ~2,050 ops.
   'wrap-l1-hit-int-cachekitio': {
     n: 20_000,
+    warmup: 4_000,
     setup: async () => {
       stubCachekitIO();
       const { createCache } = await load('index.js');
