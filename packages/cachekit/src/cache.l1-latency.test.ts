@@ -79,9 +79,15 @@ function only(index: number, count: number): number[] {
   return buckets;
 }
 
-/** Time every call of `cache`: tests the timing, not the sampling. */
+/**
+ * Time every call of `cache`: tests the timing, not the sampling. The field
+ * must exist, or the write would do nothing and a test that expects no
+ * timing would pass by chance.
+ */
 function timeEveryCall(cache: SecureCache): SecureCache {
-  (cache as unknown as { l1LatencyThreshold: number }).l1LatencyThreshold = 2 ** 30;
+  const sampling = cache as unknown as { l1LatencyThreshold: number };
+  expect(sampling.l1LatencyThreshold, 'CacheImpl.l1LatencyThreshold').toBeTypeOf('number');
+  sampling.l1LatencyThreshold = 2 ** 30;
   return cache;
 }
 

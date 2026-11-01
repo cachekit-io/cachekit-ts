@@ -879,7 +879,8 @@ the closed beta, each CachekitIO request carries these optional headers:
   chosen at random before its outcome is known, with `process.hrtime.bigint()`;
   each timed call that L1 serves adds its whole duration to a histogram of
   sixteen buckets. A report rides the backend's next request, never its health
-  check, and is never sent twice. Cloudflare Workers, Bun and Deno send no
+  check, and is never sent twice, not even when Node's `fetch` resends a
+  request on its own after a `421`. Cloudflare Workers, Bun and Deno send no
   latency report: Workers' clock does not advance during an in-memory hit, and
   the protocol names no clock for the other two.
 
@@ -893,9 +894,10 @@ backend config or `createCache.io` options, or with the environment variable
 `CACHEKIT_TELEMETRY` set to `false`, `0`, `off` or `no` (case-insensitive;
 `true`, `1`, `on` and `yes` mean on, and any other value means off, with one
 warning). On Workers the variable is read from `process.env` and from the
-Worker's bindings, through `import { env } from 'cloudflare:workers'`; under
-the `disallow_importable_env` compatibility flag that import is empty, so use
-`telemetry: false` there. Off from either control wins over on from the other, and
+Worker's bindings, through `import { env } from 'cloudflare:workers'`. A
+variable the SDK cannot read counts as off, with one warning: under the
+`disallow_importable_env` compatibility flag the bindings are hidden, so
+telemetry is off there, and so it is on Deno without `--allow-env`. Off from either control wins over on from the other, and
 both are read once, when the backend is constructed. With telemetry off a
 request carries none of the headers above, only `X-CacheKit-L1-Status`, which
 the API requires, and the `User-Agent` below.

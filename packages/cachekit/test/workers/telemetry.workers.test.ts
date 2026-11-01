@@ -40,7 +40,10 @@ describe('telemetry on Workers', () => {
     const recorded = vi.spyOn(L1LatencyReport.prototype, 'record');
     const cache = createCache({ backend: BACKEND, metrics: false });
     // Even with every call drawn for timing, none is: Workers has no clock.
-    (cache as unknown as { l1LatencyThreshold: number }).l1LatencyThreshold = 2 ** 30;
+    // The field must exist, or the write would force nothing.
+    const sampling = cache as unknown as { l1LatencyThreshold: number };
+    expect(sampling.l1LatencyThreshold, 'CacheImpl.l1LatencyThreshold').toBeTypeOf('number');
+    sampling.l1LatencyThreshold = 2 ** 30;
     const fn = cache.wrap(async (id: number) => ({ id }), { namespace: 'svc:get', ttl: 60 });
     for (let i = 0; i < 50; i++) await fn(7);
     expect(recorded).not.toHaveBeenCalled();

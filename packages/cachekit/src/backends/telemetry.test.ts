@@ -3,6 +3,9 @@
  * backend (protocol spec/saas-api.md § Optional Metrics Headers). Each test
  * names the requirement it pins.
  */
+import { once } from 'node:events';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   cachekitio,
@@ -43,6 +46,7 @@ const OPTIONAL_METRICS = [...SESSION_AND_COUNTERS, ...LATENCY];
 const COUNTERS = { l1Hits: 3, l2Hits: 1, misses: 1, l1Enabled: true };
 
 let fetchSpy: ReturnType<typeof vi.fn>;
+const nodeFetch = globalThis.fetch;
 
 function sentHeaders(call = -1): Record<string, string> {
   const calls = fetchSpy.mock.calls;
@@ -176,6 +180,44 @@ describe('telemetry switch: CACHEKIT_TELEMETRY parsing (API-95)', () => {
     expect(resolveTelemetry(true)).toBe(false);
     expect(logged).toHaveLength(1);
     expect(logged[0]).toContain('CACHEKIT_TELEMETRY');
+  });
+
+  it('reads a process environment it cannot read as off, warning once (Deno without --allow-env)', () => {
+    const logged: string[] = [];
+    setLogger((message) => logged.push(message));
+    const env = process.env;
+    process.env = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('Requires env access to "CACHEKIT_TELEMETRY"');
+        },
+      }
+    );
+    try {
+      expect(resolveTelemetry(undefined)).toBe(false);
+      expect(resolveTelemetry(true)).toBe(false);
+    } finally {
+      process.env = env;
+    }
+    expect(logged).toEqual([
+      '[cachekit] CACHEKIT_TELEMETRY could not be read ' +
+        '(Requires env access to "CACHEKIT_TELEMETRY"): telemetry is off',
+    ]);
+  });
+
+  it('reads bindings it cannot see as off, warning once (disallow_importable_env)', async () => {
+    const logged: string[] = [];
+    setLogger((message) => logged.push(message));
+    setTelemetryBindingsReader(() => {
+      throw new Error("disallow_importable_env hides the Worker's bindings");
+    });
+    const backend = cachekitio({ ...CONFIG, telemetry: true, metricsProvider: () => COUNTERS });
+    expect(resolveTelemetry(undefined)).toBe(false);
+    await backend.get('ns:key');
+    for (const name of OPTIONAL_METRICS) expect(sentHeaders()[name], name).toBeUndefined();
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain('disallow_importable_env');
   });
 
   it('refuses a telemetry setting that is not a boolean', () => {
@@ -326,6 +368,64 @@ describe('latency report on the wire (API-84 to API-86)', () => {
     expect(latencyOf(sentHeaders())).toEqual([undefined, undefined, undefined]);
   });
 
+  it('rides one attempt on the wire, even when fetch resends on its own after a 421', async () => {
+    // A 421 makes Node's fetch resend the request on a new connection, without
+    // returning to the backend (the Fetch standard's misdirected-request retry).
+    const seen: { sumNs?: string; buckets?: string; authorization?: string }[] = [];
+    const server = createServer((request, response) => {
+      seen.push({
+        sumNs: request.headers['x-cachekit-l1-latency-sum-ns'] as string | undefined,
+        buckets: request.headers['x-cachekit-l1-latency-buckets'] as string | undefined,
+        authorization: request.headers.authorization,
+      });
+      response.writeHead(seen.length === 1 ? 421 : 404).end();
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const { port } = server.address() as AddressInfo;
+    // Only the destination changes: the backend's options, its dispatcher
+    // included, go unchanged to Node's own fetch, which makes the resend.
+    vi.stubGlobal('fetch', (url: string, init: RequestInit) =>
+      nodeFetch(`http://127.0.0.1:${port}${new URL(url).pathname}`, init)
+    );
+    try {
+      const backend = new CachekitIOCore(CONFIG);
+      backend.l1Latency!.record(300);
+      expect(await backend.get('ns:a')).toBeNull();
+      expect(seen).toEqual([
+        {
+          sumNs: '300',
+          buckets: '0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0',
+          authorization: `Bearer ${API_KEY}`,
+        },
+        { sumNs: undefined, buckets: undefined, authorization: `Bearer ${API_KEY}` },
+      ]);
+      expect(backend.l1Latency!.take()).toBeUndefined();
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+
+  it('stays in place while no dispatcher can keep it to one attempt', async () => {
+    const slots = globalThis as unknown as Record<symbol, unknown>;
+    const names = [
+      Symbol.for('undici.globalDispatcher.1'),
+      Symbol.for('undici.globalDispatcher.2'),
+    ];
+    const saved = names.map((name) => slots[name]);
+    for (const name of names) slots[name] = undefined;
+    try {
+      const backend = new CachekitIOCore(CONFIG);
+      backend.l1Latency!.record(300);
+      await backend.get('ns:a');
+      expect(latencyOf(sentHeaders())).toEqual([undefined, undefined, undefined]);
+      expect(backend.l1Latency!.take()?.['X-CacheKit-L1-Latency-Sum-Ns']).toBe('300');
+    } finally {
+      names.forEach((name, i) => (slots[name] = saved[i]));
+    }
+  });
+
   it('is consumed by a 5xx too: nothing is added back', async () => {
     const backend = new CachekitIOCore(CONFIG);
     backend.l1Latency!.record(300);
@@ -347,10 +447,10 @@ describe('latency report on the wire (API-84 to API-86)', () => {
     }
   });
 
-  it('starts every backend with an empty accumulator of its own (API-83)', async () => {
-    // API-83 is about fork(), which Node lacks: a child process (child_process,
-    // cluster) loads the module afresh, so its backends start empty, as a new
-    // instance does here. No backend's hits ride another's requests either.
+  it("keeps one accumulator per backend: no backend's hits ride another's requests (§ Reports)", async () => {
+    // API-83 (a forked child starts empty) needs no test here: Node has no
+    // fork(), and a child process (child_process, cluster) loads the module
+    // afresh, so its backends start empty by construction.
     const a = new CachekitIOCore(CONFIG);
     const b = new CachekitIOCore(CONFIG);
     a.l1Latency!.record(300);

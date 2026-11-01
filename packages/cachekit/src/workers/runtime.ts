@@ -39,9 +39,23 @@ import {
 } from '../serialization/blake2b.js';
 
 // CACHEKIT_TELEMETRY is read from the Worker's bindings as well as from
-// process.env (API-94). The module is read through its namespace, so a workerd
-// from before the importable env loads this entry and reads no binding.
-setTelemetryBindingsReader(() => cloudflareWorkers.env?.CACHEKIT_TELEMETRY);
+// process.env (API-94), through the env that cloudflare:workers exports.
+// Under disallow_importable_env that env is empty, so a binding set to off
+// would go unread: the reader throws instead, and an unreadable source is off.
+// The module is read through its namespace, so a workerd without the
+// importable env still loads this entry; it reads as unreadable too.
+setTelemetryBindingsReader(() => {
+  const flags = (globalThis as { Cloudflare?: { compatibilityFlags?: Record<string, boolean> } })
+    .Cloudflare?.compatibilityFlags;
+  const env = cloudflareWorkers.env;
+  if (flags?.disallow_importable_env) {
+    throw new Error("disallow_importable_env hides the Worker's bindings");
+  }
+  if (flags === undefined || env == null) {
+    throw new Error("this workerd does not say whether it exports the Worker's bindings");
+  }
+  return env.CACHEKIT_TELEMETRY;
+});
 
 let keyHashBindingTried = false;
 

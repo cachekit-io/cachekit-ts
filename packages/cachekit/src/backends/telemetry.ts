@@ -10,10 +10,12 @@ type Control = 'on' | 'off' | 'unset';
 
 let bindingsReader: (() => unknown) | undefined;
 let warnedUnknownValue = false;
+let warnedUnreadable = false;
 
 /**
  * Package-internal: where the Workers entrypoint reads `CACHEKIT_TELEMETRY`
  * from the Worker's bindings. Unset on Node, which has only `process.env`.
+ * The reader throws when it cannot see the bindings, which reads as off.
  */
 export function setTelemetryBindingsReader(reader: (() => unknown) | undefined): void {
   bindingsReader = reader;
@@ -41,6 +43,30 @@ function parseControl(raw: unknown): Control {
 }
 
 /**
+ * One `CACHEKIT_TELEMETRY` source, parsed, or off when it cannot be read:
+ * the user may have set it to off there, so an unreadable source is off, as
+ * an unknown value is (API-95), with one warning per process. Deno without
+ * `--allow-env` throws on a `process.env` read; Workers under
+ * `disallow_importable_env` hides the bindings.
+ */
+function readControl(read: () => unknown): Control {
+  try {
+    return parseControl(read());
+  } catch (error) {
+    if (!warnedUnreadable) {
+      warnedUnreadable = true;
+      const reason = error instanceof Error ? error.message : String(error);
+      logError(`[cachekit] CACHEKIT_TELEMETRY could not be read (${reason}): telemetry is off`);
+    }
+    return 'off';
+  }
+}
+
+function readProcessEnv(): unknown {
+  return typeof process !== 'undefined' ? process.env?.CACHEKIT_TELEMETRY : undefined;
+}
+
+/**
  * Resolve a CachekitIO backend's telemetry switch (API-94, API-95). Called
  * once, at construction. `CACHEKIT_TELEMETRY` is read from `process.env`
  * wherever there is one and, on Workers, from the bindings too. The spec's
@@ -54,16 +80,16 @@ export function resolveTelemetry(setting: unknown): boolean {
       `telemetry must be true, false or undefined, got ${JSON.stringify(setting)}`
     );
   }
-  const processEnv = typeof process !== 'undefined' ? process.env?.CACHEKIT_TELEMETRY : undefined;
-  // Parse both before deciding, so an unknown value warns whatever the setting says.
-  const fromProcess = parseControl(processEnv);
-  const fromBindings = parseControl(bindingsReader?.());
+  // Read both before deciding, so an unknown value warns whatever the setting says.
+  const fromProcess = readControl(readProcessEnv);
+  const fromBindings = bindingsReader === undefined ? 'unset' : readControl(bindingsReader);
   return setting !== false && fromProcess !== 'off' && fromBindings !== 'off';
 }
 
-/** Package-internal: forget the one-time warning. Tests only. */
+/** Package-internal: forget the one-time warnings. Tests only. */
 export function _resetTelemetryWarningForTesting(): void {
   warnedUnknownValue = false;
+  warnedUnreadable = false;
 }
 
 /**
@@ -111,13 +137,18 @@ export class L1LatencyReport {
     this.sumNs += durationNs;
   }
 
+  /** True while the sum is 0: there is no report to attach (API-85). */
+  get empty(): boolean {
+    return this.sumNs < 1;
+  }
+
   /**
    * Take the report as its three headers and reset the accumulator, or
    * return undefined while the sum is 0, leaving it in place (API-85). One
    * synchronous step, so no other request can carry the same hits.
    */
   take(): Record<string, string> | undefined {
-    if (this.sumNs < 1) return undefined;
+    if (this.empty) return undefined;
     const headers = {
       'X-CacheKit-L1-Latency-Buckets': this.buckets.join(','),
       'X-CacheKit-L1-Latency-Sum-Ns': String(this.sumNs),

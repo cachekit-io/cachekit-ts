@@ -66,12 +66,4 @@ describe('Metrics Headers', () => {
     );
     expect(h).toEqual({ 'X-CacheKit-L1-Status': 'miss' });
   });
-
-  it('handles zero-division with 0.000', () => {
-    const h = buildMetricsHeaders(
-      () => ({ l1Hits: 0, l2Hits: 0, misses: 0, l1Enabled: true }),
-      true
-    );
-    expect(h['X-CacheKit-L1-Hit-Rate']).toBe('0.000');
-  });
 });

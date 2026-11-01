@@ -32,9 +32,7 @@ const onNodeJs =
   typeof process !== 'undefined' &&
   typeof process.versions?.node === 'string' &&
   process.versions.bun === undefined &&
-  process.versions.deno === undefined &&
-  !('Bun' in globalThis) &&
-  !('Deno' in globalThis);
+  process.versions.deno === undefined;
 
 /**
  * Node runtime: Redis + CachekitIO backends, NAPI bindings for the

@@ -357,10 +357,11 @@ export class CacheImpl implements SecureCache {
   private readonly defaultTtl: number;
   private readonly invalidationChannel: InvalidationChannelLike | null = null;
   private readonly metrics: MetricsCollector;
-  // Live hit/miss counters. Feed both the Prometheus collector and the SaaS
-  // X-CacheKit-L1-* telemetry headers (auto-wired via resolveBackend's
+  // Live hit/miss counters, kept whether telemetry is on or off. They feed
+  // the Prometheus collector, and the X-CacheKit-L1-* counter headers of a
+  // CachekitIO backend whose telemetry is on (auto-wired via resolveBackend's
   // l1Telemetry hook below).
-  private readonly telemetry = { l1Hits: 0, l2Hits: 0, misses: 0 };
+  private readonly hitCounters = { l1Hits: 0, l2Hits: 0, misses: 0 };
   /**
    * The backend's L1 hit-latency report, when its telemetry is on and the
    * runtime has a qualifying clock; else null, and no call draws or reads a
@@ -482,7 +483,7 @@ export class CacheImpl implements SecureCache {
     // Initialize backend. The telemetry getter reads `this` lazily (per
     // request), so constructor field order is safe.
     this.backend = runtime.resolveBackend(options.backend, options.stampede, () => ({
-      ...this.telemetry,
+      ...this.hitCounters,
       l1Enabled: this.l1 !== null,
     }));
     // Read once: a backend's report is fixed for its lifetime (API-95).
@@ -585,8 +586,8 @@ export class CacheImpl implements SecureCache {
   // fire-and-forget `void` keeps them off the hot path.
 
   private recordHit(layer: 'l1' | 'l2'): void {
-    if (layer === 'l1') this.telemetry.l1Hits++;
-    else this.telemetry.l2Hits++;
+    if (layer === 'l1') this.hitCounters.l1Hits++;
+    else this.hitCounters.l2Hits++;
     void this.metrics.recordHit(layer);
   }
 
@@ -617,7 +618,7 @@ export class CacheImpl implements SecureCache {
   }
 
   private recordMiss(): void {
-    this.telemetry.misses++;
+    this.hitCounters.misses++;
     void this.metrics.recordMiss();
   }
 

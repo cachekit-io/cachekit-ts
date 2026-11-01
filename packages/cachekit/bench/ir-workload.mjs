@@ -34,6 +34,12 @@ async function wasm() {
 const MASTER_KEY = 'a'.repeat(64);
 // Never sent anywhere: the CachekitIO workloads stub fetch.
 const FAKE_KEY = 'ck_test_fake-not-a-secret'; // pragma: allowlist secret
+
+/** The CachekitIO workloads' API: every read misses, every write succeeds. */
+function stubCachekitIO() {
+  globalThis.fetch = async (_url, init) =>
+    new globalThis.Response(null, { status: init?.method === 'GET' ? 404 : 200 });
+}
 const KEY = 'bench:getUser:' + 'a'.repeat(64);
 const ARGS = [42, 'user-profile', { region: 'au', tier: 3 }];
 // 1,055 B of msgpack. Keep fixtures under the serializer's 10,000-element
@@ -395,8 +401,7 @@ export const WORKLOADS = {
   'wrap-l1-hit-cachekitio': {
     n: 10_000,
     setup: async () => {
-      globalThis.fetch = async (_url, init) =>
-        new globalThis.Response(null, { status: init?.method === 'GET' ? 404 : 200 });
+      stubCachekitIO();
       const { createCache } = await load('index.js');
       const cache = createCache({ backend: { apiKey: FAKE_KEY }, metrics: false });
       const getUser = cache.wrap(async (id, kind, opts) => ({ id, kind, opts }), {
@@ -413,8 +418,7 @@ export const WORKLOADS = {
   'wrap-l1-hit-int-cachekitio': {
     n: 20_000,
     setup: async () => {
-      globalThis.fetch = async (_url, init) =>
-        new globalThis.Response(null, { status: init?.method === 'GET' ? 404 : 200 });
+      stubCachekitIO();
       const { createCache } = await load('index.js');
       const cache = createCache({ backend: { apiKey: FAKE_KEY }, metrics: false });
       const getThing = cache.wrap(async (id) => ({ id }), { namespace: 'bench', ttl: 3600 });
