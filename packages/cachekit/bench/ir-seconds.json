@@ -28,11 +28,11 @@
   "get-l1-hit": 11,
   "wrap-l1-hit": 17,
   "wrap-l1-hit-metrics": 12,
-  "get-l2-hit-metrics": 68,
+  "get-l2-hit-metrics": 63,
   "secure-wrap-l1-hit-100b": 47,
   "secure-wrap-l1-hit-10kb": 83,
   "secure-wrap-l1-hit-1mb": 166,
   "wrap-l1-hit-int": 15,
-  "wrap-l1-hit-cachekitio": 30,
-  "wrap-l1-hit-int-cachekitio": 24
+  "wrap-l1-hit-cachekitio": 34,
+  "wrap-l1-hit-int-cachekitio": 23
 }
