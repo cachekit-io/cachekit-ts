@@ -89,24 +89,43 @@ function flushBeforeClearing<M>(
 }
 
 /**
- * Make the gauge's own writers set its pending values first, so a direct
- * write from anything else on the registry (an SDK copy from before pending
- * values, or the application) lands after the states set before it and wins
- * at the next scrape, as it would had each state been a set(). The flush
+ * Make the gauge's own writers set the pending value of the label set they
+ * write first, so a direct write from anything else on the registry (an SDK
+ * copy from before pending values, or the application) lands after the state
+ * set before it and wins at the next scrape, as it would had each state been
+ * a set(). Only that label set's cell is touched: a direct write costs the
+ * same however many collectors share the gauge. setToCurrentTime(), startTimer()
+ * and the label children all write through set(), inc() or dec(). The flush
  * itself writes through the unwrapped set().
  */
-function flushBeforeWriting(gauge: Gauge, flush: (gauge: Gauge) => void): void {
-  runFirst(gauge, ['set', 'inc', 'dec', 'setToCurrentTime'], flush);
+function flushBeforeWriting(
+  gauge: Gauge,
+  cells: Map<string, PendingValue>,
+  set: Gauge['set']
+): void {
+  runFirst(gauge, ['set', 'inc', 'dec'], (written, labels) => {
+    if (cells.size === 0) return;
+    // As prom-client reads them: labels first when an object, else none.
+    const key = labelsKey(
+      typeof labels === 'object' && labels !== null ? (labels as Record<string, string>) : {}
+    );
+    const cell = cells.get(key);
+    if (cell !== undefined) flushPendingValue(written, cell, set);
+  });
 }
 
-/** Make each of the metric's `methods` run `first` before itself. */
-function runFirst<M>(metric: M, methods: readonly string[], first: (metric: M) => void): void {
+/** Make each of the metric's `methods` run `first` before itself, with its first argument. */
+function runFirst<M>(
+  metric: M,
+  methods: readonly string[],
+  first: (metric: M, arg: unknown) => void
+): void {
   const target = metric as unknown as Record<string, unknown>;
   for (const method of methods) {
     const original = target[method];
     if (typeof original !== 'function') continue;
     target[method] = function (this: M, ...args: unknown[]): unknown {
-      first(this);
+      first(this, args[0]);
       return original.apply(this, args);
     };
   }
@@ -176,16 +195,19 @@ function flushPendingValues(
   cells: Map<string, PendingValue>,
   set: Gauge['set']
 ): void {
-  for (const cell of cells.values()) {
-    if (!cell.set) continue;
-    cell.set = false;
-    try {
-      set.call(gauge, cell.labels, cell.value);
-    } catch (error) {
-      // Unreachable once pendingValue() has checked the labels: as above.
-      const name = (gauge as { name?: string }).name;
-      logError(`[cachekit] metrics: dropped a pending value on ${name}:`, error);
-    }
+  for (const cell of cells.values()) flushPendingValue(gauge, cell, set);
+}
+
+/** Set `gauge` to the cell's value if it was set since the gauge last read it. */
+function flushPendingValue(gauge: Gauge, cell: PendingValue, set: Gauge['set']): void {
+  if (!cell.set) return;
+  cell.set = false;
+  try {
+    set.call(gauge, cell.labels, cell.value);
+  } catch (error) {
+    // Unreachable once pendingValue() has checked the labels: as above.
+    const name = (gauge as { name?: string }).name;
+    logError(`[cachekit] metrics: dropped a pending value on ${name}:`, error);
   }
 }
 
@@ -422,7 +444,7 @@ export class CacheMetrics implements MetricsCollector {
           registers: [registry],
         });
         (gauge as Valued)[PENDING_VALUES] = cells;
-        flushBeforeWriting(gauge, flush);
+        flushBeforeWriting(gauge, cells, set);
         flushBeforeClearing(gauge, cells, flush);
         return gauge;
       };
