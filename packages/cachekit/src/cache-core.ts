@@ -116,6 +116,13 @@ type DeferredWrite =
  */
 type L1Mode = 'fill' | 'skip' | 'refresh';
 
+/** A key's idle-key ops in flight (see keysInFlight). */
+interface InFlight {
+  count: number;
+  /** The promise the latest of them handed its caller (see inFlightTail). */
+  last: Promise<unknown>;
+}
+
 /**
  * Sentinel for "the lock path did not resolve the miss — compute without
  * it". Distinct from null: the wrapped function may legitimately resolve
@@ -453,13 +460,14 @@ export class CacheImpl implements SecureCache {
   /**
    * Per key, the L2 writes and deletes running on an idle key (no tail), so
    * not in keyTails. A write-behind of such a key is refused and runs on the
-   * caller's path, concurrently, as with the option off: its early L1 fill
-   * could otherwise land before the running op's later one, leaving L1
-   * older than L2. Kept out of keyTails so that an op workerd cancels never
+   * caller's path: its early L1 fill could otherwise land before the running
+   * op's later one, leaving L1 older than L2. On Node a later op of the key
+   * queues behind the running one (see inKeyOrder); on Workers it runs
+   * concurrently. Kept out of keyTails so that an op workerd cancels never
    * leaves a tail that never settles; a count it leaks only keeps that key's
    * writes on the caller's path.
    */
-  private readonly keysInFlight = new Map<string, number>();
+  private readonly keysInFlight = new Map<string, InFlight>();
 
   constructor(options: CacheOptions, runtime: CacheRuntime) {
     // Every config check that can throw ConfigurationError runs before
@@ -1508,7 +1516,10 @@ export class CacheImpl implements SecureCache {
     // returned L1Write. A write degradation absorbed got no response: its copy
     // keeps the TTL, counted from the L1 write (API-36).
     let until: number | undefined;
-    if (this.keyTails.has(key)) {
+    // On Node a key with an op in flight queues too: two concurrent PUTs can
+    // be answered out of order, and the older value's late fill would leave
+    // L1 older than L2.
+    if (this.keyTails.has(key) || (!this.swrRequiresWaitUntil && this.keysInFlight.has(key))) {
       await this.inKeyOrder(key, async () => {
         until = await this.run('set', key, undefined, writeL2);
         if (l1Mode === 'fill') this.fillL1(key, l1Write, ttl, namespace, until);
@@ -1517,9 +1528,10 @@ export class CacheImpl implements SecureCache {
       // An idle key: what inKeyOrder does for it, inline. Every plain set()
       // takes this path, and inKeyOrder's closure and promise chain were most
       // of what per-key ordering added to it, so the two lines above repeat.
-      this.enterInFlight(key);
+      const written = this.run('set', key, undefined, writeL2);
+      this.enterInFlight(key, written);
       try {
-        until = await this.run('set', key, undefined, writeL2);
+        until = await written;
         if (l1Mode === 'fill') this.fillL1(key, l1Write, ttl, namespace, until);
       } finally {
         this.leaveInFlight(key);
@@ -1680,8 +1692,10 @@ export class CacheImpl implements SecureCache {
    * Workers when the key has an op queued. It is never put on a caller's
    * path: the revalidation runs in the background already.
    *
-   * On Node it queues behind the key's pending ops (it fills no L1, so
-   * queuing cannot leave L1 older than L2), counts against the bound, and
+   * On Node it queues behind the key's pending ops and the op in flight on
+   * it (it fills no L1, so queuing cannot leave L1 older than L2; skipping
+   * the op in flight would let a later op queued behind it overtake that
+   * op), counts against the bound, and
    * becomes the key's tail: a later set(), delete() or invalidate('params')
    * orders after it, and close() drains it.
    *
@@ -1714,46 +1728,60 @@ export class CacheImpl implements SecureCache {
     // On Workers no tail exists here (checked above), so inKeyOrder counts it in flight.
     if (this.swrRequiresWaitUntil) return this.inKeyOrder(key, send);
     return this.startPendingWrite(key, bytes, () => {
-      const tail = this.keyTails.get(key);
+      const tail = this.keyTails.get(key) ?? this.inFlightTail(key);
       return tail ? tail.then(send) : send();
     });
   }
 
   /**
    * Run an L2 write or delete of `key` after everything already queued for
-   * the key, and make it the key's new tail. An op on an idle key runs at
-   * once, as before write-behind existed, counted in keysInFlight while it
-   * runs.
+   * the key, and make it the key's new tail. On Node an op in flight on the
+   * key counts as its tail. An op on an idle key runs at once, as before
+   * write-behind existed, counted in keysInFlight while it runs.
    */
   private inKeyOrder<T>(key: string, op: () => Promise<T>): Promise<T> {
-    const tail = this.keyTails.get(key);
+    const tail = this.keyTails.get(key) ?? this.inFlightTail(key);
     if (tail === undefined) return this.countInFlight(key, op);
     const result = this.afterTail(tail).then(op);
     this.setKeyTail(key, result);
     return result;
   }
 
-  private countInFlight<T>(key: string, op: () => Promise<T>): Promise<T> {
-    this.enterInFlight(key);
-    const release = (): void => this.leaveInFlight(key);
-    let running: Promise<T>;
-    try {
-      running = op();
-    } catch (error) {
-      release();
-      throw error;
-    }
-    return running.finally(release);
+  /**
+   * On Node, the settling of the latest op in flight on `key`, or undefined.
+   * Its caller awaited that promise before any waiter could, so the caller's
+   * L1 fill or eviction runs before a waiter's op starts. On Workers always
+   * undefined: workerd can cancel an idle-key op, and a wait for it would
+   * stall the key's next op.
+   */
+  private inFlightTail(key: string): Promise<void> | undefined {
+    if (this.swrRequiresWaitUntil) return undefined;
+    return this.keysInFlight.get(key)?.last.then(
+      () => {},
+      () => {}
+    );
   }
 
-  private enterInFlight(key: string): void {
-    this.keysInFlight.set(key, (this.keysInFlight.get(key) ?? 0) + 1);
+  private countInFlight<T>(key: string, op: () => Promise<T>): Promise<T> {
+    const result = op().finally(() => this.leaveInFlight(key));
+    this.enterInFlight(key, result);
+    return result;
+  }
+
+  /** Count `op` in flight on `key`; `op` is the promise its caller awaits. */
+  private enterInFlight(key: string, op: Promise<unknown>): void {
+    const inFlight = this.keysInFlight.get(key);
+    if (inFlight === undefined) {
+      this.keysInFlight.set(key, { count: 1, last: op });
+    } else {
+      inFlight.count++;
+      inFlight.last = op;
+    }
   }
 
   private leaveInFlight(key: string): void {
-    const left = (this.keysInFlight.get(key) ?? 1) - 1;
-    if (left > 0) this.keysInFlight.set(key, left);
-    else this.keysInFlight.delete(key);
+    const inFlight = this.keysInFlight.get(key);
+    if (inFlight === undefined || --inFlight.count === 0) this.keysInFlight.delete(key);
   }
 
   /** A key's tail, capped at KEY_WAIT_CAP_MS where it may never settle. */
