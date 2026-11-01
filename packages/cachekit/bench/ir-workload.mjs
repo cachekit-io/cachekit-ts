@@ -42,6 +42,42 @@ function stubCachekitIO() {
   globalThis.fetch = async (_url, init) =>
     new globalThis.Response(null, { status: init?.method === 'GET' ? 404 : 200 });
 }
+
+/**
+ * Warms op until the cache's sampler has timed one of its calls into the L1
+ * latency report, so the warm-up that follows tiers the op up with the timed
+ * path in its type feedback. Which calls are timed follows the sampler, which
+ * is seeded from Math.random: one more draw anywhere before the cache is made
+ * (a build's module load included) moves them. Left to that, the first timed
+ * call can land after V8 has compiled the op, which then deoptimises and
+ * compiles again late in the warm-up or inside the window.
+ *
+ * Call it once op takes the path it takes in the window: a call timed on
+ * another path (the first hit of a memoised key) gives the window's path no
+ * feedback. Nor does a call before V8 has given each function its feedback
+ * vector, at about its 8th call (--invocation-count-for-feedback-allocation):
+ * so 64 calls first, then the report is emptied. Then 8 x oneIn calls, and
+ * more only while none has been timed (probability e^-8). The count is fixed
+ * because what the warm-up allocates decides how many scavenges land in the
+ * window: one more is +1.4% on wrap-l1-hit-int-cachekitio on Node 24. Reads
+ * the cache's private l1Latency; a build from before the report has no timed
+ * path.
+ */
+async function warmTimed(cache, op) {
+  const report = cache.l1Latency;
+  if (!report) return;
+  for (let i = 0; i < 64; i++) await op();
+  report.take();
+  let calls = 8 * report.oneIn;
+  for (let i = 0; i < calls; i++) {
+    await op();
+    if (!report.empty) continue;
+    // Every call untimed for 64 x oneIn calls has probability e^-64.
+    if (i + 1 === 64 * report.oneIn)
+      throw new Error(`no call was timed in ${i + 1} calls: the L1 latency sampler never fired`);
+    calls = Math.max(calls, i + 2);
+  }
+}
 const KEY = 'bench:getUser:' + 'a'.repeat(64);
 const ARGS = [42, 'user-profile', { region: 'au', tier: 3 }];
 // 1,055 B of msgpack. Keep fixtures under the serializer's 10,000-element
@@ -88,7 +124,9 @@ let sink = 0;
 // ops. A workload whose op tiers up later, or runs too long for 2,000, sets
 // its own `warmup`. To check one, run it under V8_FLAGS with --trace-opt
 // --trace-deopt and print a line at each process.cpuUsage() call: no compile
-// or deopt may land between the two.
+// or deopt may land between the two. An op with a path that only some calls
+// take at random (a timed call, see warmTimed) must also pass with extra
+// Math.random() draws made before its setup, which move those calls.
 const WARMUP = 2000;
 
 async function encryptedOp(manager, storage, bytes) {
@@ -474,9 +512,12 @@ export const WORKLOADS = {
   // backend's latency report. It sets no option a build before the report
   // lacks, so the gate measures it on the base too. fetch is stubbed: the
   // warm-up's miss and write never leave the process, and the measured hits
-  // make no request.
+  // make no request. 4,000 warm-up ops after warmTimed: when its timed call
+  // comes after V8 has compiled the op, the op deoptimises there and takes up
+  // to ~1,600 ops to compile again on Node 24.
   'wrap-l1-hit-cachekitio': {
     n: 10_000,
+    warmup: 4_000,
     setup: async () => {
       stubCachekitIO();
       const { createCache } = await load('index.js');
@@ -485,27 +526,35 @@ export const WORKLOADS = {
         namespace: 'bench',
         ttl: 3600,
       });
-      return async () => {
+      const op = async () => {
         sink += (await getUser(...ARGS)).id;
       };
+      await warmTimed(cache, op);
+      return op;
     },
   },
   // wrap-l1-hit-int on the same CachekitIO backend: the memoised hit, where
-  // the timing draw is the largest share of a hit. 4,000 warm-up ops: on Node
-  // 24 V8 compiles the wrap() closure with TurboFan at ~2,050 ops.
+  // the timing draw is the largest share of a hit. 8,000 warm-up ops after
+  // warmTimed: on Node 24 V8 compiles the wrap() closure with TurboFan at
+  // ~2,050 ops, and when warmTimed's timed call comes after that, the closure
+  // deoptimises there and takes up to ~3,400 ops to compile again.
   'wrap-l1-hit-int-cachekitio': {
     n: 20_000,
-    warmup: 4_000,
+    warmup: 8_000,
     setup: async () => {
       stubCachekitIO();
       const { createCache } = await load('index.js');
       const cache = createCache({ backend: { apiKey: FAKE_KEY }, metrics: false });
       const getThing = cache.wrap(async (id) => ({ id }), { namespace: 'bench', ttl: 3600 });
-      for (let i = 0; i < 64; i++) await getThing(i);
+      // The misses, then a hit each, which leaves the memo holding every
+      // key's L1 entry, as each call in the window finds it.
+      for (let i = 0; i < 128; i++) await getThing(i & 63);
       let i = 0;
-      return async () => {
+      const op = async () => {
         sink += (await getThing(i++ & 63)).id;
       };
+      await warmTimed(cache, op);
+      return op;
     },
   },
   // the README benchmark's hit (bench/runtime/probe.mjs): one integer argument,
