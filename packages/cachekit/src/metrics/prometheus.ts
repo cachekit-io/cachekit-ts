@@ -50,18 +50,18 @@ interface PendingCount {
  */
 const pendingCounts = new WeakMap<object, Map<string, PendingCount>>();
 
-/** prom-client calls this as the counter's collect() before every read. */
-function flushPendingCounts(this: Counter): void {
-  for (const cell of pendingCounts.get(this)?.values() ?? []) {
+/** Add `counter`'s pending counts to it: its collect() runs this before every read. */
+function flushPendingCounts(counter: Counter, cells: Map<string, PendingCount>): void {
+  for (const cell of cells.values()) {
     if (cell.n === 0) continue;
     const n = cell.n;
     cell.n = 0;
     try {
-      this.inc(cell.labels, n);
+      counter.inc(cell.labels, n);
     } catch (error) {
       // Unreachable once pendingCount() has checked the labels; a throw here
       // would fail the whole scrape, so it is logged instead.
-      const name = (this as { name?: string }).name;
+      const name = (counter as { name?: string }).name;
       logError(`[cachekit] metrics: dropped ${n} pending counts on ${name}:`, error);
     }
   }
@@ -73,18 +73,17 @@ function flushPendingCounts(this: Counter): void {
  * inc(). registry.resetMetrics() calls reset() on every metric. They then
  * detach every cell, all at zero: a cell whose collectors are gone is no
  * longer held, as prom-client holds no series it has cleared, and a live
- * collector attaches its cell again at its next count (see add()).
+ * collector attaches its cell again at its next count (see reattach()).
  */
-function flushBeforeClearing(counter: Counter): void {
+function flushBeforeClearing(counter: Counter, cells: Map<string, PendingCount>): void {
   const clearing = counter as unknown as Record<string, unknown>;
   for (const method of ['reset', 'remove']) {
     const clear = clearing[method];
     if (typeof clear !== 'function') continue;
     clearing[method] = function (this: Counter, ...args: unknown[]): unknown {
-      flushPendingCounts.call(this);
-      const cells = pendingCounts.get(this);
-      for (const cell of cells?.values() ?? []) cell.attached = false;
-      cells?.clear();
+      flushPendingCounts(this, cells);
+      for (const cell of cells.values()) cell.attached = false;
+      cells.clear();
       return clear.apply(this, args);
     };
   }
@@ -117,7 +116,7 @@ function pendingCount(counter: Counter, labels: Record<string, string>): Pending
   const cells = pendingCounts.get(counter);
   const declared = (counter as { labelNames?: readonly string[] }).labelNames;
   if (!cells || !declared || !Object.keys(labels).every((l) => declared.includes(l))) return null;
-  const key = JSON.stringify(Object.entries(labels).sort(([a], [b]) => (a < b ? -1 : 1)));
+  const key = JSON.stringify(Object.entries(labels).sort(([a], [b]) => a.localeCompare(b)));
   let cell = cells.get(key);
   if (!cell) cells.set(key, (cell = { labels, key, cells, n: 0, attached: true }));
   return cell;
@@ -283,13 +282,16 @@ export class CacheMetrics implements MetricsCollector {
       const getOrCreateCounted = (cfg: Record<string, unknown>): Counter => {
         const existing = registry.getSingleMetric?.(cfg.name as string);
         if (existing) return existing as Counter;
+        const cells = new Map<string, PendingCount>();
         const counter = new CounterClass({
           ...cfg,
-          collect: flushPendingCounts,
+          collect(this: Counter) {
+            flushPendingCounts(this, cells);
+          },
           registers: [registry],
         });
-        pendingCounts.set(counter, new Map());
-        flushBeforeClearing(counter);
+        pendingCounts.set(counter, cells);
+        flushBeforeClearing(counter, cells);
         return counter;
       };
       // Every metric declares the default labels, or each inc() would throw.

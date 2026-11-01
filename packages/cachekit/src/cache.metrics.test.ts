@@ -291,6 +291,48 @@ describe('Cache metrics wiring', () => {
     expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l1' })).toBe(1);
   });
 
+  it('L2 hits and misses after a reset count once each', async () => {
+    const registry = new Registry();
+    const cache = makeCache(registry, { l1: { enabled: false } });
+    await cache.set('ns:k', 'v');
+    await cache.get('ns:k'); // L2 hit
+    await cache.get('ns:absent'); // miss
+    await vi.waitFor(async () => {
+      expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l2' })).toBe(1);
+      expect(await metricValue(registry, 'cachekit_misses_total')).toBe(1);
+    });
+    registry.resetMetrics();
+
+    await cache.get('ns:k');
+    await cache.get('ns:k');
+    await cache.get('ns:absent');
+    expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l2' })).toBe(2);
+    expect(await metricValue(registry, 'cachekit_misses_total')).toBe(1);
+  });
+
+  it('a counter that throws while adding pending counts fails no scrape', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const registry = new Registry();
+    const cache = makeCache(registry);
+    await cache.get('ns:absent');
+    await vi.waitFor(async () => {
+      expect(await metricValue(registry, 'cachekit_misses_total')).toBe(1);
+    });
+    const misses = registry.getSingleMetric('cachekit_misses_total');
+    if (!(misses instanceof Counter)) throw new Error('cachekit_misses_total is not a Counter');
+    vi.spyOn(misses, 'inc').mockImplementation(() => {
+      throw new Error('inc failed');
+    });
+
+    await cache.get('ns:absent');
+    await expect(registry.metrics()).resolves.toContain('cachekit_misses_total 1');
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '[cachekit] metrics: dropped 1 pending counts on cachekit_misses_total:',
+      expect.any(Error)
+    );
+    consoleSpy.mockRestore();
+  });
+
   it('a cache counting after a reset joins a cache created since', async () => {
     const registry = new Registry();
     const before = makeCache(registry);
