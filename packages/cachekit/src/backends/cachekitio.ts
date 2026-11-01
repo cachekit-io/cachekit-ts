@@ -1,4 +1,4 @@
-import { Backend, CachekitIOBackendConfig, GetWithTtlResult } from './types.js';
+import { Backend, CachekitIOBackendConfig, GetWithTtlResult, SetResult } from './types.js';
 import { BackendError, ConfigurationError, TimeoutError } from '../errors.js';
 import { DEFAULT_TTL_SECONDS } from '../constants.js';
 import { getSessionHeaders } from './session.js';
@@ -87,26 +87,39 @@ function parseFreshFor(raw: string): number {
     if (digit < 0 || digit > 9) return 0;
     seconds = seconds * 10 + digit;
   }
-  return seconds > MAX_TTL_SECONDS ? 0 : seconds;
+  return seconds > MAX_FRESH_FOR_SECONDS ? 0 : seconds;
 }
 
 const DEFAULT_API_URL = 'https://api.cachekit.io';
 const DEFAULT_TIMEOUT_MS = 5_000;
 
-/** Protocol TTL ceiling: 30 days in seconds (protocol/spec/saas-api.md, TTL Validation Rules). */
-const MAX_TTL_SECONDS = 2_592_000;
+/**
+ * The `X-CacheKit-Fresh-For` cap: 30 days in seconds (protocol spec/saas-api.md
+ * § Remaining Freshness, API-32). A grammar bound on the header, deliberately
+ * NOT the TTL range below: the header never exceeds it, so a larger value is a
+ * buggy tier and reads as `0`. Never merge the two constants.
+ */
+const MAX_FRESH_FOR_SECONDS = 2_592_000;
+
+/**
+ * The TTL range ceiling: 90 days in seconds (protocol spec/saas-api.md, TTL
+ * Validation Rules). It bounds a stated TTL, not an entry's lifetime: the
+ * store clamps a TTL above the tenant's plan maximum, and the SDK sends it
+ * as is because it does not know the plan.
+ */
+const MAX_TTL_SECONDS = 7_776_000;
 
 /**
  * Validate a TTL per the protocol's normative TTL Validation Rules
  * (protocol/spec/saas-api.md): zero, negative, non-finite, and values over
- * 30 days are rejected; sub-second/fractional durations are ceiled to whole
+ * 90 days are rejected; sub-second/fractional durations are ceiled to whole
  * seconds (never truncated to 0). Exported for the TTL decorator's
  * refreshTTL, which sends the same value in the PATCH body.
  */
 export function validateTtl(ttl: number): number {
   if (!Number.isFinite(ttl) || ttl <= 0 || ttl > MAX_TTL_SECONDS) {
     throw new ConfigurationError(
-      `TTL must be greater than 0 and at most ${MAX_TTL_SECONDS} seconds (30 days), got ${ttl}`
+      `TTL must be greater than 0 and at most ${MAX_TTL_SECONDS} seconds (90 days), got ${ttl}`
     );
   }
   return Math.ceil(ttl);
@@ -115,9 +128,9 @@ export function validateTtl(ttl: number): number {
 /**
  * Validate a stale-grace window per the protocol's Stale-While-Revalidate
  * validation rules (protocol/spec/saas-api.md): negative, non-finite and
- * values over 2,591,999 are rejected before any arithmetic; fractions are
- * ceiled (API-54); the window shares the 30-day cap with `wireTtl`, the
- * already-validated TTL. Returns the whole seconds to send; `0` sends nothing.
+ * values over 7,775,999 are rejected before any arithmetic; fractions are
+ * ceiled (API-54); the window shares the 90-day TTL range with `wireTtl`,
+ * the already-validated TTL. Returns the whole seconds to send; `0` sends nothing.
  */
 export function validateStaleTtl(staleTtl: number, wireTtl: number): number {
   if (!Number.isFinite(staleTtl) || staleTtl < 0 || staleTtl > MAX_TTL_SECONDS - 1) {
@@ -128,7 +141,7 @@ export function validateStaleTtl(staleTtl: number, wireTtl: number): number {
   const wire = Math.ceil(staleTtl);
   if (wireTtl + wire > MAX_TTL_SECONDS) {
     throw new ConfigurationError(
-      `ttl + staleTtl must be at most ${MAX_TTL_SECONDS} seconds (30 days), got ${wireTtl} + ${wire}`
+      `ttl + staleTtl must be at most ${MAX_TTL_SECONDS} seconds (90 days), got ${wireTtl} + ${wire}`
     );
   }
   return wire;
@@ -226,25 +239,28 @@ export class CachekitIOCore implements Backend {
     encodeKey(key);
   }
 
-  async set(key: string, value: Uint8Array, ttl?: number): Promise<void> {
+  /** Resolves to the store's `X-CacheKit-Fresh-For` off the `PUT` 2xx, when
+   * it sent one: the bound a plan maximum TTL applied (see SetResult). */
+  async set(key: string, value: Uint8Array, ttl?: number): Promise<SetResult> {
     this.ensureNotClosed();
     const effectiveTtl = validateTtl(ttl ?? this.defaultTtl);
-    await this.put(key, value, { 'X-CacheKit-TTL': String(effectiveTtl) });
+    return this.put(key, value, { 'X-CacheKit-TTL': String(effectiveTtl) });
   }
 
   /** Backend.setWithStaleTtl capability: the same PUT, also carrying
    * `X-CacheKit-Stale-TTL`. Validated before any I/O; a `0` window sends no
-   * header, which the server reads the same way. */
+   * header, which the server reads the same way. Resolves like `set`: the
+   * stale window never lengthens the reported bound. */
   async setWithStaleTtl(
     key: string,
     value: Uint8Array,
     ttl: number,
     staleTtl: number
-  ): Promise<void> {
+  ): Promise<SetResult> {
     this.ensureNotClosed();
     const effectiveTtl = validateTtl(ttl);
     const wireStaleTtl = validateStaleTtl(staleTtl, effectiveTtl);
-    await this.put(key, value, {
+    return this.put(key, value, {
       'X-CacheKit-TTL': String(effectiveTtl),
       ...(wireStaleTtl > 0 && { 'X-CacheKit-Stale-TTL': String(wireStaleTtl) }),
     });
@@ -326,13 +342,16 @@ export class CachekitIOCore implements Backend {
 
   // ── Internal ──────────────────────────────────────────────
 
-  /** PUT the value with `headers`. Validate before calling: the catch
-   * below would wrap a ConfigurationError as a BackendError. */
+  /** PUT the value with `headers`, and return the 2xx's `X-CacheKit-Fresh-For`
+   * read with the GET grammar (malformed = `0`), or `{}` when it is absent
+   * (protocol spec/saas-api.md § Remaining Freshness, API-103). Validate
+   * before calling: the catch below would wrap a ConfigurationError as a
+   * BackendError. */
   private async put(
     key: string,
     value: Uint8Array,
     headers: Record<string, string>
-  ): Promise<void> {
+  ): Promise<SetResult> {
     const url = this.cacheUrl(key);
 
     try {
@@ -344,6 +363,8 @@ export class CachekitIOCore implements Backend {
       if (!response.ok) {
         throw await this.httpError('set', response);
       }
+      const freshFor = response.headers.get('X-CacheKit-Fresh-For');
+      return freshFor === null ? {} : { freshFor: parseFreshFor(freshFor) };
     } catch (error) {
       if (error instanceof BackendError || error instanceof TimeoutError) throw error;
       throw this.wrapError('set', error);

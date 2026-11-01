@@ -6,9 +6,11 @@ import {
   cachekitioWithLocking,
   cachekitioWithTTL,
 } from './cachekitio-factory.js';
-import type { Backend, CachekitIOBackendConfig } from './types.js';
+import type { Backend, CachekitIOBackendConfig, SetResult } from './types.js';
 import { createCache } from '../cache.js';
 import { CacheImpl } from '../cache-core.js';
+import { generateKey } from '../serialization/key-generator.js';
+import type { L1Cache } from '../l1/lru-cache.js';
 
 // The L1 backfill honours X-CacheKit-Freshness and X-CacheKit-Fresh-For
 // (protocol spec/saas-api.md § Remaining Freshness, § Reading a stale entry).
@@ -38,6 +40,13 @@ describe('freshnessFromHeaders', () => {
     expect(parse({ 'X-CacheKit-Fresh-For': '1' }).freshFor).toBe(1);
     expect(parse({ 'X-CacheKit-Fresh-For': '0000042' }).freshFor).toBe(42);
     expect(parse({ 'X-CacheKit-Fresh-For': '2592000' }).freshFor).toBe(2_592_000);
+  });
+
+  // The header's cap is its own grammar bound, not the 90-day TTL range.
+  it('keeps the 2,592,000 cap below the TTL range', () => {
+    expect(parse({ 'X-CacheKit-Fresh-For': '2592000' }).freshFor).toBe(2_592_000);
+    expect(parse({ 'X-CacheKit-Fresh-For': '2592001' }).freshFor).toBe(0);
+    expect(parse({ 'X-CacheKit-Fresh-For': '7776000' }).freshFor).toBe(0);
   });
 
   it('maps every malformed Fresh-For to 0', () => {
@@ -244,5 +253,345 @@ describe('CachekitIO L1 backfill bound', () => {
     expect(gets).toBe(2);
 
     await reader.close();
+  });
+});
+
+// The writer's own copy (protocol spec/saas-api.md § Remaining Freshness,
+// API-103): the X-CacheKit-Fresh-For on the PUT 2xx caps the L1 copy of the
+// value written, counted from receipt; absent leaves the TTL; malformed or 0
+// keeps no copy. And a PATCH /ttl response never touches an L1 bound (API-104).
+describe('CachekitIO writer L1 bound', () => {
+  let store: Map<string, Uint8Array>;
+  /** Headers on every PUT 2xx. */
+  let putHeaders: Record<string, string>;
+  let gets: number;
+  let patches: number;
+
+  beforeEach(() => {
+    store = new Map();
+    putHeaders = {};
+    gets = 0;
+    patches = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init: RequestInit) => {
+        if (init.method === 'PUT') {
+          store.set(url, init.body as Uint8Array);
+          return new Response(null, { status: 200, headers: putHeaders });
+        }
+        if (init.method === 'PATCH') {
+          patches++;
+          // A hostile or buggy hop's header on the PATCH: it must change nothing.
+          return new Response(null, {
+            status: 200,
+            headers: { 'X-CacheKit-Fresh-For': '2592000' },
+          });
+        }
+        gets++;
+        const body = store.get(url);
+        return body ? new Response(body, { status: 200 }) : new Response(null, { status: 404 });
+      })
+    );
+    vi.useFakeTimers({ toFake: ['Date'] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  // Every factory wraps CachekitIOCore differently; each must return set's result.
+  const factories = { cachekitio, cachekitioWithLocking, cachekitioWithTTL, cachekitioFull };
+
+  for (const [name, factory] of Object.entries(factories)) {
+    it(`caps the L1 copy at a Fresh-For shorter than the TTL (${name})`, async () => {
+      const cache = createCache({ backend: factory(config), defaultTtl: 3600 });
+      putHeaders = { 'X-CacheKit-Fresh-For': '2' };
+      await cache.set('ns:k', 'v1', { ttl: 3600 });
+
+      vi.advanceTimersByTime(1_900);
+      expect(await cache.get('ns:k')).toBe('v1');
+      expect(gets).toBe(0); // inside the bound: L1 hit
+
+      vi.advanceTimersByTime(100);
+      expect(await cache.get('ns:k')).toBe('v1');
+      expect(gets).toBe(1); // at the bound: the L1 copy is gone, back to L2
+
+      await cache.close();
+    });
+  }
+
+  it('keeps the TTL when the PUT carries no Fresh-For', async () => {
+    const cache = createCache({ backend: cachekitio(config), defaultTtl: 3600 });
+    await cache.set('ns:k', 'v1', { ttl: 3600 });
+
+    vi.advanceTimersByTime(3_599_000);
+    expect(await cache.get('ns:k')).toBe('v1');
+    expect(gets).toBe(0);
+
+    vi.advanceTimersByTime(1_000);
+    await cache.get('ns:k');
+    expect(gets).toBe(1);
+
+    await cache.close();
+  });
+
+  it('never lets a Fresh-For longer than the TTL extend the copy', async () => {
+    const cache = createCache({ backend: cachekitio(config), defaultTtl: 3600 });
+    putHeaders = { 'X-CacheKit-Fresh-For': '2592000' };
+    await cache.set('ns:k', 'v1', { ttl: 60 });
+
+    vi.advanceTimersByTime(59_999);
+    await cache.get('ns:k');
+    expect(gets).toBe(0); // the copy was kept, for the TTL
+
+    vi.advanceTimersByTime(1);
+    await cache.get('ns:k');
+    expect(gets).toBe(1);
+
+    await cache.close();
+  });
+
+  it.each(['0', 'abc', '-1', '2592001', '12345678', ''])(
+    'keeps no L1 copy when the PUT Fresh-For is %j',
+    async (raw) => {
+      const cache = createCache({ backend: cachekitio(config), defaultTtl: 3600 });
+      await cache.set('ns:k', 'v0', { ttl: 3600 }); // an older copy the write must not leave behind
+      putHeaders = { 'X-CacheKit-Fresh-For': raw };
+      await cache.set('ns:k', 'v1', { ttl: 3600 });
+
+      expect(await cache.get('ns:k')).toBe('v1');
+      expect(gets).toBe(1);
+
+      await cache.close();
+    }
+  );
+
+  it('counts the bound from receipt of the 2xx, not from dispatch', async () => {
+    const cache = createCache({ backend: cachekitio(config), defaultTtl: 3600 });
+    putHeaders = { 'X-CacheKit-Fresh-For': '2' };
+    // The PUT takes 1.5 s on the faked clock between dispatch and receipt.
+    const fetchStub = vi.mocked(fetch);
+    const inner = fetchStub.getMockImplementation()!;
+    fetchStub.mockImplementationOnce(async (url, init) => {
+      vi.advanceTimersByTime(1_500);
+      return inner(url as string, init as RequestInit);
+    });
+    await cache.set('ns:k', 'v1', { ttl: 3600 });
+
+    vi.advanceTimersByTime(1_900);
+    await cache.get('ns:k');
+    expect(gets).toBe(0); // 1.9 s after receipt (3.4 s after dispatch): inside the bound
+
+    vi.advanceTimersByTime(100);
+    await cache.get('ns:k');
+    expect(gets).toBe(1);
+
+    await cache.close();
+  });
+
+  it('holds the bound on the stale-window write (X-CacheKit-Stale-TTL never lengthens it)', async () => {
+    const cache = createCache({ backend: cachekitioFull(config), defaultTtl: 3600 });
+    putHeaders = { 'X-CacheKit-Fresh-For': '1' };
+    const fn = vi.fn(async () => 'computed');
+    const wrapped = cache.wrap(fn, { namespace: 'sg', ttl: 3600, staleTtl: 600 });
+
+    expect(await wrapped()).toBe('computed'); // cold miss: GET 404, then the PUT
+    expect(gets).toBe(1);
+    expect(await wrapped()).toBe('computed');
+    expect(gets).toBe(1); // L1 hit
+
+    vi.advanceTimersByTime(1_000);
+    expect(await wrapped()).toBe('computed');
+    expect(gets).toBe(2); // past Fresh-For, though inside both TTL and stale window
+    expect(fn).toHaveBeenCalledTimes(1);
+
+    await cache.close();
+  });
+
+  it('caps a write-behind copy once its PUT lands', async () => {
+    const cache = createCache({ backend: cachekitio(config), defaultTtl: 3600 });
+    putHeaders = { 'X-CacheKit-Fresh-For': '1' };
+    const wrapped = cache.wrap(async () => 'computed', {
+      namespace: 'wb',
+      ttl: 3600,
+      writeBehind: true,
+    });
+
+    expect(await wrapped()).toBe('computed'); // L1 filled before the PUT is sent
+    await vi.waitFor(() => expect(store.size).toBe(1));
+    await new Promise((resolve) => setTimeout(resolve, 0)); // let the write settle
+    expect(gets).toBe(1);
+
+    vi.advanceTimersByTime(1_000);
+    expect(await wrapped()).toBe('computed');
+    expect(gets).toBe(2); // the copy was capped at the PUT's Fresh-For
+
+    await cache.close();
+  });
+
+  it('measures SWR staleness of a capped write-behind copy against the cap, not the TTL', async () => {
+    const cache = createCache({
+      backend: cachekitio(config),
+      defaultTtl: 3600,
+      l1: { swrEnabled: true },
+    });
+    putHeaders = { 'X-CacheKit-Fresh-For': '60' };
+    const fn = vi.fn(async () => 'computed');
+    const wrapped = cache.wrap(fn, { namespace: 'wb', ttl: 3600, writeBehind: true });
+
+    expect(await wrapped()).toBe('computed');
+    await vi.waitFor(() => expect(store.size).toBe(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // 60 s left of a 60 s bound is fresh; read against the 3600 s TTL it
+    // would look stale and refresh the origin on every call.
+    const l1 = (cache as unknown as { l1: L1Cache }).l1;
+    const entry = l1.entry(generateKey('wb', [])) as unknown as { originalTtl: number };
+    expect(entry.originalTtl).toBeLessThanOrEqual(60_000);
+    expect(await wrapped()).toBe('computed');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fn).toHaveBeenCalledTimes(1);
+
+    await cache.close();
+  });
+
+  it('drops a write-behind copy when its PUT Fresh-For is 0', async () => {
+    const cache = createCache({ backend: cachekitio(config), defaultTtl: 3600 });
+    putHeaders = { 'X-CacheKit-Fresh-For': '0' };
+    const wrapped = cache.wrap(async () => 'computed', {
+      namespace: 'wb',
+      ttl: 3600,
+      writeBehind: true,
+    });
+
+    expect(await wrapped()).toBe('computed');
+    await vi.waitFor(() => expect(store.size).toBe(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(await wrapped()).toBe('computed');
+    expect(gets).toBe(2);
+
+    await cache.close();
+  });
+
+  describe('SWR refresh (L1 written only through completeRefresh)', () => {
+    // swrThresholdRatio 2 makes every live L1 entry stale, so the second call refreshes.
+    const swr = () =>
+      createCache({
+        backend: cachekitio(config),
+        defaultTtl: 3600,
+        l1: { swrEnabled: true, swrThresholdRatio: 2 },
+      });
+
+    it('caps the refreshed copy at the refresh PUT Fresh-For', async () => {
+      const cache = swr();
+      let gen = 0;
+      const wrapped = cache.wrap(async () => ++gen, { namespace: 'swr', ttl: 3600 });
+      const key = generateKey('swr', []);
+
+      expect(await wrapped()).toBe(1);
+      putHeaders = { 'X-CacheKit-Fresh-For': '1' };
+      expect(await wrapped()).toBe(1); // stale hit: refresh scheduled
+      await vi.waitFor(async () => expect(await cache.get(key)).toBe(2));
+      expect(gets).toBe(1); // the cold miss only: gen 2 came from L1
+
+      vi.advanceTimersByTime(1_000);
+      expect(await cache.get(key)).toBe(2);
+      expect(gets).toBe(2);
+
+      await cache.close();
+    });
+
+    it('keeps neither copy when the refresh PUT Fresh-For is 0', async () => {
+      const cache = swr();
+      let gen = 0;
+      const wrapped = cache.wrap(async () => ++gen, { namespace: 'swr', ttl: 3600 });
+      const key = generateKey('swr', []);
+
+      expect(await wrapped()).toBe(1);
+      putHeaders = { 'X-CacheKit-Fresh-For': '0' };
+      expect(await wrapped()).toBe(1);
+      await vi.waitFor(() => expect(gen).toBe(2));
+      await vi.waitFor(async () => {
+        const before = gets;
+        expect(await cache.get(key)).toBe(2); // read from L2: L1 holds neither generation
+        expect(gets).toBe(before + 1);
+      });
+
+      await cache.close();
+    });
+  });
+
+  it('a PATCH /ttl response never creates, refreshes or extends an L1 bound (API-104)', async () => {
+    const backend = cachekitioFull(config);
+    const cache = createCache({ backend, defaultTtl: 3600 });
+    putHeaders = { 'X-CacheKit-Fresh-For': '2' };
+    await cache.set('ns:k', 'v1', { ttl: 3600 });
+
+    vi.advanceTimersByTime(1_000);
+    expect(await backend.refreshTTL('ns:k', 7_776_000)).toBe(true);
+    expect(patches).toBe(1);
+
+    vi.advanceTimersByTime(1_000);
+    await cache.get('ns:k');
+    expect(gets).toBe(1); // still expired at the PUT's bound
+
+    // Nor does a PATCH of a key L1 does not hold create a copy.
+    expect(await backend.refreshTTL('ns:other', 3600)).toBe(true);
+    expect(await cache.get('ns:other')).toBeNull();
+    expect(gets).toBe(2);
+
+    await cache.close();
+  });
+});
+
+describe('a custom backend reporting a bound', () => {
+  /** In-memory backend whose set resolves to `result`. */
+  class ReportingBackend implements Backend {
+    store = new Map<string, Uint8Array>();
+    gets = 0;
+    constructor(private readonly result: unknown) {}
+    async get(key: string) {
+      this.gets++;
+      return this.store.get(key) ?? null;
+    }
+    async set(key: string, value: Uint8Array) {
+      this.store.set(key, value);
+      return this.result as SetResult;
+    }
+    async delete(key: string) {
+      return this.store.delete(key);
+    }
+    async exists(key: string) {
+      return this.store.has(key);
+    }
+    async close() {}
+  }
+
+  it.each([NaN, -1, '60'])(
+    'keeps no L1 copy for a freshFor of %j (fails closed)',
+    async (freshFor) => {
+      const backend = new ReportingBackend({ freshFor });
+      const cache = createCache({ backend, defaultTtl: 3600 });
+      await cache.set('ns:k', 'v1');
+
+      expect(await cache.get('ns:k')).toBe('v1');
+      expect(backend.gets).toBe(1);
+
+      await cache.close();
+    }
+  );
+
+  it('keeps the TTL for a backend that resolves to nothing', async () => {
+    const backend = new ReportingBackend(undefined);
+    const cache = createCache({ backend, defaultTtl: 3600 });
+    await cache.set('ns:k', 'v1');
+
+    expect(await cache.get('ns:k')).toBe('v1');
+    expect(backend.gets).toBe(0);
+
+    await cache.close();
   });
 });

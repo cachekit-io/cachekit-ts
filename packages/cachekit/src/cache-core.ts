@@ -8,7 +8,7 @@ import type {
   EncryptionConfig,
   InvalidationConfig,
 } from './types/cache.js';
-import type { Backend, L1Metrics, LockableBackend } from './backends/types.js';
+import type { Backend, L1Metrics, LockableBackend, SetResult } from './backends/types.js';
 import type { InvalidationEvent } from './l1/types.js';
 import type { MetricsCollector, MetricsConfig } from './metrics/prometheus.js';
 import { checkDefaultLabels } from './metrics/labels.js';
@@ -17,6 +17,7 @@ import { L1Cache, type L1Entry } from './l1/lru-cache.js';
 import { ReliabilityExecutor } from './reliability/executor.js';
 import {
   BackgroundRefreshManager,
+  boundedL1TtlMs,
   type WaitUntil,
   type L1Write,
 } from './cache/background-refresh.js';
@@ -166,6 +167,21 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 // runtime without WebAssembly has no traps to catch.
 const WASM_RUNTIME_ERROR = (globalThis as { WebAssembly?: { RuntimeError?: ErrorConstructor } })
   .WebAssembly?.RuntimeError;
+
+/**
+ * When (Date.now() ms) the store's bound on a write ends, read off what
+ * Backend.set resolved to at receipt of its success response: `freshFor`
+ * seconds from now, or undefined when the backend reported none. A value
+ * that is not a non-negative number (a custom backend's bug) fails closed,
+ * as `0`: NaN would otherwise slip past every bound check and keep the L1
+ * copy forever.
+ */
+function freshUntil(result: SetResult | void): number | undefined {
+  const freshFor = (result as SetResult | undefined)?.freshFor;
+  if (freshFor === undefined) return undefined;
+  const now = Date.now();
+  return typeof freshFor === 'number' && freshFor >= 0 ? now + freshFor * 1000 : now;
+}
 
 /**
  * A failure inside unpack that is not a verdict on the bytes: a wasm trap
@@ -1255,7 +1271,7 @@ export class CacheImpl implements SecureCache {
       throw new ConfigurationError(`Invalid TTL: ${ttl}. Must be a non-negative finite number.`);
     }
 
-    // A backend with hard TTL bounds (CachekitIO: reject 0 / > 30 days per
+    // A backend with hard TTL bounds (CachekitIO: reject 0 / > 90 days per
     // protocol) or a key it cannot address (CachekitIO's reserved path
     // segments) rejects here, synchronously — for the same reason as the
     // interop rejection below: inside `run`, degradation would swallow the
@@ -1340,11 +1356,15 @@ export class CacheImpl implements SecureCache {
     };
 
     // The L2 write, under retry, the breaker and degradation; the stale
-    // window rides it on a stale-grace wrap.
-    const writeL2 = (): Promise<void> =>
-      staleTtl > 0
-        ? this.backend.setWithStaleTtl!(key, data, ttl, staleTtl)
-        : this.backend.set(key, data, ttl);
+    // window rides it on a stale-grace wrap. It resolves to when the store's
+    // bound on the write ends (L1Write.freshUntil), counted from receipt of
+    // the success response, or undefined when the store reported none.
+    const writeL2 = async (): Promise<number | undefined> =>
+      freshUntil(
+        staleTtl > 0
+          ? await this.backend.setWithStaleTtl!(key, data, ttl, staleTtl)
+          : await this.backend.set(key, data, ttl)
+      );
 
     // A stale-grace revalidation never fills L1 (its l1Mode is skip), and may
     // be dropped: the stale entry still serves.
@@ -1363,13 +1383,25 @@ export class CacheImpl implements SecureCache {
     // keeps the value, as it keeps a degraded write's below. A write sent
     // back to the caller fills L1 after its L2 write, as with the option off.
     // A skipL1 call fills L1 in neither case, so until its write lands this
-    // process misses the key.
+    // process misses the key. When the write lands with a bound from the
+    // store, the L1 copy is capped at it then (API-103), if L1 still holds
+    // that copy; L1 is filled before the write can settle, so `held` is set.
     const fillsL1 = l1Mode === 'fill' && this.l1 !== null;
+    let held: L1Entry<unknown> | undefined;
+    const writeBehind = async (): Promise<void> => {
+      const until = await writeL2();
+      if (held === undefined || until === undefined || !this.l1) return;
+      this.l1.bound(held, until);
+      this.publishL1Stats();
+    };
     const wroteBehind =
       deferred?.kind === 'write-behind' &&
-      this.tryWriteBehind(key, data.length, writeL2, deferred.waitUntil, fillsL1);
+      this.tryWriteBehind(key, data.length, writeBehind, deferred.waitUntil, fillsL1);
     if (wroteBehind) {
-      if (l1Mode === 'fill') this.fillL1(key, l1Write, ttl, namespace);
+      if (l1Mode === 'fill') {
+        this.fillL1(key, l1Write, ttl, namespace);
+        held = this.l1?.entry(key);
+      }
       return l1Write;
     }
 
@@ -1398,29 +1430,47 @@ export class CacheImpl implements SecureCache {
     // L1 but is overwritten in L2 by the refresh's value until the entry next
     // expires or refreshes (a conditional L2 write would need CAS the Backend
     // contract doesn't have).
+    // A write that got a success response carrying the store's bound caps
+    // the L1 copy at it (API-103), here and on the refresh path through the
+    // returned L1Write. A write degradation absorbed got no response: its copy
+    // keeps the TTL, counted from the L1 write (API-36).
+    let until: number | undefined;
     if (this.keyTails.has(key)) {
       await this.inKeyOrder(key, async () => {
-        await this.run('set', key, undefined, writeL2);
-        if (l1Mode === 'fill') this.fillL1(key, l1Write, ttl, namespace);
+        until = await this.run('set', key, undefined, writeL2);
+        if (l1Mode === 'fill') this.fillL1(key, l1Write, ttl, namespace, until);
       });
-      return l1Write;
+    } else {
+      // An idle key: what inKeyOrder does for it, inline. Every plain set()
+      // takes this path, and inKeyOrder's closure and promise chain were most
+      // of what per-key ordering added to it, so the two lines above repeat.
+      this.enterInFlight(key);
+      try {
+        until = await this.run('set', key, undefined, writeL2);
+        if (l1Mode === 'fill') this.fillL1(key, l1Write, ttl, namespace, until);
+      } finally {
+        this.leaveInFlight(key);
+      }
     }
-    // An idle key: what inKeyOrder does for it, inline. Every plain set()
-    // takes this path, and inKeyOrder's closure and promise chain were most
-    // of what per-key ordering added to it, so the two lines above repeat.
-    this.enterInFlight(key);
-    try {
-      await this.run('set', key, undefined, writeL2);
-      if (l1Mode === 'fill') this.fillL1(key, l1Write, ttl, namespace);
-    } finally {
-      this.leaveInFlight(key);
-    }
-    return l1Write;
+    return until === undefined ? l1Write : { ...l1Write, freshUntil: until };
   }
 
-  private fillL1(key: string, l1Write: L1Write, ttl: number, namespace: string): void {
+  /**
+   * Put the value a write produced in L1 for `ttl` seconds, capped at the
+   * store's bound `until` (L1Write.freshUntil). Past the bound L1 keeps no
+   * copy, and drops the key's older one, which the write superseded.
+   */
+  private fillL1(
+    key: string,
+    l1Write: L1Write,
+    ttl: number,
+    namespace: string,
+    until?: number
+  ): void {
     if (!this.l1) return;
-    this.l1.set(key, l1Write.l1, ttl * 1000, namespace, l1Write.serializedSize, l1Write.count);
+    const ttlMs = boundedL1TtlMs(ttl, until);
+    if (ttlMs === null) this.l1.delete(key);
+    else this.l1.set(key, l1Write.l1, ttlMs, namespace, l1Write.serializedSize, l1Write.count);
     this.publishL1Stats();
   }
 
@@ -1446,7 +1496,7 @@ export class CacheImpl implements SecureCache {
   private tryWriteBehind(
     key: string,
     bytes: number,
-    writeL2: () => Promise<void>,
+    writeL2: () => Promise<unknown>,
     waitUntil: WaitUntil | undefined,
     heldInL1: boolean
   ): boolean {
@@ -1575,7 +1625,7 @@ export class CacheImpl implements SecureCache {
   private queueRevalidationWrite(
     key: string,
     bytes: number,
-    writeL2: () => Promise<void>
+    writeL2: () => Promise<unknown>
   ): Promise<void> | null {
     if (
       this.closed ||
@@ -1585,7 +1635,9 @@ export class CacheImpl implements SecureCache {
       this.revalidationDropped(key);
       return null;
     }
-    const send = (): Promise<void> => this.run('set', key, undefined, writeL2);
+    const send = async (): Promise<void> => {
+      await this.run('set', key, undefined, writeL2);
+    };
     // On Workers no tail exists here (checked above), so inKeyOrder counts it in flight.
     if (this.swrRequiresWaitUntil) return this.inKeyOrder(key, send);
     return this.startPendingWrite(key, bytes, () => {

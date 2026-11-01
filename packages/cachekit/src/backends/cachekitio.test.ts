@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { cachekitio } from './cachekitio-factory.js';
+import { validateStaleTtl, validateTtl } from './cachekitio.js';
 import type { Backend, CachekitIOBackendConfig } from './types.js';
 import { BackendError, ConfigurationError, TimeoutError } from '../errors.js';
 
@@ -353,7 +354,7 @@ describe('CachekitIO Backend', () => {
 
   describe('set edge cases', () => {
     // Protocol TTL Validation Rules (protocol/spec/saas-api.md): TTL=0,
-    // negative, and > 30 days MUST be rejected at the SDK boundary.
+    // negative, and > 90 days (the TTL range) MUST be rejected at the SDK boundary.
     it('rejects TTL of 0', async () => {
       await expect(backend.set('key', new Uint8Array([1]), 0)).rejects.toThrow(ConfigurationError);
       expect(fetchSpy).not.toHaveBeenCalled();
@@ -364,18 +365,20 @@ describe('CachekitIO Backend', () => {
       expect(fetchSpy).not.toHaveBeenCalled();
     });
 
-    it('rejects TTL above 2,592,000 (30 days)', async () => {
-      await expect(backend.set('key', new Uint8Array([1]), 2_592_001)).rejects.toThrow(
+    it('rejects TTL above 7,776,000 (90 days)', async () => {
+      await expect(backend.set('key', new Uint8Array([1]), 7_776_001)).rejects.toThrow(
         ConfigurationError
       );
       expect(fetchSpy).not.toHaveBeenCalled();
     });
 
-    it('accepts TTL at the 30-day ceiling', async () => {
+    // 2,592,001 is over the Startup plan maximum and the old 30-day ceiling:
+    // the SDK sends it as is, because it does not know the plan.
+    it.each([1, 2_592_001, 7_776_000])('sends TTL %i as is', async (ttl) => {
       fetchSpy.mockResolvedValueOnce(mockResponse(200));
-      await backend.set('key', new Uint8Array([1]), 2_592_000);
+      await backend.set('key', new Uint8Array([1]), ttl);
       const [, opts] = fetchSpy.mock.calls[0] as [string, RequestInit];
-      expect((opts.headers as Record<string, string>)['X-CacheKit-TTL']).toBe('2592000');
+      expect((opts.headers as Record<string, string>)['X-CacheKit-TTL']).toBe(String(ttl));
     });
 
     it('ceils sub-second TTL to 1, never truncates to 0', async () => {
@@ -397,9 +400,10 @@ describe('CachekitIO Backend', () => {
 
     it('rejects invalid defaultTtl at construction', () => {
       expect(() => cachekitio({ ...validConfig, defaultTtl: 0 })).toThrow(ConfigurationError);
-      expect(() => cachekitio({ ...validConfig, defaultTtl: 2_592_001 })).toThrow(
+      expect(() => cachekitio({ ...validConfig, defaultTtl: 7_776_001 })).toThrow(
         ConfigurationError
       );
+      expect(() => cachekitio({ ...validConfig, defaultTtl: 7_776_000 })).not.toThrow();
     });
 
     it('closed state rejects set', async () => {
@@ -515,5 +519,31 @@ describe('CachekitIO Backend', () => {
 
       await cache.close();
     });
+  });
+});
+
+// The 90-day TTL range (protocol spec/saas-api.md, TTL Validation Rules and
+// stale-window Validation), each bound and one over. The X-CacheKit-Fresh-For
+// cap stays 2,592,000: see cachekitio-freshness.test.ts.
+describe('TTL range bounds', () => {
+  it('accepts a TTL of 1..7,776,000 and rejects one over', () => {
+    expect(validateTtl(1)).toBe(1);
+    expect(validateTtl(7_776_000)).toBe(7_776_000);
+    expect(() => validateTtl(7_776_001)).toThrow(ConfigurationError);
+    expect(() => validateTtl(7_776_000.5)).toThrow(ConfigurationError);
+  });
+
+  it('accepts a staleTtl up to 7,775,999 and rejects one over, before the sum', () => {
+    expect(validateStaleTtl(7_775_999, 1)).toBe(7_775_999);
+    expect(() => validateStaleTtl(7_776_000, 0)).toThrow(/at most 7775999/);
+  });
+
+  it('accepts ttl + staleTtl up to 7,776,000 and rejects one over', () => {
+    expect(validateStaleTtl(1, 7_775_999)).toBe(1);
+    expect(validateStaleTtl(7_775_990, 10)).toBe(7_775_990);
+    expect(() => validateStaleTtl(7_775_991, 10)).toThrow(
+      /ttl \+ staleTtl must be at most 7776000/
+    );
+    expect(() => validateStaleTtl(1, 7_776_000)).toThrow(ConfigurationError);
   });
 });

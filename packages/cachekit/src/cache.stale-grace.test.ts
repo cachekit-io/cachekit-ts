@@ -462,18 +462,19 @@ describe('server stale-grace (WrapOptions.staleTtl)', () => {
       ['negative', -1],
       ['NaN', NaN],
       ['Infinity', Infinity],
-      ['over 2,591,999', 2_591_999.5],
+      ['over 7,775,999', 7_775_999.5],
+      ['7,776,000, one over the standalone bound', 7_776_000],
       ['a string', '60' as unknown as number],
-      ['over the 30-day cap with the TTL', 2_591_991],
+      ['over the 90-day TTL range with the TTL', 7_775_991],
     ])('rejects a staleTtl that is %s', (_name, staleTtl) => {
       const cache = process(new StaleGraceBackend());
       expect(() => cache.wrap(async () => 'v', { ...WRAP, staleTtl })).toThrow(ConfigurationError);
     });
 
-    it('accepts the largest window the 30-day cap leaves', async () => {
+    it('accepts the largest window the 90-day TTL range leaves', async () => {
       const backend = new StaleGraceBackend();
-      await process(backend).wrap(async () => 'v', { ...WRAP, staleTtl: 2_591_990 })();
-      expect(backend.writes).toEqual([{ ttl: 10, staleTtl: 2_591_990 }]);
+      await process(backend).wrap(async () => 'v', { ...WRAP, staleTtl: 7_775_990 })();
+      expect(backend.writes).toEqual([{ ttl: 10, staleTtl: 7_775_990 }]);
     });
 
     it('ceils a fractional window (API-54) and treats 0 as off', async () => {
@@ -616,8 +617,10 @@ describe('CachekitIO stale window on the wire', () => {
     for (const [ttl, staleTtl] of [
       [10, -1],
       [10, NaN],
-      [10, 2_591_999.5],
-      [10, 2_591_991],
+      [10, 7_775_999.5],
+      [1, 7_776_000],
+      [10, 7_775_991],
+      [7_776_000, 1],
       [0, 60],
     ]) {
       await expect(backend.setWithStaleTtl!('k', value, ttl!, staleTtl!)).rejects.toThrow(
