@@ -880,7 +880,11 @@ the closed beta, each CachekitIO request carries these optional headers:
   each timed call that L1 serves adds its whole duration to a histogram of
   sixteen buckets. A report rides the backend's next request, never its health
   check, and is never sent twice, not even when Node's `fetch` resends a
-  request on its own after a `421`. Cloudflare Workers, Bun and Deno send no
+  request on its own after a `421`, or a retry layer inside undici's `Agent`
+  resends it. A report goes out only through undici's own `Agent`: with any
+  other global dispatcher installed (`setGlobalDispatcher`), such as a
+  `RetryAgent` or a proxy, no latency report is sent, because the SDK cannot
+  rule out that it resends. Cloudflare Workers, Bun and Deno send no
   latency report: Workers' clock does not advance during an in-memory hit, and
   the protocol names no clock for the other two.
 

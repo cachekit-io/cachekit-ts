@@ -1,10 +1,21 @@
 /**
- * Node's fetch resends a request that drew a 421 (Misdirected Request) once,
- * on a new connection, without returning to the code that built it: the Fetch
- * standard's own retry. A latency report rides one attempt (protocol
- * spec/saas-api.md, API-86), so a request that carries one goes through a
- * dispatcher of its own, which hands the first attempt to undici's global
- * dispatcher as is and every later one without the report's headers.
+ * A latency report rides one attempt (protocol spec/saas-api.md, API-86), and
+ * a request can be resent below the code that built it in three ways on Node:
+ *
+ * - fetch itself resends a request that drew a 421 (Misdirected Request), on
+ *   a new connection: the Fetch standard's own retry;
+ * - a global dispatcher the application installed may retry, such as
+ *   undici's RetryAgent;
+ * - a layer inside undici's own Agent may keep the options to resend them,
+ *   as undici's retry interceptor does.
+ *
+ * So a request that carries a report goes through a dispatcher of its own.
+ * The report goes out only on the first attempt fetch dispatches, and only
+ * through undici's own Agent; the headers that attempt carries are a copy
+ * from which the report is removed as soon as it has been read, so a layer
+ * that kept them to resend finds no report in them. Any other attempt, and
+ * any other global dispatcher, gets the request without the report: it may
+ * be lost, never sent twice.
  *
  * Node keeps undici's global dispatcher under the symbols undici registers it
  * with, read here as Node's fetch reads them: undici 6 and 7 read the first,
@@ -31,14 +42,28 @@ function globalDispatcher(handler: object): Dispatcher | undefined {
   return ('onRequestStart' in handler && slots()[CURRENT]) || slots()[LEGACY];
 }
 
-/** The headers fetch dispatches, without the report's. */
-function withoutReport(headers: unknown): Record<string, unknown> {
+/**
+ * undici's own Agent, whose clients resend no request they may have
+ * delivered: they requeue only requests not yet written. Anything else, a
+ * RetryAgent or a dispatcher the application built, may resend below this.
+ */
+function deliversOnce(dispatcher: Dispatcher): boolean {
+  return dispatcher.constructor?.name === 'Agent';
+}
+
+/** A copy of the headers fetch dispatches: the plain object undici 6 to 8 build. */
+function copyOf(headers: unknown): Record<string, unknown> {
   if (typeof headers !== 'object' || headers === null || Array.isArray(headers)) {
-    // Not the plain object undici 6 to 8 dispatch: refuse the attempt rather
-    // than resend a report.
-    throw new Error('cachekit: cannot remove the latency report from a resent request');
+    throw new Error('cachekit: cannot read the headers of a request carrying a latency report');
   }
-  return Object.fromEntries(Object.entries(headers).filter(([name]) => !REPORT_HEADER.test(name)));
+  return { ...headers };
+}
+
+function dropReport(headers: Record<string, unknown>): Record<string, unknown> {
+  for (const name of Object.keys(headers)) {
+    if (REPORT_HEADER.test(name)) delete headers[name];
+  }
+  return headers;
 }
 
 /**
@@ -56,11 +81,19 @@ export function oneAttemptDispatcher(): Dispatcher | undefined {
     dispatch(options, handler) {
       const target = globalDispatcher(handler);
       if (target === undefined) throw new Error('cachekit: no global dispatcher');
-      const attempt = dispatched
-        ? { ...options, headers: withoutReport(options.headers) }
-        : options;
+      const headers = copyOf(options.headers);
+      if (dispatched || !deliversOnce(target)) {
+        dispatched = true;
+        return target.dispatch({ ...options, headers: dropReport(headers) }, handler);
+      }
       dispatched = true;
-      return target.dispatch(attempt, handler);
+      try {
+        return target.dispatch({ ...options, headers }, handler);
+      } finally {
+        // The attempt has read them by now, or, if it was queued, will be sent
+        // without the report.
+        dropReport(headers);
+      }
     },
   };
 }

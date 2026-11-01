@@ -5,6 +5,7 @@
  */
 import { once } from 'node:events';
 import { createServer } from 'node:http';
+import { createRequire } from 'node:module';
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -47,6 +48,65 @@ const COUNTERS = { l1Hits: 3, l2Hits: 1, misses: 1, l1Enabled: true };
 
 let fetchSpy: ReturnType<typeof vi.fn>;
 const nodeFetch = globalThis.fetch;
+
+interface Closable {
+  close(): Promise<void>;
+}
+interface Undici {
+  Agent: new (options?: object) => Closable;
+  RetryAgent: new (agent: Closable, options: object) => Closable;
+  Pool: new (origin: string, options: object) => { compose(interceptor: unknown): Closable };
+  interceptors: { retry(options: object): unknown };
+  setGlobalDispatcher(dispatcher: Closable): void;
+}
+// The npm undici that miniflare (from @cloudflare/vitest-plugin) brings: the
+// public API a user installs a global dispatcher with.
+const undici = createRequire(
+  createRequire(import.meta.resolve('@cloudflare/vitest-plugin')).resolve('miniflare')
+)('undici') as Undici;
+const RETRY_ONCE = { maxRetries: 1, minTimeout: 1, maxTimeout: 1 };
+
+/**
+ * Answer `statuses` in turn from a real HTTP server, with `dispatcher` as
+ * undici's global dispatcher if given, and run `body` with Node's own fetch
+ * routed there. Only the destination changes: the backend's options, its
+ * dispatcher included, reach fetch unchanged. Returns what each attempt on the
+ * wire carried.
+ */
+async function onTheWire(
+  statuses: number[],
+  body: () => Promise<void>,
+  dispatcher?: Closable
+): Promise<{ sumNs?: string; authorization?: string }[]> {
+  const seen: { sumNs?: string; authorization?: string }[] = [];
+  const server = createServer((request, response) => {
+    seen.push({
+      sumNs: request.headers['x-cachekit-l1-latency-sum-ns'] as string | undefined,
+      authorization: request.headers.authorization,
+    });
+    response.writeHead(statuses[seen.length - 1] ?? 404).end();
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { port } = server.address() as AddressInfo;
+  vi.stubGlobal('fetch', (url: string, init: RequestInit) =>
+    nodeFetch(`http://127.0.0.1:${port}${new URL(url).pathname}`, init)
+  );
+  void globalThis.Headers; // loads Node's undici, which sets its global dispatcher
+  const slots = globalThis as unknown as Record<symbol, unknown>;
+  const names = [Symbol.for('undici.globalDispatcher.1'), Symbol.for('undici.globalDispatcher.2')];
+  const saved = names.map((name) => slots[name]);
+  if (dispatcher) undici.setGlobalDispatcher(dispatcher);
+  try {
+    await body();
+  } finally {
+    names.forEach((name, i) => (slots[name] = saved[i]));
+    await dispatcher?.close();
+    server.closeAllConnections();
+    server.close();
+  }
+  return seen;
+}
 
 function sentHeaders(call = -1): Record<string, string> {
   const calls = fetchSpy.mock.calls;
@@ -368,43 +428,45 @@ describe('latency report on the wire (API-84 to API-86)', () => {
     expect(latencyOf(sentHeaders())).toEqual([undefined, undefined, undefined]);
   });
 
-  it('rides one attempt on the wire, even when fetch resends on its own after a 421', async () => {
-    // A 421 makes Node's fetch resend the request on a new connection, without
-    // returning to the backend (the Fetch standard's misdirected-request retry).
-    const seen: { sumNs?: string; buckets?: string; authorization?: string }[] = [];
-    const server = createServer((request, response) => {
-      seen.push({
-        sumNs: request.headers['x-cachekit-l1-latency-sum-ns'] as string | undefined,
-        buckets: request.headers['x-cachekit-l1-latency-buckets'] as string | undefined,
-        authorization: request.headers.authorization,
-      });
-      response.writeHead(seen.length === 1 ? 421 : 404).end();
-    });
-    server.listen(0, '127.0.0.1');
-    await once(server, 'listening');
-    const { port } = server.address() as AddressInfo;
-    // Only the destination changes: the backend's options, its dispatcher
-    // included, go unchanged to Node's own fetch, which makes the resend.
-    vi.stubGlobal('fetch', (url: string, init: RequestInit) =>
-      nodeFetch(`http://127.0.0.1:${port}${new URL(url).pathname}`, init)
-    );
-    try {
-      const backend = new CachekitIOCore(CONFIG);
+  describe('rides one attempt on the wire, whatever resends the request', () => {
+    const auth = `Bearer ${API_KEY}`;
+    let backend: CachekitIOCore;
+    const get = async () => {
+      backend = new CachekitIOCore(CONFIG);
       backend.l1Latency!.record(300);
       expect(await backend.get('ns:a')).toBeNull();
-      expect(seen).toEqual([
-        {
-          sumNs: '300',
-          buckets: '0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0',
-          authorization: `Bearer ${API_KEY}`,
-        },
-        { sumNs: undefined, buckets: undefined, authorization: `Bearer ${API_KEY}` },
+    };
+
+    it("fetch's own resend after a 421 carries none of it", async () => {
+      // A 421 makes Node's fetch resend the request on a new connection, without
+      // returning to the backend (the Fetch standard's misdirected-request retry).
+      expect(await onTheWire([421, 404], get)).toEqual([
+        { sumNs: '300', authorization: auth },
+        { sumNs: undefined, authorization: auth },
       ]);
       expect(backend.l1Latency!.take()).toBeUndefined();
-    } finally {
-      server.closeAllConnections();
-      server.close();
-    }
+    });
+
+    it("a retry inside the Agent, by undici's retry interceptor, carries none of it", async () => {
+      const agent = new undici.Agent({
+        factory: (origin: string, options: object) =>
+          new undici.Pool(origin, options).compose(undici.interceptors.retry(RETRY_ONCE)),
+      });
+      expect(await onTheWire([503, 404], get, agent)).toEqual([
+        { sumNs: '300', authorization: auth },
+        { sumNs: undefined, authorization: auth },
+      ]);
+    });
+
+    it('is withheld from a global dispatcher that is not undici’s own Agent: a RetryAgent', async () => {
+      const retrying = new undici.RetryAgent(new undici.Agent(), RETRY_ONCE);
+      expect(await onTheWire([503, 404], get, retrying)).toEqual([
+        { sumNs: undefined, authorization: auth },
+        { sumNs: undefined, authorization: auth },
+      ]);
+      // Taken, and never sent: a report may be lost, never sent twice.
+      expect(backend.l1Latency!.take()).toBeUndefined();
+    });
   });
 
   it('stays in place while no dispatcher can keep it to one attempt', async () => {
