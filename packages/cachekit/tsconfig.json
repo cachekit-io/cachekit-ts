@@ -11,5 +11,12 @@
     "stripInternal": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.test.tsx"]
+  // cjs-noble-blake2.ts is the CommonJS build's `#noble-blake2` (tsconfig.cjs.json).
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "src/serialization/cjs-noble-blake2.ts"
+  ]
 }

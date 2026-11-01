@@ -57,4 +57,8 @@ describe('the package loaded first inside a request', () => {
   it('keeps no part of the request when its dependencies load there too', async () => {
     expect(await retained(0, 300, 'cold')).toBe(false);
   });
+
+  it('keeps no part of the request that first hashes in JS', async () => {
+    expect(await retained(0, 300, 'js-hash')).toBe(false);
+  });
 });

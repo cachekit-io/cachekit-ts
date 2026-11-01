@@ -1,7 +1,5 @@
 import { Encoder } from '@msgpack/msgpack';
-import { blake2b } from '@noble/hashes/blake2.js';
-import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
-import { blake2b256Hex } from './blake2b.js';
+import { blake2b256Hex, nobleBlake2b128Hex } from './blake2b.js';
 import { normalize } from './serializer.js';
 import { ValueTooLargeError } from '../errors.js';
 import {
@@ -97,6 +95,8 @@ export function generateParamsHash(args: unknown[]): string {
   }
 }
 
+const utf8 = new TextEncoder();
+
 /**
  * `blake2b(utf8(key), digestSize=16)` hex — 32 chars. The SDK's canonical
  * short key digest, byte-identical to cachekit-py's `_key_to_path` stem: the
@@ -105,7 +105,7 @@ export function generateParamsHash(args: unknown[]): string {
  * file (or to a suspect key by recomputing) without ever logging the key.
  */
 export function blake2b16Hex(key: string): string {
-  return bytesToHex(blake2b(utf8ToBytes(key), { dkLen: 16 }));
+  return nobleBlake2b128Hex(utf8.encode(key));
 }
 
 /**

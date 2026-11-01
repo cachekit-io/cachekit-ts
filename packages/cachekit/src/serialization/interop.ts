@@ -1,6 +1,5 @@
 import { ExtensionCodec } from '@msgpack/msgpack';
-import { bytesToHex } from '@noble/hashes/utils.js';
-import { blake2b256Hex } from './blake2b.js';
+import { blake2b256Hex, bytesToHex } from './blake2b.js';
 import { ConfigurationError, SerializationError, ValueTooLargeError } from '../errors.js';
 import { assertDecodeDepth, type ObjectCount } from './serializer.js';
 import {
