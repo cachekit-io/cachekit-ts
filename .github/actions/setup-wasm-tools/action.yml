@@ -1,0 +1,59 @@
+name: Setup wasm-bindgen + wasm-opt (pinned prebuilts, checksummed)
+description: >-
+  Install the wasm-bindgen CLI at the version a Cargo.lock locks, which
+  scripts/build.sh requires, and binaryen's wasm-opt, from the upstream
+  x86_64-linux release assets. Each tarball must match the SHA-256 recorded
+  here, and a wasm-bindgen version with none recorded fails the step.
+inputs:
+  cargo-lock:
+    description: The Cargo.lock whose wasm-bindgen version to install
+    required: false
+    default: packages/cachekit-core-wasm/Cargo.lock
+  bin-dir:
+    description: >-
+      Where to install both tools. Empty installs them into $HOME/.local/bin
+      and adds that to PATH; a caller that names a directory puts it on PATH
+      itself.
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Install wasm-bindgen + wasm-opt
+      shell: bash
+      env:
+        CARGO_LOCK: ${{ inputs.cargo-lock }}
+        BIN_DIR: ${{ inputs.bin-dir }}
+        BINARYEN_VERSION: '131'
+        BINARYEN_SHA256: b5bf1f0eaf17c63ee588ff7a5954dc8f6ce2c26989051c66f24dfe9ece3e46db # pragma: allowlist secret
+      run: |
+        version=$(grep -A1 '^name = "wasm-bindgen"$' "$CARGO_LOCK" | grep '^version' | cut -d'"' -f2) || {
+          echo "::error::$CARGO_LOCK locks no wasm-bindgen"
+          exit 1
+        }
+        # SHA-256 of wasm-bindgen-<version>-x86_64-unknown-linux-musl.tar.gz.
+        # A bump adds its version here, beside Cargo.lock. Keep a superseded
+        # line while a release tag still locks it: the instruction-count gate
+        # also builds a PR's base, and a release PR's base is the package's
+        # last tag.
+        case $version in
+          0.2.121) sha256=3039f38f65fe237b640cf06a140c919ca8d717ec5012146d145d3f27bb4d6b28 ;; # pragma: allowlist secret
+          *)
+            echo "::error::no SHA-256 recorded for wasm-bindgen '$version' (locked in $CARGO_LOCK); add it to .github/actions/setup-wasm-tools/action.yml"
+            exit 1
+            ;;
+        esac
+        bin=${BIN_DIR:-$HOME/.local/bin}
+        tmp=$(mktemp -d "$RUNNER_TEMP/wasm-tools.XXXXXX")
+        mkdir -p "$bin"
+        name=wasm-bindgen-${version}-x86_64-unknown-linux-musl
+        curl -sSfL -o "$tmp/wasm-bindgen.tar.gz" "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${version}/${name}.tar.gz"
+        echo "${sha256}  $tmp/wasm-bindgen.tar.gz" | sha256sum -c -
+        tar xzf "$tmp/wasm-bindgen.tar.gz" -C "$tmp" "${name}/wasm-bindgen"
+        cp "$tmp/${name}/wasm-bindgen" "$bin/"
+        curl -sSfL -o "$tmp/binaryen.tar.gz" "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz"
+        echo "${BINARYEN_SHA256}  $tmp/binaryen.tar.gz" | sha256sum -c -
+        tar xzf "$tmp/binaryen.tar.gz" -C "$tmp" "binaryen-version_${BINARYEN_VERSION}/bin/wasm-opt"
+        cp "$tmp/binaryen-version_${BINARYEN_VERSION}/bin/wasm-opt" "$bin/"
+        rm -rf "${tmp:?}"
+        [[ -n $BIN_DIR ]] || echo "$bin" >> "$GITHUB_PATH"
