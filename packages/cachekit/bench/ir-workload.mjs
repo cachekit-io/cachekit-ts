@@ -64,12 +64,26 @@ function stubCachekitIO() {
  * below 0.01%), each timed call taken from the report as it comes. The count
  * is fixed because what the warm-up allocates decides how many scavenges land
  * in the window: one more is +1.4% on wrap-l1-hit-int-cachekitio on Node 24.
- * Reads the cache's private l1Latency; a build from before the report has no
- * timed path.
+ *
+ * The report is a private field of the cache, so this finds it among the
+ * cache's fields by its class, not by its name: the gate runs one copy of this
+ * file on a base and a head that may name it differently. A build without the
+ * class has no timed path, and the warm-up is skipped. A build with the class
+ * whose cache holds no report it can read throws: skipping there would leave
+ * the timed path cold in the window, a false regression of about 5%.
  */
 async function warmTimed(cache, op) {
-  const report = cache.l1Latency;
-  if (!report) return;
+  const telemetry = existsSync(new URL('backends/telemetry.js', dist))
+    ? await load('backends/telemetry.js')
+    : {};
+  if (!telemetry.L1LatencyReport) return;
+  const report = Object.values(cache).find((v) => v instanceof telemetry.L1LatencyReport);
+  if (!(report?.oneIn >= 1)) {
+    throw new Error(
+      'the build has an L1 latency report but the cache holds none this can read: ' +
+        'unset CACHEKIT_TELEMETRY=off, or teach warmTimed where the report went'
+    );
+  }
   for (let i = 0; i < 64; i++) await op();
   report.take();
   let calls = 24 * report.oneIn;
