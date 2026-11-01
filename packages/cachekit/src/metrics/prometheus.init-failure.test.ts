@@ -70,6 +70,24 @@ describe('CacheMetrics with prom-client missing', () => {
     expect(logs).toHaveLength(1);
   });
 
+  it('the per-attempt calls stop awaiting the failed load once it has reported', async () => {
+    const logs: string[] = [];
+    setLogger((message) => logs.push(message));
+    const metrics = new CacheMetrics();
+    const recordOperation = vi.spyOn(metrics, 'recordOperation');
+    const updateState = vi.spyOn(metrics, 'updateCircuitBreakerState');
+
+    metrics.countOperation('get', 'success');
+    await vi.waitFor(() => expect(logs).toHaveLength(1));
+    metrics.countOperation('get', 'error');
+    metrics.setCircuitBreakerState('open');
+    expect(() => metrics.timeOperation('get')()).not.toThrow();
+
+    expect(recordOperation).toHaveBeenCalledTimes(1);
+    expect(updateState).not.toHaveBeenCalled();
+    expect(logs).toHaveLength(1);
+  });
+
   it('every metric call is a no-op that never throws', async () => {
     setLogger(() => {});
     const metrics = new CacheMetrics();
