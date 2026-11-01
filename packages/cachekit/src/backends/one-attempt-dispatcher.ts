@@ -1,40 +1,25 @@
 /**
  * A latency report rides one attempt (protocol spec/saas-api.md, API-86), and
- * on Node a request can be resent below the code that built it:
+ * on Node a request can be resent below the code that built it: by fetch
+ * itself after a 421 (the Fetch standard's own retry), by a retrying global
+ * dispatcher such as undici's RetryAgent, by a retry layer inside an Agent, by
+ * an HTTP/1.1 client that pipelines and loses its connection, or by undici
+ * 6's HTTP/2 client, which writes every stream still in flight again when any
+ * one ends.
  *
- * - fetch itself resends a request that drew a 421 (Misdirected Request), on
- *   a new connection: the Fetch standard's own retry;
- * - a global dispatcher the application installed may retry, such as
- *   undici's RetryAgent or an Agent composed with its retry interceptor;
- * - a layer inside an Agent, from a factory of the application's, may keep
- *   the options to resend them, as undici's retry interceptor does;
- * - an HTTP/1.1 client with pipelining on writes a request behind a running
- *   one, and when the connection drops it fails the head and writes the rest
- *   again on a new one;
- * - undici 6's HTTP/2 client, when any stream ends, puts every other stream
- *   still in flight back in its queue and writes it again, whatever its
- *   idempotency. That takes an Agent created with `allowH2` and `pipelining`
- *   above 1: a client's default pipelining of 1 runs one stream at a time.
+ * So a report is sent only through an Agent exactly as `new Agent()` builds
+ * it, which Node's own default is: every option left at its default and the
+ * default factory. Such an Agent neither retries nor pipelines; over HTTP/2,
+ * which only undici 8 turns on by default, it replays only a stream the
+ * server refused or, after GOAWAY, never processed, which the spec allows.
+ * Any other dispatcher, and an Agent with any option set, leaves the report
+ * waiting: a report may be lost, never sent twice.
  *
- * So a report is sent only through exactly undici's Agent, and only on the
- * first attempt fetch dispatches. That attempt is not idempotent, so a client
- * never pipelines it behind a running request: it is always the head, and a
- * head whose connection drops fails rather than being written again. Its
- * headers are a copy from which the report is removed as soon as dispatch
- * returns, so a layer that kept the options to resend them finds no report.
- * Any later attempt, and any other dispatcher, gets the request without it.
- *
- * Over HTTP/2, undici 8 replays only a stream the server refused or, after
- * GOAWAY, never processed: an attempt known not to have been delivered, which
- * the spec allows. undici 7's GOAWAY handler requeues every stream behind the
- * head, but its client never runs a non-idempotent request beside another, so
- * the one that carries a report is the head, and fails. undici 6 and 7 share
- * the first slot, and an Agent there gets a report only while its options say
- * HTTP/2 is off (`allowH2`, off by default in both); options it cannot read
- * count as on. That reads the Agent's private options, under the symbol undici
- * 6 to 8 all describe as 'options'. Detecting an Agent's custom factory the
- * same way would still leave a retrying fetch wrapper, so what this cannot
- * see, and when a report is lost, is in the README's Telemetry section.
+ * The report rides only the first attempt fetch dispatches, marked not
+ * idempotent so that no client could pipeline it, and in a copy of the
+ * headers from which it is removed as soon as dispatch returns. Any later
+ * attempt gets the request without it. What this cannot see, such as a fetch
+ * wrapper that retries, is in the README's Telemetry section.
  *
  * Node keeps undici's global dispatcher under the symbols undici registers it
  * with. The fetch of undici 6 and 7 reads the first and passes handlers of the
@@ -71,37 +56,38 @@ function slotFor(handler: object): symbol {
   return 'onRequestStart' in handler ? CURRENT : LEGACY;
 }
 
+/** An own field of `agent` under a symbol described `name`, as undici 6 to 8 keep them. */
+function privateField(agent: object, name: string): unknown {
+  const key = Object.getOwnPropertySymbols(agent).find((symbol) => symbol.description === name);
+  return key === undefined ? undefined : Reflect.get(agent, key);
+}
+
 /**
- * Exactly undici's Agent, as constructed: not a RetryAgent or a MockAgent,
- * and not composed with interceptors. undici 6's compose() returns a
- * ComposedDispatcher; undici 7 and 8's returns a proxy of the Agent that
- * answers to its name but swaps in another dispatch, as does an instance
- * whose dispatch was replaced.
+ * Exactly as `new Agent()` builds it. The class is undici's Agent, and its
+ * dispatch is its prototype's: not a RetryAgent or a MockAgent, nor the proxy
+ * that compose() returns in undici 7 and 8 (undici 6's is a ComposedDispatcher).
+ * Its options, under the symbol described 'options', are all undefined but
+ * `maxOrigins: Infinity` (undici 7 and 8), and its factory, under 'factory',
+ * is undici's `defaultFactory`. Any option set fails this, an HTTP/2 or
+ * pipelining one among them, as does undici moving either field.
  */
 function deliversOnce(dispatcher: Dispatcher): boolean {
   const prototype: unknown = Object.getPrototypeOf(dispatcher);
+  const options = privateField(dispatcher, 'options');
+  const factory = privateField(dispatcher, 'factory');
   return (
     dispatcher.constructor?.name === 'Agent' &&
     typeof prototype === 'object' &&
     prototype !== null &&
-    Reflect.get(dispatcher, 'dispatch') === Reflect.get(prototype, 'dispatch')
+    Reflect.get(dispatcher, 'dispatch') === Reflect.get(prototype, 'dispatch') &&
+    typeof factory === 'function' &&
+    factory.name === 'defaultFactory' &&
+    typeof options === 'object' &&
+    options !== null &&
+    Object.entries(options).every(
+      ([name, value]) => value === undefined || (name === 'maxOrigins' && value === Infinity)
+    )
   );
-}
-
-/** False unless the Agent's private options say HTTP/2 is off. */
-function http1Only(agent: Dispatcher): boolean {
-  const key = Object.getOwnPropertySymbols(agent).find(
-    (symbol) => symbol.description === 'options'
-  );
-  const options: unknown = key === undefined ? undefined : Reflect.get(agent, key);
-  return (
-    typeof options === 'object' && options !== null && Reflect.get(options, 'allowH2') !== true
-  );
-}
-
-/** Whether a report may go through `dispatcher`, in the global slot `key`. */
-function carriesOnce(dispatcher: Dispatcher, key: symbol): boolean {
-  return deliversOnce(dispatcher) && (key !== LEGACY || http1Only(dispatcher));
 }
 
 /** A copy of the headers fetch dispatches: the plain object undici 6 to 8 build. */
@@ -126,8 +112,8 @@ function nodeUndiciVersion(): unknown {
 /**
  * A fetch `dispatcher` for one request that carries a latency report, or
  * undefined, and the report waits, unless the global dispatcher Node's fetch
- * reads is undici's Agent. `undiciVersion` is the undici Node bundles, which
- * decides the slot its fetch reads; tests pass one.
+ * reads is an Agent built with defaults. `undiciVersion` is the undici Node
+ * bundles, which decides the slot its fetch reads; tests pass one.
  */
 export function oneAttemptDispatcher(
   undiciVersion: unknown = nodeUndiciVersion()
@@ -138,19 +124,20 @@ export function oneAttemptDispatcher(
   // undici fills its slots as it loads.
   if (slot(key) === undefined) void globalThis.Headers;
   const target = slot(key);
-  if (target === undefined || !carriesOnce(target, key)) return undefined;
+  if (target === undefined || !deliversOnce(target)) return undefined;
   let dispatched = false;
   return {
     dispatch(options, handler) {
       // A handler of the other API comes from a fetch other than Node's own,
       // such as npm undici's: it goes to the slot that fetch reads.
       const handlerSlot = slotFor(handler);
-      const to = handlerSlot === key ? target : slot(handlerSlot);
+      const own = handlerSlot === key;
+      const to = own ? target : slot(handlerSlot);
       if (to === undefined) throw new Error('cachekit: no global dispatcher for this request');
       const headers = copyOf(options.headers);
       const first = !dispatched;
       dispatched = true;
-      if (!first || !carriesOnce(to, handlerSlot)) {
+      if (!first || !(own || deliversOnce(to))) {
         return to.dispatch({ ...options, headers: dropReport(headers) }, handler);
       }
       try {

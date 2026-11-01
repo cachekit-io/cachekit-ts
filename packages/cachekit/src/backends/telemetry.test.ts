@@ -5,8 +5,7 @@
  */
 import { once } from 'node:events';
 import { createServer } from 'node:http';
-import { createRequire } from 'node:module';
-import { createServer as createTcpServer, type AddressInfo, type Socket } from 'node:net';
+import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   cachekitio,
@@ -24,6 +23,7 @@ import {
 } from './telemetry.js';
 import { ConfigurationError } from '../errors.js';
 import { setLogger } from '../logger.js';
+import { npmUndici, type Closable } from '../../test/fixtures/npm-undici.js';
 
 const API_URL = 'https://api.test.cachekit.io';
 const API_KEY = 'ck_test_fake-not-a-secret'; // pragma: allowlist secret
@@ -49,30 +49,7 @@ const COUNTERS = { l1Hits: 3, l2Hits: 1, misses: 1, l1Enabled: true };
 let fetchSpy: ReturnType<typeof vi.fn>;
 const nodeFetch = globalThis.fetch;
 
-interface Closable {
-  close(): Promise<void>;
-}
-interface Composable extends Closable {
-  compose(interceptor: unknown): Closable;
-}
-interface Undici {
-  Agent: new (options?: object) => Composable;
-  RetryAgent: new (agent: Closable, options: object) => Closable;
-  Pool: new (origin: string, options: object) => Composable;
-  MockAgent: new () => Closable & {
-    disableNetConnect(): void;
-    get(origin: string): {
-      intercept(options: object): { reply(status: number, body: string): void };
-    };
-  };
-  interceptors: { retry(options: object): unknown };
-  setGlobalDispatcher(dispatcher: Closable): void;
-}
-// The npm undici that miniflare (from @cloudflare/vitest-plugin) brings: the
-// public API a user installs a global dispatcher with.
-const undici = createRequire(
-  createRequire(import.meta.resolve('@cloudflare/vitest-plugin')).resolve('miniflare')
-)('undici') as Undici;
+const undici = npmUndici;
 const RETRY_ONCE = { maxRetries: 1, minTimeout: 1, maxTimeout: 1 };
 const DISPATCHER_SLOTS = [
   Symbol.for('undici.globalDispatcher.1'),
@@ -468,35 +445,36 @@ describe('latency report on the wire (API-84 to API-86)', () => {
       expect(backend.l1Latency!.take()).toBeUndefined();
     });
 
-    it("a retry inside the Agent, by undici's retry interceptor, carries none of it", async () => {
-      const agent = new undici.Agent({
-        factory: (origin: string, options: object) =>
-          new undici.Pool(origin, options).compose(undici.interceptors.retry(RETRY_ONCE)),
-      });
-      expect(await onTheWire([503, 404], get, agent)).toEqual([
-        { sumNs: '300', authorization: auth },
-        { sumNs: undefined, authorization: auth },
-      ]);
-    });
-
-    it('rides the one attempt of an uncontended request through undici’s Agent', async () => {
+    it('rides the one attempt of an uncontended request through an Agent built with defaults', async () => {
       expect(await onTheWire([404], get, new undici.Agent())).toEqual([
         { sumNs: '300', authorization: auth },
       ]);
       expect(backend.l1Latency!.take()).toBeUndefined();
     });
 
+    // A retrying dispatcher answers a 503 by retrying; the others get a 404 at once.
     it.each([
-      ['a RetryAgent', () => new undici.RetryAgent(new undici.Agent(), RETRY_ONCE)],
+      ['a RetryAgent', [503, 404], () => new undici.RetryAgent(new undici.Agent(), RETRY_ONCE)],
       [
         'an Agent composed with retry',
+        [503, 404],
         () => new undici.Agent().compose(undici.interceptors.retry(RETRY_ONCE)),
       ],
-    ])('waits while the global dispatcher is %s, which may resend', async (_, make) => {
-      expect(await onTheWire([503, 404], get, make())).toEqual([
-        { sumNs: undefined, authorization: auth },
-        { sumNs: undefined, authorization: auth },
-      ]);
+      [
+        'an Agent whose factory retries',
+        [503, 404],
+        () =>
+          new undici.Agent({
+            factory: (origin: string, options: object) =>
+              new undici.Pool(origin, options).compose(undici.interceptors.retry(RETRY_ONCE)),
+          }),
+      ],
+      ['an Agent that pipelines', [404], () => new undici.Agent({ pipelining: 2 })],
+    ])('waits while the global dispatcher is %s, which may resend', async (_, statuses, make) => {
+      const seen = await onTheWire(statuses, get, make());
+      expect(seen).toHaveLength(statuses.length);
+      for (const attempt of seen)
+        expect(attempt).toEqual({ sumNs: undefined, authorization: auth });
       // Not taken: it rides a later request, through undici's Agent.
       expect(backend.l1Latency!.take()?.['X-CacheKit-L1-Latency-Sum-Ns']).toBe('300');
     });
@@ -531,71 +509,6 @@ describe('latency report on the wire (API-84 to API-86)', () => {
       expect(new Set(decoded)).toEqual(new Set(['payload']));
       // Not undici's Agent: the report is not taken, and waits.
       expect(backend.l1Latency!.take()?.['X-CacheKit-L1-Latency-Sum-Ns']).toBe('300');
-    });
-
-    it('a pipelining Agent never writes it again after the connection drops', async () => {
-      // A raw server, to see every byte. On the first connection it answers
-      // the first request's headers but holds its body: once fetch has read
-      // those headers, undici may pipeline a GET behind it. The connection
-      // drops as soon as a second request arrives on it, and undici fails the
-      // head and requeues whatever it wrote behind it.
-      let wire = '';
-      let firstSocket: Socket | undefined;
-      const sockets: Socket[] = [];
-      const server = createTcpServer((socket) => {
-        sockets.push(socket);
-        const first = firstSocket === undefined;
-        firstSocket ??= socket;
-        let heads = 0;
-        socket.on('error', () => {});
-        socket.on('data', (chunk) => {
-          const text = chunk.toString('latin1');
-          wire += text;
-          const count = text.split('\r\n\r\n').length - 1;
-          if (!first) {
-            for (let i = 0; i < count; i++) {
-              socket.write('HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n');
-            }
-            return;
-          }
-          if (heads === 0 && count > 0) {
-            socket.write('HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\nabc');
-          }
-          heads += count;
-          if (heads >= 2) socket.destroy();
-        });
-      });
-      server.listen(0, '127.0.0.1');
-      await once(server, 'listening');
-      const { port } = server.address() as AddressInfo;
-      let headersRead: Promise<unknown> | undefined;
-      vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
-        const response = nodeFetch(`http://127.0.0.1:${port}${new URL(url).pathname}`, init);
-        headersRead ??= response.catch(() => undefined);
-        return response;
-      });
-      const agent = new undici.Agent({ pipelining: 2, connections: 1 });
-      try {
-        await keepingGlobalDispatcher(async () => {
-          undici.setGlobalDispatcher(agent);
-          backend = new CachekitIOCore(CONFIG);
-          const plain = backend.get('ns:x'); // takes no report: there is none yet
-          await vi.waitFor(() => expect(headersRead).toBeDefined());
-          await headersRead; // fetch resolves once the response headers are read
-          backend.l1Latency!.record(300);
-          const carrying = backend.get('ns:a');
-          // Not pipelined, it waits behind the held response: drop the
-          // connection under it, so it goes out on the next one.
-          const drop = setTimeout(() => firstSocket?.destroy(), 500);
-          await Promise.allSettled([plain, carrying]);
-          clearTimeout(drop);
-        });
-      } finally {
-        await agent.close();
-        for (const socket of sockets) socket.destroy();
-        server.close();
-      }
-      expect(wire.match(/x-cachekit-l1-latency-sum-ns: 300/gi)).toHaveLength(1);
     });
 
     it('a fetch wrapper that retries with the same init carries none of it', async () => {

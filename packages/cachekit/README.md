@@ -886,34 +886,28 @@ the closed beta, each CachekitIO request carries these optional headers:
   chosen at random before its outcome is known, with `process.hrtime.bigint()`;
   each timed call that L1 serves adds its whole duration to a histogram of
   sixteen buckets. A report rides the backend's next request, never its health
-  check, and is never sent twice: not when Node's `fetch` resends a request
-  on its own after a `421`, not when undici's own retry handler inside an
-  `Agent`'s connection pools resends it, and not when a pipelining `Agent`
-  loses its connection (the request that carries a report is never
-  pipelined). A report is sent only while the global dispatcher is undici's
-  own `Agent` as constructed: with any other (`setGlobalDispatcher`), such as
-  a `RetryAgent`, a `MockAgent`, a proxy or an `Agent` composed with
-  interceptors, the SDK cannot rule out a resend, so the report waits and no
-  latency headers are sent. On Node.js 22 and 24 the same holds for an
-  `Agent` created with `allowH2: true`: the HTTP/2 client of Node.js 22's
-  undici writes requests in flight again. A report can be lost: a request the
-  `Agent` has to queue goes without its report. An `Agent` with a
-  `connections` limit queues while every connection is busy, and on Node.js
-  26, whose undici probes an `https:` API for HTTP/2, requests made while a
-  new connection is being set up queue too, so reports go missing more often
-  around a cold start or a reconnect. Reports are also lost when
-  `globalThis.fetch` is npm undici's `fetch` of another major than the
-  undici Node.js bundles and the dispatcher that `fetch` reads is not
-  undici's own `Agent`. The SDK
-  cannot see resend code you write into your own transport, such as an
-  `Agent` factory or interceptor that copies a request's headers and resends
-  them, or a `fetch` wrapper that retries with a new init; such code must not
-  resend a request that carries the `X-CacheKit-L1-Latency-*` headers. A
-  `fetch` wrapper that spreads the SDK's options over its own `dispatcher`,
-  such as a proxy, has it overridden on a request that carries a report,
-  which then goes straight to
-  the configured API: set a proxy with `setGlobalDispatcher` instead, or turn
-  telemetry off. Cloudflare Workers, Bun and Deno send no
+  check, and is never sent twice, not even when Node's `fetch` resends a
+  request on its own after a `421`. A report is sent only through an `Agent`
+  exactly as `new Agent()` builds it, which Node's own default dispatcher is:
+  with any other global dispatcher (`setGlobalDispatcher`), such as a
+  `RetryAgent`, a `MockAgent`, a proxy, an `Agent` composed with
+  interceptors, or an `Agent` created with any option set, the SDK cannot
+  rule out a resend, so the report waits and no latency headers are sent.
+  A report can be lost:
+  - when the global dispatcher, or the one an npm undici `fetch` of another
+    major than Node's reads, is anything but an `Agent` built with defaults;
+  - when the `Agent` has to queue the request: on Node.js 26, whose undici
+    probes an `https:` API for HTTP/2, requests made while a new connection
+    is being set up queue, so reports go missing more often around a cold
+    start or a reconnect.
+
+  The SDK cannot see resend code in a `fetch` wrapper you install: one that
+  retries with a new init must not resend a request that carries the
+  `X-CacheKit-L1-Latency-*` headers. A `fetch` wrapper that spreads the SDK's
+  options over its own `dispatcher`, such as a proxy, has it overridden on a
+  request that carries a report, which then goes straight to the configured
+  API: set a proxy with `setGlobalDispatcher` instead, or turn telemetry off.
+  Cloudflare Workers, Bun and Deno send no
   latency report: Workers' clock does not advance during an in-memory hit, and
   the protocol names no clock for the other two.
 

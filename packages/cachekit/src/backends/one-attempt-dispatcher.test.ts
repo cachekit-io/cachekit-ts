@@ -2,17 +2,12 @@
  * The dispatcher that keeps a latency report to one attempt (protocol
  * spec/saas-api.md, API-86). telemetry.test.ts checks it on the wire, with
  * this Node's own fetch and genuine undici dispatchers; this pins, for each
- * undici Node bundles, which global slot it reads, when it makes no
- * dispatcher at all, and what each attempt is handed.
+ * undici Node bundles, which global slot it reads, which Agents it accepts,
+ * and what each attempt is handed.
  */
-import { createRequire } from 'node:module';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { oneAttemptDispatcher } from './one-attempt-dispatcher.js';
-
-// The npm undici that miniflare (from @cloudflare/vitest-plugin) brings.
-const npmUndici = createRequire(
-  createRequire(import.meta.resolve('@cloudflare/vitest-plugin')).resolve('miniflare')
-)('undici') as { Agent: new (options?: object) => object };
+import { npmUndici } from '../../test/fixtures/npm-undici.js';
 
 const LEGACY = Symbol.for('undici.globalDispatcher.1');
 const CURRENT = Symbol.for('undici.globalDispatcher.2');
@@ -41,19 +36,18 @@ const UNDICI_7 = { version: '7.30.1', handler: { onConnect() {} }, slot: 'legacy
  */
 type Log = { name: string; read: unknown; held: unknown; idempotent?: boolean }[];
 
-/** Where undici 6 to 8 keep an Agent's options: a symbol described as 'options'. */
+// Where undici 6 to 8 keep an Agent's options and factory.
 const OPTIONS = Symbol('options');
+const FACTORY = Symbol('factory');
 
-/** Named like undici's own Agent, which the report may go through. */
+/** Shaped like undici's own Agent as `new Agent()` builds it. */
 class Agent {
-  [OPTIONS]: object;
+  [OPTIONS] = { maxOrigins: Infinity, connect: undefined, tls: undefined };
+  [FACTORY] = function defaultFactory(): void {};
   constructor(
     private readonly name: string,
-    private readonly log: Log,
-    options: object = {}
-  ) {
-    this[OPTIONS] = options;
-  }
+    private readonly log: Log
+  ) {}
   dispatch(options: { headers?: unknown; idempotent?: boolean }): boolean {
     this.log.push({
       name: this.name,
@@ -86,8 +80,7 @@ describe('oneAttemptDispatcher', () => {
       const dispatcher = oneAttemptDispatcher(version)!;
       dispatcher.dispatch({ headers: HEADERS }, handler);
       dispatcher.dispatch({ headers: HEADERS }, handler);
-      // The first attempt is not idempotent, so no client pipelines it behind
-      // a running request and writes it again when that connection drops.
+      // The first attempt is not idempotent, so no client could pipeline it.
       expect(log.map(({ name, read, idempotent }) => [name, read, idempotent])).toEqual([
         [slot, HEADERS, false],
         [slot, WITHOUT_REPORT, undefined],
@@ -131,48 +124,42 @@ describe('oneAttemptDispatcher', () => {
     expect(log.map(({ name, read }) => [name, read])).toEqual([['legacy', sent]]);
   });
 
-  describe('HTTP/2 on the first slot, where undici 6 rewrites streams in flight', () => {
+  describe('only an Agent built with defaults gets a report', () => {
+    it("accepts this Node's own default dispatcher", () => {
+      expect(oneAttemptDispatcher()).toBeDefined();
+    });
+
+    it.each([UNDICI_8, UNDICI_7])('accepts a genuine `new Agent()` ($version)', ({ version }) => {
+      const agent = new npmUndici.Agent();
+      install(agent, agent);
+      expect(oneAttemptDispatcher(version)).toBeDefined();
+    });
+
     it.each([
-      ['allowH2 on', false, { allowH2: true }],
-      ['allowH2 off', true, { allowH2: false }],
-      ['allowH2 unset, the default', true, {}],
-    ])('under undici 6 and 7, an Agent with %s gets a report: %s', (_, sends, options) => {
-      install(new Agent('legacy', [], options), undefined);
-      expect(oneAttemptDispatcher(UNDICI_7.version) !== undefined).toBe(sends);
-    });
-
-    it('treats an Agent whose options it cannot read as HTTP/2 on', () => {
-      const agent = new Agent('legacy', []);
-      delete (agent as Partial<Agent>)[OPTIONS];
-      install(agent, undefined);
+      ['allowH2', { allowH2: true }],
+      ['connect.allowH2', { connect: { allowH2: true } }],
+      ['a connect function', { connect: () => undefined }],
+      [
+        'a factory',
+        { factory: (origin: string, options: object) => new npmUndici.Pool(origin, options) },
+      ],
+      ['pipelining', { pipelining: 2 }],
+      ['a CA only', { connect: { ca: 'x' } }],
+    ])('refuses a genuine Agent created with %s, on either slot', (_, options) => {
+      const agent = new npmUndici.Agent(options);
+      install(agent, agent);
+      expect(oneAttemptDispatcher(UNDICI_8.version)).toBeUndefined();
       expect(oneAttemptDispatcher(UNDICI_7.version)).toBeUndefined();
     });
 
-    it('under undici 8, whose HTTP/2 replays only undelivered streams, allowH2 does not matter', () => {
-      install(undefined, new Agent('current', [], { allowH2: true }));
-      expect(oneAttemptDispatcher(UNDICI_8.version)).toBeDefined();
-    });
-
-    it("strips the report from another fetch's request to an HTTP/2 Agent on the first slot", () => {
-      const log: Log = [];
-      install(new Agent('legacy', log, { allowH2: true }), new Agent('current', log));
-      oneAttemptDispatcher(UNDICI_8.version)!.dispatch({ headers: HEADERS }, UNDICI_7.handler);
-      expect(log.map(({ name, read }) => [name, read])).toEqual([['legacy', WITHOUT_REPORT]]);
-    });
-
-    type AgentClass = new (options?: object) => object;
-    // This Node's own Agent sits in the first slot only under undici 6 and 7.
-    const genuine: [string, () => AgentClass][] = [['npm undici 7', () => npmUndici.Agent]];
-    if (Number.parseInt(process.versions.undici ?? '', 10) < 8) {
-      genuine.push(['this Node’s own', () => (saved[0] as object).constructor as AgentClass]);
-    }
-
-    it.each(genuine)('reads allowH2 from a genuine %s Agent', (_, ctor) => {
-      const Genuine = ctor();
-      install(new Genuine({ allowH2: true }), undefined);
-      expect(oneAttemptDispatcher(UNDICI_7.version)).toBeUndefined();
-      install(new Genuine(), undefined);
-      expect(oneAttemptDispatcher(UNDICI_7.version)).toBeDefined();
+    it.each([
+      ['its options', OPTIONS],
+      ['its factory', FACTORY],
+    ])('refuses an Agent whose %s it cannot read', (_, field) => {
+      const agent = new Agent('current', []);
+      delete (agent as unknown as Record<symbol, unknown>)[field];
+      install(agent, agent);
+      expect(oneAttemptDispatcher(UNDICI_8.version)).toBeUndefined();
     });
   });
 
