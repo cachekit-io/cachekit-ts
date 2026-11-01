@@ -7,8 +7,9 @@
 // calls. ir.mjs has callgrind dump its counters on entry to node::CPUUsage, so
 // the counted window holds the n ops and nothing else: module load, setup,
 // warm-up and V8's optimizing compiles stay out.
-// --wall prints the steady-state ns per op of the n iterations instead
-// (indicative only). Imports the built package: run `pnpm build` first.
+// --wall prints the ns per op of the n iterations instead (indicative only:
+// ir.mjs runs it without V8_FLAGS, so V8 may still be compiling the op in
+// the background). Imports the built package: run `pnpm build` first.
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
