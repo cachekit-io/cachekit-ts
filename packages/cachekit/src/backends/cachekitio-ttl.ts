@@ -2,6 +2,7 @@ import type { Backend, TTLBackend } from './types.js';
 import { CachekitIOCore, validateTtl, encodeKey } from './cachekitio.js';
 import { BackendError, TimeoutError } from '../errors.js';
 import { classifyHttpError, classifyNetworkError } from './error-classifier.js';
+import type { L1LatencyReport } from './telemetry.js';
 
 // Required<…getWithTtl | setWithStaleTtl>: tsc, not only tests, enforces the forwards.
 export class TTLCachekitIO
@@ -15,6 +16,10 @@ export class TTLCachekitIO
   }
   get transformsKeys(): boolean | undefined {
     return this.inner.transformsKeys;
+  }
+  /** @internal Forwarded like keyPrefix — see Backend.l1Latency. */
+  get l1Latency(): L1LatencyReport | undefined {
+    return this.inner.l1Latency;
   }
 
   get(key: string) {

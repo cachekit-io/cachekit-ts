@@ -22,6 +22,7 @@ import {
   deriveTenantKeys,
 } from '@cachekit-io/cachekit-core-wasm';
 import * as core from '@cachekit-io/cachekit-core-wasm';
+import * as cloudflareWorkers from 'cloudflare:workers';
 import type { CacheOptions, SecureCache } from '../types/cache.js';
 import type { CachekitIOBackendConfig } from '../backends/types.js';
 import { cachekitio } from '../backends/cachekitio-factory.js';
@@ -30,11 +31,19 @@ import { EncryptionManagerCore, type EncryptionBindings } from '../encryption/ma
 import { webCryptoEncryptionBindings } from './webcrypto.js';
 import { ConfigurationError } from '../errors.js';
 import { KEY_GEN_MAX_SIZE } from '../constants.js';
+import { setTelemetryBindingsReader } from '../backends/telemetry.js';
 import {
   nobleBlake2b256Hex,
   setKeyHashBinding,
   type Blake2b256Hex,
 } from '../serialization/blake2b.js';
+
+// CACHEKIT_TELEMETRY is read from the Worker's bindings as well as from
+// process.env (API-94). The module is read through its namespace, so a workerd
+// from before the importable env loads this entry and reads no binding.
+setTelemetryBindingsReader(
+  () => (cloudflareWorkers as { env?: Record<string, unknown> }).env?.CACHEKIT_TELEMETRY
+);
 
 let keyHashBindingTried = false;
 

@@ -23,6 +23,20 @@ import timers from 'node:timers';
 setKeyHashBinding((core as { blake2b256Hex?: Blake2b256Hex }).blake2b256Hex);
 
 /**
+ * The protocol names `process.hrtime.bigint()` as the qualifying L1-latency
+ * clock on Node.js (spec/saas-api.md, API-82). Bun and Deno implement it too,
+ * and load this entry, but a clock qualifies only on a runtime the docs name,
+ * so they time no L1 hit.
+ */
+const onNodeJs =
+  typeof process !== 'undefined' &&
+  typeof process.versions?.node === 'string' &&
+  process.versions.bun === undefined &&
+  process.versions.deno === undefined &&
+  !('Bun' in globalThis) &&
+  !('Deno' in globalThis);
+
+/**
  * Node runtime: Redis + CachekitIO backends, NAPI bindings for the
  * ByteStorage envelope and encryption, Redis Pub/Sub invalidation.
  * The Workers entrypoint (workers/index.ts) supplies its own runtime —
@@ -67,6 +81,7 @@ const nodeRuntime: CacheRuntime = {
     timer.unref();
     return () => timers.clearTimeout(timer);
   },
+  l1HitClock: onNodeJs ? () => process.hrtime.bigint() : undefined,
 };
 
 /**

@@ -49,6 +49,8 @@ try {
     conditions: ['workerd'],
     loader: { '.wasm': 'binary' },
     plugins: [guardPlugin],
+    // workerd's built-in modules, as wrangler leaves them.
+    external: ['cloudflare:*'],
     write: false,
     logLevel: 'silent',
   });

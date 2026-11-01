@@ -863,9 +863,46 @@ The logger may be `async`. If it throws or its promise rejects, the SDK reports
 that failure, with the original message, to `console.error`; it never reaches
 the cache operation and never surfaces as an unhandled rejection.
 
-With the CachekitIO backend, the `X-CacheKit-L1-*` telemetry headers are wired
-automatically from the cache's live L1/L2 hit and miss counters; pass your own
-`metricsProvider` in the backend config to override. Those counters, and the
+### Telemetry (CachekitIO only)
+
+Only the CachekitIO backend sends telemetry, and only to the API it is
+configured with; Redis, Memcached, File, Workers KV, the Cache API and an
+L1-only cache send nothing anywhere. While telemetry is on, the default during
+the closed beta, each CachekitIO request carries these optional headers:
+
+- the session headers: `X-CacheKit-Session-ID` and `-Session-Start`, and the
+  cache's hit and miss counters `X-CacheKit-L1-Hits`, `-L2-Hits`, `-Misses`
+  and `-L1-Hit-Rate`, the share of all counted operations L1 served,
+  `L1-Hits / (L1-Hits + L2-Hits + Misses)`;
+- unreleased: the L1 hit-latency report, `X-CacheKit-L1-Latency-Buckets`,
+  `-Sum-Ns` and `-One-In`. On Node.js the cache times one call in 1024,
+  chosen at random before its outcome is known, with `process.hrtime.bigint()`;
+  each timed call that L1 serves adds its whole duration to a histogram of
+  sixteen buckets. A report rides the backend's next request, never its health
+  check, and is never sent twice. Cloudflare Workers, Bun and Deno send no
+  latency report: Workers' clock does not advance during an in-memory hit, and
+  the protocol names no clock for the other two.
+
+The counters are wired automatically when the backend is given as a config
+(`backend: { apiKey }` or `createCache.io`); a `cachekitio()` instance passed
+as `backend` gets them only from its own `metricsProvider`, and the Workers
+entry wires none. The latency report needs no wiring: it works in both forms.
+
+Turn telemetry off (unreleased) with `telemetry: false` in the CachekitIO
+backend config or `createCache.io` options, or with the environment variable
+`CACHEKIT_TELEMETRY` set to `false`, `0`, `off` or `no` (case-insensitive;
+`true`, `1`, `on` and `yes` mean on, and any other value means off, with one
+warning). On Workers the variable is read from `process.env` and from the
+Worker's bindings. Off from either control wins over on from the other, and
+both are read once, when the backend is constructed. With telemetry off a
+request carries none of the headers above, only `X-CacheKit-L1-Status`, which
+the API requires, and the `User-Agent` below.
+
+```typescript
+createCache({ backend: { apiKey: process.env.CACHEKIT_API_KEY!, telemetry: false } });
+```
+
+Pass your own `metricsProvider` in the backend config to override the counters. Those counters, and the
 Prometheus hit and miss counters, count one outcome per read: a plain `get()` or
 `exists()` counts a hit by the layer that served it, or a miss. A `wrap()` call
 also counts one outcome: an L1 or L2 hit by the layer that served its value

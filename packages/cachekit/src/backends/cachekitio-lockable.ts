@@ -2,6 +2,7 @@ import type { Backend, LockableBackend } from './types.js';
 import { CachekitIOCore, encodeKey } from './cachekitio.js';
 import { BackendError, TimeoutError } from '../errors.js';
 import { classifyHttpError, classifyNetworkError } from './error-classifier.js';
+import type { L1LatencyReport } from './telemetry.js';
 
 /**
  * Lock capability token travels in this request header, never the query string
@@ -23,6 +24,10 @@ export class LockableCachekitIO
   }
   get transformsKeys(): boolean | undefined {
     return this.inner.transformsKeys;
+  }
+  /** @internal Forwarded like keyPrefix — see Backend.l1Latency. */
+  get l1Latency(): L1LatencyReport | undefined {
+    return this.inner.l1Latency;
   }
 
   get(key: string) {

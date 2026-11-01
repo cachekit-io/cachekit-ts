@@ -1,3 +1,5 @@
+import type { L1LatencyReport } from './telemetry.js';
+
 /**
  * Backend interface for pluggable cache storage.
  *
@@ -197,6 +199,14 @@ export interface Backend {
    * Like `keyPrefix`, the value MUST be constant from construction onward.
    */
   readonly compressionDefault?: boolean;
+
+  /**
+   * The CachekitIO backend's L1 hit-latency report, which the cache records
+   * the L1 hits it times into; present only while that backend's telemetry
+   * is on. Delegating wrappers forward it like `keyPrefix`.
+   * @internal
+   */
+  readonly l1Latency?: L1LatencyReport;
 }
 
 /** Result of {@link Backend.getWithTtl}: the bytes plus remaining lifetime. */
@@ -361,6 +371,16 @@ export interface CachekitIOBackendConfig {
   allowCustomHost?: boolean;
   /** Provider function for L1 cache metrics (used in request headers) */
   metricsProvider?: () => L1Metrics | null;
+  /**
+   * The telemetry switch (protocol spec/saas-api.md § Telemetry switch). Left
+   * `undefined`, the `CACHEKIT_TELEMETRY` environment variable decides, and
+   * telemetry is on when that is unset too. `false`, or `CACHEKIT_TELEMETRY`
+   * set to `false`, `0`, `off` or `no`, turns it off: requests then carry no
+   * session, counter, hit-rate or L1-latency header, only
+   * `X-CacheKit-L1-Status` and the `User-Agent`. Off wins over on from either
+   * control. Both are read once, when the backend is constructed.
+   */
+  telemetry?: boolean;
 }
 
 export interface L1Metrics {

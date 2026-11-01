@@ -384,6 +384,45 @@ export const WORKLOADS = {
     50,
     20
   ),
+  // wrap-l1-hit on a CachekitIO backend, configured as `{ apiKey }`, so its
+  // telemetry is on and one call in L1_LATENCY_ONE_IN is timed into the
+  // backend's latency report. It sets no option a build before the report
+  // lacks, so the gate measures it on the base too. fetch is stubbed: the
+  // warm-up's miss and write never leave the process, and the measured hits
+  // make no request.
+  'wrap-l1-hit-cachekitio': {
+    n: 10_000,
+    setup: async () => {
+      globalThis.fetch = async (_url, init) =>
+        new Response(null, { status: init?.method === 'GET' ? 404 : 200 });
+      const { createCache } = await load('index.js');
+      const cache = createCache({ backend: { apiKey: 'ck_live_bench' }, metrics: false });
+      const getUser = cache.wrap(async (id, kind, opts) => ({ id, kind, opts }), {
+        namespace: 'bench',
+        ttl: 3600,
+      });
+      return async () => {
+        sink += (await getUser(...ARGS)).id;
+      };
+    },
+  },
+  // wrap-l1-hit-int on the same CachekitIO backend: the memoised hit, where
+  // the timing draw is the largest share of a hit
+  'wrap-l1-hit-int-cachekitio': {
+    n: 20_000,
+    setup: async () => {
+      globalThis.fetch = async (_url, init) =>
+        new Response(null, { status: init?.method === 'GET' ? 404 : 200 });
+      const { createCache } = await load('index.js');
+      const cache = createCache({ backend: { apiKey: 'ck_live_bench' }, metrics: false });
+      const getThing = cache.wrap(async (id) => ({ id }), { namespace: 'bench', ttl: 3600 });
+      for (let i = 0; i < 64; i++) await getThing(i);
+      let i = 0;
+      return async () => {
+        sink += (await getThing(i++ & 63)).id;
+      };
+    },
+  },
   // the README benchmark's hit (bench/runtime/probe.mjs): one integer argument,
   // cycling over 64 values that are all in L1
   'wrap-l1-hit-int': {
