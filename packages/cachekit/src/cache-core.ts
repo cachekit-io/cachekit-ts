@@ -1569,8 +1569,10 @@ export class CacheImpl implements SecureCache {
    * Workers when the key has an op queued. It is never put on a caller's
    * path: the revalidation runs in the background already.
    *
-   * On Node it queues behind the key's pending ops (it fills no L1, so
-   * queuing cannot leave L1 older than L2), counts against the bound, and
+   * On Node it queues behind the key's pending ops and the op in flight on
+   * it (it fills no L1, so queuing cannot leave L1 older than L2; skipping
+   * the op in flight would let a later op queued behind it overtake that
+   * op), counts against the bound, and
    * becomes the key's tail: a later set(), delete() or invalidate('params')
    * orders after it, and close() drains it.
    *
@@ -1601,7 +1603,7 @@ export class CacheImpl implements SecureCache {
     // On Workers no tail exists here (checked above), so inKeyOrder counts it in flight.
     if (this.swrRequiresWaitUntil) return this.inKeyOrder(key, send);
     return this.startPendingWrite(key, bytes, () => {
-      const tail = this.keyTails.get(key);
+      const tail = this.keyTails.get(key) ?? this.inFlightTail(key);
       return tail ? tail.then(send) : send();
     });
   }
