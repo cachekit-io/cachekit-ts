@@ -452,8 +452,9 @@ either order, and L1 can serve the older value for up to its TTL.
   `cache.withExecutionContext(ctx)`, which registers the write with
   `ctx.waitUntil`. workerd cancels unregistered work at response return;
 - while the key already has a write or delete pending or in flight in this
-  process: the write runs on the caller's path (behind a pending one,
-  alongside one in flight) and fills L1 after its L2 write, as with the
+  process: the write runs on the caller's path (behind a pending one, and on
+  Node behind one in flight too; on Workers alongside one in flight) and
+  fills L1 after its L2 write, as with the
   option off, so a write-behind never fills L1 ahead of an earlier write. On Workers
   a background write queued there would also spend workerd's 30 s
   `waitUntil` budget waiting and be cancelled as it sends; for that reason an
