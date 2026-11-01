@@ -887,12 +887,17 @@ the closed beta, each CachekitIO request carries these optional headers:
   own `Agent` as constructed: with any other (`setGlobalDispatcher`), such as
   a `RetryAgent`, a `MockAgent`, a proxy or an `Agent` composed with
   interceptors, the SDK cannot rule out a resend, so the report waits and no
-  latency headers are sent. A report can be lost, never sent twice: a request
-  the `Agent` has to queue goes without its report. An `Agent` with a
+  latency headers are sent. On Node.js 22 and 24 the same holds for an
+  `Agent` created with `allowH2: true`: the HTTP/2 client of Node.js 22's
+  undici writes requests in flight again. A report can be lost: a request the
+  `Agent` has to queue goes without its report. An `Agent` with a
   `connections` limit queues while every connection is busy, and on Node.js
   26, whose undici probes an `https:` API for HTTP/2, requests made while a
   new connection is being set up queue too, so reports go missing more often
-  around a cold start or a reconnect. The SDK
+  around a cold start or a reconnect. Reports are also lost when
+  `globalThis.fetch` is npm undici's `fetch` of another major than the
+  undici Node.js bundles and the dispatcher that `fetch` reads is not
+  undici's own `Agent`. The SDK
   cannot see resend code you write into your own transport, such as an
   `Agent` factory or interceptor that copies a request's headers and resends
   them, or a `fetch` wrapper that retries with a new init; such code must not

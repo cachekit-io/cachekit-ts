@@ -10,7 +10,11 @@
  *   the options to resend them, as undici's retry interceptor does;
  * - an HTTP/1.1 client with pipelining on writes a request behind a running
  *   one, and when the connection drops it fails the head and writes the rest
- *   again on a new one.
+ *   again on a new one;
+ * - undici 6's HTTP/2 client, when any stream ends, puts every other stream
+ *   still in flight back in its queue and writes it again, whatever its
+ *   idempotency. That takes an Agent created with `allowH2` and `pipelining`
+ *   above 1: a client's default pipelining of 1 runs one stream at a time.
  *
  * So a report is sent only through exactly undici's Agent, and only on the
  * first attempt fetch dispatches. That attempt is not idempotent, so a client
@@ -19,13 +23,18 @@
  * headers are a copy from which the report is removed as soon as dispatch
  * returns, so a layer that kept the options to resend them finds no report.
  * Any later attempt, and any other dispatcher, gets the request without it.
- * HTTP/2 replays only a stream the server refused or, after GOAWAY, never
- * processed: an attempt known not to have been delivered, which the spec
- * allows.
  *
- * What this cannot see, and when a report is lost, is in the README's
- * Telemetry section. Detecting an Agent's custom factory would mean reading
- * undici's private fields, and would still leave a retrying fetch wrapper.
+ * Over HTTP/2, undici 8 replays only a stream the server refused or, after
+ * GOAWAY, never processed: an attempt known not to have been delivered, which
+ * the spec allows. undici 7's GOAWAY handler requeues every stream behind the
+ * head, but its client never runs a non-idempotent request beside another, so
+ * the one that carries a report is the head, and fails. undici 6 and 7 share
+ * the first slot, and an Agent there gets a report only while its options say
+ * HTTP/2 is off (`allowH2`, off by default in both); options it cannot read
+ * count as on. That reads the Agent's private options, under the symbol undici
+ * 6 to 8 all describe as 'options'. Detecting an Agent's custom factory the
+ * same way would still leave a retrying fetch wrapper, so what this cannot
+ * see, and when a report is lost, is in the README's Telemetry section.
  *
  * Node keeps undici's global dispatcher under the symbols undici registers it
  * with. The fetch of undici 6 and 7 reads the first and passes handlers of the
@@ -79,6 +88,22 @@ function deliversOnce(dispatcher: Dispatcher): boolean {
   );
 }
 
+/** False unless the Agent's private options say HTTP/2 is off. */
+function http1Only(agent: Dispatcher): boolean {
+  const key = Object.getOwnPropertySymbols(agent).find(
+    (symbol) => symbol.description === 'options'
+  );
+  const options: unknown = key === undefined ? undefined : Reflect.get(agent, key);
+  return (
+    typeof options === 'object' && options !== null && Reflect.get(options, 'allowH2') !== true
+  );
+}
+
+/** Whether a report may go through `dispatcher`, in the global slot `key`. */
+function carriesOnce(dispatcher: Dispatcher, key: symbol): boolean {
+  return deliversOnce(dispatcher) && (key !== LEGACY || http1Only(dispatcher));
+}
+
 /** A copy of the headers fetch dispatches: the plain object undici 6 to 8 build. */
 function copyOf(headers: unknown): Record<string, unknown> {
   if (typeof headers !== 'object' || headers === null || Array.isArray(headers)) {
@@ -113,7 +138,7 @@ export function oneAttemptDispatcher(
   // undici fills its slots as it loads.
   if (slot(key) === undefined) void globalThis.Headers;
   const target = slot(key);
-  if (target === undefined || !deliversOnce(target)) return undefined;
+  if (target === undefined || !carriesOnce(target, key)) return undefined;
   let dispatched = false;
   return {
     dispatch(options, handler) {
@@ -125,7 +150,7 @@ export function oneAttemptDispatcher(
       const headers = copyOf(options.headers);
       const first = !dispatched;
       dispatched = true;
-      if (!first || !deliversOnce(to)) {
+      if (!first || !carriesOnce(to, handlerSlot)) {
         return to.dispatch({ ...options, headers: dropReport(headers) }, handler);
       }
       try {

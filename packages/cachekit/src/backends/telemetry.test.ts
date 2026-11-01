@@ -535,18 +535,17 @@ describe('latency report on the wire (API-84 to API-86)', () => {
 
     it('a pipelining Agent never writes it again after the connection drops', async () => {
       // A raw server, to see every byte. On the first connection it answers
-      // the first request's headers but holds its body: from then on undici
-      // may pipeline a GET behind it. The connection drops once a second
-      // request arrives on it, or 300 ms after the first, and undici fails the
+      // the first request's headers but holds its body: once fetch has read
+      // those headers, undici may pipeline a GET behind it. The connection
+      // drops as soon as a second request arrives on it, and undici fails the
       // head and requeues whatever it wrote behind it.
       let wire = '';
-      let connection = 0;
+      let firstSocket: Socket | undefined;
       const sockets: Socket[] = [];
-      let headServed!: () => void;
-      const served = new Promise<void>((resolve) => (headServed = resolve));
       const server = createTcpServer((socket) => {
         sockets.push(socket);
-        const first = connection++ === 0;
+        const first = firstSocket === undefined;
+        firstSocket ??= socket;
         let heads = 0;
         socket.on('error', () => {});
         socket.on('data', (chunk) => {
@@ -561,8 +560,6 @@ describe('latency report on the wire (API-84 to API-86)', () => {
           }
           if (heads === 0 && count > 0) {
             socket.write('HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\nabc');
-            setTimeout(() => socket.destroy(), 300);
-            headServed();
           }
           heads += count;
           if (heads >= 2) socket.destroy();
@@ -571,20 +568,27 @@ describe('latency report on the wire (API-84 to API-86)', () => {
       server.listen(0, '127.0.0.1');
       await once(server, 'listening');
       const { port } = server.address() as AddressInfo;
-      vi.stubGlobal('fetch', (url: string, init: RequestInit) =>
-        nodeFetch(`http://127.0.0.1:${port}${new URL(url).pathname}`, init)
-      );
+      let headersRead: Promise<unknown> | undefined;
+      vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
+        const response = nodeFetch(`http://127.0.0.1:${port}${new URL(url).pathname}`, init);
+        headersRead ??= response.catch(() => undefined);
+        return response;
+      });
       const agent = new undici.Agent({ pipelining: 2, connections: 1 });
       try {
         await keepingGlobalDispatcher(async () => {
           undici.setGlobalDispatcher(agent);
           backend = new CachekitIOCore(CONFIG);
           const plain = backend.get('ns:x'); // takes no report: there is none yet
-          await served;
-          await new Promise((resolve) => setTimeout(resolve, 30)); // its headers are read
+          await vi.waitFor(() => expect(headersRead).toBeDefined());
+          await headersRead; // fetch resolves once the response headers are read
           backend.l1Latency!.record(300);
           const carrying = backend.get('ns:a');
+          // Not pipelined, it waits behind the held response: drop the
+          // connection under it, so it goes out on the next one.
+          const drop = setTimeout(() => firstSocket?.destroy(), 500);
           await Promise.allSettled([plain, carrying]);
+          clearTimeout(drop);
         });
       } finally {
         await agent.close();
