@@ -95,7 +95,7 @@ jobs:
           cache: ${{ !inputs.ref && 'pnpm' || '' }}
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
