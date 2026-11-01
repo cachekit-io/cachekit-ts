@@ -378,7 +378,7 @@ describe('CachekitIO writer L1 bound', () => {
     const inner = fetchStub.getMockImplementation()!;
     fetchStub.mockImplementationOnce(async (url, init) => {
       vi.advanceTimersByTime(1_500);
-      return inner(url as string, init as RequestInit);
+      return inner(url, init);
     });
     await cache.set('ns:k', 'v1', { ttl: 3600 });
 
