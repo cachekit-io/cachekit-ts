@@ -52,10 +52,19 @@ const nodeFetch = globalThis.fetch;
 interface Closable {
   close(): Promise<void>;
 }
+interface Composable extends Closable {
+  compose(interceptor: unknown): Closable;
+}
 interface Undici {
-  Agent: new (options?: object) => Closable;
+  Agent: new (options?: object) => Composable;
   RetryAgent: new (agent: Closable, options: object) => Closable;
-  Pool: new (origin: string, options: object) => { compose(interceptor: unknown): Closable };
+  Pool: new (origin: string, options: object) => Composable;
+  MockAgent: new () => Closable & {
+    disableNetConnect(): void;
+    get(origin: string): {
+      intercept(options: object): { reply(status: number, body: string): void };
+    };
+  };
   interceptors: { retry(options: object): unknown };
   setGlobalDispatcher(dispatcher: Closable): void;
 }
@@ -470,14 +479,58 @@ describe('latency report on the wire (API-84 to API-86)', () => {
       ]);
     });
 
-    it('is withheld from a global dispatcher that is not undici’s own Agent: a RetryAgent', async () => {
-      const retrying = new undici.RetryAgent(new undici.Agent(), RETRY_ONCE);
-      expect(await onTheWire([503, 404], get, retrying)).toEqual([
+    it('rides the one attempt of an uncontended request through undici’s Agent', async () => {
+      expect(await onTheWire([404], get, new undici.Agent())).toEqual([
+        { sumNs: '300', authorization: auth },
+      ]);
+      expect(backend.l1Latency!.take()).toBeUndefined();
+    });
+
+    it.each([
+      ['a RetryAgent', () => new undici.RetryAgent(new undici.Agent(), RETRY_ONCE)],
+      [
+        'an Agent composed with retry',
+        () => new undici.Agent().compose(undici.interceptors.retry(RETRY_ONCE)),
+      ],
+    ])('waits while the global dispatcher is %s, which may resend', async (_, make) => {
+      expect(await onTheWire([503, 404], get, make())).toEqual([
         { sumNs: undefined, authorization: auth },
         { sumNs: undefined, authorization: auth },
       ]);
-      // Taken, and never sent: a report may be lost, never sent twice.
-      expect(backend.l1Latency!.take()).toBeUndefined();
+      // Not taken: it rides a later request, through undici's Agent.
+      expect(backend.l1Latency!.take()?.['X-CacheKit-L1-Latency-Sum-Ns']).toBe('300');
+    });
+
+    it('leaves a MockAgent alone: a body-matching intercept still sees the bytes of a set', async () => {
+      vi.stubGlobal('fetch', nodeFetch);
+      const mock = new undici.MockAgent();
+      mock.disableNetConnect();
+      const bodies: unknown[] = [];
+      mock
+        .get(API_URL)
+        .intercept({
+          path: (path: string) => path.startsWith('/v1/cache/'),
+          method: 'PUT',
+          body: (body: unknown) => bodies.push(body) > 0,
+        })
+        .reply(200, '{}');
+      try {
+        await keepingGlobalDispatcher(async () => {
+          undici.setGlobalDispatcher(mock);
+          backend = new CachekitIOCore(CONFIG);
+          backend.l1Latency!.record(300);
+          await backend.set('ns:a', new TextEncoder().encode('payload'), 60);
+        });
+      } finally {
+        await mock.close();
+      }
+      // The bytes themselves, not a stream: fetch read the mock's isMockActive.
+      const decoded = bodies.map((body) =>
+        body instanceof Uint8Array ? new TextDecoder().decode(body) : String(body)
+      );
+      expect(new Set(decoded)).toEqual(new Set(['payload']));
+      // Not undici's Agent: the report is not taken, and waits.
+      expect(backend.l1Latency!.take()?.['X-CacheKit-L1-Latency-Sum-Ns']).toBe('300');
     });
 
     it('a fetch wrapper that retries with the same init carries none of it', async () => {

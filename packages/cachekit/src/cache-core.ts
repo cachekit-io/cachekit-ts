@@ -263,15 +263,15 @@ export interface CacheRuntime {
    * Resolve a backend config union to a Backend instance. `stampede` carries
    * the cold-miss protection config so a runtime can select a lock-capable
    * variant (Node picks cachekitioWithLocking for apiKey configs when
-   * distributedLock is on); `l1Telemetry` lazily reads the cache's live
-   * hit/miss counters so a SaaS backend can auto-wire its telemetry headers.
+   * distributedLock is on); `readHitCounters` lazily reads the cache's live
+   * hit/miss counters so a CachekitIO backend can auto-wire its counter headers.
    * Runtimes without these conveniences may ignore both — users can still
    * pass a fully-configured Backend instance directly.
    */
   resolveBackend(
     config: CacheOptions['backend'],
     stampede?: StampedeConfig,
-    l1Telemetry?: () => L1Metrics
+    readHitCounters?: () => L1Metrics
   ): Backend;
   /**
    * Create the Prometheus metrics collector. Absent on platforms without
@@ -360,7 +360,7 @@ export class CacheImpl implements SecureCache {
   // Live hit/miss counters, kept whether telemetry is on or off. They feed
   // the Prometheus collector, and the X-CacheKit-L1-* counter headers of a
   // CachekitIO backend whose telemetry is on (auto-wired via resolveBackend's
-  // l1Telemetry hook below).
+  // readHitCounters hook below).
   private readonly hitCounters = { l1Hits: 0, l2Hits: 0, misses: 0 };
   /**
    * The backend's L1 hit-latency report, when its telemetry is on and the
@@ -480,7 +480,7 @@ export class CacheImpl implements SecureCache {
     // Initialize L1 cache (its maxMemory check throws ConfigurationError)
     this.l1 = options.l1?.enabled !== false ? new L1Cache(options.l1) : null;
 
-    // Initialize backend. The telemetry getter reads `this` lazily (per
+    // Initialize backend. The hit-counter reader reads `this` lazily (per
     // request), so constructor field order is safe.
     this.backend = runtime.resolveBackend(options.backend, options.stampede, () => ({
       ...this.hitCounters,

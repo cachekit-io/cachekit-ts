@@ -880,15 +880,23 @@ the closed beta, each CachekitIO request carries these optional headers:
   each timed call that L1 serves adds its whole duration to a histogram of
   sixteen buckets. A report rides the backend's next request, never its health
   check, and is never sent twice, not even when Node's `fetch` resends a
-  request on its own after a `421`, or undici's own retry handler inside its
-  `Agent` resends it. A report goes out only through undici's own `Agent`:
-  with any other global dispatcher installed (`setGlobalDispatcher`), such as
-  a `RetryAgent` or a proxy, no latency report is sent, because the SDK
-  cannot rule out that it resends. The SDK cannot see resend code you write
-  into your own transport, such as an `Agent` interceptor that copies a
-  request's headers and resends them, or a `fetch` wrapper that retries with
-  a new init; such code must not resend a request that carries the
-  `X-CacheKit-L1-Latency-*` headers. Cloudflare Workers, Bun and Deno send no
+  request on its own after a `421`, or undici's own retry handler inside an
+  `Agent`'s connection pools resends it. A report is sent only while the
+  global dispatcher is undici's own `Agent` as constructed: with any other
+  (`setGlobalDispatcher`), such as a `RetryAgent`, a `MockAgent`, a proxy or
+  an `Agent` composed with interceptors, the SDK cannot rule out a resend,
+  so the report waits and no latency headers are sent. A report can be lost:
+  an `Agent` created with a `connections` limit queues a request while every
+  connection is busy, and a queued request goes without its report. The SDK
+  cannot see resend code you write into your own transport, such as an
+  `Agent` factory or interceptor that copies a request's headers and resends
+  them, or a `fetch` wrapper that retries with a new init; such code must not
+  resend a request that carries the `X-CacheKit-L1-Latency-*` headers. A
+  `fetch` wrapper that spreads the SDK's options over its own `dispatcher`,
+  such as a proxy, has it overridden on a request that carries a report,
+  which then goes straight to
+  the configured API: set a proxy with `setGlobalDispatcher` instead, or turn
+  telemetry off. Cloudflare Workers, Bun and Deno send no
   latency report: Workers' clock does not advance during an in-memory hit, and
   the protocol names no clock for the other two.
 

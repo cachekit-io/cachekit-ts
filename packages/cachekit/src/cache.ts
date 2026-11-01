@@ -44,25 +44,25 @@ const nodeRuntime: CacheRuntime = {
   resolveBackend(
     config: CacheOptions['backend'],
     stampede?: StampedeConfig,
-    l1Telemetry?: () => L1Metrics
+    readHitCounters?: () => L1Metrics
   ) {
     if ('get' in config) {
       return config;
     }
     if ('apiKey' in config) {
       const ioConfig = config as CachekitIOBackendConfig;
-      // Auto-wire the SaaS telemetry headers from the cache's live hit/miss
+      // Auto-wire the counter headers from the cache's live hit/miss
       // counters; an explicit user-supplied provider still wins.
-      const withTelemetry: CachekitIOBackendConfig = {
+      const withCounters: CachekitIOBackendConfig = {
         ...ioConfig,
-        metricsProvider: ioConfig.metricsProvider ?? l1Telemetry,
+        metricsProvider: ioConfig.metricsProvider ?? readHitCounters,
       };
       // The plain SaaS factory has no lock capability; the distributedLock
       // opt-in selects the lockable wrapper so config-based users aren't
       // forced to construct the backend by hand.
       return stampede?.distributedLock
-        ? cachekitioWithLocking(withTelemetry)
-        : cachekitio(withTelemetry);
+        ? cachekitioWithLocking(withCounters)
+        : cachekitio(withCounters);
     }
     return redis(config as RedisBackendConfig);
   },
