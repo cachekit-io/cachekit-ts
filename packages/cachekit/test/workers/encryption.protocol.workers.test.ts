@@ -4,7 +4,7 @@
  * Byte-verifies the wasm32 cachekit-core bindings and the Workers
  * EncryptionManager against protocol/test-vectors/encryption.json (Python
  * ground truth; vendored in ./fixtures/ and sha256-pinned by the Node lane).
- * Runs inside real workerd via @cloudflare/vitest-pool-workers,
+ * Runs inside real workerd via @cloudflare/vitest-plugin,
  * so wasm instantiation itself is under test.
  *
  * Three layers:

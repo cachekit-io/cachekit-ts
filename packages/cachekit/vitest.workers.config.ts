@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { cloudflareTest } from '@cloudflare/vitest-pool-workers';
+import { cloudflareTest } from '@cloudflare/vitest-plugin';
 import { defineConfig } from 'vitest/config';
 
 /**
@@ -53,7 +53,7 @@ const mockCachekitIOService = createMockCachekitIO();
 
 /**
  * Workers test lane: runs test/workers/** inside real workerd via
- * @cloudflare/vitest-pool-workers — protocol vector suites against the wasm
+ * @cloudflare/vitest-plugin — protocol vector suites against the wasm
  * bindings, plus a CachekitIO backend smoke test. The default vitest config
  * (Node lane) excludes these tests.
  *

@@ -1,5 +1,5 @@
 // Workers-only entry. The .wasm import resolves to a WebAssembly.Module
-// under wrangler / workerd / vitest-pool-workers (CompiledWasm module rule).
+// under wrangler / workerd / @cloudflare/vitest-plugin (CompiledWasm module rule).
 // It does NOT resolve under plain Node — Node consumers use the NAPI sibling
 // @cachekit-io/cachekit-core-ts instead.
 import wasmModule from './pkg/cachekit_core_wasm_bg.wasm';
