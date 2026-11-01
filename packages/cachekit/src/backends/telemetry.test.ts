@@ -65,6 +65,21 @@ const undici = createRequire(
   createRequire(import.meta.resolve('@cloudflare/vitest-plugin')).resolve('miniflare')
 )('undici') as Undici;
 const RETRY_ONCE = { maxRetries: 1, minTimeout: 1, maxTimeout: 1 };
+const DISPATCHER_SLOTS = [
+  Symbol.for('undici.globalDispatcher.1'),
+  Symbol.for('undici.globalDispatcher.2'),
+];
+
+/** Run `body`, then put undici's global dispatcher slots back as they were. */
+async function keepingGlobalDispatcher(body: () => Promise<void>): Promise<void> {
+  void globalThis.Headers; // loads Node's undici, which sets its global dispatcher
+  const saved: unknown[] = DISPATCHER_SLOTS.map((key) => Reflect.get(globalThis, key));
+  try {
+    await body();
+  } finally {
+    DISPATCHER_SLOTS.forEach((key, i) => Reflect.set(globalThis, key, saved[i]));
+  }
+}
 
 /**
  * Answer `statuses` in turn from a real HTTP server, with `dispatcher` as
@@ -92,15 +107,12 @@ async function onTheWire(
   vi.stubGlobal('fetch', (url: string, init: RequestInit) =>
     nodeFetch(`http://127.0.0.1:${port}${new URL(url).pathname}`, init)
   );
-  void globalThis.Headers; // loads Node's undici, which sets its global dispatcher
-  const slots = globalThis as unknown as Record<symbol, unknown>;
-  const names = [Symbol.for('undici.globalDispatcher.1'), Symbol.for('undici.globalDispatcher.2')];
-  const saved = names.map((name) => slots[name]);
-  if (dispatcher) undici.setGlobalDispatcher(dispatcher);
   try {
-    await body();
+    await keepingGlobalDispatcher(async () => {
+      if (dispatcher) undici.setGlobalDispatcher(dispatcher);
+      await body();
+    });
   } finally {
-    names.forEach((name, i) => (slots[name] = saved[i]));
     await dispatcher?.close();
     server.closeAllConnections();
     server.close();
@@ -470,22 +482,14 @@ describe('latency report on the wire (API-84 to API-86)', () => {
   });
 
   it('stays in place while no dispatcher can keep it to one attempt', async () => {
-    const slots = globalThis as unknown as Record<symbol, unknown>;
-    const names = [
-      Symbol.for('undici.globalDispatcher.1'),
-      Symbol.for('undici.globalDispatcher.2'),
-    ];
-    const saved = names.map((name) => slots[name]);
-    for (const name of names) slots[name] = undefined;
-    try {
+    await keepingGlobalDispatcher(async () => {
+      for (const key of DISPATCHER_SLOTS) Reflect.set(globalThis, key, undefined);
       const backend = new CachekitIOCore(CONFIG);
       backend.l1Latency!.record(300);
       await backend.get('ns:a');
       expect(latencyOf(sentHeaders())).toEqual([undefined, undefined, undefined]);
       expect(backend.l1Latency!.take()?.['X-CacheKit-L1-Latency-Sum-Ns']).toBe('300');
-    } finally {
-      names.forEach((name, i) => (slots[name] = saved[i]));
-    }
+    });
   });
 
   it('is consumed by a 5xx too: nothing is added back', async () => {

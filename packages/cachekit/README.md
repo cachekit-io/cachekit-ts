@@ -899,9 +899,10 @@ backend config or `createCache.io` options, or with the environment variable
 `true`, `1`, `on` and `yes` mean on, and any other value means off, with one
 warning). On Workers the variable is read from `process.env` and from the
 Worker's bindings, through `import { env } from 'cloudflare:workers'`. A
-variable the SDK cannot read counts as off, with one warning: under the
-`disallow_importable_env` compatibility flag the bindings are hidden, so
-telemetry is off there, and so it is on Deno without `--allow-env`. Off from either control wins over on from the other, and
+variable the SDK cannot read counts as off, with one warning. Telemetry is
+therefore off in two cases: under the `disallow_importable_env`
+compatibility flag, which hides the bindings, and on Deno without
+`--allow-env`. Off from either control wins over on from the other, and
 both are read once, when the backend is constructed. With telemetry off a
 request carries none of the headers above, only `X-CacheKit-L1-Status`, which
 the API requires, and the `User-Agent` below.

@@ -10,8 +10,13 @@ import { oneAttemptDispatcher } from './one-attempt-dispatcher.js';
 
 const LEGACY = Symbol.for('undici.globalDispatcher.1');
 const CURRENT = Symbol.for('undici.globalDispatcher.2');
-const slots = globalThis as unknown as Record<symbol, unknown>;
-const saved = { legacy: undefined as unknown, current: undefined as unknown };
+let saved: unknown[] = [];
+
+/** Put dispatchers in undici's two global slots, as undici 6 to 8 fill them. */
+function install(legacy: unknown, current: unknown): void {
+  Reflect.set(globalThis, LEGACY, legacy);
+  Reflect.set(globalThis, CURRENT, current);
+}
 
 const HEADERS = {
   Authorization: 'Bearer x',
@@ -45,14 +50,10 @@ class RetryAgent extends Agent {}
 
 beforeEach(() => {
   void globalThis.Headers; // loads Node's undici, which sets its global dispatcher
-  saved.legacy = slots[LEGACY];
-  saved.current = slots[CURRENT];
+  saved = [Reflect.get(globalThis, LEGACY), Reflect.get(globalThis, CURRENT)];
 });
 
-afterEach(() => {
-  slots[LEGACY] = saved.legacy;
-  slots[CURRENT] = saved.current;
-});
+afterEach(() => install(saved[0], saved[1]));
 
 describe('oneAttemptDispatcher', () => {
   it.each([
@@ -62,8 +63,7 @@ describe('oneAttemptDispatcher', () => {
     'hands a %s handler to the dispatcher fetch reads: the report on the first attempt only',
     (_, handler, expected) => {
       const log: Log = [];
-      slots[LEGACY] = new Agent('legacy', log);
-      slots[CURRENT] = new Agent('current', log);
+      install(new Agent('legacy', log), new Agent('current', log));
       const dispatcher = oneAttemptDispatcher()!;
       dispatcher.dispatch({ headers: HEADERS }, handler);
       dispatcher.dispatch({ headers: HEADERS }, handler);
@@ -76,7 +76,7 @@ describe('oneAttemptDispatcher', () => {
 
   it('takes the report out of the headers it handed on, once dispatch returns', () => {
     const log: Log = [];
-    slots[LEGACY] = slots[CURRENT] = new Agent('current', log);
+    install(new Agent('current', log), new Agent('current', log));
     oneAttemptDispatcher()!.dispatch({ headers: HEADERS }, { onRequestStart() {} });
     // A layer that kept the options to resend them, as undici's retry handler
     // does, reads them again without the report.
@@ -88,22 +88,21 @@ describe('oneAttemptDispatcher', () => {
 
   it('withholds the report from a global dispatcher other than undici’s Agent', () => {
     const log: Log = [];
-    slots[LEGACY] = slots[CURRENT] = new RetryAgent('retry', log);
+    install(new RetryAgent('retry', log), new RetryAgent('retry', log));
     oneAttemptDispatcher()!.dispatch({ headers: HEADERS }, { onRequestStart() {} });
     expect(log.map(({ read }) => read)).toEqual([WITHOUT_REPORT]);
   });
 
   it('falls back to the legacy dispatcher where undici 6 sets no other', () => {
     const log: Log = [];
-    slots[LEGACY] = new Agent('legacy', log);
-    slots[CURRENT] = undefined;
+    install(new Agent('legacy', log), undefined);
     oneAttemptDispatcher()!.dispatch({ headers: HEADERS }, { onRequestStart() {} });
     expect(log.map(({ name, read }) => [name, read])).toEqual([['legacy', HEADERS]]);
   });
 
   it('refuses headers it cannot read, rather than send the report it cannot remove', () => {
     const log: Log = [];
-    slots[LEGACY] = slots[CURRENT] = new Agent('current', log);
+    install(new Agent('current', log), new Agent('current', log));
     const raw = Object.entries(HEADERS).flat();
     expect(() =>
       oneAttemptDispatcher()!.dispatch({ headers: raw }, { onRequestStart() {} })
@@ -111,9 +110,13 @@ describe('oneAttemptDispatcher', () => {
     expect(log).toHaveLength(0);
   });
 
+  it('treats a slot holding something other than a dispatcher as empty', () => {
+    install({ dispatch: 'not a function' }, 42);
+    expect(oneAttemptDispatcher()).toBeUndefined();
+  });
+
   it('makes no dispatcher without a global one to hand to: the report waits', () => {
-    slots[LEGACY] = undefined;
-    slots[CURRENT] = undefined;
+    install(undefined, undefined);
     expect(oneAttemptDispatcher()).toBeUndefined();
   });
 });

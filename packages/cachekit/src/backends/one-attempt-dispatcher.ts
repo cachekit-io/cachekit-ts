@@ -33,13 +33,19 @@ const LEGACY = Symbol.for('undici.globalDispatcher.1');
 const CURRENT = Symbol.for('undici.globalDispatcher.2');
 const REPORT_HEADER = /^x-cachekit-l1-latency-/i;
 
-function slots(): Record<symbol, Dispatcher | undefined> {
-  return globalThis as unknown as Record<symbol, Dispatcher | undefined>;
+/** The dispatcher in one of undici's global slots, if what is there is one. */
+function slot(key: symbol): Dispatcher | undefined {
+  const value: unknown = Reflect.get(globalThis, key);
+  return typeof value === 'object' &&
+    value !== null &&
+    typeof Reflect.get(value, 'dispatch') === 'function'
+    ? (value as Dispatcher)
+    : undefined;
 }
 
 /** The dispatcher Node's fetch would use, for a handler of the API it passes. */
 function globalDispatcher(handler: object): Dispatcher | undefined {
-  return ('onRequestStart' in handler && slots()[CURRENT]) || slots()[LEGACY];
+  return ('onRequestStart' in handler && slot(CURRENT)) || slot(LEGACY);
 }
 
 /**
@@ -74,8 +80,8 @@ function dropReport(headers: Record<string, unknown>): Record<string, unknown> {
 export function oneAttemptDispatcher(): Dispatcher | undefined {
   // Node loads undici on the first use of fetch or one of its classes, and
   // undici sets its global dispatcher as it loads.
-  if (slots()[LEGACY] === undefined) void globalThis.Headers;
-  if (slots()[LEGACY] === undefined && slots()[CURRENT] === undefined) return undefined;
+  if (slot(LEGACY) === undefined) void globalThis.Headers;
+  if (slot(LEGACY) === undefined && slot(CURRENT) === undefined) return undefined;
   let dispatched = false;
   return {
     dispatch(options, handler) {
