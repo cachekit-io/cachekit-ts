@@ -81,6 +81,7 @@ describe('config errors throw before the backend is resolved', () => {
       createByteStorage: () => new ByteStorage(),
       createEncryption: (config) =>
         new EncryptionManager(config.masterKey, config.tenantId, config.previousMasterKeys),
+      createMetrics: (config) => new CacheMetrics(config),
     };
     return { runtime, resolveBackend };
   }
@@ -118,6 +119,11 @@ describe('config errors throw before the backend is resolved', () => {
       'invalidation without Pub/Sub',
       { invalidation: { redis: createMockRedis() } },
       /Cross-instance invalidation is not supported in this runtime/,
+    ],
+    [
+      'metrics.defaultLabels reserved key',
+      { metrics: { defaultLabels: { layer: 'edge' } } },
+      /metrics\.defaultLabels cannot set layer/,
     ],
   ])('%s: throws ConfigurationError without calling resolveBackend', (_name, extra, message) => {
     const { runtime, resolveBackend } = fakeRuntime();
