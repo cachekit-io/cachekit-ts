@@ -61,25 +61,31 @@ describe.skipIf(!process.features.require_module)('built CommonJS entry', () => 
   });
 
   // An ES module app that loads the package through a CommonJS module, then
-  // imports noble itself: up to Node 22.17 and on 23, the import-time
-  // require(esm) fails while the app's graph is still loading noble, and noble
-  // must then load on first use.
-  it('loads from a CommonJS module the app imports before @noble/hashes', async () => {
-    const { key, fileName } = await runProbe('noble-cjs-after-probe.mjs');
-    expect(key).toBe(probeKey);
-    expect(fileName).toBe(bytesToHex(blake2b(utf8ToBytes(key), { dkLen: 16 })));
-  });
+  // imports noble itself. On Node 22.15, 22.16 and 23 the import-time
+  // require(esm) returns noble before its bindings exist, so the binding is
+  // read at each call, never at load. On 22.12 to 22.14 that require throws,
+  // as a static require of noble did before.
+  it.skipIf(/^22\.1[234]\./.test(process.versions.node))(
+    'loads from a CommonJS module the app imports before @noble/hashes',
+    async () => {
+      const { key, fileName } = await runProbe('noble-cjs-after-probe.mjs');
+      expect(key).toBe(probeKey);
+      expect(fileName).toBe(bytesToHex(blake2b(utf8ToBytes(key), { dkLen: 16 })));
+    }
+  );
 });
 
 // The ES module build imports noble statically on every Node version, so noble
-// is evaluated before the package's own code, as the app's graph orders it.
-it('imports @noble/hashes in the ES module build', async () => {
-  const { stdout } = await run(
-    process.execPath,
-    [join(pkgDir, 'test', 'node-entry', 'noble-preload-probe.mjs')],
-    { timeout: 20_000 }
-  );
-  expect(stdout.trim()).toBe('function');
+// is evaluated before the package's own code, as the app's graph orders it,
+// and never goes through require(esm).
+it('imports @noble/hashes statically in the ES module build', async () => {
+  const probe = (await runProbe('noble-probe.mjs', ['esm', entries.esm])) as {
+    afterJsHash: boolean;
+    key: string;
+    fileName: string;
+  };
+  expect(probe).toMatchObject({ afterJsHash: false, key: probeKey });
+  expect(probe.fileName).toBe(bytesToHex(blake2b(utf8ToBytes(probe.key), { dkLen: 16 })));
 });
 
 // A lazy require(esm) fails here up to Node 22.17 and on 23: noble is linked

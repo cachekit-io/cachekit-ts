@@ -1,11 +1,12 @@
 // Loads a built Node entry in this fresh process and reports whether
-// @noble/hashes was loaded after the import, after a key was made, and after
-// a hash only JS computes (a File backend name), with the key and the name:
+// @noble/hashes was loaded through require(esm) after the import, after a key
+// was made, and after a hash only JS computes (a File backend name), with the
+// key and the name:
 //
 //   node noble-probe.mjs <esm|cjs> <path to dist/index.js or dist/cjs/index.js>
 //
-// The package loads @noble/hashes, an ES module, through require(esm), and
-// Node lists a module loaded that way in the CommonJS module cache.
+// Node lists a module loaded through require(esm) in the CommonJS module
+// cache, and one loaded by a static import not at all.
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';

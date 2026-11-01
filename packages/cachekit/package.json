@@ -47,7 +47,7 @@
     }
   },
   "imports": {
-    "#noble-preload": "@noble/hashes/blake2.js"
+    "#noble-blake2": "@noble/hashes/blake2.js"
   },
   "files": [
     "dist",
