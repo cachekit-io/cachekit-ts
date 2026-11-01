@@ -46,7 +46,7 @@ allowBuilds:
   cpu-features: true
   protobufjs: true
   ssh2: true
-  # Workers test lane (vitest-pool-workers): esbuild's install script writes
+  # Workers test lane (@cloudflare/vitest-plugin): esbuild's install script writes
   # its platform binary; workerd ships the runtime binary the pool executes.
   esbuild: true
   workerd: true
