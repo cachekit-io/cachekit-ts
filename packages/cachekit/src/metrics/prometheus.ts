@@ -68,20 +68,25 @@ function flushPendingCounts(counter: Counter, cells: Map<string, PendingCount>):
 }
 
 /**
- * Make the counter's reset() and remove() flush its pending counts first, so
- * they clear counts recorded before them, as they would had each hit been an
- * inc(). registry.resetMetrics() calls reset() on every metric. They then
- * detach every cell, all at zero: a cell whose collectors are gone is no
- * longer held, as prom-client holds no series it has cleared, and a live
- * collector attaches its cell again at its next count (see reattach()).
+ * Make the metric's reset() and remove() flush its pending counts or values
+ * first, so they clear what was recorded before them, as they would had each
+ * hit been an inc() or each state a set(). registry.resetMetrics() calls
+ * reset() on every metric. They then detach every cell, all flushed: a cell
+ * whose collectors are gone is no longer held, as prom-client holds no series
+ * it has cleared, and a live collector attaches its cell again at its next
+ * write (see reattach() and reattachValue()).
  */
-function flushBeforeClearing(counter: Counter, cells: Map<string, PendingCount>): void {
-  const clearing = counter as unknown as Record<string, unknown>;
+function flushBeforeClearing<M>(
+  metric: M,
+  cells: Map<string, { attached: boolean }>,
+  flush: (metric: M) => void
+): void {
+  const clearing = metric as unknown as Record<string, unknown>;
   for (const method of ['reset', 'remove']) {
     const clear = clearing[method];
     if (typeof clear !== 'function') continue;
-    clearing[method] = function (this: Counter, ...args: unknown[]): unknown {
-      flushPendingCounts(this, cells);
+    clearing[method] = function (this: M, ...args: unknown[]): unknown {
+      flush(this);
       for (const cell of cells.values()) cell.attached = false;
       cells.clear();
       return clear.apply(this, args);
@@ -114,11 +119,78 @@ function reattach(cell: PendingCount): PendingCount {
  */
 function pendingCount(counter: Counter, labels: Record<string, string>): PendingCount | null {
   const cells = pendingCounts.get(counter);
-  const declared = (counter as { labelNames?: readonly string[] }).labelNames;
-  if (!cells || !declared || !Object.keys(labels).every((l) => declared.includes(l))) return null;
-  const key = JSON.stringify(Object.entries(labels).sort(([a], [b]) => a.localeCompare(b)));
+  if (!cells || !declaresLabels(counter, labels)) return null;
+  const key = labelsKey(labels);
   let cell = cells.get(key);
   if (!cell) cells.set(key, (cell = { labels, key, cells, n: 0, attached: true }));
+  return cell;
+}
+
+/** A gauge's value for one label set, as PendingCount is a counter's count. */
+interface PendingValue {
+  readonly labels: Record<string, string>;
+  /** Its key in `cells`. */
+  readonly key: string;
+  /** The gauge's cells; this one is in it while `attached`. */
+  readonly cells: Map<string, PendingValue>;
+  value: number;
+  /** Set since the gauge last read it. */
+  set: boolean;
+  attached: boolean;
+}
+
+/**
+ * Values set per gauge this module created, one per label set and shared by
+ * every collector writing to that gauge, so the last write wins at scrape as
+ * it would had each been a set(). As pendingCounts, for a gauge.
+ */
+const pendingValues = new WeakMap<object, Map<string, PendingValue>>();
+
+/** Set `gauge` to each value set since it last read them. */
+function flushPendingValues(gauge: Gauge, cells: Map<string, PendingValue>): void {
+  for (const cell of cells.values()) {
+    if (!cell.set) continue;
+    cell.set = false;
+    try {
+      gauge.set(cell.labels, cell.value);
+    } catch (error) {
+      // Unreachable once pendingValue() has checked the labels: as above.
+      const name = (gauge as { name?: string }).name;
+      logError(`[cachekit] metrics: dropped a pending value on ${name}:`, error);
+    }
+  }
+}
+
+/**
+ * Attach a value cell a reset or remove detached, about to be set, and return
+ * the cell its collector keeps: itself, back in its gauge's cells, or the one
+ * a newer collector has put there for the same labels.
+ */
+function reattachValue(cell: PendingValue): PendingValue {
+  const live = cell.cells.get(cell.key);
+  if (live !== undefined) return live;
+  cell.attached = true;
+  cell.cells.set(cell.key, cell);
+  return cell;
+}
+
+/** The labels' key in a counter's or gauge's cells. */
+const labelsKey = (labels: Record<string, string>): string =>
+  JSON.stringify(Object.entries(labels).sort(([a], [b]) => a.localeCompare(b)));
+
+/** Whether `metric` declares every one of `labels`, so an inc() or set() cannot throw on them. */
+function declaresLabels(metric: object, labels: Record<string, string>): boolean {
+  const declared = (metric as { labelNames?: readonly string[] }).labelNames;
+  return declared !== undefined && Object.keys(labels).every((l) => declared.includes(l));
+}
+
+/** The pending value for `labels` on `gauge`, or null, as pendingCount(). */
+function pendingValue(gauge: Gauge, labels: Record<string, string>): PendingValue | null {
+  const cells = pendingValues.get(gauge);
+  if (!cells || !declaresLabels(gauge, labels)) return null;
+  const key = labelsKey(labels);
+  let cell = cells.get(key);
+  if (!cell) cells.set(key, (cell = { labels, key, cells, value: 0, set: false, attached: true }));
   return cell;
 }
 
@@ -156,6 +228,14 @@ export interface MetricsCollector {
   startTimer(operation: string): Promise<() => void>;
   updateL1Stats(entries: number, memoryBytes: number): Promise<void>;
   updateCircuitBreakerState(state: 'closed' | 'open' | 'half-open'): Promise<void>;
+  /**
+   * The cache's per-attempt path, without promises, as countHit(): count one
+   * backend attempt, start its duration timer, and publish the circuit-breaker
+   * state after each op.
+   */
+  countOperation(operation: string, status: 'success' | 'error'): void;
+  timeOperation(operation: string): () => void;
+  setCircuitBreakerState(state: 'closed' | 'open' | 'half-open'): void;
 }
 
 /**
@@ -214,6 +294,11 @@ export class CacheMetrics implements MetricsCollector {
   private l1Hits: PendingCount | null = null;
   private l2Hits: PendingCount | null = null;
   private misses: PendingCount | null = null;
+  // Pending operation counts by operation, one map per status
+  private readonly successes = new Map<string, PendingCount>();
+  private readonly failures = new Map<string, PendingCount>();
+  // The breaker state's pending value (see pendingValues)
+  private circuitBreakerState: PendingValue | null = null;
 
   /**
    * Settles true once prom-client has loaded and every metric is registered,
@@ -278,7 +363,7 @@ export class CacheMetrics implements MetricsCollector {
         if (existing) return existing as M;
         return new Ctor({ ...cfg, registers: [registry] });
       };
-      // A counter that reads its pending hit or miss counts when scraped.
+      // A counter that reads its pending counts when scraped.
       const getOrCreateCounted = (cfg: Record<string, unknown>): Counter => {
         const existing = registry.getSingleMetric?.(cfg.name as string);
         if (existing) return existing as Counter;
@@ -291,14 +376,30 @@ export class CacheMetrics implements MetricsCollector {
           registers: [registry],
         });
         pendingCounts.set(counter, cells);
-        flushBeforeClearing(counter, cells);
+        flushBeforeClearing(counter, cells, (c) => flushPendingCounts(c, cells));
         return counter;
+      };
+      // A gauge that reads its pending values when scraped.
+      const getOrCreateValued = (cfg: Record<string, unknown>): Gauge => {
+        const existing = registry.getSingleMetric?.(cfg.name as string);
+        if (existing) return existing as Gauge;
+        const cells = new Map<string, PendingValue>();
+        const gauge = new GaugeClass({
+          ...cfg,
+          collect(this: Gauge) {
+            flushPendingValues(this, cells);
+          },
+          registers: [registry],
+        });
+        pendingValues.set(gauge, cells);
+        flushBeforeClearing(gauge, cells, (g) => flushPendingValues(g, cells));
+        return gauge;
       };
       // Every metric declares the default labels, or each inc() would throw.
       const defaultLabelNames = Object.keys(this.defaultLabels);
 
       // Operations counter
-      this.operationsCounter = getOrCreate(CounterClass, {
+      this.operationsCounter = getOrCreateCounted({
         name: `${this.prefix}_operations_total`,
         help: 'Total cache operations',
         labelNames: ['operation', 'status', ...defaultLabelNames],
@@ -348,7 +449,7 @@ export class CacheMetrics implements MetricsCollector {
       });
 
       // Circuit breaker gauge
-      this.circuitBreakerGauge = getOrCreate(GaugeClass, {
+      const circuitBreakerGauge = getOrCreateValued({
         name: `${this.prefix}_circuit_breaker_state`,
         help: 'Circuit breaker state (0=closed, 0.5=half-open, 1=open)',
         labelNames: defaultLabelNames,
@@ -359,6 +460,8 @@ export class CacheMetrics implements MetricsCollector {
       this.l1Hits = pendingCount(hits, { layer: 'l1', ...this.defaultLabels });
       this.l2Hits = pendingCount(hits, { layer: 'l2', ...this.defaultLabels });
       this.misses = pendingCount(misses, this.defaultLabels);
+      this.circuitBreakerGauge = circuitBreakerGauge;
+      this.circuitBreakerState = pendingValue(circuitBreakerGauge, this.defaultLabels);
 
       this.isReady = true;
       return true;
@@ -426,10 +529,39 @@ export class CacheMetrics implements MetricsCollector {
   async recordOperation(operation: string, status: 'success' | 'error'): Promise<void> {
     try {
       if (!(await this.whenReady())) return;
-      this.operationsCounter?.inc({ operation, status, ...this.defaultLabels });
+      if (!this.addPendingOperation(operation, status))
+        this.operationsCounter?.inc({ operation, status, ...this.defaultLabels });
     } catch (error) {
       this.handleError(error, 'recordOperation');
     }
+  }
+
+  /**
+   * Count a backend attempt. Runs on every attempt, so once prom-client has
+   * loaded it only adds to a pending count, as countHit() does.
+   */
+  countOperation(operation: string, status: 'success' | 'error'): void {
+    if (!this.addPendingOperation(operation, status) && !this.initFailed)
+      void this.recordOperation(operation, status);
+  }
+
+  /** Add an attempt to its pending count; false when there is none. */
+  private addPendingOperation(operation: string, status: 'success' | 'error'): boolean {
+    if (!this.isReady || this.operationsCounter === null) return false;
+    const cells = status === 'success' ? this.successes : this.failures;
+    let pending = cells.get(operation);
+    if (pending === undefined) {
+      const cell = pendingCount(this.operationsCounter, {
+        operation,
+        status,
+        ...this.defaultLabels,
+      });
+      if (cell === null) return false;
+      cells.set(operation, (pending = cell));
+    }
+    pending.n++;
+    if (!pending.attached) cells.set(operation, reattach(pending));
+    return true;
   }
 
   /**
@@ -510,6 +642,11 @@ export class CacheMetrics implements MetricsCollector {
    * records its duration once it has, so no operation's sample is dropped.
    */
   async startTimer(operation: string): Promise<() => void> {
+    return this.timeOperation(operation);
+  }
+
+  /** startTimer() without the promise: the cache's per-attempt path. */
+  timeOperation(operation: string): () => void {
     const start = performance.now();
     return () => {
       const seconds = (performance.now() - start) / 1000;
@@ -550,13 +687,36 @@ export class CacheMetrics implements MetricsCollector {
   async updateCircuitBreakerState(state: 'closed' | 'open' | 'half-open'): Promise<void> {
     try {
       if (!(await this.whenReady())) return;
-      const value = state === 'closed' ? 0 : state === 'half-open' ? 0.5 : 1;
-      this.circuitBreakerGauge?.set(this.defaultLabels, value);
+      if (!this.setPendingState(state))
+        this.circuitBreakerGauge?.set(this.defaultLabels, breakerValue(state));
     } catch (error) {
       this.handleError(error, 'updateCircuitBreakerState');
     }
   }
+
+  /**
+   * Publish the circuit-breaker state after an op. Runs on every op with a
+   * breaker, so once prom-client has loaded it only sets a pending value,
+   * which the gauge reads when scraped.
+   */
+  setCircuitBreakerState(state: 'closed' | 'open' | 'half-open'): void {
+    if (!this.setPendingState(state) && !this.initFailed)
+      void this.updateCircuitBreakerState(state);
+  }
+
+  /** Set the state's pending value; false when there is none. */
+  private setPendingState(state: 'closed' | 'open' | 'half-open'): boolean {
+    let pending = this.circuitBreakerState;
+    if (pending === null) return false;
+    if (!pending.attached) this.circuitBreakerState = pending = reattachValue(pending);
+    pending.value = breakerValue(state);
+    pending.set = true;
+    return true;
+  }
 }
+
+const breakerValue = (state: 'closed' | 'open' | 'half-open'): number =>
+  state === 'closed' ? 0 : state === 'half-open' ? 0.5 : 1;
 
 /**
  * No-op metrics implementation for when metrics are disabled.
@@ -573,6 +733,11 @@ export class NoopMetrics implements MetricsCollector {
   }
   async updateL1Stats(): Promise<void> {}
   async updateCircuitBreakerState(): Promise<void> {}
+  countOperation(): void {}
+  timeOperation(): () => void {
+    return () => {};
+  }
+  setCircuitBreakerState(): void {}
 }
 
 /** Create metrics instance based on configuration */

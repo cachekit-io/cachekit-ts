@@ -841,8 +841,12 @@ const cache = createCache({
 // the same defaultLabels keys: the first cache to register sets the schema.
 ```
 
-Hits and misses are counted in plain fields and added to their counters when
-the registry is scraped, so a cache hit does no prom-client work.
+Hits, misses and backend operations are counted in plain fields and added to
+their counters when the registry is scraped, and the circuit-breaker state is
+set on its gauge the same way, so a cache hit does no prom-client work and a
+backend operation does one: observing its duration. Caches sharing a registry
+share the circuit-breaker gauge, which reads the state of whichever cache
+finished an operation last.
 
 prom-client loads in the background, starting on the event-loop turn after the
 cache is created, and no cache operation waits for it. Metrics recorded while it

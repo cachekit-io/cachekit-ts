@@ -200,6 +200,11 @@ const NOOP_METRICS: MetricsCollector = {
   },
   async updateL1Stats() {},
   async updateCircuitBreakerState() {},
+  countOperation() {},
+  timeOperation() {
+    return () => {};
+  },
+  setCircuitBreakerState() {},
 };
 
 /**
@@ -569,7 +574,7 @@ export class CacheImpl implements SecureCache {
   }
 
   private recordFailure(operation: string, error: unknown): void {
-    void this.metrics.recordOperation(operation, 'error');
+    this.metrics.countOperation(operation, 'error');
     void this.metrics.recordError(error instanceof Error ? error.constructor.name : 'Unknown');
   }
 
@@ -820,7 +825,7 @@ export class CacheImpl implements SecureCache {
       return await this.reliabilityExecutor.execute(operation, fallback);
     } finally {
       const state = this.reliabilityExecutor.getCircuitBreakerState();
-      if (state !== null) void this.metrics.updateCircuitBreakerState(state);
+      if (state !== null) this.metrics.setCircuitBreakerState(state);
     }
   }
 
@@ -831,10 +836,10 @@ export class CacheImpl implements SecureCache {
    * `operations_total`.
    */
   private async instrument<T>(operation: string, key: string, fn: () => Promise<T>): Promise<T> {
-    const endTimer = await this.metrics.startTimer(operation);
+    const endTimer = this.metrics.timeOperation(operation);
     try {
       const result = await fn();
-      void this.metrics.recordOperation(operation, 'success');
+      this.metrics.countOperation(operation, 'success');
       return result;
     } catch (error) {
       this.recordFailure(operation, error);

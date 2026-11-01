@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { Counter, Registry } from 'prom-client';
+import { Counter, Gauge, Registry } from 'prom-client';
 import { createCache } from './cache.js';
 import { ConfigurationError } from './errors.js';
 import type { SecureCache } from './types/cache.js';
@@ -405,6 +405,148 @@ describe('Cache metrics wiring', () => {
     await cache.get('ns:k');
     await vi.waitFor(async () => {
       expect(await metricValue(registry, 'cachekit_hits_total', { layer: 'l1' })).toBe(2);
+    });
+  });
+
+  it('counts attempts and the breaker state into metrics registered by someone else', async () => {
+    const registry = new Registry();
+    new Counter({
+      name: 'cachekit_operations_total',
+      help: 'registered first by the application',
+      labelNames: ['operation', 'status'],
+      registers: [registry],
+    });
+    new Gauge({
+      name: 'cachekit_circuit_breaker_state',
+      help: 'registered first by the application',
+      registers: [registry],
+    }).set(7);
+    const cache = makeCache(registry, {
+      l1: { enabled: false },
+      reliability: { circuitBreaker: { failureThreshold: 5 } },
+    });
+    await cache.set('ns:k', 'v');
+    await cache.get('ns:k');
+
+    await vi.waitFor(async () => {
+      expect(
+        await metricValue(registry, 'cachekit_operations_total', {
+          operation: 'get',
+          status: 'success',
+        })
+      ).toBe(1);
+      expect(await metricValue(registry, 'cachekit_circuit_breaker_state')).toBe(0);
+    });
+    await cache.get('ns:k');
+    await vi.waitFor(async () => {
+      expect(
+        await metricValue(registry, 'cachekit_operations_total', {
+          operation: 'get',
+          status: 'success',
+        })
+      ).toBe(2);
+    });
+  });
+
+  // A backend attempt's counts and the breaker state are read at scrape time.
+  // These are the values each attempt recorded as it ran: two caches share
+  // one registry, so the breaker gauge holds the state of whichever cache
+  // finished an op last.
+  it('scrapes backend attempts and the breaker state as recorded per op', async () => {
+    const registry = new Registry();
+    const reliability = { circuitBreaker: { failureThreshold: 1 }, retry: { maxAttempts: 1 } };
+    const healthy = makeCache(registry, { l1: { enabled: false }, reliability });
+    const failing = makeCache(registry, {
+      backend: new FailingBackend(),
+      l1: { enabled: false },
+      reliability,
+    });
+    const scrape = async () => ({
+      getOk: await metricValue(registry, 'cachekit_operations_total', {
+        operation: 'get',
+        status: 'success',
+      }),
+      getError: await metricValue(registry, 'cachekit_operations_total', {
+        operation: 'get',
+        status: 'error',
+      }),
+      setOk: await metricValue(registry, 'cachekit_operations_total', {
+        operation: 'set',
+        status: 'success',
+      }),
+      getTimed: await metricValue(registry, 'cachekit_operation_duration_seconds_count', {
+        operation: 'get',
+      }),
+      errors: await metricValue(registry, 'cachekit_errors_total'),
+      breaker: (await registry.getSingleMetricAsString('cachekit_circuit_breaker_state'))
+        .split('\n')
+        .find((line) => line.startsWith('cachekit_circuit_breaker_state')),
+    });
+    const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+    await healthy.set('ns:k', 'v');
+    await vi.waitFor(async () => {
+      expect((await scrape()).setOk).toBe(1);
+    });
+    expect(await healthy.get('ns:k')).toBe('v');
+    await settle();
+    expect(await scrape()).toEqual({
+      getOk: 1,
+      getError: 0,
+      setOk: 1,
+      getTimed: 1,
+      errors: 0,
+      breaker: 'cachekit_circuit_breaker_state 0',
+    });
+
+    // The error path: one failed attempt opens the failing cache's breaker.
+    expect(await failing.get('ns:k')).toBeNull();
+    await settle();
+    const opened = {
+      getOk: 1,
+      getError: 1,
+      setOk: 1,
+      getTimed: 2,
+      errors: 1,
+      breaker: 'cachekit_circuit_breaker_state 1',
+    };
+    expect(await scrape()).toEqual(opened);
+    // A second scrape with no ops in between reads the same.
+    expect(await scrape()).toEqual(opened);
+
+    // The healthy cache finishes an op last: the shared gauge reads closed.
+    expect(await healthy.get('ns:k')).toBe('v');
+    await settle();
+    expect(await scrape()).toEqual({
+      ...opened,
+      getOk: 2,
+      getTimed: 3,
+      breaker: 'cachekit_circuit_breaker_state 0',
+    });
+
+    // An open breaker rejects without a backend attempt, and still publishes.
+    expect(await failing.get('ns:k')).toBeNull();
+    await settle();
+    expect(await scrape()).toEqual({ ...opened, getOk: 2, getTimed: 3 });
+
+    // A reset zeroes the gauge (prom-client resets an unlabelled gauge to 0)
+    // until the next op publishes the state again, including a state and an
+    // attempt recorded since the last scrape.
+    expect(await healthy.get('ns:k')).toBe('v');
+    expect(await failing.get('ns:k')).toBeNull();
+    await settle();
+    registry.resetMetrics();
+    const zero = { getOk: 0, getError: 0, setOk: 0, getTimed: 0, errors: 0 };
+    expect(await scrape()).toEqual({ ...zero, breaker: 'cachekit_circuit_breaker_state 0' });
+    expect(await failing.get('ns:k')).toBeNull();
+    expect(await healthy.get('ns:k')).toBe('v');
+    expect(await failing.get('ns:k')).toBeNull();
+    await settle();
+    expect(await scrape()).toEqual({
+      ...zero,
+      getOk: 1,
+      getTimed: 1,
+      breaker: 'cachekit_circuit_breaker_state 1',
     });
   });
 
