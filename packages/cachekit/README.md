@@ -434,6 +434,14 @@ pending write, which then never settles. After the cap the op runs anyway, so
 there the ordering holds for 30 s: a write still in flight at the cap can
 land after the op.
 
+With or without write-behind, on Node a `set()` or `delete()` of a key whose
+`set()` or `delete()` is still in flight waits for it to settle before
+sending, so concurrent `set()` calls of a key land in call order (on an
+encrypted cache, the order they finish encrypting) and L1 ends on the value L2
+holds. On Workers, where workerd can cancel the op in flight, concurrent
+`set()` calls of a key with no pending write stay unordered: they can land in
+either order, and L1 can serve the older value for up to its TTL.
+
 **The write stays on the caller's path:**
 
 - while `stampede.distributedLock` holds the lease: a write deferred past the
