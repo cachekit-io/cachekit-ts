@@ -43,14 +43,18 @@ const LEGACY = Symbol.for('undici.globalDispatcher.1');
 const CURRENT = Symbol.for('undici.globalDispatcher.2');
 const REPORT_HEADER = /^x-cachekit-l1-latency-/i;
 
+function isDispatcher(value: unknown): value is Dispatcher {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof Reflect.get(value, 'dispatch') === 'function'
+  );
+}
+
 /** The dispatcher in one of undici's global slots, if what is there is one. */
 function slot(key: symbol): Dispatcher | undefined {
   const value: unknown = Reflect.get(globalThis, key);
-  return typeof value === 'object' &&
-    value !== null &&
-    typeof Reflect.get(value, 'dispatch') === 'function'
-    ? (value as Dispatcher)
-    : undefined;
+  return isDispatcher(value) ? value : undefined;
 }
 
 /** The dispatcher Node's fetch would use, for a handler of the API it passes. */
