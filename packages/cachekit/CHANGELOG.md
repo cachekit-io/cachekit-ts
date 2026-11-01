@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.3.0](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.2.3...cachekit-v0.3.0) (2026-11-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cachekitio:** 90-day TTL range; bound the writer's L1 copy by the PUT Fresh-For (LAB-12090) ([#301](https://github.com/cachekit-io/cachekit-ts/issues/301))
+
+### Features
+
+* **cachekitio:** 90-day TTL range; bound the writer's L1 copy by the PUT Fresh-For (LAB-12090) ([#301](https://github.com/cachekit-io/cachekit-ts/issues/301)) ([8f5bcbc](https://github.com/cachekit-io/cachekit-ts/commit/8f5bcbc557f2b77f2e8dc94185b8f09238e44154))
+* **cachekitio:** opt-in server stale-grace on wrap() with background revalidation (LAB-7167) ([#274](https://github.com/cachekit-io/cachekit-ts/issues/274)) ([dc37caa](https://github.com/cachekit-io/cachekit-ts/commit/dc37caa81579b15f1ea8e20c293de5b502f7583c))
+* **cachekit:** opt-in write-behind for wrap() cold misses (LAB-7129) ([#275](https://github.com/cachekit-io/cachekit-ts/issues/275)) ([253b666](https://github.com/cachekit-io/cachekit-ts/commit/253b66686678730a8d692879b21a65673a13d274))
+* **telemetry:** report L1 hit latency and add a telemetry off switch (LAB-12080) ([#299](https://github.com/cachekit-io/cachekit-ts/issues/299)) ([46e7aaf](https://github.com/cachekit-io/cachekit-ts/commit/46e7aafc4975020073833394395d21e55f4e2058))
+
+
+### Bug Fixes
+
+* **cachekit:** key the wrap() SWR refresh with the call's own options reading (LAB-12162) ([#291](https://github.com/cachekit-io/cachekit-ts/issues/291)) ([46fb6ca](https://github.com/cachekit-io/cachekit-ts/commit/46fb6ca901e0d4ff8fc0e47e7553f18676af61a4))
+* **cachekit:** make wrap({ skipL1 }) skip L1 on the cold path (LAB-12031) ([#276](https://github.com/cachekit-io/cachekit-ts/issues/276)) ([0758d48](https://github.com/cachekit-io/cachekit-ts/commit/0758d48b42cdb7271855ed2f4f1290a3205ab3bc))
+* **deps:** clear undici below 7.30.1 from the test graph (LAB-12210) ([#298](https://github.com/cachekit-io/cachekit-ts/issues/298)) ([b263904](https://github.com/cachekit-io/cachekit-ts/commit/b263904408fffd98bb7d7812d8cc090238547f01))
+
+
+### Performance Improvements
+
+* **cachekit:** count an idle-key set() in flight without a promise chain (LAB-12153) ([a2a9107](https://github.com/cachekit-io/cachekit-ts/commit/a2a9107674339aeecc6d579c1982517cf06b500d))
+* **cachekit:** return a plaintext L1 hit without awaiting a decode (LAB-12110) ([#287](https://github.com/cachekit-io/cachekit-ts/issues/287)) ([469d84b](https://github.com/cachekit-io/cachekit-ts/commit/469d84bc278e82f3b11c9a9a95fc762bb894443c))
+* **cachekit:** serve a memoised wrap() L1 hit from the entry it holds (LAB-12034) ([#277](https://github.com/cachekit-io/cachekit-ts/issues/277)) ([9fb2701](https://github.com/cachekit-io/cachekit-ts/commit/9fb2701b9754164bbd4fd83725e976deb8e9b238))
+* **cachekit:** skip the decode's depth walks on an encrypted L1 hit this cache checked (LAB-12111) ([#290](https://github.com/cachekit-io/cachekit-ts/issues/290)) ([e1e5544](https://github.com/cachekit-io/cachekit-ts/commit/e1e5544b61717f5af6d1c68a7ef9596f91e33743))
+* **metrics:** a metrics-on backend attempt stops paying three async frames and two label hashes (LAB-12146) ([#302](https://github.com/cachekit-io/cachekit-ts/issues/302)) ([758edc0](https://github.com/cachekit-io/cachekit-ts/commit/758edc00b233a995b281e8bccf4865450bcf7578))
+* **metrics:** a metrics-on L1 hit stops paying a promise and a label hash (LAB-12109) ([#286](https://github.com/cachekit-io/cachekit-ts/issues/286)) ([173ce65](https://github.com/cachekit-io/cachekit-ts/commit/173ce65e90dc80e4fe3ab2b71913658640027280))
+* **workers:** encrypt and decrypt through WebCrypto on Workers (LAB-7135) ([#271](https://github.com/cachekit-io/cachekit-ts/issues/271)) ([c6a3f21](https://github.com/cachekit-io/cachekit-ts/commit/c6a3f21c8379bda1272f5230640032dca29befab))
+
 ## [0.2.3](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-v0.2.2...cachekit-v0.2.3) (2026-10-29)
 
 
