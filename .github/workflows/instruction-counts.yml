@@ -157,7 +157,7 @@ jobs:
           fetch-depth: 2 # the merge commit the shards measured, and its parents
           persist-credentials: false
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: instruction-counts-[0-9]*
           path: ${{ runner.temp }}/reports # one directory per shard
@@ -194,7 +194,7 @@ jobs:
     permissions:
       pull-requests: write # enough for a PR's issue comments
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: instruction-counts-comment
           path: ${{ runner.temp }}/perf-ir
