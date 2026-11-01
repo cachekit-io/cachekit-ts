@@ -2,7 +2,6 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { Counter, Gauge, Registry } from 'prom-client';
 import { createCache } from './cache.js';
 import { ConfigurationError } from './errors.js';
-import { CacheMetrics } from './metrics/prometheus.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
 import { InMemoryBackend, metricValue } from '../test/fixtures/metrics.js';
@@ -410,9 +409,9 @@ describe('Cache metrics wiring', () => {
   });
 
   // Anything else writing the gauge directly (an older SDK copy on the same
-  // registry, or the application) writes after the states pending before it,
-  // so its value must win at the next scrape, and a later op's must win over it.
-  it('a direct write to the breaker gauge orders with the states pending around it', async () => {
+  // registry, or the application) is ordered against the cache's own writes,
+  // as prom-client orders any two set() calls, whatever form the labels take.
+  it('a direct write to the breaker gauge orders with the cache writes around it', async () => {
     const registry = new Registry();
     const cache = makeCache(registry, {
       l1: { enabled: false },
@@ -425,7 +424,7 @@ describe('Cache metrics wiring', () => {
     const gauge = registry.getSingleMetric('cachekit_circuit_breaker_state') as Gauge;
     const breaker = () => metricValue(registry, 'cachekit_circuit_breaker_state');
 
-    await cache.get('ns:k'); // closed, pending
+    await cache.get('ns:k'); // closed
     gauge.set(1);
     expect(await breaker()).toBe(1);
     expect(await breaker()).toBe(1);
@@ -435,36 +434,34 @@ describe('Cache metrics wiring', () => {
     expect(await breaker()).toBe(0.5);
 
     gauge.set(1);
-    await cache.get('ns:k'); // closed, pending after the direct write
+    await cache.get('ns:k'); // closed, after the direct write
     expect(await breaker()).toBe(0);
   });
 
-  // A direct write touches only its own label set's pending value, so its
-  // cost does not grow with the collectors sharing the gauge.
-  it('a direct write to one label set of the breaker gauge leaves the others pending', async () => {
+  // prom-client stringifies label values, so { tenant: 42 } is the series a
+  // cache with defaultLabels { tenant: '42' } writes.
+  it('a direct write with numeric label values orders with the cache writes', async () => {
     const registry = new Registry();
-    const tenants = ['a', 'b', 'c'].map(
-      (tenant) => new CacheMetrics({ registry, defaultLabels: { tenant } })
-    );
-    await Promise.all(tenants.map((m) => m.recordHit('l1'))); // prom-client loaded
-    for (const m of tenants) m.setCircuitBreakerState('open');
+    const cache = makeCache(registry, {
+      l1: { enabled: false },
+      reliability: { circuitBreaker: { failureThreshold: 5 } },
+      metrics: { registry, defaultLabels: { tenant: '42' } },
+    });
+    await cache.set('ns:k', 'v');
+    await vi.waitFor(async () => {
+      expect(await registry.metrics()).toContain('cachekit_circuit_breaker_state{tenant="42"} 0');
+    });
     const gauge = registry.getSingleMetric('cachekit_circuit_breaker_state') as Gauge;
-    const cells = (gauge as unknown as Record<symbol, Map<string, { set: boolean }>>)[
-      Symbol.for('@cachekit-io/cachekit:metrics:pending-values:v1')
-    ];
-    const pending = () => [...cells.values()].filter((c) => c.set).length;
+    const breaker = () => metricValue(registry, 'cachekit_circuit_breaker_state');
+    const numeric = { tenant: 42 } as unknown as Record<string, string>;
 
-    gauge.set({ tenant: 'a' }, 0);
-    expect(pending()).toBe(2);
-    gauge.labels({ tenant: 'b' }).inc(0.5); // after b's pending 1: 1.5
-    expect(pending()).toBe(1);
-    gauge.set({ tenant: 'z' }, 7); // no collector writes z
-    expect(pending()).toBe(1);
-
-    const byTenant = Object.fromEntries(
-      (await gauge.get()).values.map((v) => [v.labels.tenant, v.value])
-    );
-    expect(byTenant).toEqual({ a: 0, b: 1.5, c: 1, z: 7 });
+    await cache.get('ns:k'); // closed
+    gauge.set(numeric, 1);
+    expect(await breaker()).toBe(1);
+    gauge.labels(numeric).inc(0.5);
+    expect(await breaker()).toBe(1.5);
+    await cache.get('ns:k');
+    expect(await breaker()).toBe(0);
   });
 
   it('counts attempts and the breaker state into metrics registered by someone else', async () => {

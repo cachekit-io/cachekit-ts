@@ -68,65 +68,23 @@ function flushPendingCounts(counter: Counter, cells: Map<string, PendingCount>):
 }
 
 /**
- * Make the metric's reset() and remove() flush its pending counts or values
- * first, so they clear what was recorded before them, as they would had each
- * hit been an inc() or each state a set(). registry.resetMetrics() calls
- * reset() on every metric. They then detach every cell, all flushed: a cell
- * whose collectors are gone is no longer held, as prom-client holds no series
- * it has cleared, and a live collector attaches its cell again at its next
- * write (see reattach() and reattachValue()).
+ * Make the counter's reset() and remove() flush its pending counts first, so
+ * they clear counts recorded before them, as they would had each hit been an
+ * inc(). registry.resetMetrics() calls reset() on every metric. They then
+ * detach every cell, all at zero: a cell whose collectors are gone is no
+ * longer held, as prom-client holds no series it has cleared, and a live
+ * collector attaches its cell again at its next count (see reattach()).
  */
-function flushBeforeClearing<M>(
-  metric: M,
-  cells: Map<string, { attached: boolean }>,
-  flush: (metric: M) => void
-): void {
-  runFirst(metric, ['reset', 'remove'], (cleared) => {
-    flush(cleared);
-    for (const cell of cells.values()) cell.attached = false;
-    cells.clear();
-  });
-}
-
-/**
- * Make the gauge's own writers set the pending value of the label set they
- * write first, so a direct write from anything else on the registry (an SDK
- * copy from before pending values, or the application) lands after the state
- * set before it and wins at the next scrape, as it would had each state been
- * a set(). Only that label set's cell is touched: a direct write costs the
- * same however many collectors share the gauge. setToCurrentTime(), startTimer()
- * and the label children all write through set(), inc() or dec(). The flush
- * itself writes through the unwrapped set().
- */
-function flushBeforeWriting(
-  gauge: Gauge,
-  cells: Map<string, PendingValue>,
-  set: Gauge['set']
-): void {
-  runFirst(gauge, ['set', 'inc', 'dec'], (written, labels) => {
-    if (cells.size === 0) return;
-    // As prom-client reads them: labels first when an object, else none.
-    const key = labelsKey(
-      typeof labels === 'object' && labels !== null ? (labels as Record<string, string>) : {}
-    );
-    const cell = cells.get(key);
-    if (cell !== undefined) flushPendingValue(written, cell, set);
-  });
-}
-
-/** Make each of the metric's `methods` run `first` before itself, with its first argument. */
-function runFirst<M>(
-  metric: M,
-  methods: readonly string[],
-  first: (metric: M, arg: unknown) => void
-): void {
-  const target = metric as unknown as Record<string, unknown>;
-  for (const method of methods) {
-    const original = target[method];
-    if (typeof original !== 'function') continue;
-    target[method] = function (this: M, ...args: unknown[]): unknown {
-      first(this, args[0]);
-      return original.apply(this, args);
+function flushBeforeClearing(counter: Counter, cells: Map<string, PendingCount>): void {
+  const clearing = counter as unknown as Record<string, unknown>;
+  for (const method of ['reset', 'remove']) {
+    const clear = clearing[method];
+    if (typeof clear !== 'function') continue;
+    clearing[method] = function (this: Counter, ...args: unknown[]): unknown {
+      flushPendingCounts(this, cells);
+      for (const cell of cells.values()) cell.attached = false;
+      cells.clear();
+      return clear.apply(this, args);
     };
   }
 }
@@ -156,91 +114,11 @@ function reattach(cell: PendingCount): PendingCount {
  */
 function pendingCount(counter: Counter, labels: Record<string, string>): PendingCount | null {
   const cells = pendingCounts.get(counter);
-  if (!cells || !declaresLabels(counter, labels)) return null;
-  const key = labelsKey(labels);
+  const declared = (counter as { labelNames?: readonly string[] }).labelNames;
+  if (!cells || !declared || !Object.keys(labels).every((l) => declared.includes(l))) return null;
+  const key = JSON.stringify(Object.entries(labels).sort(([a], [b]) => a.localeCompare(b)));
   let cell = cells.get(key);
   if (!cell) cells.set(key, (cell = { labels, key, cells, n: 0, attached: true }));
-  return cell;
-}
-
-/** A gauge's value for one label set, as PendingCount is a counter's count. */
-interface PendingValue {
-  readonly labels: Record<string, string>;
-  /** Its key in `cells`. */
-  readonly key: string;
-  /** The gauge's cells; this one is in it while `attached`. */
-  readonly cells: Map<string, PendingValue>;
-  value: number;
-  /** Set since the gauge last read it. */
-  set: boolean;
-  attached: boolean;
-}
-
-/**
- * Where a gauge created here keeps its values set, one per label set and
- * shared by every collector writing to that gauge, so the last write wins at
- * scrape as it would had each been a set(). As pendingCounts, for a gauge,
- * but a property of the gauge under a process-wide symbol rather than a
- * module-local map: a process can load both the ESM and the CommonJS build,
- * and a collector of one would otherwise set a gauge the other created
- * directly, which that build's older pending value then overwrote at scrape.
- * Counts need no such care, since they add up in any order.
- */
-const PENDING_VALUES = Symbol.for('@cachekit-io/cachekit:metrics:pending-values:v1');
-type Valued = { [PENDING_VALUES]?: Map<string, PendingValue> };
-
-/** Set `gauge` to each value set since it last read them. */
-function flushPendingValues(
-  gauge: Gauge,
-  cells: Map<string, PendingValue>,
-  set: Gauge['set']
-): void {
-  for (const cell of cells.values()) flushPendingValue(gauge, cell, set);
-}
-
-/** Set `gauge` to the cell's value if it was set since the gauge last read it. */
-function flushPendingValue(gauge: Gauge, cell: PendingValue, set: Gauge['set']): void {
-  if (!cell.set) return;
-  cell.set = false;
-  try {
-    set.call(gauge, cell.labels, cell.value);
-  } catch (error) {
-    // Unreachable once pendingValue() has checked the labels: as above.
-    const name = (gauge as { name?: string }).name;
-    logError(`[cachekit] metrics: dropped a pending value on ${name}:`, error);
-  }
-}
-
-/**
- * Attach a value cell a reset or remove detached, about to be set, and return
- * the cell its collector keeps: itself, back in its gauge's cells, or the one
- * a newer collector has put there for the same labels.
- */
-function reattachValue(cell: PendingValue): PendingValue {
-  const live = cell.cells.get(cell.key);
-  if (live !== undefined) return live;
-  cell.attached = true;
-  cell.cells.set(cell.key, cell);
-  return cell;
-}
-
-/** The labels' key in a counter's or gauge's cells. */
-const labelsKey = (labels: Record<string, string>): string =>
-  JSON.stringify(Object.entries(labels).sort(([a], [b]) => a.localeCompare(b)));
-
-/** Whether `metric` declares every one of `labels`, so an inc() or set() cannot throw on them. */
-function declaresLabels(metric: object, labels: Record<string, string>): boolean {
-  const declared = (metric as { labelNames?: readonly string[] }).labelNames;
-  return declared !== undefined && Object.keys(labels).every((l) => declared.includes(l));
-}
-
-/** The pending value for `labels` on `gauge`, or null, as pendingCount(). */
-function pendingValue(gauge: Gauge, labels: Record<string, string>): PendingValue | null {
-  const cells = (gauge as Valued)[PENDING_VALUES];
-  if (!cells || !declaresLabels(gauge, labels)) return null;
-  const key = labelsKey(labels);
-  let cell = cells.get(key);
-  if (!cell) cells.set(key, (cell = { labels, key, cells, value: 0, set: false, attached: true }));
   return cell;
 }
 
@@ -347,8 +225,6 @@ export class CacheMetrics implements MetricsCollector {
   // Pending operation counts by operation, one map per status
   private readonly successes = new Map<string, PendingCount>();
   private readonly failures = new Map<string, PendingCount>();
-  // The breaker state's pending value (see PENDING_VALUES)
-  private circuitBreakerState: PendingValue | null = null;
 
   /**
    * Settles true once prom-client has loaded and every metric is registered,
@@ -426,27 +302,8 @@ export class CacheMetrics implements MetricsCollector {
           registers: [registry],
         });
         pendingCounts.set(counter, cells);
-        flushBeforeClearing(counter, cells, (c) => flushPendingCounts(c, cells));
+        flushBeforeClearing(counter, cells);
         return counter;
-      };
-      // A gauge that reads its pending values when scraped.
-      const getOrCreateValued = (cfg: Record<string, unknown>): Gauge => {
-        const existing = registry.getSingleMetric?.(cfg.name as string);
-        if (existing) return existing as Gauge;
-        const cells = new Map<string, PendingValue>();
-        const set = (GaugeClass.prototype as Gauge).set;
-        const flush = (gauge: Gauge): void => flushPendingValues(gauge, cells, set);
-        const gauge = new GaugeClass({
-          ...cfg,
-          collect(this: Gauge) {
-            flush(this);
-          },
-          registers: [registry],
-        });
-        (gauge as Valued)[PENDING_VALUES] = cells;
-        flushBeforeWriting(gauge, cells, set);
-        flushBeforeClearing(gauge, cells, flush);
-        return gauge;
       };
       // Every metric declares the default labels, or each inc() would throw.
       const defaultLabelNames = Object.keys(this.defaultLabels);
@@ -502,7 +359,7 @@ export class CacheMetrics implements MetricsCollector {
       });
 
       // Circuit breaker gauge
-      const circuitBreakerGauge = getOrCreateValued({
+      this.circuitBreakerGauge = getOrCreate(GaugeClass, {
         name: `${this.prefix}_circuit_breaker_state`,
         help: 'Circuit breaker state (0=closed, 0.5=half-open, 1=open)',
         labelNames: defaultLabelNames,
@@ -513,8 +370,6 @@ export class CacheMetrics implements MetricsCollector {
       this.l1Hits = pendingCount(hits, { layer: 'l1', ...this.defaultLabels });
       this.l2Hits = pendingCount(hits, { layer: 'l2', ...this.defaultLabels });
       this.misses = pendingCount(misses, this.defaultLabels);
-      this.circuitBreakerGauge = circuitBreakerGauge;
-      this.circuitBreakerState = pendingValue(circuitBreakerGauge, this.defaultLabels);
 
       this.isReady = true;
       return true;
@@ -740,31 +595,30 @@ export class CacheMetrics implements MetricsCollector {
   async updateCircuitBreakerState(state: 'closed' | 'open' | 'half-open'): Promise<void> {
     try {
       if (!(await this.whenReady())) return;
-      if (!this.setPendingState(state))
-        this.circuitBreakerGauge?.set(this.defaultLabels, breakerValue(state));
+      this.circuitBreakerGauge?.set(this.defaultLabels, breakerValue(state));
     } catch (error) {
       this.handleError(error, 'updateCircuitBreakerState');
     }
   }
 
   /**
-   * Publish the circuit-breaker state after an op. Runs on every op with a
-   * breaker, so once prom-client has loaded it only sets a pending value,
-   * which the gauge reads when scraped.
+   * Publish the circuit-breaker state after an op, without a promise once
+   * prom-client has loaded. It stays a set() per op rather than a value read
+   * at scrape: caches sharing a registry share the gauge, which reads the
+   * state of whichever finished an op last, and only prom-client's own set()
+   * keeps that order against every other writer (the other build of this
+   * package, an older copy, the application) and matches its label handling.
    */
   setCircuitBreakerState(state: 'closed' | 'open' | 'half-open'): void {
-    if (!this.setPendingState(state) && !this.initFailed)
+    if (this.isReady) {
+      try {
+        this.circuitBreakerGauge?.set(this.defaultLabels, breakerValue(state));
+      } catch (error) {
+        this.handleError(error, 'setCircuitBreakerState');
+      }
+    } else if (!this.initFailed) {
       void this.updateCircuitBreakerState(state);
-  }
-
-  /** Set the state's pending value; false when there is none. */
-  private setPendingState(state: 'closed' | 'open' | 'half-open'): boolean {
-    let pending = this.circuitBreakerState;
-    if (pending === null) return false;
-    if (!pending.attached) this.circuitBreakerState = pending = reattachValue(pending);
-    pending.value = breakerValue(state);
-    pending.set = true;
-    return true;
+    }
   }
 }
 
