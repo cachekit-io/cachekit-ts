@@ -373,6 +373,32 @@ export const WORKLOADS = {
       };
     },
   },
+  // wrap-l1-hit with metrics on, the production, secure and io default
+  'wrap-l1-hit-metrics': {
+    n: 10_000,
+    setup: async () => {
+      const { createCache } = await load('index.js');
+      const { Registry } = await import('prom-client');
+      const registry = new Registry();
+      const cache = createCache({ backend: new MemoryBackend(), metrics: { registry } });
+      const getUser = cache.wrap(async (id, kind, opts) => ({ id, kind, opts }), {
+        namespace: 'bench',
+        ttl: 3600,
+      });
+      await getUser(...ARGS);
+      // prom-client loads on a later turn of the event loop, which a loop of
+      // awaited hits never yields: wait here until it has counted the miss.
+      const deadline = Date.now() + 5_000;
+      while (!(await registry.metrics()).includes('cachekit_misses_total 1')) {
+        if (Date.now() > deadline)
+          throw new Error('wrap-l1-hit-metrics: prom-client did not count the miss within 5 s');
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      return async () => {
+        sink += (await getUser(...ARGS)).id;
+      };
+    },
+  },
   // an encrypted wrap() L1 hit at 100 B, 10 KB and 1 MB of msgpack (3, 320
   // and 96 x 320 rows). On Node 22 and 24 each repeats within 0.01%. On Node
   // 26 the 100 B and 1 MB hits sometimes have a run up to 1.7% off the rest,

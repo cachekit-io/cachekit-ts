@@ -53,6 +53,23 @@ describe('CacheMetrics with prom-client missing', () => {
     expect(logs[0]).toMatch(/^\[cachekit\] metrics are enabled but failed to initialize/);
   });
 
+  it('the per-hit counters report once, then stop awaiting the failed load', async () => {
+    const logs: string[] = [];
+    setLogger((message) => logs.push(message));
+    const metrics = new CacheMetrics();
+    const recordHit = vi.spyOn(metrics, 'recordHit');
+    const recordMiss = vi.spyOn(metrics, 'recordMiss');
+
+    metrics.countHit('l1');
+    await vi.waitFor(() => expect(logs).toHaveLength(1));
+    metrics.countHit('l2');
+    metrics.countMiss();
+
+    expect(recordHit).toHaveBeenCalledTimes(1);
+    expect(recordMiss).not.toHaveBeenCalled();
+    expect(logs).toHaveLength(1);
+  });
+
   it('every metric call is a no-op that never throws', async () => {
     setLogger(() => {});
     const metrics = new CacheMetrics();

@@ -5,6 +5,7 @@
  */
 import { setImmediate } from 'node:timers';
 import { logError } from '../logger.js';
+import { checkDefaultLabels } from './labels.js';
 
 // Types for prom-client (peer dependency)
 interface Counter {
@@ -29,6 +30,98 @@ interface Registry {
 // Generic constructor type for prom-client metric classes
 type MetricConstructor<T> = new (config: Record<string, unknown>) => T;
 
+/** Hits or misses for one label set, counted since the last scrape. */
+interface PendingCount {
+  readonly labels: Record<string, string>;
+  /** Its key in `cells`. */
+  readonly key: string;
+  /** The counter's cells; this one is in it while `attached`. */
+  readonly cells: Map<string, PendingCount>;
+  n: number;
+  attached: boolean;
+}
+
+/**
+ * Pending counts per counter this module created, one per label set and
+ * shared by every collector writing to that counter. A hit or miss is a field
+ * increment: prom-client's per-call label hash and validation run once per
+ * label set per scrape instead, in the counter's collect(). A counter created
+ * elsewhere has no entry, so its collectors increment it directly.
+ */
+const pendingCounts = new WeakMap<object, Map<string, PendingCount>>();
+
+/** Add `counter`'s pending counts to it: its collect() runs this before every read. */
+function flushPendingCounts(counter: Counter, cells: Map<string, PendingCount>): void {
+  for (const cell of cells.values()) {
+    if (cell.n === 0) continue;
+    const n = cell.n;
+    cell.n = 0;
+    try {
+      counter.inc(cell.labels, n);
+    } catch (error) {
+      // Unreachable once pendingCount() has checked the labels; a throw here
+      // would fail the whole scrape, so it is logged instead.
+      const name = (counter as { name?: string }).name;
+      logError(`[cachekit] metrics: dropped ${n} pending counts on ${name}:`, error);
+    }
+  }
+}
+
+/**
+ * Make the counter's reset() and remove() flush its pending counts first, so
+ * they clear counts recorded before them, as they would had each hit been an
+ * inc(). registry.resetMetrics() calls reset() on every metric. They then
+ * detach every cell, all at zero: a cell whose collectors are gone is no
+ * longer held, as prom-client holds no series it has cleared, and a live
+ * collector attaches its cell again at its next count (see reattach()).
+ */
+function flushBeforeClearing(counter: Counter, cells: Map<string, PendingCount>): void {
+  const clearing = counter as unknown as Record<string, unknown>;
+  for (const method of ['reset', 'remove']) {
+    const clear = clearing[method];
+    if (typeof clear !== 'function') continue;
+    clearing[method] = function (this: Counter, ...args: unknown[]): unknown {
+      flushPendingCounts(this, cells);
+      for (const cell of cells.values()) cell.attached = false;
+      cells.clear();
+      return clear.apply(this, args);
+    };
+  }
+}
+
+/**
+ * Attach a cell a reset or remove detached, just counted into, and return the
+ * cell its collector keeps. It goes back into its counter's cells, or, when a
+ * newer collector has put one there for the same labels, adds its count to
+ * that one, which the collector keeps from then on.
+ */
+function reattach(cell: PendingCount): PendingCount {
+  const live = cell.cells.get(cell.key);
+  if (live === undefined) {
+    cell.attached = true;
+    cell.cells.set(cell.key, cell);
+    return cell;
+  }
+  live.n += cell.n;
+  cell.n = 0;
+  return live;
+}
+
+/**
+ * The pending count for `labels` on `counter`, or null when the counter was
+ * not created here or does not declare every label (it would throw on each
+ * inc): the collector then increments it directly, reporting each failure.
+ */
+function pendingCount(counter: Counter, labels: Record<string, string>): PendingCount | null {
+  const cells = pendingCounts.get(counter);
+  const declared = (counter as { labelNames?: readonly string[] }).labelNames;
+  if (!cells || !declared || !Object.keys(labels).every((l) => declared.includes(l))) return null;
+  const key = JSON.stringify(Object.entries(labels).sort(([a], [b]) => a.localeCompare(b)));
+  let cell = cells.get(key);
+  if (!cell) cells.set(key, (cell = { labels, key, cells, n: 0, attached: true }));
+  return cell;
+}
+
 /**
  * Metrics configuration.
  */
@@ -51,6 +144,14 @@ export interface MetricsCollector {
   recordOperation(operation: string, status: 'success' | 'error'): Promise<void>;
   recordHit(layer: 'l1' | 'l2'): Promise<void>;
   recordMiss(): Promise<void>;
+  /**
+   * Count a hit or miss without returning a promise: the cache's per-op path.
+   * No promise is the point: one made as the package loads inside a request
+   * keeps that request's async context alive on Node 22, and one made per
+   * hit costs an allocation.
+   */
+  countHit(layer: 'l1' | 'l2'): void;
+  countMiss(): void;
   recordError(errorType: string): Promise<void>;
   startTimer(operation: string): Promise<() => void>;
   updateL1Stats(entries: number, memoryBytes: number): Promise<void>;
@@ -109,6 +210,11 @@ export class CacheMetrics implements MetricsCollector {
   private l1MemoryGauge: Gauge | null = null;
   private circuitBreakerGauge: Gauge | null = null;
 
+  // Pending counts, set once prom-client has loaded (see pendingCounts)
+  private l1Hits: PendingCount | null = null;
+  private l2Hits: PendingCount | null = null;
+  private misses: PendingCount | null = null;
+
   /**
    * Settles true once prom-client has loaded and every metric is registered,
    * false if either failed. Never rejects. Scheduled by the constructor, so
@@ -119,9 +225,12 @@ export class CacheMetrics implements MetricsCollector {
   private isReady = false;
   /** An initialization failure that whenReady() has not reported yet. */
   private initError: Error | null = null;
+  /** Initialization failed and has been reported: every metric is a no-op. */
+  private initFailed = false;
 
   constructor(config: MetricsConfig = {}) {
     this.prefix = config.prefix ?? 'cachekit';
+    checkDefaultLabels(config.defaultLabels);
     this.defaultLabels = config.defaultLabels ?? {};
     this.registry = config.registry;
     this.errorHandler = config.onError;
@@ -169,40 +278,58 @@ export class CacheMetrics implements MetricsCollector {
         if (existing) return existing as M;
         return new Ctor({ ...cfg, registers: [registry] });
       };
+      // A counter that reads its pending hit or miss counts when scraped.
+      const getOrCreateCounted = (cfg: Record<string, unknown>): Counter => {
+        const existing = registry.getSingleMetric?.(cfg.name as string);
+        if (existing) return existing as Counter;
+        const cells = new Map<string, PendingCount>();
+        const counter = new CounterClass({
+          ...cfg,
+          collect(this: Counter) {
+            flushPendingCounts(this, cells);
+          },
+          registers: [registry],
+        });
+        pendingCounts.set(counter, cells);
+        flushBeforeClearing(counter, cells);
+        return counter;
+      };
+      // Every metric declares the default labels, or each inc() would throw.
+      const defaultLabelNames = Object.keys(this.defaultLabels);
 
       // Operations counter
       this.operationsCounter = getOrCreate(CounterClass, {
         name: `${this.prefix}_operations_total`,
         help: 'Total cache operations',
-        labelNames: ['operation', 'status'],
+        labelNames: ['operation', 'status', ...defaultLabelNames],
       });
 
       // Hits counter
-      this.hitsCounter = getOrCreate(CounterClass, {
+      const hits = getOrCreateCounted({
         name: `${this.prefix}_hits_total`,
         help: 'Cache hits',
-        labelNames: ['layer'],
+        labelNames: ['layer', ...defaultLabelNames],
       });
 
       // Misses counter
-      this.missesCounter = getOrCreate(CounterClass, {
+      const misses = getOrCreateCounted({
         name: `${this.prefix}_misses_total`,
         help: 'Cache misses',
-        labelNames: [],
+        labelNames: defaultLabelNames,
       });
 
       // Errors counter
       this.errorsCounter = getOrCreate(CounterClass, {
         name: `${this.prefix}_errors_total`,
         help: 'Cache errors',
-        labelNames: ['error_type'],
+        labelNames: ['error_type', ...defaultLabelNames],
       });
 
       // Duration histogram
       this.durationHistogram = getOrCreate(HistogramClass, {
         name: `${this.prefix}_operation_duration_seconds`,
         help: 'Operation duration in seconds',
-        labelNames: ['operation'],
+        labelNames: ['operation', ...defaultLabelNames],
         buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5],
       });
 
@@ -210,22 +337,28 @@ export class CacheMetrics implements MetricsCollector {
       this.l1EntriesGauge = getOrCreate(GaugeClass, {
         name: `${this.prefix}_l1_entries`,
         help: 'Current L1 cache entries',
-        labelNames: [],
+        labelNames: defaultLabelNames,
       });
 
       // L1 memory gauge
       this.l1MemoryGauge = getOrCreate(GaugeClass, {
         name: `${this.prefix}_l1_memory_bytes`,
         help: 'Current L1 memory usage in bytes',
-        labelNames: [],
+        labelNames: defaultLabelNames,
       });
 
       // Circuit breaker gauge
       this.circuitBreakerGauge = getOrCreate(GaugeClass, {
         name: `${this.prefix}_circuit_breaker_state`,
         help: 'Circuit breaker state (0=closed, 0.5=half-open, 1=open)',
-        labelNames: [],
+        labelNames: defaultLabelNames,
       });
+
+      this.hitsCounter = hits;
+      this.missesCounter = misses;
+      this.l1Hits = pendingCount(hits, { layer: 'l1', ...this.defaultLabels });
+      this.l2Hits = pendingCount(hits, { layer: 'l2', ...this.defaultLabels });
+      this.misses = pendingCount(misses, this.defaultLabels);
 
       this.isReady = true;
       return true;
@@ -242,6 +375,7 @@ export class CacheMetrics implements MetricsCollector {
    */
   private async whenReady(): Promise<boolean> {
     if (await this.ready) return true;
+    this.initFailed = true;
     const err = this.initError;
     if (err) {
       this.initError = null;
@@ -299,24 +433,60 @@ export class CacheMetrics implements MetricsCollector {
   }
 
   /**
-   * Record a cache hit.
+   * Count a cache hit. Runs on every hit, so once prom-client has loaded it
+   * only adds to a pending count, which the counter reads when scraped.
+   */
+  countHit(layer: 'l1' | 'l2'): void {
+    if (!this.addPendingHit(layer) && !this.initFailed) void this.recordHit(layer);
+  }
+
+  /** Add a hit to its pending count; false when there is none. */
+  private addPendingHit(layer: 'l1' | 'l2'): boolean {
+    const pending = layer === 'l1' ? this.l1Hits : this.l2Hits;
+    if (pending === null) return false;
+    pending.n++;
+    if (!pending.attached) {
+      if (layer === 'l1') this.l1Hits = reattach(pending);
+      else this.l2Hits = reattach(pending);
+    }
+    return true;
+  }
+
+  /**
+   * Record a cache hit, settling once it is counted.
    */
   async recordHit(layer: 'l1' | 'l2'): Promise<void> {
     try {
       if (!(await this.whenReady())) return;
-      this.hitsCounter?.inc({ layer, ...this.defaultLabels });
+      if (!this.addPendingHit(layer)) this.hitsCounter?.inc({ layer, ...this.defaultLabels });
     } catch (error) {
       this.handleError(error, 'recordHit');
     }
   }
 
   /**
-   * Record a cache miss.
+   * Count a cache miss, as countHit() counts a hit.
+   */
+  countMiss(): void {
+    if (!this.addPendingMiss() && !this.initFailed) void this.recordMiss();
+  }
+
+  /** Add a miss to its pending count; false when there is none. */
+  private addPendingMiss(): boolean {
+    const pending = this.misses;
+    if (pending === null) return false;
+    pending.n++;
+    if (!pending.attached) this.misses = reattach(pending);
+    return true;
+  }
+
+  /**
+   * Record a cache miss, settling once it is counted.
    */
   async recordMiss(): Promise<void> {
     try {
       if (!(await this.whenReady())) return;
-      this.missesCounter?.inc(this.defaultLabels);
+      if (!this.addPendingMiss()) this.missesCounter?.inc(this.defaultLabels);
     } catch (error) {
       this.handleError(error, 'recordMiss');
     }
@@ -395,6 +565,8 @@ export class NoopMetrics implements MetricsCollector {
   async recordOperation(): Promise<void> {}
   async recordHit(): Promise<void> {}
   async recordMiss(): Promise<void> {}
+  countHit(): void {}
+  countMiss(): void {}
   async recordError(): Promise<void> {}
   async startTimer(): Promise<() => void> {
     return () => {};

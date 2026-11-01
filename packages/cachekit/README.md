@@ -835,7 +835,14 @@ const cache = createCache({
 //             cachekit_misses_total, cachekit_errors_total{error_type}
 // Histogram:  cachekit_operation_duration_seconds{operation}
 // Gauges:     cachekit_l1_entries, cachekit_l1_memory_bytes, cachekit_circuit_breaker_state
+// Every metric also carries the defaultLabels, whose keys cannot be layer,
+// operation, status or error_type (createCache throws ConfigurationError).
+// Caches sharing a registry and prefix share these metrics, so they must use
+// the same defaultLabels keys: the first cache to register sets the schema.
 ```
+
+Hits and misses are counted in plain fields and added to their counters when
+the registry is scraped, so a cache hit does no prom-client work.
 
 prom-client loads in the background, starting on the event-loop turn after the
 cache is created, and no cache operation waits for it. Metrics recorded while it
