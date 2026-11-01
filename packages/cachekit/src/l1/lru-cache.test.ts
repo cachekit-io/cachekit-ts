@@ -1339,7 +1339,7 @@ describe('L1Cache', () => {
   });
 });
 
-describe('L1Cache bound and discardRefresh', () => {
+describe('L1Cache capExpiryAt and discardRefresh', () => {
   afterEach(() => {
     vi.useRealTimers();
   });
@@ -1350,12 +1350,12 @@ describe('L1Cache bound and discardRefresh', () => {
     c.set('a', 'v', 10_000, 'ns');
     const entry = c.entry('a')!;
 
-    c.bound(entry, 20_000); // later than expiry: no change
+    c.capExpiryAt(entry, 20_000); // later than expiry: no change
     vi.advanceTimersByTime(9_999);
     expect(c.get('a')).toBe('v');
 
     c.set('b', 'v', 10_000, 'ns');
-    c.bound(c.entry('b')!, Date.now() + 2_000);
+    c.capExpiryAt(c.entry('b')!, Date.now() + 2_000);
     vi.advanceTimersByTime(1_999);
     expect(c.get('b')).toBe('v');
     vi.advanceTimersByTime(1);
@@ -1369,14 +1369,15 @@ describe('L1Cache bound and discardRefresh', () => {
     const old = c.entry('a')!;
     c.set('a', 'new', 10_000, 'ns');
 
-    c.bound(old, 0); // not the entry L1 holds now
+    c.capExpiryAt(old, 0); // not the entry L1 holds now
     expect(c.get('a')).toBe('new');
 
-    c.bound(c.entry('a')!, 0);
+    c.capExpiryAt(c.entry('a')!, 0);
     expect(c.get('a')).toBeNull();
   });
 
   it('discardRefresh drops the entry only while its version matches', () => {
+    vi.useFakeTimers({ now: 0 });
     const c = new L1Cache<string>({ swrEnabled: true, swrThresholdRatio: 2 });
     c.set('a', 'v', 10_000, 'ns');
     const { versionToken } = c.getWithSwr('a');

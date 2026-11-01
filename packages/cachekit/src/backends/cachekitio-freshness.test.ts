@@ -83,7 +83,8 @@ describe('CachekitIO L1 backfill bound', () => {
       'fetch',
       vi.fn(async (url: string, init: RequestInit) => {
         if (init.method === 'PUT') {
-          store.set(url, init.body as Uint8Array);
+          if (!(init.body instanceof Uint8Array)) throw new TypeError('PUT body must be bytes');
+          store.set(url, init.body);
           return new Response(null, { status: 200 });
         }
         gets++;
@@ -276,7 +277,8 @@ describe('CachekitIO writer L1 bound', () => {
       'fetch',
       vi.fn(async (url: string, init: RequestInit) => {
         if (init.method === 'PUT') {
-          store.set(url, init.body as Uint8Array);
+          if (!(init.body instanceof Uint8Array)) throw new TypeError('PUT body must be bytes');
+          store.set(url, init.body);
           return new Response(null, { status: 200, headers: putHeaders });
         }
         if (init.method === 'PATCH') {

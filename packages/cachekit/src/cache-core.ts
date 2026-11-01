@@ -177,7 +177,8 @@ const WASM_RUNTIME_ERROR = (globalThis as { WebAssembly?: { RuntimeError?: Error
  * copy forever.
  */
 function freshUntil(result: SetResult | void): number | undefined {
-  const freshFor = (result as SetResult | undefined)?.freshFor;
+  if (!result) return undefined;
+  const { freshFor } = result;
   if (freshFor === undefined) return undefined;
   const now = Date.now();
   return typeof freshFor === 'number' && freshFor >= 0 ? now + freshFor * 1000 : now;
@@ -1391,7 +1392,7 @@ export class CacheImpl implements SecureCache {
     const writeBehind = async (): Promise<void> => {
       const until = await writeL2();
       if (held === undefined || until === undefined || !this.l1) return;
-      this.l1.bound(held, until);
+      this.l1.capExpiryAt(held, until);
       this.publishL1Stats();
     };
     const wroteBehind =
