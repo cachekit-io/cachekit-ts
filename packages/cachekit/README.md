@@ -516,14 +516,18 @@ const getReport = cache.wrap(async (id: string) => buildReport(id), {
   like any write. Past the window the server answers 404 and the call takes
   the ordinary miss path.
 - A stale value never enters L1, and the L1 copy of a written value still
-  expires at `ttl`: the window is served by the server only.
+  expires at `ttl`, or sooner when the server reports a shorter lifetime
+  for the write: the window is served by the server only.
 - On Cloudflare Workers the revalidation needs a context bound with
   `withExecutionContext(ctx)`; without one, a stale read is treated as a miss
   and recomputed in the request.
 - `wrap()` throws `ConfigurationError` when `staleTtl` is set on an encrypted
   cache (a secure cache's TTL is often a revocation boundary), on a backend
-  other than CachekitIO, above 2,591,999 seconds, or when `ttl + staleTtl`
-  exceeds 2,592,000 (30 days). Fractions round up; `0` turns it off.
+  other than CachekitIO, above 7,775,999 seconds, or when `ttl + staleTtl`
+  exceeds 7,776,000 (90 days, the protocol's TTL range). Fractions round up;
+  `0` turns it off. A window that does not fit the tenant's plan maximum TTL
+  is not an error: the server shortens it (see the CachekitIO TTL note
+  below).
 
 > [!WARNING]
 > The stale window applies to every reader of the key, not only to this
@@ -566,11 +570,27 @@ Four backends implement the same `Backend` interface (raw bytes in/out) and plug
 | Backend           | Import                                                      | Runtime       | Notes                                                                                                                                                                                 |
 | ----------------- | ----------------------------------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Redis             | `redis` from `@cachekit-io/cachekit`                        | Node          | ioredis; TTL inspection + distributed locking                                                                                                                                         |
-| CachekitIO (SaaS) | `cachekitio` from `@cachekit-io/cachekit`                   | Node, Workers | fetch-based; TTL + locking variants; accepts finite TTLs > 0 up to 2,592,000 s (30 days), fractional values round up; invalid values throw `ConfigurationError` per the protocol spec |
+| CachekitIO (SaaS) | `cachekitio` from `@cachekit-io/cachekit`                   | Node, Workers | fetch-based; TTL + locking variants; accepts finite TTLs > 0 up to 7,776,000 s (90 days), fractional values round up; invalid values throw `ConfigurationError` per the protocol spec |
 | Memcached         | `memcached` from `@cachekit-io/cachekit/backends/memcached` | Node          | memjs (binary protocol, multi-server); requires the optional `memjs` peer dependency                                                                                                  |
 | File              | `file` from `@cachekit-io/cachekit/backends/file`           | Node          | local disk, on-disk format shared with cachekit-py                                                                                                                                    |
 
 The Memcached and File backends are **Node-runtime only** and live behind subpath exports, so the root entry never loads `memjs` or the File backend. The root entry is itself **Node-only**: it loads `node:crypto` and the NAPI core, whose loader requires `node:fs`. ioredis loads when the app creates a Redis backend, not when it imports the package, so an app that never uses Redis never loads it; commands issued before the load finishes wait for it. Bundlers follow that load, so a bundle that uses Redis carries ioredis. ioredis is CommonJS and requires Node builtins, so an esbuild ESM bundle for Node needs `require` defined (the usual `createRequire` banner). Edge code uses the `workerd` export condition or the `@cachekit-io/cachekit/workers` subpath. Bun resolves the root to the Node entry and runs it, NAPI core included (checked on Bun 1.3.8); the `/workers` subpath does not load on Bun. No entry targets Deno, Deno Deploy or Vercel/Next edge.
+
+**CachekitIO TTL and the plan maximum.** The TTL range is 1 to 7,776,000
+seconds (90 days); the SDK rejects anything outside it before any request.
+Each plan also has a maximum TTL: Free 86,400 s (24 hours), Startup
+2,592,000 s (30 days), Professional 7,776,000 s (90 days), Enterprise none.
+The SDK does not know your plan, so it sends a TTL inside the range as is,
+and the server stores the write with at most the plan maximum (the fresh
+window first, then whatever stale window is left). That clamp never rejects
+a write. The server reports the lifetime it applied in `X-CacheKit-Fresh-For`
+on the write's response, and the writing process's L1 copy expires after
+`min(ttl, X-CacheKit-Fresh-For)` seconds, counted from that response; a
+malformed or `0` value keeps no L1 copy. A write whose error degradation
+absorbed (a timeout, say) got no response, and keeps its L1 copy for `ttl`.
+`refreshTTL` (`PATCH /ttl`) never changes how long an L1 copy is served.
+This SDK always sends a TTL (`defaultTtl`, one hour unless set), so it never
+stores a CachekitIO entry without an expiry.
 
 **L1 freshness across processes.** When a plain `get()` hits L2, the value is
 re-populated into this process's L1. On backends that surface the entry's

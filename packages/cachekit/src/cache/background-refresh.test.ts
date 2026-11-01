@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
-import { BackgroundRefreshManager, type PersistCallback } from './background-refresh.js';
+import {
+  BackgroundRefreshManager,
+  boundedL1TtlMs,
+  type PersistCallback,
+} from './background-refresh.js';
 import { L1Cache } from '../l1/lru-cache.js';
 
 // Pin the SWR jitter draw so tests are deterministic. 0.5 lands the
@@ -327,5 +331,25 @@ describe('BackgroundRefreshManager', () => {
         expect(persistToL2).toHaveBeenCalled();
       });
     });
+  });
+});
+
+describe('boundedL1TtlMs', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('keeps the TTL without a bound, and 0 (no expiry) for ttl <= 0', () => {
+    expect(boundedL1TtlMs(60)).toBe(60_000);
+    expect(boundedL1TtlMs(0)).toBe(0);
+    expect(boundedL1TtlMs(-1)).toBe(0);
+  });
+
+  it('takes the shorter of TTL and bound, the bound alone for no expiry, null once past', () => {
+    vi.useFakeTimers({ now: 1_000 });
+    expect(boundedL1TtlMs(60, 1_000 + 5_000)).toBe(5_000);
+    expect(boundedL1TtlMs(2, 1_000 + 5_000)).toBe(2_000);
+    expect(boundedL1TtlMs(0, 1_000 + 5_000)).toBe(5_000);
+    expect(boundedL1TtlMs(60, 1_000)).toBeNull();
   });
 });

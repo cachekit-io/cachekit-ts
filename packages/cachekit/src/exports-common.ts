@@ -23,6 +23,7 @@ export type {
 export type {
   Backend,
   GetWithTtlResult,
+  SetResult,
   CachekitIOBackendConfig,
   LockableBackend,
   TTLBackend,

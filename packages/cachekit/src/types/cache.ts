@@ -96,8 +96,10 @@ export interface WrapOptionsBase {
    *
    * Checked at wrap time (ConfigurationError): requires a backend that reads
    * and writes the stale window (CachekitIO); refused on encrypted caches; at
-   * most 2,591,999 seconds, and `ttl + staleTtl` at most 2,592,000 (30 days);
-   * fractions round up; `0` turns it off.
+   * most 7,775,999 seconds, and `ttl + staleTtl` at most 7,776,000 (90 days,
+   * the protocol's TTL range); fractions round up; `0` turns it off. The
+   * server shortens a window the tenant's plan maximum TTL leaves no room
+   * for, and never rejects it for that.
    *
    * On Workers the revalidation needs a bound `waitUntil`
    * (`withExecutionContext`); without one a stale read is a miss, recomputed
