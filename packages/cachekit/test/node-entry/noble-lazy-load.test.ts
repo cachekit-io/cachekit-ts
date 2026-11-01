@@ -77,7 +77,9 @@ describe.skipIf(!process.features.require_module)('built CommonJS entry', () => 
 
 // The ES module build imports noble statically on every Node version, so noble
 // is evaluated before the package's own code, as the app's graph orders it,
-// and never goes through require(esm).
+// and never goes through require(esm). A lazy load there fails while the app's
+// graph is still loading noble (src/serialization/blake2b.ts), which only some
+// Node versions show; this test fails on every version if one comes back.
 it('imports @noble/hashes statically in the ES module build', async () => {
   const probe = (await runProbe('noble-probe.mjs', ['esm', entries.esm])) as {
     afterJsHash: boolean;
@@ -86,12 +88,4 @@ it('imports @noble/hashes statically in the ES module build', async () => {
   };
   expect(probe).toMatchObject({ afterJsHash: false, key: probeKey });
   expect(probe.fileName).toBe(bytesToHex(blake2b(utf8ToBytes(probe.key), { dkLen: 16 })));
-});
-
-// A lazy require(esm) fails here up to Node 22.17 and on 23: noble is linked
-// but not evaluated while the module the app imports first runs and hashes.
-it('hashes in JS from a module the app imports before @noble/hashes', async () => {
-  const { key, fileName } = await runProbe('noble-after-probe.mjs');
-  expect(key).toBe(probeKey);
-  expect(fileName).toBe(bytesToHex(blake2b(utf8ToBytes(key), { dkLen: 16 })));
 });

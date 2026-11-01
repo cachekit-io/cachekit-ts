@@ -1,8 +1,10 @@
 // @noble/hashes' BLAKE2b. In the ES module build `#noble-blake2` (package.json
-// `imports`) is noble itself, a static import: a lazy require(esm) there would
-// share noble with the app's own ES module graph, and Node refuses require(esm)
-// of a module that graph is still loading. In the CommonJS build it is
-// cjs-noble-blake2.ts, which loads noble on first use on Node 24 and later.
+// `imports`) is a static import of noble (esm-noble-blake2.ts). A lazy
+// require(esm) there would share noble with the app's own ES module graph,
+// which can still be loading it: Node 22.12 to 22.14 then throw, 22.15, 22.16
+// and 23 return it unevaluated, and every version throws while an import() of
+// it is in flight. In the CommonJS build it is cjs-noble-blake2.ts, which loads
+// noble at require below Node 24 and on first use from 24.
 import { blake2b } from '#noble-blake2';
 import { logError } from '../logger.js';
 import { CACHE_KEY_HASH_LENGTH } from '../constants.js';

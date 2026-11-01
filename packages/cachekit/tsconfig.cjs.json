@@ -11,5 +11,12 @@
     // CommonJS build always resolves #noble-blake2 to this module.
     "paths": { "#noble-blake2": ["./src/serialization/cjs-noble-blake2.ts"] }
   },
-  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.test.tsx", "src/workers/**"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "src/workers/**",
+    "src/serialization/esm-noble-blake2.ts"
+  ]
 }
