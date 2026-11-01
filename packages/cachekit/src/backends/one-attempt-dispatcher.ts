@@ -17,6 +17,16 @@
  * any other global dispatcher, gets the request without the report: it may
  * be lost, never sent twice.
  *
+ * What this cannot see is resend code the application wrote into its own
+ * transport: an interceptor or Agent factory of its own that copies the
+ * headers and resends from the copy, or a fetch wrapper that retries with a
+ * fresh init. undici's own retry handler keeps the options it was handed, and
+ * a wrapper that reuses the init reuses this dispatcher, which strips the
+ * second attempt. Detecting a custom
+ * factory would mean reading undici's private fields, and would still leave
+ * the fetch wrapper, so the boundary is documented instead (README,
+ * Telemetry).
+ *
  * Node keeps undici's global dispatcher under the symbols undici registers it
  * with, read here as Node's fetch reads them: undici 6 and 7 read the first,
  * undici 8 the second, where the first holds an adapter for the older handler

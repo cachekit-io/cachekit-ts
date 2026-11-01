@@ -479,6 +479,21 @@ describe('latency report on the wire (API-84 to API-86)', () => {
       // Taken, and never sent: a report may be lost, never sent twice.
       expect(backend.l1Latency!.take()).toBeUndefined();
     });
+
+    it('a fetch wrapper that retries with the same init carries none of it', async () => {
+      const seen = await onTheWire([503, 404], async () => {
+        const routed = globalThis.fetch;
+        vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+          const response = await routed(url, init);
+          return response.status === 503 ? routed(url, init) : response;
+        });
+        await get();
+      });
+      expect(seen).toEqual([
+        { sumNs: '300', authorization: auth },
+        { sumNs: undefined, authorization: auth },
+      ]);
+    });
   });
 
   it('stays in place while no dispatcher can keep it to one attempt', async () => {
