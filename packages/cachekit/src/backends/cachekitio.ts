@@ -312,12 +312,9 @@ export class CachekitIOCore implements Backend {
     const start = performance.now();
     try {
       // No latency report: the server does not record health checks (API-84).
-      const response = await this.request(
-        'GET',
-        `${this.apiUrl}/v1/cache/health`,
-        undefined,
-        false
-      );
+      const response = await this.request('GET', `${this.apiUrl}/v1/cache/health`, {
+        latencyReport: false,
+      });
       const latencyMs = performance.now() - start;
       if (response.status === 429) return { healthy: false, latencyMs };
       if (!response.ok) return { healthy: false, latencyMs };
@@ -384,15 +381,14 @@ export class CachekitIOCore implements Backend {
   private async request(
     method: string,
     url: string,
-    opts?: { body?: Uint8Array; headers?: Record<string, string> },
-    attachReport = true
+    opts?: { body?: Uint8Array; headers?: Record<string, string>; latencyReport?: false }
   ): Promise<Response> {
     const headers: Record<string, string> = {
       'User-Agent': USER_AGENT,
       Authorization: `Bearer ${this.apiKey}`,
       ...(this.telemetry && getSessionHeaders()),
       ...buildMetricsHeaders(this.metricsProvider, this.telemetry),
-      ...(attachReport && this.l1Latency?.take()),
+      ...(opts?.latencyReport !== false && this.l1Latency?.take()),
       ...opts?.headers,
     };
     if (opts?.body) {

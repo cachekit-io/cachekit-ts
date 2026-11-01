@@ -893,7 +893,9 @@ backend config or `createCache.io` options, or with the environment variable
 `CACHEKIT_TELEMETRY` set to `false`, `0`, `off` or `no` (case-insensitive;
 `true`, `1`, `on` and `yes` mean on, and any other value means off, with one
 warning). On Workers the variable is read from `process.env` and from the
-Worker's bindings. Off from either control wins over on from the other, and
+Worker's bindings, through `import { env } from 'cloudflare:workers'`; under
+the `disallow_importable_env` compatibility flag that import is empty, so use
+`telemetry: false` there. Off from either control wins over on from the other, and
 both are read once, when the backend is constructed. With telemetry off a
 request carries none of the headers above, only `X-CacheKit-L1-Status`, which
 the API requires, and the `User-Agent` below.

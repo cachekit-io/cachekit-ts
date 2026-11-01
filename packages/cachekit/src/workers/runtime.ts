@@ -41,9 +41,7 @@ import {
 // CACHEKIT_TELEMETRY is read from the Worker's bindings as well as from
 // process.env (API-94). The module is read through its namespace, so a workerd
 // from before the importable env loads this entry and reads no binding.
-setTelemetryBindingsReader(
-  () => (cloudflareWorkers as { env?: Record<string, unknown> }).env?.CACHEKIT_TELEMETRY
-);
+setTelemetryBindingsReader(() => cloudflareWorkers.env?.CACHEKIT_TELEMETRY);
 
 let keyHashBindingTried = false;
 

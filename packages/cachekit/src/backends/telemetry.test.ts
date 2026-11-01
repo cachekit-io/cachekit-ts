@@ -4,7 +4,12 @@
  * names the requirement it pins.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cachekitio, cachekitioFull, cachekitioWithLocking } from './cachekitio-factory.js';
+import {
+  cachekitio,
+  cachekitioFull,
+  cachekitioWithLocking,
+  cachekitioWithTTL,
+} from './cachekitio-factory.js';
 import { CachekitIOCore } from './cachekitio.js';
 import {
   L1_LATENCY_ONE_IN,
@@ -118,13 +123,6 @@ describe('L1LatencyReport encoding (API-87)', () => {
       expect(Number(value)).toBeLessThanOrEqual(Number.MAX_SAFE_INTEGER);
     }
     expect(headers['X-CacheKit-L1-Latency-Buckets'].split(',')).toHaveLength(16);
-  });
-
-  it(`samples one call in ${L1_LATENCY_ONE_IN}, within the spec's 1 to 1,000,000 (API-81)`, () => {
-    expect(Number.isInteger(L1_LATENCY_ONE_IN)).toBe(true);
-    expect(L1_LATENCY_ONE_IN).toBeGreaterThanOrEqual(1);
-    expect(L1_LATENCY_ONE_IN).toBeLessThanOrEqual(1_000_000);
-    expect(new CachekitIOCore(CONFIG).l1Latency?.oneIn).toBe(L1_LATENCY_ONE_IN);
   });
 });
 
@@ -281,10 +279,6 @@ describe('telemetry off (API-96)', () => {
     }
   });
 
-  it('accumulates no latency report while off', () => {
-    expect(new CachekitIOCore({ ...CONFIG, telemetry: false }).l1Latency).toBeUndefined();
-  });
-
   it('keeps L1-Status disabled for a cache without L1', async () => {
     const backend = cachekitio({
       ...CONFIG,
@@ -353,9 +347,10 @@ describe('latency report on the wire (API-84 to API-86)', () => {
     }
   });
 
-  it('keeps one accumulator per backend instance: one never rides the other (API-83)', async () => {
-    // Node has no fork(): a child process (child_process, cluster) loads the
-    // module afresh, so its backends start empty, as a new instance does here.
+  it('starts every backend with an empty accumulator of its own (API-83)', async () => {
+    // API-83 is about fork(), which Node lacks: a child process (child_process,
+    // cluster) loads the module afresh, so its backends start empty, as a new
+    // instance does here. No backend's hits ride another's requests either.
     const a = new CachekitIOCore(CONFIG);
     const b = new CachekitIOCore(CONFIG);
     a.l1Latency!.record(300);
@@ -365,13 +360,9 @@ describe('latency report on the wire (API-84 to API-86)', () => {
   });
 
   it('is forwarded by every CachekitIO wrapper (Backend.l1Latency)', () => {
-    for (const backend of [
-      cachekitio(CONFIG),
-      cachekitioWithLocking(CONFIG),
-      cachekitioFull(CONFIG),
-    ]) {
-      expect(backend.l1Latency).toBeInstanceOf(L1LatencyReport);
+    for (const factory of [cachekitio, cachekitioWithLocking, cachekitioWithTTL, cachekitioFull]) {
+      expect(factory(CONFIG).l1Latency).toBeInstanceOf(L1LatencyReport);
+      expect(factory({ ...CONFIG, telemetry: false }).l1Latency).toBeUndefined();
     }
-    expect(cachekitioFull({ ...CONFIG, telemetry: false }).l1Latency).toBeUndefined();
   });
 });

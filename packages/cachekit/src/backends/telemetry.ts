@@ -86,7 +86,7 @@ const BUCKET_15_MAX_NS = 2_097_152;
  * them, as one report, onto its next request.
  */
 export class L1LatencyReport {
-  private buckets = new Array<number>(16).fill(0);
+  private readonly buckets = new Array<number>(16).fill(0);
   private sumNs = 0;
 
   constructor(readonly oneIn: number) {}
@@ -123,7 +123,7 @@ export class L1LatencyReport {
       'X-CacheKit-L1-Latency-Sum-Ns': String(this.sumNs),
       'X-CacheKit-L1-Latency-One-In': String(this.oneIn),
     };
-    this.buckets = new Array<number>(16).fill(0);
+    this.buckets.fill(0);
     this.sumNs = 0;
     return headers;
   }

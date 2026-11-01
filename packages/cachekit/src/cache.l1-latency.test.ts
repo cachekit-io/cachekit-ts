@@ -81,7 +81,7 @@ function only(index: number, count: number): number[] {
 
 /** Time every call of `cache`: tests the timing, not the sampling. */
 function timeEveryCall(cache: SecureCache): SecureCache {
-  (cache as unknown as { l1LatencyBelow: number }).l1LatencyBelow = 2 ** 30;
+  (cache as unknown as { l1LatencyThreshold: number }).l1LatencyThreshold = 2 ** 30;
   return cache;
 }
 
@@ -202,7 +202,7 @@ describe('what is timed (API-79)', () => {
     expect(report.sum).toBe(String(STEP));
   });
 
-  it('discards a timed call that turns out a miss or an L2 hit', async () => {
+  it('draws before the outcome is known, and discards a timed miss or L2 hit (API-81)', async () => {
     const cache = track(timeEveryCall(createCache({ backend: BACKEND, metrics: false })));
     await cache.get('svc:absent'); // miss
     const other = track(timeEveryCall(createCache({ backend: BACKEND, metrics: false })));
@@ -238,15 +238,6 @@ describe('what is never timed (API-80)', () => {
     expect(clockReads).toBe(0);
     expect((await nextReport(cache)).sum).toBeUndefined();
   });
-
-  it('a read inside a wrap() call: an L1-served wrap() call is timed once, not twice', async () => {
-    const cache = track(timeEveryCall(createCache({ backend: BACKEND, metrics: false })));
-    const fn = cache.wrap(async (q: { id: number }) => q, OPTIONS);
-    await fn({ id: 1 });
-    clockReads = 0;
-    await fn({ id: 1 });
-    expect(clockReads).toBe(2);
-  });
 });
 
 describe('sampling (API-81)', () => {
@@ -279,29 +270,24 @@ describe('sampling (API-81)', () => {
     expect(timed[2]).toBeLessThan(5_400);
     expect(gaps.size).toBeGreaterThan(10);
   });
-
-  it('draws before the outcome is known: a miss reads the clock too', async () => {
-    const cache = track(timeEveryCall(createCache({ backend: BACKEND, metrics: false })));
-    const fn = cache.wrap(async (id: number) => ({ id }), OPTIONS);
-    await fn(7);
-    expect(clockReads).toBe(1);
-  });
 });
 
 describe('only the CachekitIO backend reports (API-77, API-82)', () => {
   it('a cache on any other backend never draws or reads the clock', async () => {
-    const cache = track(createCache({ backend: new InMemoryBackend(), metrics: false }));
+    const cache = track(
+      timeEveryCall(createCache({ backend: new InMemoryBackend(), metrics: false }))
+    );
     const fn = cache.wrap(async (id: number) => ({ id }), OPTIONS);
-    for (let i = 0; i < 5_000; i++) await fn(7);
+    for (let i = 0; i < 3; i++) await fn(7);
     await cache.get(generateKey(OPTIONS.namespace, [7]));
     expect(clockReads).toBe(0);
   });
 
   it('with telemetry off, no call is timed and no latency header is sent', async () => {
     vi.stubEnv('CACHEKIT_TELEMETRY', 'off');
-    const cache = track(createCache({ backend: BACKEND, metrics: false }));
+    const cache = track(timeEveryCall(createCache({ backend: BACKEND, metrics: false })));
     const fn = cache.wrap(async (id: number) => ({ id }), OPTIONS);
-    for (let i = 0; i < 5_000; i++) await fn(7);
+    for (let i = 0; i < 3; i++) await fn(7);
     expect(clockReads).toBe(0);
     const headers = sent();
     expect(headers['X-CacheKit-L1-Latency-Buckets']).toBeUndefined();

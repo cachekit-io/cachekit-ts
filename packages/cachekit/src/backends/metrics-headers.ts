@@ -6,8 +6,8 @@ import type { L1Metrics } from './types.js';
  * every `ck_sdk_` request (API-96).
  */
 export function buildMetricsHeaders(
-  provider?: () => L1Metrics | null,
-  telemetry = true
+  provider: (() => L1Metrics | null) | undefined,
+  telemetry: boolean
 ): Record<string, string> {
   const disabled = { 'X-CacheKit-L1-Status': 'disabled' };
   if (!provider) return disabled;

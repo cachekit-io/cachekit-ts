@@ -372,13 +372,13 @@ export class CacheImpl implements SecureCache {
    * below this: 2^30 / l1Latency.oneIn, so with probability 1/oneIn (API-81).
    * Thirty bits keep the draw a small integer, which a hit never boxes.
    */
-  private readonly l1LatencyBelow: number;
+  private readonly l1LatencyThreshold: number;
   /**
    * The xorshift32 state behind each call's draw, seeded from Math.random
    * and never 0. Drawing with Math.random instead cost a memoised L1 hit on
    * Node 24 about 70 instructions more, measured.
    */
-  private l1LatencyDraw: number;
+  private l1LatencyRng: number;
   private readonly l1HitClock: (() => bigint) | undefined;
   private readonly swrRequiresWaitUntil: boolean;
   private readonly setUnrefTimeout: UnrefTimeout | undefined;
@@ -488,8 +488,8 @@ export class CacheImpl implements SecureCache {
     // Read once: a backend's report is fixed for its lifetime (API-95).
     const report = this.l1 && runtime.l1HitClock ? this.backend.l1Latency : undefined;
     this.l1Latency = report ?? null;
-    this.l1LatencyBelow = report ? 2 ** 30 / report.oneIn : 0;
-    this.l1LatencyDraw = (Math.random() * 2 ** 32) | 0 || 1;
+    this.l1LatencyThreshold = report ? 2 ** 30 / report.oneIn : 0;
+    this.l1LatencyRng = (Math.random() * 2 ** 32) | 0 || 1;
     this.l1HitClock = runtime.l1HitClock;
 
     // Initialize metrics (Prometheus via the runtime; no-op when the
@@ -598,18 +598,19 @@ export class CacheImpl implements SecureCache {
    * wrap() are never timed (API-80): their callers never pass a reading on.
    */
   private startL1Timer(): bigint | undefined {
-    let x = this.l1LatencyDraw;
+    let x = this.l1LatencyRng;
     x ^= x << 13;
     x ^= x >>> 17;
     x ^= x << 5;
-    this.l1LatencyDraw = x;
-    return x >>> 2 < this.l1LatencyBelow ? this.l1HitClock!() : undefined;
+    this.l1LatencyRng = x;
+    return x >>> 2 < this.l1LatencyThreshold ? this.l1HitClock!() : undefined;
   }
 
   /**
-   * The last step of a timed call that L1 served, right after its recordHit:
-   * add its duration to the backend's latency report. The clock stops in the
-   * step that hands the value back (API-79).
+   * The last step of a timed call that L1 served: add its duration to the
+   * backend's latency report. Called in the synchronous step that produces
+   * the value, after its recordHit, or for a read inside wrap() just before
+   * the one wrapRead makes (API-79). A timed call nobody stops is discarded.
    */
   private stopL1Timer(timedFrom: bigint): void {
     this.l1Latency!.record(Number(this.l1HitClock!() - timedFrom));
@@ -1134,8 +1135,8 @@ export class CacheImpl implements SecureCache {
    * same way, and a stale read never re-populates L1. `readFreshness` asks
    * for those headers even with L1 off, so a stale-grace wrap sees the label.
    * `useL1` false (a wrap() call with skipL1) reads as if L1 were off: L1 is
-   * neither read nor re-populated. `timedFrom` is the start reading of a get()
-   * drawn for timing (see startL1Timer).
+   * neither read nor re-populated. `timedFrom` is the start reading of a call
+   * drawn for timing (see startL1Timer): an L1 hit stops its clock here.
    */
   private async getEntry<T>(
     key: string,
@@ -1160,10 +1161,10 @@ export class CacheImpl implements SecureCache {
           : { value: l1Result as T };
         if (decoded !== null) {
           if (probe) probe.servedBy = 'l1';
-          else {
-            this.recordHit('l1');
-            if (timedFrom !== undefined) this.stopL1Timer(timedFrom);
-          }
+          else this.recordHit('l1');
+          // Stopped here even for a wrap() read, whose hit wrapRead counts once
+          // this returns: this is the step that produces the value.
+          if (timedFrom !== undefined) this.stopL1Timer(timedFrom);
           return decoded.value;
         }
       }
@@ -2245,7 +2246,8 @@ export class CacheImpl implements SecureCache {
       options.ttl,
       probe,
       grace !== null,
-      !options.skipL1
+      !options.skipL1,
+      timedFrom
     );
     if (value === null) return null;
     if (probe.stale && grace) {
@@ -2253,8 +2255,6 @@ export class CacheImpl implements SecureCache {
       grace.revalidate();
     }
     if (probe.servedBy !== null) this.recordHit(probe.servedBy);
-    // A timed call that L2 served is discarded (API-79).
-    if (timedFrom !== undefined && probe.servedBy === 'l1') this.stopL1Timer(timedFrom);
     return value;
   }
 
