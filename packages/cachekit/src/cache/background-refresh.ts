@@ -33,6 +33,29 @@ export interface L1Write {
   readonly serializedSize?: number;
   /** Heap objects and values in the value, counted as it was serialized (see L1Cache.set). */
   readonly count?: ObjectCount;
+  /**
+   * When (Date.now() ms) the store's bound on the write ends: the receipt of
+   * its success response plus the `freshFor` it reported (Backend.set's
+   * SetResult). Unset when the store reported none, or the write never got a
+   * success response. See boundedL1TtlMs.
+   */
+  readonly freshUntil?: number;
+}
+
+/**
+ * The L1 lifetime, in ms, for the copy a cache keeps of a value it wrote with
+ * `ttlSeconds`, the store having bounded it until `freshUntil` (see
+ * L1Write.freshUntil): the shorter of the two, counted from now. `0` is L1's
+ * no-expiry encoding (a `ttlSeconds` of 0 or less, unbounded). Null when the
+ * bound has passed, so L1 must keep no copy (protocol spec/saas-api.md
+ * § Remaining Freshness, API-103).
+ */
+export function boundedL1TtlMs(ttlSeconds: number, freshUntil?: number): number | null {
+  const ttlMs = ttlSeconds > 0 ? ttlSeconds * 1000 : 0;
+  if (freshUntil === undefined) return ttlMs;
+  const remaining = freshUntil - Date.now();
+  if (remaining <= 0) return null;
+  return ttlMs > 0 ? Math.min(ttlMs, remaining) : remaining;
 }
 
 /**
@@ -121,15 +144,20 @@ export class BackgroundRefreshManager {
             // per minute.
             l1Cache.deferRefresh(key, versionToken);
           } else {
-            l1Cache.completeRefresh(
-              key,
-              persisted.l1,
-              options.ttl * 1000,
-              versionToken,
-              options.namespace,
-              persisted.serializedSize,
-              persisted.count
-            );
+            // The store's bound on the write caps the copy; past it, the
+            // refreshed value is not kept and the stale entry goes too.
+            const ttlMs = boundedL1TtlMs(options.ttl, persisted.freshUntil);
+            if (ttlMs === null) l1Cache.discardRefresh(key, versionToken);
+            else
+              l1Cache.completeRefresh(
+                key,
+                persisted.l1,
+                ttlMs,
+                versionToken,
+                options.namespace,
+                persisted.serializedSize,
+                persisted.count
+              );
           }
         }
       } catch (error) {

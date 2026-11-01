@@ -6,14 +6,23 @@
 //   node bench/ir.mjs --build-hash
 //
 // Wall-clock microbenchmarks on a shared or hosted machine cannot resolve the
-// 1-2% changes that matter here; instruction counts can, once three sources of
-// run-to-run noise are removed:
+// 1-2% changes that matter here; instruction counts can, once these sources of
+// noise are removed:
 // - V8: default flags vary main-thread Ir 2-4x between identical runs
 //   (background compilation and GC). V8_FLAGS pins them; --no-liftoff and
 //   --predictable-gc-schedule are what make the wasm paths repeat.
 // - The fixed part: module load and warm-up vary by 1-3% of a whole process.
 //   So Ir/op = Ir(window) / n, where the window is the n ops of one workload,
 //   bracketed by ir-workload.mjs; nothing else is counted.
+// - Tier-up, which moves Ir between builds rather than runs: V8 compiles a
+//   function with TurboFan after about 3,000 calls, and some functions called
+//   once per op got there only after 45,000 ops. A compile inside the window
+//   is a one-time cost divided by n that moves with a function's size and
+//   V8's inlining, not with the op's cost: it was up to 48% of a workload's
+//   Ir/op. --invocation-count-for-turbofan lowers the threshold so each
+//   workload's warm-up runs past it. It barely moves the steady state: after
+//   a 60,000-op warm-up, six workloads read within 0.32% of the default
+//   threshold's count.
 // On Node 22 and 24 every workload then repeats within 0.01%. On Node 26 the
 // workloads that cross into the NAPI or wasm core keep a residual of
 // 0.1-0.3%, and napi-encrypted an occasional run about 1% low; neither ASLR
@@ -77,6 +86,7 @@ const V8_FLAGS = [
   '--random-seed=1',
   '--no-liftoff',
   '--predictable-gc-schedule',
+  '--invocation-count-for-turbofan=150',
 ];
 const N = Object.fromEntries(Object.entries(WORKLOADS).map(([name, w]) => [name, w.n]));
 const AA_LIMIT = 0.004;

@@ -63,38 +63,57 @@ const mockCachekitIOService = createMockCachekitIO();
  * test. Without it, vite's own SSR wasm transform tries a runtime fs read,
  * which cannot work inside workerd; the pool's UnsafeEval binding
  * (newWasmModule) is miniflare's own mechanism for exactly this.
+ *
+ * test/workers/miniflare/** runs in Node instead: each test there starts its
+ * own workerd through Miniflare, for a configuration the pool cannot run in.
  */
 export default defineConfig({
-  plugins: [
-    {
-      name: 'wasm-compiled-module',
-      enforce: 'pre',
-      load(id) {
-        const path = id.split('?')[0];
-        if (!path.endsWith('.wasm')) return null;
-        const base64 = readFileSync(path).toString('base64');
-        return `
-          import { env } from 'cloudflare:test';
-          const bytes = Uint8Array.from(atob(${JSON.stringify(base64)}), (c) => c.charCodeAt(0));
-          export default env.__VITEST_POOL_WORKERS_UNSAFE_EVAL.newWasmModule(bytes);
-        `;
-      },
-    },
-    cloudflareTest({
-      miniflare: {
-        compatibilityDate: '2026-07-01',
-        // In-memory mock of the CachekitIO API for the backend smoke test:
-        // every fetch the tests make leaves workerd through this service
-        // (real Request/Response marshalling, binary-safe bodies). Unknown
-        // hosts 502 so tests can never reach the network.
-        outboundService: mockCachekitIOService,
-        // Real KV binding for the Workers KV backend tests.
-        kvNamespaces: ['TEST_KV'],
-      },
-    }),
-  ],
   test: {
-    include: ['test/workers/**/*.test.ts'],
-    testTimeout: 10000,
+    projects: [
+      {
+        plugins: [
+          {
+            name: 'wasm-compiled-module',
+            enforce: 'pre',
+            load(id) {
+              const path = id.split('?')[0];
+              if (!path.endsWith('.wasm')) return null;
+              const base64 = readFileSync(path).toString('base64');
+              return `
+                import { env } from 'cloudflare:test';
+                const bytes = Uint8Array.from(atob(${JSON.stringify(base64)}), (c) => c.charCodeAt(0));
+                export default env.__VITEST_POOL_WORKERS_UNSAFE_EVAL.newWasmModule(bytes);
+              `;
+            },
+          },
+          cloudflareTest({
+            miniflare: {
+              compatibilityDate: '2026-07-01',
+              // In-memory mock of the CachekitIO API for the backend smoke test:
+              // every fetch the tests make leaves workerd through this service
+              // (real Request/Response marshalling, binary-safe bodies). Unknown
+              // hosts 502 so tests can never reach the network.
+              outboundService: mockCachekitIOService,
+              // Real KV binding for the Workers KV backend tests.
+              kvNamespaces: ['TEST_KV'],
+            },
+          }),
+        ],
+        test: {
+          name: 'workerd',
+          include: ['test/workers/**/*.test.ts'],
+          exclude: ['test/workers/miniflare/**'],
+          testTimeout: 10000,
+        },
+      },
+      {
+        test: {
+          name: 'miniflare',
+          environment: 'node',
+          include: ['test/workers/miniflare/**/*.test.ts'],
+          testTimeout: 60000,
+        },
+      },
+    ],
   },
 });

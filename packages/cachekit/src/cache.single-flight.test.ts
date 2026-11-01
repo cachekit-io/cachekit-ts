@@ -114,8 +114,8 @@ class WaitedGrantBackend extends CountingLockableBackend {
 /** The cache's live hit/miss counters: what its telemetry headers carry. */
 const outcomes = (cache: SecureCache): { l1Hits: number; l2Hits: number; misses: number } => {
   const { l1Hits, l2Hits, misses } = (
-    cache as unknown as { telemetry: { l1Hits: number; l2Hits: number; misses: number } }
-  ).telemetry;
+    cache as unknown as { hitCounters: { l1Hits: number; l2Hits: number; misses: number } }
+  ).hitCounters;
   return { l1Hits, l2Hits, misses };
 };
 

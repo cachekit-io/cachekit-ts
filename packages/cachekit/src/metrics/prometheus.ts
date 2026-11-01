@@ -156,6 +156,14 @@ export interface MetricsCollector {
   startTimer(operation: string): Promise<() => void>;
   updateL1Stats(entries: number, memoryBytes: number): Promise<void>;
   updateCircuitBreakerState(state: 'closed' | 'open' | 'half-open'): Promise<void>;
+  /**
+   * The cache's per-attempt path, without promises, as countHit(): count one
+   * backend attempt, start its duration timer, and publish the circuit-breaker
+   * state after each op.
+   */
+  countOperation(operation: string, status: 'success' | 'error'): void;
+  timeOperation(operation: string): () => void;
+  setCircuitBreakerState(state: 'closed' | 'open' | 'half-open'): void;
 }
 
 /**
@@ -214,6 +222,9 @@ export class CacheMetrics implements MetricsCollector {
   private l1Hits: PendingCount | null = null;
   private l2Hits: PendingCount | null = null;
   private misses: PendingCount | null = null;
+  // Pending operation counts by operation, one map per status
+  private readonly successes = new Map<string, PendingCount>();
+  private readonly failures = new Map<string, PendingCount>();
 
   /**
    * Settles true once prom-client has loaded and every metric is registered,
@@ -278,7 +289,7 @@ export class CacheMetrics implements MetricsCollector {
         if (existing) return existing as M;
         return new Ctor({ ...cfg, registers: [registry] });
       };
-      // A counter that reads its pending hit or miss counts when scraped.
+      // A counter that reads its pending counts when scraped.
       const getOrCreateCounted = (cfg: Record<string, unknown>): Counter => {
         const existing = registry.getSingleMetric?.(cfg.name as string);
         if (existing) return existing as Counter;
@@ -298,7 +309,7 @@ export class CacheMetrics implements MetricsCollector {
       const defaultLabelNames = Object.keys(this.defaultLabels);
 
       // Operations counter
-      this.operationsCounter = getOrCreate(CounterClass, {
+      this.operationsCounter = getOrCreateCounted({
         name: `${this.prefix}_operations_total`,
         help: 'Total cache operations',
         labelNames: ['operation', 'status', ...defaultLabelNames],
@@ -426,10 +437,39 @@ export class CacheMetrics implements MetricsCollector {
   async recordOperation(operation: string, status: 'success' | 'error'): Promise<void> {
     try {
       if (!(await this.whenReady())) return;
-      this.operationsCounter?.inc({ operation, status, ...this.defaultLabels });
+      if (!this.addPendingOperation(operation, status))
+        this.operationsCounter?.inc({ operation, status, ...this.defaultLabels });
     } catch (error) {
       this.handleError(error, 'recordOperation');
     }
+  }
+
+  /**
+   * Count a backend attempt. Runs on every attempt, so once prom-client has
+   * loaded it only adds to a pending count, as countHit() does.
+   */
+  countOperation(operation: string, status: 'success' | 'error'): void {
+    if (!this.addPendingOperation(operation, status) && !this.initFailed)
+      void this.recordOperation(operation, status);
+  }
+
+  /** Add an attempt to its pending count; false when there is none. */
+  private addPendingOperation(operation: string, status: 'success' | 'error'): boolean {
+    if (!this.isReady || this.operationsCounter === null) return false;
+    const cells = status === 'success' ? this.successes : this.failures;
+    let pending = cells.get(operation);
+    if (pending === undefined) {
+      const cell = pendingCount(this.operationsCounter, {
+        operation,
+        status,
+        ...this.defaultLabels,
+      });
+      if (cell === null) return false;
+      cells.set(operation, (pending = cell));
+    }
+    pending.n++;
+    if (!pending.attached) cells.set(operation, reattach(pending));
+    return true;
   }
 
   /**
@@ -510,6 +550,11 @@ export class CacheMetrics implements MetricsCollector {
    * records its duration once it has, so no operation's sample is dropped.
    */
   async startTimer(operation: string): Promise<() => void> {
+    return this.timeOperation(operation);
+  }
+
+  /** startTimer() without the promise: the cache's per-attempt path. */
+  timeOperation(operation: string): () => void {
     const start = performance.now();
     return () => {
       const seconds = (performance.now() - start) / 1000;
@@ -550,13 +595,35 @@ export class CacheMetrics implements MetricsCollector {
   async updateCircuitBreakerState(state: 'closed' | 'open' | 'half-open'): Promise<void> {
     try {
       if (!(await this.whenReady())) return;
-      const value = state === 'closed' ? 0 : state === 'half-open' ? 0.5 : 1;
-      this.circuitBreakerGauge?.set(this.defaultLabels, value);
+      this.circuitBreakerGauge?.set(this.defaultLabels, breakerValue(state));
     } catch (error) {
       this.handleError(error, 'updateCircuitBreakerState');
     }
   }
+
+  /**
+   * Publish the circuit-breaker state after an op, without a promise once
+   * prom-client has loaded. It stays a set() per op rather than a value read
+   * at scrape: caches sharing a registry share the gauge, which reads the
+   * state of whichever finished an op last, and only prom-client's own set()
+   * keeps that order against every other writer (the other build of this
+   * package, an older copy, the application) and matches its label handling.
+   */
+  setCircuitBreakerState(state: 'closed' | 'open' | 'half-open'): void {
+    if (this.isReady) {
+      try {
+        this.circuitBreakerGauge?.set(this.defaultLabels, breakerValue(state));
+      } catch (error) {
+        this.handleError(error, 'setCircuitBreakerState');
+      }
+    } else if (!this.initFailed) {
+      void this.updateCircuitBreakerState(state);
+    }
+  }
 }
+
+const breakerValue = (state: 'closed' | 'open' | 'half-open'): number =>
+  state === 'closed' ? 0 : state === 'half-open' ? 0.5 : 1;
 
 /**
  * No-op metrics implementation for when metrics are disabled.
@@ -573,6 +640,11 @@ export class NoopMetrics implements MetricsCollector {
   }
   async updateL1Stats(): Promise<void> {}
   async updateCircuitBreakerState(): Promise<void> {}
+  countOperation(): void {}
+  timeOperation(): () => void {
+    return () => {};
+  }
+  setCircuitBreakerState(): void {}
 }
 
 /** Create metrics instance based on configuration */

@@ -1,3 +1,5 @@
+import type { L1LatencyReport } from './telemetry.js';
+
 /**
  * Backend interface for pluggable cache storage.
  *
@@ -54,12 +56,21 @@ export interface Backend {
   /**
    * Store a value with optional TTL.
    *
+   * A backend whose store can apply a shorter lifetime than the one it was
+   * given (CachekitIO: a plan maximum TTL clamps the write) resolves to a
+   * {@link SetResult} reporting that bound, and CacheImpl caps the L1 copy of
+   * the value it wrote with it. Every other backend resolves to nothing.
+   *
+   * Delegating wrappers MUST return the inner backend's result, or they hide
+   * the bound from CacheImpl.
+   *
    * @param key - Cache key
    * @param value - Raw bytes to store
    * @param ttl - Time-to-live in seconds (optional, backend default if omitted)
+   * @returns Nothing, or the bound the store applied (see {@link SetResult})
    * @throws {BackendError} if the operation fails
    */
-  set(key: string, value: Uint8Array, ttl?: number): Promise<void>;
+  set(key: string, value: Uint8Array, ttl?: number): Promise<SetResult | void>;
 
   /**
    * Optional capability: `set` plus a stale-grace window, the time the store
@@ -69,13 +80,20 @@ export interface Backend {
    * CacheImpl refuses `WrapOptions.staleTtl` on a backend without both, because
    * a reader that cannot see the stale label caches stale bytes as fresh.
    *
-   * Delegating wrappers MUST forward the inner backend's implementation.
+   * Delegating wrappers MUST forward the inner backend's implementation and
+   * return its result, as for {@link set}.
    *
    * @param ttl - Time-to-live in seconds (required: the window counts from it)
    * @param staleTtl - Stale-grace window in seconds, >= 0; `0` sends no window
+   * @returns Nothing, or the bound the store applied (see {@link SetResult})
    * @throws {BackendError} if the operation fails
    */
-  setWithStaleTtl?(key: string, value: Uint8Array, ttl: number, staleTtl: number): Promise<void>;
+  setWithStaleTtl?(
+    key: string,
+    value: Uint8Array,
+    ttl: number,
+    staleTtl: number
+  ): Promise<SetResult | void>;
 
   /**
    * Optional capability: synchronously reject a TTL this backend cannot
@@ -87,7 +105,7 @@ export interface Backend {
    * failures. Same rationale as the interop-rejection path in CacheImpl.
    *
    * Implement only where the backend has hard TTL bounds (CachekitIO's
-   * protocol rules: reject 0/negative/> 30 days). Backends that map
+   * protocol rules: reject 0/negative/> 90 days). Backends that map
    * out-of-range TTLs to a defined behavior (e.g. `ttl <= 0` = no expiry
    * on Redis/File/Workers KV) omit it.
    *
@@ -197,6 +215,14 @@ export interface Backend {
    * Like `keyPrefix`, the value MUST be constant from construction onward.
    */
   readonly compressionDefault?: boolean;
+
+  /**
+   * The CachekitIO backend's L1 hit-latency report, which the cache records
+   * the L1 hits it times into; present only while that backend's telemetry
+   * is on. Delegating wrappers forward it like `keyPrefix`.
+   * @internal
+   */
+  readonly l1Latency?: L1LatencyReport;
 }
 
 /** Result of {@link Backend.getWithTtl}: the bytes plus remaining lifetime. */
@@ -221,6 +247,24 @@ export interface GetWithTtlResult {
    * separate from `ttlSeconds` because the store keeps entries past their
    * freshness (stale window); `0` forbids re-populating L1 at all (protocol
    * spec/saas-api.md § Remaining Freshness). Omitted = no bound signalled.
+   */
+  freshFor?: number;
+}
+
+/**
+ * Result of a {@link Backend.set} (or `setWithStaleTtl`) whose store reported
+ * the bound it applied to the write.
+ */
+export interface SetResult {
+  /**
+   * The stored entry's remaining freshness in whole seconds, as the store
+   * reported it on the write's success response (CachekitIO
+   * `X-CacheKit-Fresh-For` on the `PUT` 2xx, read with the same grammar as
+   * on a `GET`). CacheImpl stops serving its L1 copy of the value once this
+   * many seconds have passed since it received the response, whatever the
+   * TTL; `0` (a malformed header included) means L1 keeps no copy (protocol
+   * spec/saas-api.md § Remaining Freshness, API-103). Omitted = the store
+   * applied the TTL it was given, and the L1 copy keeps its usual lifetime.
    */
   freshFor?: number;
 }
@@ -350,9 +394,12 @@ export interface CachekitIOBackendConfig {
   /**
    * Default TTL in seconds for set operations without explicit TTL.
    * Protocol bounds apply (saas-api.md TTL Validation Rules): must be
-   * greater than 0 and at most 2,592,000 (30 days) — out-of-range values
+   * greater than 0 and at most 7,776,000 (90 days) — out-of-range values
    * throw ConfigurationError at construction. Unlike File/Memcached,
-   * `0` does NOT mean "never expire" here; the protocol rejects it.
+   * `0` does NOT mean "never expire" here; the protocol rejects it. The
+   * server clamps a TTL above the tenant's plan maximum TTL (Free 24 hours,
+   * Startup 30 days, Professional 90 days) rather than rejecting it, and
+   * the write's L1 copy follows the clamped lifetime.
    */
   defaultTtl?: number;
   /** Per-attempt request timeout in milliseconds (default: 5000, the protocol's CACHEKIT_TIMEOUT default) */
@@ -361,6 +408,16 @@ export interface CachekitIOBackendConfig {
   allowCustomHost?: boolean;
   /** Provider function for L1 cache metrics (used in request headers) */
   metricsProvider?: () => L1Metrics | null;
+  /**
+   * The telemetry switch (protocol spec/saas-api.md § Telemetry switch). Left
+   * `undefined`, the `CACHEKIT_TELEMETRY` environment variable decides, and
+   * telemetry is on when that is unset too. `false`, or `CACHEKIT_TELEMETRY`
+   * set to `false`, `0`, `off` or `no`, turns it off: requests then carry no
+   * session, counter, hit-rate or L1-latency header, only
+   * `X-CacheKit-L1-Status` and the `User-Agent`. Off wins over on from either
+   * control. Both are read once, when the backend is constructed.
+   */
+  telemetry?: boolean;
 }
 
 export interface L1Metrics {

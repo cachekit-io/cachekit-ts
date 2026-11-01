@@ -1338,3 +1338,58 @@ describe('L1Cache', () => {
     });
   });
 });
+
+describe('L1Cache capExpiryAt and discardRefresh', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('bound caps the entry and shortens its SWR lifetime, never extends it', () => {
+    vi.useFakeTimers({ now: 0 });
+    const c = new L1Cache<string>();
+    c.set('a', 'v', 10_000, 'ns');
+    const entry = c.entry('a')!;
+
+    c.capExpiryAt(entry, 20_000); // later than expiry: no change
+    vi.advanceTimersByTime(9_999);
+    expect(c.get('a')).toBe('v');
+
+    c.set('b', 'v', 10_000, 'ns');
+    c.capExpiryAt(c.entry('b')!, Date.now() + 2_000);
+    vi.advanceTimersByTime(1_999);
+    expect(c.get('b')).toBe('v');
+    vi.advanceTimersByTime(1);
+    expect(c.get('b')).toBeNull();
+  });
+
+  it('bound past its deadline drops the entry; a superseded entry is left alone', () => {
+    vi.useFakeTimers({ now: 0 });
+    const c = new L1Cache<string>();
+    c.set('a', 'old', 10_000, 'ns');
+    const old = c.entry('a')!;
+    c.set('a', 'new', 10_000, 'ns');
+
+    c.capExpiryAt(old, 0); // not the entry L1 holds now
+    expect(c.get('a')).toBe('new');
+
+    c.capExpiryAt(c.entry('a')!, 0);
+    expect(c.get('a')).toBeNull();
+  });
+
+  it('discardRefresh drops the entry only while its version matches', () => {
+    vi.useFakeTimers({ now: 0 });
+    const c = new L1Cache<string>({ swrEnabled: true, swrThresholdRatio: 2 });
+    c.set('a', 'v', 10_000, 'ns');
+    const { versionToken } = c.getWithSwr('a');
+
+    c.set('a', 'newer', 10_000, 'ns');
+    c.discardRefresh('a', versionToken);
+    expect(c.get('a')).toBe('newer');
+
+    c.discardRefresh('a', c.getWithSwr('a').versionToken);
+    expect(c.get('a')).toBeNull();
+
+    c.discardRefresh('missing', 0); // no version: reads as 0, nothing to drop
+    expect(c.get('missing')).toBeNull();
+  });
+});

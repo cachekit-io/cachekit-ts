@@ -22,6 +22,8 @@ repos:
         entry: pnpm exec eslint --fix --max-warnings 0
         language: system
         files: ^packages/cachekit/src/.*\.(ts|tsx)$
+        # eslint.config.js ignores declaration files, and an ignored file passed by name warns.
+        exclude: \.d\.ts$
         pass_filenames: true
 
       - id: prettier

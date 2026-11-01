@@ -59,9 +59,18 @@ describe('TTLCachekitIO', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('refreshTTL rejects TTL above 2,592,000 (30 days)', async () => {
-    await expect(ttlBackend.refreshTTL('key', 2_592_001)).rejects.toThrow(ConfigurationError);
+  it('refreshTTL rejects TTL above 7,776,000 (90 days)', async () => {
+    await expect(ttlBackend.refreshTTL('key', 7_776_001)).rejects.toThrow(ConfigurationError);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  // A TTL over a plan's maximum but inside the TTL range is sent as is: the
+  // SDK does not know the plan, and the store clamps it.
+  it.each([1, 2_592_001, 7_776_000])('refreshTTL sends %i as is in the PATCH body', async (ttl) => {
+    fetchSpy.mockResolvedValueOnce(mockResponse(200, { success: true }));
+    await ttlBackend.refreshTTL('key', ttl);
+    const [, opts] = fetchSpy.mock.calls[0];
+    expect(JSON.parse(new TextDecoder().decode(opts.body))).toEqual({ ttl });
   });
 
   it('refreshTTL ceils fractional TTL to whole seconds in the PATCH body', async () => {

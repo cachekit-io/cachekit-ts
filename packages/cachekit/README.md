@@ -525,14 +525,18 @@ const getReport = cache.wrap(async (id: string) => buildReport(id), {
   like any write. Past the window the server answers 404 and the call takes
   the ordinary miss path.
 - A stale value never enters L1, and the L1 copy of a written value still
-  expires at `ttl`: the window is served by the server only.
+  expires at `ttl`, or sooner when the server reports a shorter lifetime
+  for the write: the window is served by the server only.
 - On Cloudflare Workers the revalidation needs a context bound with
   `withExecutionContext(ctx)`; without one, a stale read is treated as a miss
   and recomputed in the request.
 - `wrap()` throws `ConfigurationError` when `staleTtl` is set on an encrypted
   cache (a secure cache's TTL is often a revocation boundary), on a backend
-  other than CachekitIO, above 2,591,999 seconds, or when `ttl + staleTtl`
-  exceeds 2,592,000 (30 days). Fractions round up; `0` turns it off.
+  other than CachekitIO, above 7,775,999 seconds, or when `ttl + staleTtl`
+  exceeds 7,776,000 (90 days, the protocol's TTL range). Fractions round up;
+  `0` turns it off. A window that does not fit the tenant's plan maximum TTL
+  is not an error: the server shortens it (see the CachekitIO TTL note
+  below).
 
 > [!WARNING]
 > The stale window applies to every reader of the key, not only to this
@@ -575,11 +579,27 @@ Four backends implement the same `Backend` interface (raw bytes in/out) and plug
 | Backend           | Import                                                      | Runtime       | Notes                                                                                                                                                                                 |
 | ----------------- | ----------------------------------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Redis             | `redis` from `@cachekit-io/cachekit`                        | Node          | ioredis; TTL inspection + distributed locking                                                                                                                                         |
-| CachekitIO (SaaS) | `cachekitio` from `@cachekit-io/cachekit`                   | Node, Workers | fetch-based; TTL + locking variants; accepts finite TTLs > 0 up to 2,592,000 s (30 days), fractional values round up; invalid values throw `ConfigurationError` per the protocol spec |
+| CachekitIO (SaaS) | `cachekitio` from `@cachekit-io/cachekit`                   | Node, Workers | fetch-based; TTL + locking variants; accepts finite TTLs > 0 up to 7,776,000 s (90 days), fractional values round up; invalid values throw `ConfigurationError` per the protocol spec |
 | Memcached         | `memcached` from `@cachekit-io/cachekit/backends/memcached` | Node          | memjs (binary protocol, multi-server); requires the optional `memjs` peer dependency                                                                                                  |
 | File              | `file` from `@cachekit-io/cachekit/backends/file`           | Node          | local disk, on-disk format shared with cachekit-py                                                                                                                                    |
 
 The Memcached and File backends are **Node-runtime only** and live behind subpath exports, so the root entry never loads `memjs` or the File backend. The root entry is itself **Node-only**: it loads `node:crypto` and the NAPI core, whose loader requires `node:fs`. ioredis loads when the app creates a Redis backend, not when it imports the package, so an app that never uses Redis never loads it; commands issued before the load finishes wait for it. Bundlers follow that load, so a bundle that uses Redis carries ioredis. ioredis is CommonJS and requires Node builtins, so an esbuild ESM bundle for Node needs `require` defined (the usual `createRequire` banner). Edge code uses the `workerd` export condition or the `@cachekit-io/cachekit/workers` subpath. Bun resolves the root to the Node entry and runs it, NAPI core included (checked on Bun 1.3.8); the `/workers` subpath does not load on Bun. No entry targets Deno, Deno Deploy or Vercel/Next edge.
+
+**CachekitIO TTL and the plan maximum.** The TTL range is 1 to 7,776,000
+seconds (90 days); the SDK rejects anything outside it before any request.
+Each plan also has a maximum TTL: Free 86,400 s (24 hours), Startup
+2,592,000 s (30 days), Professional 7,776,000 s (90 days), Enterprise none.
+The SDK does not know your plan, so it sends a TTL inside the range as is,
+and the server stores the write with at most the plan maximum (the fresh
+window first, then whatever stale window is left). That clamp never rejects
+a write. The server reports the lifetime it applied in `X-CacheKit-Fresh-For`
+on the write's response, and the writing process's L1 copy expires after
+`min(ttl, X-CacheKit-Fresh-For)` seconds, counted from that response; a
+malformed or `0` value keeps no L1 copy. A write whose error degradation
+absorbed (a timeout, say) got no response, and keeps its L1 copy for `ttl`.
+`refreshTTL` (`PATCH /ttl`) never changes how long an L1 copy is served.
+This SDK always sends a TTL (`defaultTtl`, one hour unless set), so it never
+stores a CachekitIO entry without an expiry.
 
 **L1 freshness across processes.** When a plain `get()` hits L2, the value is
 re-populated into this process's L1. On backends that surface the entry's
@@ -850,8 +870,12 @@ const cache = createCache({
 // the same defaultLabels keys: the first cache to register sets the schema.
 ```
 
-Hits and misses are counted in plain fields and added to their counters when
-the registry is scraped, so a cache hit does no prom-client work.
+Hits, misses and backend operations are counted in plain fields and added to
+their counters when the registry is scraped, so a cache hit does no prom-client
+work. A backend operation observes its duration and, when the cache has a
+circuit breaker, sets the circuit-breaker gauge. Caches sharing a registry
+share that gauge, which reads the state of whichever cache finished an
+operation last.
 
 prom-client loads in the background, starting on the event-loop turn after the
 cache is created, and no cache operation waits for it. Metrics recorded while it
@@ -879,9 +903,72 @@ The logger may be `async`. If it throws or its promise rejects, the SDK reports
 that failure, with the original message, to `console.error`; it never reaches
 the cache operation and never surfaces as an unhandled rejection.
 
-With the CachekitIO backend, the `X-CacheKit-L1-*` telemetry headers are wired
-automatically from the cache's live L1/L2 hit and miss counters; pass your own
-`metricsProvider` in the backend config to override. Those counters, and the
+### Telemetry (CachekitIO only)
+
+Only the CachekitIO backend sends telemetry, and only to the API it is
+configured with; Redis, Memcached, File, Workers KV, the Cache API and an
+L1-only cache send nothing anywhere. While telemetry is on, the default during
+the closed beta, each CachekitIO request carries these optional headers:
+
+- the session headers: `X-CacheKit-Session-ID` and `-Session-Start`, and the
+  cache's hit and miss counters `X-CacheKit-L1-Hits`, `-L2-Hits`, `-Misses`
+  and `-L1-Hit-Rate`, the share of all counted operations L1 served,
+  `L1-Hits / (L1-Hits + L2-Hits + Misses)`;
+- unreleased: the L1 hit-latency report, `X-CacheKit-L1-Latency-Buckets`,
+  `-Sum-Ns` and `-One-In`. On Node.js the cache times one call in 1024,
+  chosen at random before its outcome is known, with `process.hrtime.bigint()`;
+  each timed call that L1 serves adds its whole duration to a histogram of
+  sixteen buckets. A report rides the backend's next request, never its health
+  check, and is never sent twice, not even when Node's `fetch` resends a
+  request on its own after a `421`. A report is sent only through an `Agent`
+  exactly as `new Agent()` builds it, which Node's own default dispatcher is:
+  with any other global dispatcher (`setGlobalDispatcher`), such as a
+  `RetryAgent`, a `MockAgent`, a proxy, an `Agent` composed with
+  interceptors, or an `Agent` created with any option set, the SDK cannot
+  rule out a resend, so the report waits and no latency headers are sent.
+  A report can be lost:
+  - when the global dispatcher, or the one an npm undici `fetch` of another
+    major than Node's reads, is anything but an `Agent` built with defaults;
+  - when the `Agent` has to queue the request: on Node.js 26, whose undici
+    probes an `https:` API for HTTP/2, requests made while a new connection
+    is being set up queue, so reports go missing more often around a cold
+    start or a reconnect.
+
+  The SDK cannot see resend code in a `fetch` wrapper you install: one that
+  retries with a new init must not resend a request that carries the
+  `X-CacheKit-L1-Latency-*` headers. A `fetch` wrapper that spreads the SDK's
+  options over its own `dispatcher`, such as a proxy, has it overridden on a
+  request that carries a report, which then goes straight to the configured
+  API: set a proxy with `setGlobalDispatcher` instead, or turn telemetry off.
+  Cloudflare Workers, Bun and Deno send no
+  latency report: Workers' clock does not advance during an in-memory hit, and
+  the protocol names no clock for the other two.
+
+The counters are wired automatically when the backend is given as a config
+(`backend: { apiKey }` or `createCache.io`); a `cachekitio()` instance passed
+as `backend` gets them only from its own `metricsProvider`, and the Workers
+entry wires none. The latency report needs no wiring: it works in both forms.
+
+Turn telemetry off (unreleased) with `telemetry: false` in the CachekitIO
+backend config or `createCache.io` options, or with the environment variable
+`CACHEKIT_TELEMETRY` set to `false`, `0`, `off` or `no` (case-insensitive;
+`true`, `1`, `on` and `yes` mean on, and any other value means off, with one
+warning). On Workers the variable is read from `process.env` and from the
+Worker's bindings, through `import { env } from 'cloudflare:workers'`. A
+variable the SDK cannot read counts as off, with one warning. Telemetry is
+therefore off wherever the variable cannot be read, including under the
+`disallow_importable_env` compatibility flag, which hides the bindings, on
+a workerd that exposes no `Cloudflare.compatibilityFlags` or no importable
+`env`, and on Deno without `--allow-env`. Off from either control wins over on from the other, and
+both are read once, when the backend is constructed. With telemetry off a
+request carries none of the headers above, only `X-CacheKit-L1-Status`, which
+the API requires, and the `User-Agent` below.
+
+```typescript
+createCache({ backend: { apiKey: process.env.CACHEKIT_API_KEY!, telemetry: false } });
+```
+
+Pass your own `metricsProvider` in the backend config to override the counters. Those counters, and the
 Prometheus hit and miss counters, count one outcome per read: a plain `get()` or
 `exists()` counts a hit by the layer that served it, or a miss. A `wrap()` call
 also counts one outcome: an L1 or L2 hit by the layer that served its value

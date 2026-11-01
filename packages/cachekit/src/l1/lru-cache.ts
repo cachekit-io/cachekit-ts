@@ -295,6 +295,41 @@ export class L1Cache<T = unknown> {
   }
 
   /**
+   * Cap an entry `entry` returned at `until` (a Date.now() time): it stops
+   * being served then, and is never extended. If `until` has passed, the
+   * entry is deleted now.
+   * The SWR threshold follows the shorter lifetime, so a capped entry is not
+   * read as stale for the whole of it. Nothing changes unless L1 still holds
+   * this very entry: a later write or invalidation of the key is untouched.
+   * Package-internal.
+   * @internal
+   */
+  capExpiryAt(entry: L1Entry<T>, until: number): void {
+    const node = this.cache.get(entry.key);
+    if (node === undefined || node !== entry) return;
+    const remaining = until - Date.now();
+    if (remaining <= 0) {
+      this.delete(node.key);
+      return;
+    }
+    if (until >= node.expiresAt) return;
+    node.expiresAt = until;
+    node.originalTtl = remaining;
+  }
+
+  /**
+   * End a SWR refresh whose value L1 may not keep (its store bounded it to
+   * nothing), dropping the stale entry it would have replaced if the version
+   * still matches. A newer write or invalidation of the key is kept.
+   * Package-internal.
+   * @internal
+   */
+  discardRefresh(key: string, versionToken: number): void {
+    this.refreshingKeys.delete(key);
+    if ((this.entryVersion.get(key) ?? 0) === versionToken) this.delete(key);
+  }
+
+  /**
    * Complete a SWR refresh, updating the cache if version matches (a value
    * charged above an eighth of maxMemory drops the entry instead; see `set`).
    * Returns false if version changed (stale refresh result).
