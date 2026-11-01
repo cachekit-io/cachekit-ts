@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.2](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-core-wasm-v0.2.1...cachekit-core-wasm-v0.2.2) (2026-11-01)
+
+
+### Bug Fixes
+
+* **deps:** clear undici below 7.30.1 from the test graph (LAB-12210) ([#298](https://github.com/cachekit-io/cachekit-ts/issues/298)) ([b263904](https://github.com/cachekit-io/cachekit-ts/commit/b263904408fffd98bb7d7812d8cc090238547f01))
+
+
+### Performance Improvements
+
+* **deps:** bump cachekit-core to 0.7.4 (LAB-12129) ([#289](https://github.com/cachekit-io/cachekit-ts/issues/289)) ([ac259b5](https://github.com/cachekit-io/cachekit-ts/commit/ac259b57590a6d76bc9a59e874efa606efdb49b5))
+* **workers:** encrypt and decrypt through WebCrypto on Workers (LAB-7135) ([#271](https://github.com/cachekit-io/cachekit-ts/issues/271)) ([c6a3f21](https://github.com/cachekit-io/cachekit-ts/commit/c6a3f21c8379bda1272f5230640032dca29befab))
+
 ## [0.2.1](https://github.com/cachekit-io/cachekit-ts/compare/cachekit-core-wasm-v0.2.0...cachekit-core-wasm-v0.2.1) (2026-10-28)
 
 
