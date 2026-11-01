@@ -2,10 +2,11 @@
 //
 //   node [v8 flags] bench/ir-workload.mjs <workload> <n> [--wall]
 //
-// A run loads only what its workload needs, warms the op past tier-up, then
-// runs it n times between two process.cpuUsage() calls. ir.mjs has callgrind
-// dump its counters on entry to node::CPUUsage, so the counted window holds
-// the n ops and nothing else: module load, setup and warm-up stay out.
+// A run loads only what its workload needs, warms the op until V8 has
+// finished compiling it, then runs it n times between two process.cpuUsage()
+// calls. ir.mjs has callgrind dump its counters on entry to node::CPUUsage, so
+// the counted window holds the n ops and nothing else: module load, setup,
+// warm-up and V8's optimizing compiles stay out.
 // --wall prints the steady-state ns per op of the n iterations instead
 // (indicative only). Imports the built package: run `pnpm build` first.
 import { existsSync, readFileSync } from 'node:fs';
@@ -73,8 +74,12 @@ async function incompressible() {
 }
 
 let sink = 0;
-// Ops run before the window opens, past V8's tier-up. A workload whose op
-// is long enough to tier up sooner sets its own `warmup`.
+// Ops run before the window opens. Under ir.mjs's V8_FLAGS every function a
+// cheap op runs has finished its Maglev and TurboFan compiles within 2,000
+// ops. A workload whose op tiers up later, or runs too long for 2,000, sets
+// its own `warmup`. To check one, run it under V8_FLAGS with --trace-opt
+// --trace-deopt and print a line at each process.cpuUsage() call: no compile
+// or deopt may land between the two.
 const WARMUP = 2000;
 
 async function encryptedOp(manager, storage, bytes) {
@@ -148,8 +153,9 @@ const plaintextSet = (rows, n, warmup) => plaintextSetOf(rowsOf(rows), n, warmup
  * build from before the key hash moved into the bindings has no
  * serialization/blake2b.js and hashes keys in JS: the base side of a compare.
  */
-const keygen = (args, n, wasmHash = false) => ({
+const keygen = (args, n, wasmHash = false, warmup) => ({
   n,
+  warmup,
   setup: async () => {
     const hashing = existsSync(new URL('serialization/blake2b.js', dist))
       ? await load('serialization/blake2b.js')
@@ -251,17 +257,22 @@ export const WORKLOADS = {
   },
   'l1-set-at-capacity-1k': l1AtCapacity(1_000, 200_000),
   'l1-set-at-capacity-10k': l1AtCapacity(10_000, 4_000),
-  'l1-set-at-capacity-100k': l1AtCapacity(100_000, 2_000),
+  // 20,000 ops: 100,000 live entries keep V8 marking the old generation
+  // through the window, and over 2,000 ops the share of that marking in the
+  // window differed between runs by up to 1.9%; over 20,000 it repeats within
+  // 0.01%.
+  'l1-set-at-capacity-100k': l1AtCapacity(100_000, 20_000),
   'plaintext-set-1kb': plaintextSet(32, 5_000),
   'plaintext-set-10kb': plaintextSet(320, 1_000),
-  // 200 warm-up ops, not 2,000: each op encodes 3,200 rows, so V8 has tiered
-  // up long before, and the default made one process run ~9 minutes in CI.
-  // The shorter warm-up moved its Ir/op by +0.4% in CI.
-  'plaintext-set-100kb': plaintextSet(3_200, 1_000, 200),
+  // 1,300 warm-up ops, not 2,000: V8 has finished compiling the set() path
+  // around it by ~960 ops, and 2,000 made one process run ~9 minutes in CI.
+  'plaintext-set-100kb': plaintextSet(3_200, 1_000, 1_300),
   // the ends of the object-heavy write range: one 64 B object, and 1,005,035 B
   // in 96 groups of 320 rows, so no collection nears the 10,000-element bound
-  // and the whole stays under the 1 MiB encode limit. A 1 MB op runs long
-  // enough under callgrind that 20 warm-up ops are past tier-up.
+  // and the whole stays under the 1 MiB encode limit. 20 warm-up ops for 1 MB:
+  // the encoders it calls per row reach TurboFan in the first op, and the
+  // set() path around them runs 40 times, too few for V8 to compile it, so
+  // the window holds no compile.
   'plaintext-set-64b': plaintextSetOf(
     { id: 7, name: 'item-7', score: 10.5, ok: true, tags: ['a', 'b'], owner: 'user-424242' },
     20_000
@@ -293,9 +304,10 @@ export const WORKLOADS = {
   // 1 KB of arguments, where the hash's share of the cost grows with the bytes
   'keygen-1kb': keygen([VALUE], 5_000),
   // the same on Workers, where the wasm binding hashes keys once its module is
-  // instantiated
-  'keygen-wasm': keygen(ARGS, 20_000, true),
-  'keygen-wasm-1kb': keygen([VALUE], 5_000, true),
+  // instantiated. 4,000 warm-up ops: the glue reads each hash back through
+  // Node's TextDecoder decode, which V8 compiles with TurboFan at ~2,400 ops.
+  'keygen-wasm': keygen(ARGS, 20_000, true, 4_000),
+  'keygen-wasm-1kb': keygen([VALUE], 5_000, true, 4_000),
   // set encodes (normalize + msgpack, in one walk), an L2 hit decodes
   // (depth bounds + msgpack)
   'serializer-roundtrip': {
@@ -327,9 +339,12 @@ export const WORKLOADS = {
   'wasm-encrypted': wasmEncrypted(encoded, 5_000),
   'wasm-encrypted-64kb': wasmEncrypted(incompressible, 50),
   // a secure cache's L2 round trip on Node, L1 off: set + get, each running the
-  // AAD-size pre-flight (validateKey) and then encrypt or decrypt
+  // AAD-size pre-flight (validateKey) and then encrypt or decrypt. 4,000
+  // warm-up ops: the get reads the envelope header through Node's TextDecoder,
+  // whose decode V8 compiles with TurboFan at ~2,400 ops.
   'secure-set-get': {
     n: 5_000,
+    warmup: 4_000,
     setup: async () => {
       const { createCache } = await load('index.js');
       const cache = createCache({
@@ -345,9 +360,11 @@ export const WORKLOADS = {
     },
   },
   // get() served from a plaintext L1, which holds the decoded value: the
-  // lookup and the promises around it (l1-get-hit times L1Cache.get alone)
+  // lookup and the promises around it (l1-get-hit times L1Cache.get alone).
+  // 4,000 warm-up ops: V8 compiles getEntry with TurboFan at ~2,200.
   'get-l1-hit': {
     n: 20_000,
+    warmup: 4_000,
     setup: async () => {
       const { createCache } = await load('index.js');
       const cache = createCache({ backend: new MemoryBackend(), metrics: false });
@@ -402,9 +419,11 @@ export const WORKLOADS = {
   // an encrypted wrap() L1 hit at 100 B, 10 KB and 1 MB of msgpack (3, 320
   // and 96 x 320 rows). On Node 22 and 24 each repeats within 0.01%. On Node
   // 26 the 100 B and 1 MB hits sometimes have a run up to 1.7% off the rest,
-  // and a 4x larger n did not remove it: gate on Node 22 or 24.
-  'secure-wrap-l1-hit-100b': secureWrapHit(rowsOf(3), 40_000),
-  'secure-wrap-l1-hit-10kb': secureWrapHit(rowsOf(320), 500),
+  // and a 4x larger n did not remove it: gate on Node 22 or 24. 4,000 warm-up
+  // ops at 100 B and 10 KB: V8 compiles normalize with TurboFan at ~2,200 ops,
+  // and the encoder deoptimises and is compiled again up to ~2,500.
+  'secure-wrap-l1-hit-100b': secureWrapHit(rowsOf(3), 40_000, 4_000),
+  'secure-wrap-l1-hit-10kb': secureWrapHit(rowsOf(320), 500, 4_000),
   'secure-wrap-l1-hit-1mb': secureWrapHit(
     { groups: Array.from({ length: 96 }, () => rowsOf(320)) },
     50,
@@ -427,6 +446,14 @@ export const WORKLOADS = {
   },
 };
 
+// The warm-up and the window run their ops through this one function, so it
+// is as warm as the op when the window opens. A loop in the module body
+// instead had V8 compile the module body inside the window and deoptimise it
+// at the window's end.
+async function repeat(op, times) {
+  for (let i = 0; i < times; i++) await op();
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const [name, nArg] = process.argv.slice(2);
   const n = Number(nArg);
@@ -437,11 +464,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     throw new Error(`n must be a non-negative integer, got "${nArg}"`);
 
   const op = await WORKLOADS[name].setup(n);
-  const warmup = WORKLOADS[name].warmup ?? WARMUP;
-  for (let i = 0; i < warmup; i++) await op();
+  await repeat(op, WORKLOADS[name].warmup ?? WARMUP);
   process.cpuUsage(); // window start: callgrind dump 1
   const t0 = process.hrtime.bigint();
-  for (let i = 0; i < n; i++) await op();
+  await repeat(op, n);
   const ns = Number(process.hrtime.bigint() - t0);
   process.cpuUsage(); // window end: callgrind dump 2
   if (process.argv.includes('--wall')) console.log(JSON.stringify({ nsPerOp: n ? ns / n : 0 }));
