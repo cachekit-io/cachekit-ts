@@ -34,6 +34,14 @@ async function wasm() {
 }
 
 const MASTER_KEY = 'a'.repeat(64);
+// Never sent anywhere: the CachekitIO workloads stub fetch.
+const FAKE_KEY = 'ck_test_fake-not-a-secret'; // pragma: allowlist secret
+
+/** The CachekitIO workloads' API: every read misses, every write succeeds. */
+function stubCachekitIO() {
+  globalThis.fetch = async (_url, init) =>
+    new globalThis.Response(null, { status: init?.method === 'GET' ? 404 : 200 });
+}
 const KEY = 'bench:getUser:' + 'a'.repeat(64);
 const ARGS = [42, 'user-profile', { region: 'au', tier: 3 }];
 // 1,055 B of msgpack. Keep fixtures under the serializer's 10,000-element
@@ -417,6 +425,37 @@ export const WORKLOADS = {
       };
     },
   },
+  // get() served from L2 with metrics on and a circuit breaker, as the
+  // production intent has: one backend attempt's metrics (operations counter,
+  // duration histogram, breaker gauge) around an unpack and a decode
+  'get-l2-hit-metrics': {
+    n: 10_000,
+    // 2,000 ops leave ~40 TurboFan compiles inside the window (node --trace-opt
+    // with markers at the window); 30,000 leave none on Node 22.
+    warmup: 30_000,
+    setup: async () => {
+      const { createCache } = await load('index.js');
+      const { Registry } = await import('prom-client');
+      const registry = new Registry();
+      const cache = createCache({
+        backend: new MemoryBackend(),
+        l1: { enabled: false },
+        reliability: { circuitBreaker: { failureThreshold: 5 } },
+        metrics: { registry },
+      });
+      await cache.set(KEY, VALUE, { ttl: 3600 });
+      // As in wrap-l1-hit-metrics: wait until prom-client has counted the set.
+      const deadline = Date.now() + 5_000;
+      while (!(await registry.metrics()).includes('operation="set",status="success"} 1')) {
+        if (Date.now() > deadline)
+          throw new Error('get-l2-hit-metrics: prom-client did not count the set within 5 s');
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      return async () => {
+        sink += (await cache.get(KEY)).rows.length;
+      };
+    },
+  },
   // an encrypted wrap() L1 hit at 100 B, 10 KB and 1 MB of msgpack (3, 320
   // and 96 x 320 rows). On Node 22 and 24 each repeats within 0.01%. On Node
   // 26 the 100 B and 1 MB hits sometimes have a run up to 1.7% off the rest,
@@ -430,6 +469,43 @@ export const WORKLOADS = {
     50,
     20
   ),
+  // wrap-l1-hit on a CachekitIO backend, configured as `{ apiKey }`, so its
+  // telemetry is on and one call in L1_LATENCY_ONE_IN is timed into the
+  // backend's latency report. It sets no option a build before the report
+  // lacks, so the gate measures it on the base too. fetch is stubbed: the
+  // warm-up's miss and write never leave the process, and the measured hits
+  // make no request.
+  'wrap-l1-hit-cachekitio': {
+    n: 10_000,
+    setup: async () => {
+      stubCachekitIO();
+      const { createCache } = await load('index.js');
+      const cache = createCache({ backend: { apiKey: FAKE_KEY }, metrics: false });
+      const getUser = cache.wrap(async (id, kind, opts) => ({ id, kind, opts }), {
+        namespace: 'bench',
+        ttl: 3600,
+      });
+      return async () => {
+        sink += (await getUser(...ARGS)).id;
+      };
+    },
+  },
+  // wrap-l1-hit-int on the same CachekitIO backend: the memoised hit, where
+  // the timing draw is the largest share of a hit
+  'wrap-l1-hit-int-cachekitio': {
+    n: 20_000,
+    setup: async () => {
+      stubCachekitIO();
+      const { createCache } = await load('index.js');
+      const cache = createCache({ backend: { apiKey: FAKE_KEY }, metrics: false });
+      const getThing = cache.wrap(async (id) => ({ id }), { namespace: 'bench', ttl: 3600 });
+      for (let i = 0; i < 64; i++) await getThing(i);
+      let i = 0;
+      return async () => {
+        sink += (await getThing(i++ & 63)).id;
+      };
+    },
+  },
   // the README benchmark's hit (bench/runtime/probe.mjs): one integer argument,
   // cycling over 64 values that are all in L1
   'wrap-l1-hit-int': {

@@ -841,8 +841,12 @@ const cache = createCache({
 // the same defaultLabels keys: the first cache to register sets the schema.
 ```
 
-Hits and misses are counted in plain fields and added to their counters when
-the registry is scraped, so a cache hit does no prom-client work.
+Hits, misses and backend operations are counted in plain fields and added to
+their counters when the registry is scraped, so a cache hit does no prom-client
+work. A backend operation observes its duration and, when the cache has a
+circuit breaker, sets the circuit-breaker gauge. Caches sharing a registry
+share that gauge, which reads the state of whichever cache finished an
+operation last.
 
 prom-client loads in the background, starting on the event-loop turn after the
 cache is created, and no cache operation waits for it. Metrics recorded while it
@@ -870,9 +874,72 @@ The logger may be `async`. If it throws or its promise rejects, the SDK reports
 that failure, with the original message, to `console.error`; it never reaches
 the cache operation and never surfaces as an unhandled rejection.
 
-With the CachekitIO backend, the `X-CacheKit-L1-*` telemetry headers are wired
-automatically from the cache's live L1/L2 hit and miss counters; pass your own
-`metricsProvider` in the backend config to override. Those counters, and the
+### Telemetry (CachekitIO only)
+
+Only the CachekitIO backend sends telemetry, and only to the API it is
+configured with; Redis, Memcached, File, Workers KV, the Cache API and an
+L1-only cache send nothing anywhere. While telemetry is on, the default during
+the closed beta, each CachekitIO request carries these optional headers:
+
+- the session headers: `X-CacheKit-Session-ID` and `-Session-Start`, and the
+  cache's hit and miss counters `X-CacheKit-L1-Hits`, `-L2-Hits`, `-Misses`
+  and `-L1-Hit-Rate`, the share of all counted operations L1 served,
+  `L1-Hits / (L1-Hits + L2-Hits + Misses)`;
+- unreleased: the L1 hit-latency report, `X-CacheKit-L1-Latency-Buckets`,
+  `-Sum-Ns` and `-One-In`. On Node.js the cache times one call in 1024,
+  chosen at random before its outcome is known, with `process.hrtime.bigint()`;
+  each timed call that L1 serves adds its whole duration to a histogram of
+  sixteen buckets. A report rides the backend's next request, never its health
+  check, and is never sent twice, not even when Node's `fetch` resends a
+  request on its own after a `421`. A report is sent only through an `Agent`
+  exactly as `new Agent()` builds it, which Node's own default dispatcher is:
+  with any other global dispatcher (`setGlobalDispatcher`), such as a
+  `RetryAgent`, a `MockAgent`, a proxy, an `Agent` composed with
+  interceptors, or an `Agent` created with any option set, the SDK cannot
+  rule out a resend, so the report waits and no latency headers are sent.
+  A report can be lost:
+  - when the global dispatcher, or the one an npm undici `fetch` of another
+    major than Node's reads, is anything but an `Agent` built with defaults;
+  - when the `Agent` has to queue the request: on Node.js 26, whose undici
+    probes an `https:` API for HTTP/2, requests made while a new connection
+    is being set up queue, so reports go missing more often around a cold
+    start or a reconnect.
+
+  The SDK cannot see resend code in a `fetch` wrapper you install: one that
+  retries with a new init must not resend a request that carries the
+  `X-CacheKit-L1-Latency-*` headers. A `fetch` wrapper that spreads the SDK's
+  options over its own `dispatcher`, such as a proxy, has it overridden on a
+  request that carries a report, which then goes straight to the configured
+  API: set a proxy with `setGlobalDispatcher` instead, or turn telemetry off.
+  Cloudflare Workers, Bun and Deno send no
+  latency report: Workers' clock does not advance during an in-memory hit, and
+  the protocol names no clock for the other two.
+
+The counters are wired automatically when the backend is given as a config
+(`backend: { apiKey }` or `createCache.io`); a `cachekitio()` instance passed
+as `backend` gets them only from its own `metricsProvider`, and the Workers
+entry wires none. The latency report needs no wiring: it works in both forms.
+
+Turn telemetry off (unreleased) with `telemetry: false` in the CachekitIO
+backend config or `createCache.io` options, or with the environment variable
+`CACHEKIT_TELEMETRY` set to `false`, `0`, `off` or `no` (case-insensitive;
+`true`, `1`, `on` and `yes` mean on, and any other value means off, with one
+warning). On Workers the variable is read from `process.env` and from the
+Worker's bindings, through `import { env } from 'cloudflare:workers'`. A
+variable the SDK cannot read counts as off, with one warning. Telemetry is
+therefore off wherever the variable cannot be read, including under the
+`disallow_importable_env` compatibility flag, which hides the bindings, on
+a workerd that exposes no `Cloudflare.compatibilityFlags` or no importable
+`env`, and on Deno without `--allow-env`. Off from either control wins over on from the other, and
+both are read once, when the backend is constructed. With telemetry off a
+request carries none of the headers above, only `X-CacheKit-L1-Status`, which
+the API requires, and the `User-Agent` below.
+
+```typescript
+createCache({ backend: { apiKey: process.env.CACHEKIT_API_KEY!, telemetry: false } });
+```
+
+Pass your own `metricsProvider` in the backend config to override the counters. Those counters, and the
 Prometheus hit and miss counters, count one outcome per read: a plain `get()` or
 `exists()` counts a hit by the layer that served it, or a miss. A `wrap()` call
 also counts one outcome: an L1 or L2 hit by the layer that served its value

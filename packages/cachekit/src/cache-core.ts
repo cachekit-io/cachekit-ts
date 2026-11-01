@@ -9,6 +9,7 @@ import type {
   InvalidationConfig,
 } from './types/cache.js';
 import type { Backend, L1Metrics, LockableBackend } from './backends/types.js';
+import type { L1LatencyReport } from './backends/telemetry.js';
 import type { InvalidationEvent } from './l1/types.js';
 import type { MetricsCollector, MetricsConfig } from './metrics/prometheus.js';
 import { checkDefaultLabels } from './metrics/labels.js';
@@ -200,6 +201,11 @@ const NOOP_METRICS: MetricsCollector = {
   },
   async updateL1Stats() {},
   async updateCircuitBreakerState() {},
+  countOperation() {},
+  timeOperation() {
+    return () => {};
+  },
+  setCircuitBreakerState() {},
 };
 
 /**
@@ -265,15 +271,15 @@ export interface CacheRuntime {
    * Resolve a backend config union to a Backend instance. `stampede` carries
    * the cold-miss protection config so a runtime can select a lock-capable
    * variant (Node picks cachekitioWithLocking for apiKey configs when
-   * distributedLock is on); `l1Telemetry` lazily reads the cache's live
-   * hit/miss counters so a SaaS backend can auto-wire its telemetry headers.
+   * distributedLock is on); `readHitCounters` lazily reads the cache's live
+   * hit/miss counters so a CachekitIO backend can auto-wire its counter headers.
    * Runtimes without these conveniences may ignore both — users can still
    * pass a fully-configured Backend instance directly.
    */
   resolveBackend(
     config: CacheOptions['backend'],
     stampede?: StampedeConfig,
-    l1Telemetry?: () => L1Metrics
+    readHitCounters?: () => L1Metrics
   ): Backend;
   /**
    * Create the Prometheus metrics collector. Absent on platforms without
@@ -310,6 +316,14 @@ export interface CacheRuntime {
    * request that set it ends.
    */
   setUnrefTimeout?: UnrefTimeout;
+  /**
+   * A monotonic nanosecond clock that advances during synchronous execution
+   * and resolves 100 ns or finer, which the protocol requires before an SDK
+   * reports L1 hit latency (spec/saas-api.md § L1 hit latency, API-82). Node
+   * supplies `process.hrtime.bigint`. Absent on Workers, whose clock moves
+   * only on I/O: there no L1 hit is timed and no latency header is sent.
+   */
+  l1HitClock?: () => bigint;
 }
 
 /**
@@ -351,10 +365,30 @@ export class CacheImpl implements SecureCache {
   private readonly defaultTtl: number;
   private readonly invalidationChannel: InvalidationChannelLike | null = null;
   private readonly metrics: MetricsCollector;
-  // Live hit/miss counters. Feed both the Prometheus collector and the SaaS
-  // X-CacheKit-L1-* telemetry headers (auto-wired via resolveBackend's
-  // l1Telemetry hook below).
-  private readonly telemetry = { l1Hits: 0, l2Hits: 0, misses: 0 };
+  // Live hit/miss counters, kept whether telemetry is on or off. They feed
+  // the Prometheus collector, and the X-CacheKit-L1-* counter headers of a
+  // CachekitIO backend whose telemetry is on (auto-wired via resolveBackend's
+  // readHitCounters hook below).
+  private readonly hitCounters = { l1Hits: 0, l2Hits: 0, misses: 0 };
+  /**
+   * The backend's L1 hit-latency report, when its telemetry is on and the
+   * runtime has a qualifying clock; else null, and no call draws or reads a
+   * clock. See startL1Timer.
+   */
+  private readonly l1Latency: L1LatencyReport | null;
+  /**
+   * A call is timed when its draw, the top 30 bits of the generator's 32, is
+   * below this: 2^30 / l1Latency.oneIn, so with probability 1/oneIn (API-81).
+   * Thirty bits keep the draw a small integer, which a hit never boxes.
+   */
+  private readonly l1LatencyThreshold: number;
+  /**
+   * The xorshift32 state behind each call's draw, seeded from Math.random
+   * and never 0. Drawing with Math.random instead cost a memoised L1 hit on
+   * Node 24 about 70 instructions more, measured.
+   */
+  private l1LatencyRng: number;
+  private readonly l1HitClock: (() => bigint) | undefined;
   private readonly swrRequiresWaitUntil: boolean;
   private readonly setUnrefTimeout: UnrefTimeout | undefined;
   /**
@@ -459,12 +493,18 @@ export class CacheImpl implements SecureCache {
     const metricsOption = options.metrics ?? false;
     if (typeof metricsOption === 'object') checkDefaultLabels(metricsOption.defaultLabels);
 
-    // Initialize backend. The telemetry getter reads `this` lazily (per
+    // Initialize backend. The hit-counter reader reads `this` lazily (per
     // request), so constructor field order is safe.
     this.backend = runtime.resolveBackend(options.backend, options.stampede, () => ({
-      ...this.telemetry,
+      ...this.hitCounters,
       l1Enabled: this.l1 !== null,
     }));
+    // Read once: a backend's report is fixed for its lifetime (API-95).
+    const report = this.l1 && runtime.l1HitClock ? this.backend.l1Latency : undefined;
+    this.l1Latency = report ?? null;
+    this.l1LatencyThreshold = report ? 2 ** 30 / report.oneIn : 0;
+    this.l1LatencyRng = (Math.random() * 2 ** 32) | 0 || 1;
+    this.l1HitClock = runtime.l1HitClock;
 
     // Lock capability. Duck-typed like cachekit-py's hasattr check:
     // user-supplied Backend instances aren't required to declare the
@@ -558,18 +598,44 @@ export class CacheImpl implements SecureCache {
   // fire-and-forget `void` keeps them off the hot path.
 
   private recordHit(layer: 'l1' | 'l2'): void {
-    if (layer === 'l1') this.telemetry.l1Hits++;
-    else this.telemetry.l2Hits++;
+    if (layer === 'l1') this.hitCounters.l1Hits++;
+    else this.hitCounters.l2Hits++;
     this.metrics.countHit(layer);
   }
 
+  /**
+   * The first step of a call that can count an L1 hit, when l1Latency is set:
+   * draw whether to time it, before its outcome is known, independently for
+   * every call (API-81), and if so read the clock. Returns the reading, or
+   * undefined for a call not timed. Joined calls, exists() and reads inside
+   * wrap() are never timed (API-80): their callers never pass a reading on.
+   */
+  private startL1Timer(): bigint | undefined {
+    let x = this.l1LatencyRng;
+    x ^= x << 13;
+    x ^= x >>> 17;
+    x ^= x << 5;
+    this.l1LatencyRng = x;
+    return x >>> 2 < this.l1LatencyThreshold ? this.l1HitClock!() : undefined;
+  }
+
+  /**
+   * The last step of a timed call that L1 served: add its duration to the
+   * backend's latency report. Called in the synchronous step that produces
+   * the value, after its recordHit, or for a read inside wrap() just before
+   * the one wrapRead makes (API-79). A timed call nobody stops is discarded.
+   */
+  private stopL1Timer(timedFrom: bigint): void {
+    this.l1Latency!.record(Number(this.l1HitClock!() - timedFrom));
+  }
+
   private recordMiss(): void {
-    this.telemetry.misses++;
+    this.hitCounters.misses++;
     this.metrics.countMiss();
   }
 
   private recordFailure(operation: string, error: unknown): void {
-    void this.metrics.recordOperation(operation, 'error');
+    this.metrics.countOperation(operation, 'error');
     void this.metrics.recordError(error instanceof Error ? error.constructor.name : 'Unknown');
   }
 
@@ -820,7 +886,7 @@ export class CacheImpl implements SecureCache {
       return await this.reliabilityExecutor.execute(operation, fallback);
     } finally {
       const state = this.reliabilityExecutor.getCircuitBreakerState();
-      if (state !== null) void this.metrics.updateCircuitBreakerState(state);
+      if (state !== null) this.metrics.setCircuitBreakerState(state);
     }
   }
 
@@ -831,10 +897,10 @@ export class CacheImpl implements SecureCache {
    * `operations_total`.
    */
   private async instrument<T>(operation: string, key: string, fn: () => Promise<T>): Promise<T> {
-    const endTimer = await this.metrics.startTimer(operation);
+    const endTimer = this.metrics.timeOperation(operation);
     try {
       const result = await fn();
-      void this.metrics.recordOperation(operation, 'success');
+      this.metrics.countOperation(operation, 'success');
       return result;
     } catch (error) {
       this.recordFailure(operation, error);
@@ -858,7 +924,8 @@ export class CacheImpl implements SecureCache {
   // Not async: an async function that returns getEntry's promise settles two
   // microtask turns after it, which a plaintext L1 hit would pay every time.
   get<T>(key: string): Promise<T | null> {
-    return this.getEntry(key, false);
+    const timedFrom = this.l1Latency === null ? undefined : this.startL1Timer();
+    return this.getEntry(key, false, undefined, undefined, false, true, timedFrom);
   }
 
   /**
@@ -1081,7 +1148,8 @@ export class CacheImpl implements SecureCache {
    * same way, and a stale read never re-populates L1. `readFreshness` asks
    * for those headers even with L1 off, so a stale-grace wrap sees the label.
    * `useL1` false (a wrap() call with skipL1) reads as if L1 were off: L1 is
-   * neither read nor re-populated.
+   * neither read nor re-populated. `timedFrom` is the start reading of a call
+   * drawn for timing (see startL1Timer): an L1 hit stops its clock here.
    */
   private async getEntry<T>(
     key: string,
@@ -1089,7 +1157,8 @@ export class CacheImpl implements SecureCache {
     ttlSeconds?: number,
     probe?: L2ReadProbe,
     readFreshness = false,
-    useL1 = true
+    useL1 = true,
+    timedFrom?: bigint
   ): Promise<T | null> {
     this.ensureNotClosed();
     const l1 = useL1 ? this.l1 : null;
@@ -1106,6 +1175,9 @@ export class CacheImpl implements SecureCache {
         if (decoded !== null) {
           if (probe) probe.servedBy = 'l1';
           else this.recordHit('l1');
+          // Stopped here even for a wrap() read, whose hit wrapRead counts once
+          // this returns: this is the step that produces the value.
+          if (timedFrom !== undefined) this.stopL1Timer(timedFrom);
           return decoded.value;
         }
       }
@@ -1805,7 +1877,12 @@ export class CacheImpl implements SecureCache {
     );
     if (autoKeys.memoising) this.trackKeyMemo(autoKeys);
     return async (...args: TArgs): Promise<TResult> => {
-      // First, and before keying in particular: keying puts the arguments in the
+      // The draw comes first, before the call's outcome is known (API-81), and
+      // the clock starts at the call's first step (§ L1 hit latency).
+      // The null check is inline: on Node 22 a call here cost a memoised hit
+      // with no report about 1% more, measured.
+      const timedFrom = this.l1Latency === null ? undefined : this.startL1Timer();
+      // Then, and before keying in particular: keying puts the arguments in the
       // key memo, which close() has emptied, and only the timer of a new window
       // would empty it again. The flag is read here because calling
       // ensureNotClosed() on every call cost an L1 hit about 100 instructions,
@@ -1851,6 +1928,7 @@ export class CacheImpl implements SecureCache {
       const held = slot?.entry;
       if (held !== undefined && this.l1!.hit(held, now)) {
         this.recordHit('l1');
+        if (timedFrom !== undefined) this.stopL1Timer(timedFrom);
         return held.value as TResult;
       }
 
@@ -1869,6 +1947,7 @@ export class CacheImpl implements SecureCache {
               : { value: l1Value as TResult };
             if (decoded !== null) {
               this.recordHit('l1');
+              if (timedFrom !== undefined) this.stopL1Timer(timedFrom);
               return decoded.value;
             }
           }
@@ -1926,7 +2005,10 @@ export class CacheImpl implements SecureCache {
               // own, discarded with the entry: one Map lookup, against the key
               // generation that call has already paid for.
               if (autoKeys.memoising) slot!.entry = this.l1.entry(cacheKey);
+              // After scheduleRefresh: a stale serve's timed interval includes
+              // the synchronous start of its revalidation.
               this.recordHit('l1');
+              if (timedFrom !== undefined) this.stopL1Timer(timedFrom);
               return decoded.value;
             }
           }
@@ -1941,7 +2023,8 @@ export class CacheImpl implements SecureCache {
       if (existing) {
         // Served in process without a backend request, as cachekit-py
         // counts a joined caller: one L1 hit. A flight that rejects counts
-        // nothing for its joiners.
+        // nothing for its joiners. Never timed: its duration is the
+        // flight's work (API-80).
         const joined = (await existing) as TResult;
         this.recordHit('l1');
         return joined;
@@ -1952,7 +2035,8 @@ export class CacheImpl implements SecureCache {
         () => fn(...args),
         options,
         staleTtl,
-        waitUntil
+        waitUntil,
+        timedFrom
       );
       this.inflight.set(cacheKey, flight);
       try {
@@ -1969,7 +2053,9 @@ export class CacheImpl implements SecureCache {
    * lock when the backend supports it and stampede.distributedLock is on.
    * `waitUntil` is the flight leader's: the herd shares one lock, so its
    * release rides the request that took it, as does a revalidation of a
-   * server-stale hit (`staleTtl` > 0, see wrapRead).
+   * server-stale hit (`staleTtl` > 0, see wrapRead). So is `timedFrom`, the
+   * leader's start reading when its call was drawn for timing: a read that
+   * L1 serves is the call's L1 hit, and is timed as one.
    */
   private async resolveMiss<TResult>(
     cacheKey: string,
@@ -1977,7 +2063,8 @@ export class CacheImpl implements SecureCache {
     compute: () => Promise<TResult>,
     options: WrapOptionsBase,
     staleTtl: number,
-    waitUntil?: WaitUntil
+    waitUntil?: WaitUntil,
+    timedFrom?: bigint
   ): Promise<TResult> {
     // Workers cancel unregistered background work at response return, so
     // without a bound waitUntil there is no revalidation: fail safe to the
@@ -1993,7 +2080,7 @@ export class CacheImpl implements SecureCache {
           }
         : null;
     const read: L2ReadProbe = { cleanMiss: false, servedBy: null, stale: false };
-    const cached = await this.wrapRead<TResult>(cacheKey, interop, options, grace, read);
+    const cached = await this.wrapRead<TResult>(cacheKey, interop, options, grace, read, timedFrom);
     if (cached !== null) {
       return cached;
     }
@@ -2006,7 +2093,8 @@ export class CacheImpl implements SecureCache {
         options,
         grace,
         read.cleanMiss,
-        waitUntil
+        waitUntil,
+        timedFrom
       );
       if (locked !== LOCK_FALLTHROUGH) {
         return locked;
@@ -2061,13 +2149,21 @@ export class CacheImpl implements SecureCache {
     options: WrapOptionsBase,
     grace: StaleGrace | null,
     cleanMiss: boolean,
-    waitUntil?: WaitUntil
+    waitUntil?: WaitUntil,
+    timedFrom?: bigint
   ): Promise<TResult | typeof LOCK_FALLTHROUGH> {
     const lockable = this.lockable!;
     const { lockTimeoutMs, lockWaitMs, lockPollMs } = this.stampede;
     const deadline = Date.now() + lockWaitMs;
     const recheck = async (): Promise<TResult | typeof LOCK_FALLTHROUGH> => {
-      const filled = await this.wrapRead<TResult>(cacheKey, interop, options, grace);
+      const filled = await this.wrapRead<TResult>(
+        cacheKey,
+        interop,
+        options,
+        grace,
+        undefined,
+        timedFrom
+      );
       return filled !== null ? filled : LOCK_FALLTHROUGH;
     };
 
@@ -2097,7 +2193,9 @@ export class CacheImpl implements SecureCache {
               cacheKey,
               interop,
               options,
-              grace && { ...grace, revalidate: null }
+              grace && { ...grace, revalidate: null },
+              undefined,
+              timedFrom
             );
             if (filled !== null) {
               return filled;
@@ -2152,7 +2250,8 @@ export class CacheImpl implements SecureCache {
     interop: boolean,
     options: WrapOptionsBase,
     grace: StaleGrace | null,
-    probe: L2ReadProbe = { cleanMiss: false, servedBy: null, stale: false }
+    probe: L2ReadProbe = { cleanMiss: false, servedBy: null, stale: false },
+    timedFrom?: bigint
   ): Promise<TResult | null> {
     const value = await this.getEntry<TResult>(
       cacheKey,
@@ -2160,7 +2259,8 @@ export class CacheImpl implements SecureCache {
       options.ttl,
       probe,
       grace !== null,
-      !options.skipL1
+      !options.skipL1,
+      timedFrom
     );
     if (value === null) return null;
     if (probe.stale && grace) {
