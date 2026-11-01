@@ -3,6 +3,8 @@ import { BackendError, ConfigurationError, TimeoutError } from '../errors.js';
 import { DEFAULT_TTL_SECONDS } from '../constants.js';
 import { getSessionHeaders } from './session.js';
 import { buildMetricsHeaders } from './metrics-headers.js';
+import { L1_LATENCY_ONE_IN, L1LatencyReport, resolveTelemetry } from './telemetry.js';
+import { oneAttemptDispatcher } from './one-attempt-dispatcher.js';
 import { classifyHttpError, classifyNetworkError } from './error-classifier.js';
 import { validateCachekitUrl } from './url-validator.js';
 import { USER_AGENT } from './user-agent.js';
@@ -176,6 +178,14 @@ export class CachekitIOCore implements Backend {
   private readonly defaultTtl: number;
   private readonly timeout: number;
   private readonly metricsProvider?: () => import('./types.js').L1Metrics | null;
+  /** The telemetry switch, resolved once at construction (API-95). */
+  private readonly telemetry: boolean;
+  /**
+   * This backend's one L1 hit-latency accumulator (API-83 to API-86); absent
+   * while telemetry is off, so nothing is timed into it. See Backend.l1Latency.
+   * @internal
+   */
+  readonly l1Latency?: L1LatencyReport;
   private closed = false;
 
   constructor(config: CachekitIOBackendConfig) {
@@ -188,6 +198,8 @@ export class CachekitIOCore implements Backend {
     this.defaultTtl = validateTtl(config.defaultTtl ?? DEFAULT_TTL_SECONDS);
     this.timeout = config.timeout ?? DEFAULT_TIMEOUT_MS;
     this.metricsProvider = config.metricsProvider;
+    this.telemetry = resolveTelemetry(config.telemetry);
+    if (this.telemetry) this.l1Latency = new L1LatencyReport(L1_LATENCY_ONE_IN);
   }
 
   async get(key: string): Promise<Uint8Array | null> {
@@ -316,7 +328,10 @@ export class CachekitIOCore implements Backend {
   async health(): Promise<{ healthy: boolean; latencyMs: number; version?: string }> {
     const start = performance.now();
     try {
-      const response = await this.request('GET', `${this.apiUrl}/v1/cache/health`);
+      // No latency report: the server does not record health checks (API-84).
+      const response = await this.request('GET', `${this.apiUrl}/v1/cache/health`, {
+        latencyReport: false,
+      });
       const latencyMs = performance.now() - start;
       if (response.status === 429) return { healthy: false, latencyMs };
       if (!response.ok) return { healthy: false, latencyMs };
@@ -377,23 +392,34 @@ export class CachekitIOCore implements Backend {
     return `${this.apiUrl}/v1/cache/${encodeKey(key)}`;
   }
 
+  /**
+   * One attempt. With telemetry off it carries no optional metrics header
+   * (API-96). A latency report is taken here, on every call, so each attempt
+   * the cache's retries make takes its own: the one it takes is consumed
+   * whatever the outcome, and never re-sent (API-86), not even by the resend
+   * fetch makes on its own after a 421 (see takeLatencyReport). The headers
+   * go only to this backend's configured API, and a redirect is never
+   * followed (API-77).
+   */
   private async request(
     method: string,
     url: string,
-    opts?: { body?: Uint8Array; headers?: Record<string, string> }
+    opts?: { body?: Uint8Array; headers?: Record<string, string>; latencyReport?: false }
   ): Promise<Response> {
+    const report = opts?.latencyReport === false ? undefined : this.takeLatencyReport();
     const headers: Record<string, string> = {
       'User-Agent': USER_AGENT,
       Authorization: `Bearer ${this.apiKey}`,
-      ...getSessionHeaders(),
-      ...buildMetricsHeaders(this.metricsProvider),
+      ...(this.telemetry && getSessionHeaders()),
+      ...buildMetricsHeaders(this.metricsProvider, this.telemetry),
+      ...report?.headers,
       ...opts?.headers,
     };
     if (opts?.body) {
       headers['Content-Type'] = opts.headers?.['Content-Type'] ?? 'application/octet-stream';
     }
 
-    return fetch(url, {
+    const init: RequestInit = {
       method,
       headers,
       body: opts?.body,
@@ -403,7 +429,27 @@ export class CachekitIOCore implements Backend {
       // Not 'error': Node raises that as a network failure, which is retried.
       redirect: 'manual',
       signal: AbortSignal.timeout(this.timeout),
-    });
+    };
+    // Typed loosely: the dispatcher implements the one method of undici's
+    // Dispatcher that fetch calls, and the package does not depend on undici.
+    if (report) (init as { dispatcher?: object }).dispatcher = report.dispatcher;
+    return fetch(url, init);
+  }
+
+  /**
+   * This backend's latency report for one request, with the fetch dispatcher
+   * that strips it from any resend of that request (one-attempt-dispatcher.ts).
+   * Undefined, leaving the report in place, while there is nothing to report
+   * (API-85) or no such dispatcher: on any runtime but Node, which alone
+   * times L1 hits, and on Node while its global dispatcher is anything but
+   * undici's own Agent, which might resend the request.
+   */
+  private takeLatencyReport(): { headers: Record<string, string>; dispatcher: object } | undefined {
+    const report = this.l1Latency;
+    if (report === undefined || report.empty) return undefined;
+    const dispatcher = oneAttemptDispatcher();
+    if (dispatcher === undefined) return undefined;
+    return { headers: report.take()!, dispatcher };
   }
 
   private async httpError(operation: string, response: Response): Promise<BackendError> {

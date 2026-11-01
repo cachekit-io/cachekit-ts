@@ -104,7 +104,8 @@ function spyRecordOperation(cache: SecureCache) {
 }
 
 const outcomes = (cache: SecureCache): { l1Hits: number; l2Hits: number; misses: number } =>
-  (cache as unknown as { telemetry: { l1Hits: number; l2Hits: number; misses: number } }).telemetry;
+  (cache as unknown as { hitCounters: { l1Hits: number; l2Hits: number; misses: number } })
+    .hitCounters;
 
 describe('write-behind', () => {
   const caches: SecureCache[] = [];

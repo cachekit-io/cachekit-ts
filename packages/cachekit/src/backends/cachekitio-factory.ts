@@ -2,6 +2,7 @@ import type { Backend, CachekitIOBackendConfig, LockableBackend, TTLBackend } fr
 import { CachekitIOCore } from './cachekitio.js';
 import { LockableCachekitIO } from './cachekitio-lockable.js';
 import { TTLCachekitIO } from './cachekitio-ttl.js';
+import type { L1LatencyReport } from './telemetry.js';
 
 export function cachekitio(config: CachekitIOBackendConfig): Backend {
   return new CachekitIOCore(config);
@@ -34,6 +35,10 @@ class CachekitIO
   }
   get transformsKeys(): boolean | undefined {
     return this.lockable.transformsKeys;
+  }
+  /** @internal Forwarded like keyPrefix — see Backend.l1Latency. */
+  get l1Latency(): L1LatencyReport | undefined {
+    return this.lockable.l1Latency;
   }
   get(key: string) {
     return this.lockable.get(key);

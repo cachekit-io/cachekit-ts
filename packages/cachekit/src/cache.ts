@@ -23,6 +23,18 @@ import timers from 'node:timers';
 setKeyHashBinding((core as { blake2b256Hex?: Blake2b256Hex }).blake2b256Hex);
 
 /**
+ * The protocol names `process.hrtime.bigint()` as the qualifying L1-latency
+ * clock on Node.js (spec/saas-api.md, API-82). Bun and Deno implement it too,
+ * and load this entry, but a clock qualifies only on a runtime the docs name,
+ * so they time no L1 hit.
+ */
+const onNodeJs =
+  typeof process !== 'undefined' &&
+  typeof process.versions?.node === 'string' &&
+  process.versions.bun === undefined &&
+  process.versions.deno === undefined;
+
+/**
  * Node runtime: Redis + CachekitIO backends, NAPI bindings for the
  * ByteStorage envelope and encryption, Redis Pub/Sub invalidation.
  * The Workers entrypoint (workers/index.ts) supplies its own runtime —
@@ -32,25 +44,25 @@ const nodeRuntime: CacheRuntime = {
   resolveBackend(
     config: CacheOptions['backend'],
     stampede?: StampedeConfig,
-    l1Telemetry?: () => L1Metrics
+    readHitCounters?: () => L1Metrics
   ) {
     if ('get' in config) {
       return config;
     }
     if ('apiKey' in config) {
       const ioConfig = config as CachekitIOBackendConfig;
-      // Auto-wire the SaaS telemetry headers from the cache's live hit/miss
+      // Auto-wire the counter headers from the cache's live hit/miss
       // counters; an explicit user-supplied provider still wins.
-      const withTelemetry: CachekitIOBackendConfig = {
+      const withCounters: CachekitIOBackendConfig = {
         ...ioConfig,
-        metricsProvider: ioConfig.metricsProvider ?? l1Telemetry,
+        metricsProvider: ioConfig.metricsProvider ?? readHitCounters,
       };
       // The plain SaaS factory has no lock capability; the distributedLock
       // opt-in selects the lockable wrapper so config-based users aren't
       // forced to construct the backend by hand.
       return stampede?.distributedLock
-        ? cachekitioWithLocking(withTelemetry)
-        : cachekitio(withTelemetry);
+        ? cachekitioWithLocking(withCounters)
+        : cachekitio(withCounters);
     }
     return redis(config as RedisBackendConfig);
   },
@@ -67,6 +79,7 @@ const nodeRuntime: CacheRuntime = {
     timer.unref();
     return () => timers.clearTimeout(timer);
   },
+  l1HitClock: onNodeJs ? () => process.hrtime.bigint() : undefined,
 };
 
 /**
