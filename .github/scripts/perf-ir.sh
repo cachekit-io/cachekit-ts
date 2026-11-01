@@ -2,7 +2,10 @@
 # Build a pull request and its base side by side and gate the PR's
 # instructions per op against the base's (packages/cachekit/bench/ir.mjs).
 # Run from a checkout of the PR merge commit, with Node, pnpm, Rust, the wasm
-# tools and valgrind on PATH. `trees` checks the two trees out under $IR_ROOT
+# tools and valgrind on PATH. A tree's build puts $IR_ROOT/bin/<tree> first on
+# PATH: scripts/build.sh needs the wasm-bindgen CLI that tree's Cargo.lock
+# locks, and CI installs it there, so a PR that bumps it is measured against a
+# base that locks the old one. `trees` checks the two trees out under $IR_ROOT
 # (default $RUNNER_TEMP/ir, which must lie outside the checkout); `measure`
 # builds them and writes $OUT/report.json, ir.mjs's --report, or
 # $OUT/same-build when both builds hash alike, and exits with ir.mjs's code.
@@ -26,7 +29,8 @@
 # only those would hash alike on both sides and pass unmeasured.
 set -euo pipefail
 : "${OUT:?}"
-root=${IR_ROOT:-${RUNNER_TEMP:?set IR_ROOT outside this checkout}/ir}
+# Absolute: a tree's PATH entry is read from inside that tree.
+root=$(realpath -m "${IR_ROOT:-${RUNNER_TEMP:?set IR_ROOT outside this checkout}/ir}")
 mkdir -p "$OUT"
 
 # The workloads a tree's own bench file defines, in its order; none when it
@@ -63,6 +67,7 @@ for tree in base head; do
   echo "::group::Build the $tree"
   (
     cd "$root/$tree"
+    PATH=$root/bin/$tree:$PATH
     pnpm install --frozen-lockfile
     # turbo shares its cache across worktrees: when the core's inputs match,
     # the second tree would restore the first tree's .node, skip `napi build`,
