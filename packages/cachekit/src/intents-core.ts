@@ -148,6 +148,11 @@ export interface IOOptions extends BaseIntentOptions {
   apiUrl?: string;
   /** Per-attempt request timeout in milliseconds (default: 5000) */
   timeout?: number;
+  /**
+   * The telemetry switch: `false` turns off the optional metrics headers,
+   * as `CACHEKIT_TELEMETRY=false` does. See CachekitIOBackendConfig.telemetry.
+   */
+  telemetry?: boolean;
   /** Optional encryption config for zero-knowledge mode */
   encryption?: EncryptionConfig;
   /**
@@ -334,6 +339,7 @@ export function buildIntents<TCache extends SecureCache>(
       apiKey: apiKeyOption,
       apiUrl,
       timeout,
+      telemetry,
       ttl,
       l1,
       encryption,
@@ -359,6 +365,7 @@ export function buildIntents<TCache extends SecureCache>(
         apiKey,
         apiUrl,
         timeout,
+        telemetry,
       },
       defaultTtl: ttl ?? 3600,
       l1: withFullL1Defaults(l1),

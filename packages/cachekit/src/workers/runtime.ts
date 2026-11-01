@@ -22,6 +22,7 @@ import {
   deriveTenantKeys,
 } from '@cachekit-io/cachekit-core-wasm';
 import * as core from '@cachekit-io/cachekit-core-wasm';
+import * as cloudflareWorkers from 'cloudflare:workers';
 import type { CacheOptions, SecureCache } from '../types/cache.js';
 import type { CachekitIOBackendConfig } from '../backends/types.js';
 import { cachekitio } from '../backends/cachekitio-factory.js';
@@ -30,11 +31,31 @@ import { EncryptionManagerCore, type EncryptionBindings } from '../encryption/ma
 import { webCryptoEncryptionBindings } from './webcrypto.js';
 import { ConfigurationError } from '../errors.js';
 import { KEY_GEN_MAX_SIZE } from '../constants.js';
+import { setTelemetryBindingsReader } from '../backends/telemetry.js';
 import {
   nobleBlake2b256Hex,
   setKeyHashBinding,
   type Blake2b256Hex,
 } from '../serialization/blake2b.js';
+
+// CACHEKIT_TELEMETRY is read from the Worker's bindings as well as from
+// process.env (API-94), through the env that cloudflare:workers exports.
+// Under disallow_importable_env that env is empty, so a binding set to off
+// would go unread: the reader throws instead, and an unreadable source is off.
+// The module is read through its namespace, so a workerd without the
+// importable env still loads this entry; it reads as unreadable too.
+setTelemetryBindingsReader(() => {
+  const flags = (globalThis as { Cloudflare?: { compatibilityFlags?: Record<string, boolean> } })
+    .Cloudflare?.compatibilityFlags;
+  const env = cloudflareWorkers.env;
+  if (flags?.disallow_importable_env) {
+    throw new Error("disallow_importable_env hides the Worker's bindings");
+  }
+  if (flags === undefined || env == null) {
+    throw new Error("this workerd does not say whether it exports the Worker's bindings");
+  }
+  return env.CACHEKIT_TELEMETRY;
+});
 
 let keyHashBindingTried = false;
 

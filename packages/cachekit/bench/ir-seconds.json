@@ -26,5 +26,7 @@
   "wasm-encrypted-64kb": 92,
   "secure-set-get": 73,
   "wrap-l1-hit": 22,
-  "wrap-l1-hit-int": 20
+  "wrap-l1-hit-int": 20,
+  "wrap-l1-hit-cachekitio": 22,
+  "wrap-l1-hit-int-cachekitio": 20
 }

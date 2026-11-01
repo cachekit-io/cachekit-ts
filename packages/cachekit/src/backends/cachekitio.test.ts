@@ -443,9 +443,9 @@ describe('CachekitIO Backend', () => {
       await cache.close();
     });
 
-    // The SaaS telemetry headers are auto-wired from the cache's
+    // The X-CacheKit-L1-* counter headers are auto-wired from the cache's
     // live hit/miss counters — no user-supplied metricsProvider needed.
-    it('auto-wires X-CacheKit-L1-* telemetry headers from live cache counters', async () => {
+    it('auto-wires the X-CacheKit-L1-* counter headers from live cache counters', async () => {
       const { createCache } = await import('../cache.js');
 
       const cache = createCache({
