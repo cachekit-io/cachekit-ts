@@ -7,30 +7,25 @@
  * - a global dispatcher the application installed may retry, such as
  *   undici's RetryAgent or an Agent composed with its retry interceptor;
  * - a layer inside an Agent, from a factory of the application's, may keep
- *   the options to resend them, as undici's retry interceptor does.
+ *   the options to resend them, as undici's retry interceptor does;
+ * - an HTTP/1.1 client with pipelining on writes a request behind a running
+ *   one, and when the connection drops it fails the head and writes the rest
+ *   again on a new one.
  *
- * So a report is taken only while the global dispatcher Node's fetch reads is
- * exactly undici's Agent, whose clients resend no request they may have
- * delivered: they requeue only requests not yet written. Any other global
- * dispatcher, composed or not, leaves the report waiting for a later request.
- * A request that carries one goes through a dispatcher of its own: the
- * report rides the first attempt, in a copy of the headers from which it is
- * removed as soon as dispatch returns, so a layer that kept the options to
- * resend them finds no report in them, and any later attempt fetch makes
- * gets the request without it.
+ * So a report is sent only through exactly undici's Agent, and only on the
+ * first attempt fetch dispatches. That attempt is not idempotent, so a client
+ * never pipelines it behind a running request: it is always the head, and a
+ * head whose connection drops fails rather than being written again. Its
+ * headers are a copy from which the report is removed as soon as dispatch
+ * returns, so a layer that kept the options to resend them finds no report.
+ * Any later attempt, and any other dispatcher, gets the request without it.
+ * HTTP/2 replays only a stream the server refused or, after GOAWAY, never
+ * processed: an attempt known not to have been delivered, which the spec
+ * allows.
  *
- * Two limits, documented in the README's Telemetry section. An Agent created
- * with a `connections` limit queues a request while every connection is
- * busy, and a queued first attempt goes without the report, which is lost:
- * reports from a saturated pool are dropped, never sent twice. And this
- * cannot see resend code the application wrote into its own transport: an
- * interceptor or factory that copies the headers and resends from its copy,
- * or a fetch wrapper that retries with a fresh init. A wrapper that spreads
- * the init over a `dispatcher` of its own, such as a proxy, has it replaced
- * by this one on a request that carries a report, which then goes straight
- * to the configured API. A wrapper that reuses the init reuses this dispatcher, which strips the
- * second attempt. Detecting a custom factory would mean reading undici's
- * private fields, and would still leave the fetch wrapper.
+ * What this cannot see, and when a report is lost, is in the README's
+ * Telemetry section. Detecting an Agent's custom factory would mean reading
+ * undici's private fields, and would still leave a retrying fetch wrapper.
  *
  * Node keeps undici's global dispatcher under the symbols undici registers it
  * with. The fetch of undici 6 and 7 reads the first and passes handlers of the
@@ -39,10 +34,9 @@
  * is no undici, and nothing here is used: only Node times L1 hits.
  */
 
-/** The parts of undici's Dispatcher that fetch uses. */
+/** The part of undici's Dispatcher that fetch uses. */
 interface Dispatcher {
-  dispatch(options: { headers?: unknown }, handler: object): boolean;
-  readonly isMockActive?: unknown;
+  dispatch(options: { headers?: unknown; idempotent?: boolean }, handler: object): boolean;
 }
 
 const LEGACY = Symbol.for('undici.globalDispatcher.1');
@@ -122,24 +116,20 @@ export function oneAttemptDispatcher(
   if (target === undefined || !deliversOnce(target)) return undefined;
   let dispatched = false;
   return {
-    // Node's fetch picks the request body by this (undici 6 to 8).
-    get isMockActive(): unknown {
-      return target.isMockActive;
-    },
     dispatch(options, handler) {
+      // A handler of the other API comes from a fetch other than Node's own,
+      // such as npm undici's: it goes to the slot that fetch reads.
+      const handlerSlot = slotFor(handler);
+      const to = handlerSlot === key ? target : slot(handlerSlot);
+      if (to === undefined) throw new Error('cachekit: no global dispatcher for this request');
       const headers = copyOf(options.headers);
-      const own = slotFor(handler) === key;
-      if (dispatched || !own) {
-        dispatched = true;
-        // A handler of the other API comes from another fetch than Node's
-        // own: it goes to the slot that fetch reads, without the report.
-        const to = own ? target : slot(slotFor(handler));
-        if (to === undefined) throw new Error('cachekit: no global dispatcher for this request');
+      const first = !dispatched;
+      dispatched = true;
+      if (!first || !deliversOnce(to)) {
         return to.dispatch({ ...options, headers: dropReport(headers) }, handler);
       }
-      dispatched = true;
       try {
-        return target.dispatch({ ...options, headers }, handler);
+        return to.dispatch({ ...options, headers, idempotent: false }, handler);
       } finally {
         // The attempt has read them by now, or, if a full pool queued it,
         // will go without the report.

@@ -6,7 +6,7 @@
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
-import type { AddressInfo } from 'node:net';
+import { createServer as createTcpServer, type AddressInfo, type Socket } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   cachekitio,
@@ -531,6 +531,67 @@ describe('latency report on the wire (API-84 to API-86)', () => {
       expect(new Set(decoded)).toEqual(new Set(['payload']));
       // Not undici's Agent: the report is not taken, and waits.
       expect(backend.l1Latency!.take()?.['X-CacheKit-L1-Latency-Sum-Ns']).toBe('300');
+    });
+
+    it('a pipelining Agent never writes it again after the connection drops', async () => {
+      // A raw server, to see every byte. On the first connection it answers
+      // the first request's headers but holds its body: from then on undici
+      // may pipeline a GET behind it. The connection drops once a second
+      // request arrives on it, or 300 ms after the first, and undici fails the
+      // head and requeues whatever it wrote behind it.
+      let wire = '';
+      let connection = 0;
+      const sockets: Socket[] = [];
+      let headServed!: () => void;
+      const served = new Promise<void>((resolve) => (headServed = resolve));
+      const server = createTcpServer((socket) => {
+        sockets.push(socket);
+        const first = connection++ === 0;
+        let heads = 0;
+        socket.on('error', () => {});
+        socket.on('data', (chunk) => {
+          const text = chunk.toString('latin1');
+          wire += text;
+          const count = text.split('\r\n\r\n').length - 1;
+          if (!first) {
+            for (let i = 0; i < count; i++) {
+              socket.write('HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n');
+            }
+            return;
+          }
+          if (heads === 0 && count > 0) {
+            socket.write('HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\nabc');
+            setTimeout(() => socket.destroy(), 300);
+            headServed();
+          }
+          heads += count;
+          if (heads >= 2) socket.destroy();
+        });
+      });
+      server.listen(0, '127.0.0.1');
+      await once(server, 'listening');
+      const { port } = server.address() as AddressInfo;
+      vi.stubGlobal('fetch', (url: string, init: RequestInit) =>
+        nodeFetch(`http://127.0.0.1:${port}${new URL(url).pathname}`, init)
+      );
+      const agent = new undici.Agent({ pipelining: 2, connections: 1 });
+      try {
+        await keepingGlobalDispatcher(async () => {
+          undici.setGlobalDispatcher(agent);
+          backend = new CachekitIOCore(CONFIG);
+          const plain = backend.get('ns:x'); // takes no report: there is none yet
+          await served;
+          await new Promise((resolve) => setTimeout(resolve, 30)); // its headers are read
+          backend.l1Latency!.record(300);
+          const carrying = backend.get('ns:a');
+          await Promise.allSettled([plain, carrying]);
+        });
+      } finally {
+        await agent.close();
+        for (const socket of sockets) socket.destroy();
+        server.close();
+      }
+      expect(wire.match(/x-cachekit-l1-latency-sum-ns: 300/gi)).toHaveLength(1);
     });
 
     it('a fetch wrapper that retries with the same init carries none of it', async () => {

@@ -879,15 +879,20 @@ the closed beta, each CachekitIO request carries these optional headers:
   chosen at random before its outcome is known, with `process.hrtime.bigint()`;
   each timed call that L1 serves adds its whole duration to a histogram of
   sixteen buckets. A report rides the backend's next request, never its health
-  check, and is never sent twice, not even when Node's `fetch` resends a
-  request on its own after a `421`, or undici's own retry handler inside an
-  `Agent`'s connection pools resends it. A report is sent only while the
-  global dispatcher is undici's own `Agent` as constructed: with any other
-  (`setGlobalDispatcher`), such as a `RetryAgent`, a `MockAgent`, a proxy or
-  an `Agent` composed with interceptors, the SDK cannot rule out a resend,
-  so the report waits and no latency headers are sent. A report can be lost:
-  an `Agent` created with a `connections` limit queues a request while every
-  connection is busy, and a queued request goes without its report. The SDK
+  check, and is never sent twice: not when Node's `fetch` resends a request
+  on its own after a `421`, not when undici's own retry handler inside an
+  `Agent`'s connection pools resends it, and not when a pipelining `Agent`
+  loses its connection (the request that carries a report is never
+  pipelined). A report is sent only while the global dispatcher is undici's
+  own `Agent` as constructed: with any other (`setGlobalDispatcher`), such as
+  a `RetryAgent`, a `MockAgent`, a proxy or an `Agent` composed with
+  interceptors, the SDK cannot rule out a resend, so the report waits and no
+  latency headers are sent. A report can be lost, never sent twice: a request
+  the `Agent` has to queue goes without its report. An `Agent` with a
+  `connections` limit queues while every connection is busy, and on Node.js
+  26, whose undici probes an `https:` API for HTTP/2, requests made while a
+  new connection is being set up queue too, so reports go missing more often
+  around a cold start or a reconnect. The SDK
   cannot see resend code you write into your own transport, such as an
   `Agent` factory or interceptor that copies a request's headers and resends
   them, or a `fetch` wrapper that retries with a new init; such code must not
@@ -912,9 +917,10 @@ backend config or `createCache.io` options, or with the environment variable
 warning). On Workers the variable is read from `process.env` and from the
 Worker's bindings, through `import { env } from 'cloudflare:workers'`. A
 variable the SDK cannot read counts as off, with one warning. Telemetry is
-therefore off in two cases: under the `disallow_importable_env`
-compatibility flag, which hides the bindings, and on Deno without
-`--allow-env`. Off from either control wins over on from the other, and
+therefore off wherever the variable cannot be read, including under the
+`disallow_importable_env` compatibility flag, which hides the bindings, on
+a workerd that exposes no `Cloudflare.compatibilityFlags` or no importable
+`env`, and on Deno without `--allow-env`. Off from either control wins over on from the other, and
 both are read once, when the backend is constructed. With telemetry off a
 request carries none of the headers above, only `X-CacheKit-L1-Status`, which
 the API requires, and the `User-Agent` below.

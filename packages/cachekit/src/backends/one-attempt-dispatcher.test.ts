@@ -29,21 +29,24 @@ const WITHOUT_REPORT = { Authorization: 'Bearer x', 'X-CacheKit-L1-Status': 'mis
 const UNDICI_8 = { version: '8.12.2', handler: { onRequestStart() {} }, slot: 'current' };
 const UNDICI_7 = { version: '7.30.1', handler: { onConnect() {} }, slot: 'legacy' };
 
-/** What each dispatch was handed: the headers as read then, and the object itself. */
-type Log = { name: string; read: unknown; held: unknown }[];
+/**
+ * What each dispatch was handed: the headers as read then, the object itself,
+ * and whether the attempt was marked idempotent.
+ */
+type Log = { name: string; read: unknown; held: unknown; idempotent?: boolean }[];
 
 /** Named like undici's own Agent, which the report may go through. */
 class Agent {
-  isMockActive = false;
   constructor(
     private readonly name: string,
     private readonly log: Log
   ) {}
-  dispatch(options: { headers?: unknown }): boolean {
+  dispatch(options: { headers?: unknown; idempotent?: boolean }): boolean {
     this.log.push({
       name: this.name,
       read: { ...(options.headers as object) },
       held: options.headers,
+      idempotent: options.idempotent,
     });
     return true;
   }
@@ -70,9 +73,11 @@ describe('oneAttemptDispatcher', () => {
       const dispatcher = oneAttemptDispatcher(version)!;
       dispatcher.dispatch({ headers: HEADERS }, handler);
       dispatcher.dispatch({ headers: HEADERS }, handler);
-      expect(log.map(({ name, read }) => [name, read])).toEqual([
-        [slot, HEADERS],
-        [slot, WITHOUT_REPORT],
+      // The first attempt is not idempotent, so no client pipelines it behind
+      // a running request and writes it again when that connection drops.
+      expect(log.map(({ name, read, idempotent }) => [name, read, idempotent])).toEqual([
+        [slot, HEADERS, false],
+        [slot, WITHOUT_REPORT, undefined],
       ]);
     }
   );
@@ -102,20 +107,15 @@ describe('oneAttemptDispatcher', () => {
     expect(oneAttemptDispatcher(UNDICI_8.version)).toBeUndefined();
   });
 
-  it("sends a handler of the other API to that API's slot, without the report", () => {
+  it.each([
+    ['undici’s Agent: with the report', Agent, HEADERS],
+    ['anything else: without it', RetryAgent, WITHOUT_REPORT],
+  ])("sends another fetch's handler to the slot that fetch reads, holding %s", (_, Kind, sent) => {
+    // npm undici's fetch, of another major than Node's, on a global slot of its own.
     const log: Log = [];
-    install(new Agent('legacy', log), new Agent('current', log));
+    install(new Kind('legacy', log), new Agent('current', log));
     oneAttemptDispatcher(UNDICI_8.version)!.dispatch({ headers: HEADERS }, UNDICI_7.handler);
-    expect(log.map(({ name, read }) => [name, read])).toEqual([['legacy', WITHOUT_REPORT]]);
-  });
-
-  it("forwards its target's isMockActive, by which fetch picks the request body", () => {
-    const agent = new Agent('current', []);
-    install(undefined, agent);
-    const dispatcher = oneAttemptDispatcher(UNDICI_8.version)!;
-    expect(dispatcher.isMockActive).toBe(false);
-    agent.isMockActive = true;
-    expect(dispatcher.isMockActive).toBe(true);
+    expect(log.map(({ name, read }) => [name, read])).toEqual([['legacy', sent]]);
   });
 
   it('refuses headers it cannot read, rather than send a report it cannot remove', () => {
