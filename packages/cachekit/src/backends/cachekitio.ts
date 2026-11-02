@@ -251,8 +251,9 @@ export class CachekitIOCore implements Backend {
     encodeKey(key);
   }
 
-  /** Resolves to the store's `X-CacheKit-Fresh-For` off the `PUT` 2xx, when
-   * it sent one: the bound a plan maximum TTL applied (see SetResult). */
+  /** Resolves to when the `PUT` 2xx arrived and the store's
+   * `X-CacheKit-Fresh-For` off it, when it sent one: the bound a plan maximum
+   * TTL applied (see SetResult). */
   async set(key: string, value: Uint8Array, ttl?: number): Promise<SetResult> {
     this.ensureNotClosed();
     const effectiveTtl = validateTtl(ttl ?? this.defaultTtl);
@@ -357,9 +358,10 @@ export class CachekitIOCore implements Backend {
 
   // ── Internal ──────────────────────────────────────────────
 
-  /** PUT the value with `headers`, and return the 2xx's `X-CacheKit-Fresh-For`
-   * read with the GET grammar (malformed = `0`), or `{}` when it is absent
-   * (protocol spec/saas-api.md § Remaining Freshness, API-103). Validate
+  /** PUT the value with `headers`, and return when the 2xx arrived
+   * (`receivedAt`) and its `X-CacheKit-Fresh-For` read with the GET grammar
+   * (malformed = `0`), omitted when the header is absent (protocol
+   * spec/saas-api.md § Remaining Freshness, API-103). Validate
    * before calling: the catch below would wrap a ConfigurationError as a
    * BackendError. */
   private async put(
@@ -378,8 +380,10 @@ export class CachekitIOCore implements Backend {
       if (!response.ok) {
         throw await this.httpError('set', response);
       }
+      // Taken here, at the 2xx: the writer's L1 bound runs from it (API-103).
+      const receivedAt = Date.now();
       const freshFor = response.headers.get('X-CacheKit-Fresh-For');
-      return freshFor === null ? {} : { freshFor: parseFreshFor(freshFor) };
+      return freshFor === null ? { receivedAt } : { receivedAt, freshFor: parseFreshFor(freshFor) };
     } catch (error) {
       if (error instanceof BackendError || error instanceof TimeoutError) throw error;
       throw this.wrapError('set', error);

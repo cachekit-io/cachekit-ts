@@ -593,7 +593,14 @@ window first, then whatever stale window is left). That clamp never rejects
 a write. The server reports the lifetime it applied in `X-CacheKit-Fresh-For`
 on the write's response, and the writing process's L1 copy expires after
 `min(ttl, X-CacheKit-Fresh-For)` seconds, counted from that response; a
-malformed or `0` value keeps no L1 copy. A write whose error degradation
+malformed or `0` value keeps no L1 copy. A custom backend that wraps the
+CacheKit Cloud backend must return the inner `set` result unchanged: it
+carries the instant the response arrived (`SetResult.receivedAt`), so work
+the wrapper does afterwards shortens the L1 copy instead of restarting it.
+The SDK learns that instant only when the wrapper resolves, so a
+write-behind copy, which is in L1 before the request is sent, keeps serving
+until then. A wrapper should resolve as soon as the inner `set` does.
+A write whose error degradation
 absorbed (a timeout, say) got no response, and keeps its L1 copy for `ttl`.
 `refreshTTL` (`PATCH /ttl`) never changes how long an L1 copy is served.
 This SDK always sends a TTL (`defaultTtl`, one hour unless set), so it never

@@ -526,6 +526,119 @@ describe('CachekitIO writer L1 bound', () => {
     });
   });
 
+  // A wrapper that forwards inner.set's result unchanged but does 1.2 s of work
+  // after the PUT 2xx: the bound runs from receipt, so the delay shortens the
+  // copy and never restarts it (API-103).
+  describe('behind a wrapper that delays after the PUT', () => {
+    const DELAY_MS = 1_200;
+    let delayMs: number;
+    /** Date.now() as the inner set resolved: receipt of the PUT 2xx. */
+    let receivedAt: number;
+    /** Writes the wrapper has resolved. */
+    let writes: number;
+
+    const delaying = (inner: Backend): Backend => ({
+      get: (key) => inner.get(key),
+      getWithTtl: (key) => inner.getWithTtl!(key),
+      async set(key, value, ttl) {
+        const result = await inner.set(key, value, ttl);
+        receivedAt = Date.now();
+        vi.advanceTimersByTime(delayMs);
+        writes++;
+        return result;
+      },
+      delete: (key) => inner.delete(key),
+      exists: (key) => inner.exists(key),
+      close: () => inner.close(),
+    });
+
+    beforeEach(() => {
+      delayMs = DELAY_MS;
+      writes = 0;
+    });
+
+    it('stops a direct set copy at receipt plus Fresh-For', async () => {
+      const cache = createCache({ backend: delaying(cachekitio(config)), defaultTtl: 3600 });
+      putHeaders = { 'X-CacheKit-Fresh-For': '1' };
+      await cache.set('ns:k', 'v1', { ttl: 3600 });
+
+      expect(Date.now() - receivedAt).toBeGreaterThanOrEqual(1_000);
+      expect(await cache.get('ns:k')).toBe('v1');
+      expect(gets).toBe(1); // past receipt + 1 s: L2, not L1
+
+      await cache.close();
+    });
+
+    it('stops a write-behind copy at receipt plus Fresh-For', async () => {
+      const cache = createCache({ backend: delaying(cachekitio(config)), defaultTtl: 3600 });
+      putHeaders = { 'X-CacheKit-Fresh-For': '1' };
+      const wrapped = cache.wrap(async () => 'computed', {
+        namespace: 'wb',
+        ttl: 3600,
+        writeBehind: true,
+      });
+
+      expect(await wrapped()).toBe('computed'); // cold miss: one GET, L1 filled
+      await vi.waitFor(() => expect(store.size).toBe(1));
+      await new Promise((resolve) => setTimeout(resolve, 0)); // let the write settle
+
+      expect(Date.now() - receivedAt).toBeGreaterThanOrEqual(1_000);
+      expect(await wrapped()).toBe('computed');
+      expect(gets).toBe(2);
+
+      await cache.close();
+    });
+
+    // swrThresholdRatio 2 makes every live L1 entry stale, so the second call refreshes.
+    async function refreshThroughWrapper(ttl: number) {
+      const cache = createCache({
+        backend: delaying(cachekitio(config)),
+        defaultTtl: 3600,
+        l1: { swrEnabled: true, swrThresholdRatio: 2 },
+      });
+      let gen = 0;
+      const wrapped = cache.wrap(async () => ++gen, { namespace: 'swr', ttl });
+      const key = generateKey('swr', []);
+
+      delayMs = 0; // the first write fills L1 undelayed, so the next call is a stale hit
+      expect(await wrapped()).toBe(1);
+      delayMs = DELAY_MS;
+      expect(await wrapped()).toBe(1); // stale hit: refresh scheduled
+      // One read, once the refresh settles: a read through L2 backfills L1 itself.
+      await vi.waitFor(() => expect(writes).toBe(2));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(Date.now() - receivedAt).toBeGreaterThanOrEqual(1_000);
+      const before = gets;
+      expect(await cache.get(key)).toBe(2);
+      expect(gets).toBe(before + 1); // L1 kept no refreshed copy
+
+      await cache.close();
+    }
+
+    it('stops an SWR-refreshed copy at receipt plus Fresh-For', async () => {
+      putHeaders = { 'X-CacheKit-Fresh-For': '1' };
+      await refreshThroughWrapper(3600);
+    });
+
+    describe('with no Fresh-For on the PUT, the TTL runs from receipt', () => {
+      it('on a direct set', async () => {
+        const cache = createCache({ backend: delaying(cachekitio(config)), defaultTtl: 3600 });
+        await cache.set('ns:k', 'v1', { ttl: 1 });
+
+        expect(Date.now() - receivedAt).toBeGreaterThanOrEqual(1_000);
+        expect(await cache.get('ns:k')).toBe('v1');
+        expect(gets).toBe(1);
+
+        await cache.close();
+      });
+
+      it('on an SWR refresh', async () => {
+        await refreshThroughWrapper(1);
+      });
+    });
+  });
+
   it('a PATCH /ttl response never creates, refreshes or extends an L1 bound (API-104)', async () => {
     const backend = cachekitioFull(config);
     const cache = createCache({ backend, defaultTtl: 3600 });
@@ -572,10 +685,36 @@ describe('a custom backend reporting a bound', () => {
     async close() {}
   }
 
-  it.each([NaN, -1, '60'])(
+  it.each([NaN, -1, Infinity, '60'])(
     'keeps no L1 copy for a freshFor of %j (fails closed)',
     async (freshFor) => {
       const backend = new ReportingBackend({ freshFor });
+      const cache = createCache({ backend, defaultTtl: 3600 });
+      await cache.set('ns:k', 'v1');
+
+      expect(await cache.get('ns:k')).toBe('v1');
+      expect(backend.gets).toBe(1);
+
+      await cache.close();
+    }
+  );
+
+  it('counts the TTL from a reported receipt instant', async () => {
+    const backend = new ReportingBackend({ receivedAt: Date.now() - 2_000 });
+    const cache = createCache({ backend, defaultTtl: 3600 });
+    await cache.set('ns:k', 'v1', { ttl: 1 });
+
+    expect(await cache.get('ns:k')).toBe('v1');
+    expect(backend.gets).toBe(1); // receipt + 1 s has passed: no L1 copy
+
+    await cache.close();
+  });
+
+  // Honoured, a future or NaN instant would lengthen the copy past Fresh-For: 0.
+  it.each([() => Date.now() + 3_600_000, () => NaN])(
+    'ignores a receipt instant that is not a past instant (%#)',
+    async (receivedAt) => {
+      const backend = new ReportingBackend({ receivedAt: receivedAt(), freshFor: 0 });
       const cache = createCache({ backend, defaultTtl: 3600 });
       await cache.set('ns:k', 'v1');
 
