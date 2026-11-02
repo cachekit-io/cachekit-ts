@@ -232,6 +232,13 @@ describe('oneAttemptDispatcher', () => {
     expect(oneAttemptDispatcher(UNDICI_7.version)).toBeUndefined();
   });
 
+  it('refuses a dispatcher with no prototype, and so no class', () => {
+    const bare = Object.assign(Object.create(null) as object, { dispatch: () => true });
+    install(bare, bare);
+    expect(oneAttemptDispatcher(UNDICI_8.version)).toBeUndefined();
+    expect(oneAttemptDispatcher(UNDICI_7.version)).toBeUndefined();
+  });
+
   it('makes none off Node, where there is no undici', () => {
     expect(oneAttemptDispatcher(null)).toBeUndefined();
   });

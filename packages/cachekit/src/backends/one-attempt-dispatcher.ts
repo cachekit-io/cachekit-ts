@@ -68,12 +68,12 @@ function privateField(agent: object, name: string): unknown {
 }
 
 /** The names of the classes `prototype`'s class extends, nearest first. */
-function superclasses(prototype: object): string[] {
-  const names: string[] = [];
+function superclasses(prototype: object): unknown[] {
+  const names: unknown[] = [];
   let above: unknown = Object.getPrototypeOf(prototype);
   while (typeof above === 'object' && above !== null) {
-    const constructor: unknown = Reflect.get(above, 'constructor');
-    names.push(typeof constructor === 'function' ? constructor.name : '');
+    // Object() reads a missing constructor as one without a name.
+    names.push(Reflect.get(Object(Reflect.get(above, 'constructor')), 'name'));
     above = Object.getPrototypeOf(above);
   }
   return names;
