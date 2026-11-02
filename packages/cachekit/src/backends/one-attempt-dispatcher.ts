@@ -32,6 +32,7 @@
  * handlers, and its first holds an adapter for the older API. Elsewhere there
  * is no undici, and nothing here is used: only Node times L1 hits.
  */
+import { logError } from '../logger.js';
 
 /** The part of undici's Dispatcher that fetch uses. */
 interface Dispatcher {
@@ -95,8 +96,14 @@ function builtInterceptorOf(agent: object): string | undefined {
       // What a constructor returns is always an object.
       const interceptors = privateField(Reflect.construct(Agent, []), 'dispatch interceptors');
       source = Array.isArray(interceptors) ? sourceOf(interceptors[0]) : undefined;
-    } catch {
-      source = undefined; // not a class undici builds: no report
+    } catch (error) {
+      // Once per class: every Agent of it is refused, and its reports wait.
+      logError(
+        `[cachekit] cannot build a fresh ${Agent.name} to check an Agent's interceptors against: ` +
+          'no latency report is sent through it',
+        error
+      );
+      source = undefined;
     }
     builtInterceptor.set(Agent, source);
   }

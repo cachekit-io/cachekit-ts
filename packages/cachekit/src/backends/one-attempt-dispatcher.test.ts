@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { oneAttemptDispatcher } from './one-attempt-dispatcher.js';
+import { setLogger } from '../logger.js';
 import { npmUndici } from '../../test/fixtures/npm-undici.js';
 
 const LEGACY = Symbol.for('undici.globalDispatcher.1');
@@ -230,14 +231,24 @@ describe('oneAttemptDispatcher', () => {
         expect(oneAttemptDispatcher(UNDICI_7.version)).toBeUndefined();
       });
 
-      it('refuses an Agent of a class it cannot build afresh to compare with', () => {
+      it('refuses, and logs once, an Agent of a class it cannot build afresh to compare with', () => {
         const agent = Object.assign(new Agent('current', []), {
           constructor: function Agent(): never {
             throw new Error('not built');
           },
         });
         install(agent, agent);
-        expect(oneAttemptDispatcher(UNDICI_7.version)).toBeUndefined();
+        const logged: unknown[][] = [];
+        setLogger((message, error) => logged.push([message, error]));
+        try {
+          expect(oneAttemptDispatcher(UNDICI_7.version)).toBeUndefined();
+          expect(oneAttemptDispatcher(UNDICI_7.version)).toBeUndefined();
+        } finally {
+          setLogger(null);
+        }
+        expect(logged).toEqual([
+          [expect.stringMatching(/cannot build a fresh Agent/), new Error('not built')],
+        ]);
       });
     });
 
