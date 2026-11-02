@@ -178,16 +178,11 @@ const WASM_RUNTIME_ERROR = (globalThis as { WebAssembly?: { RuntimeError?: Error
 
 /**
  * When (Date.now() ms) the writer's L1 copy of a write made with `ttl`
- * seconds must stop serving, read off what Backend.set resolved to: counted
- * from `receivedAt`, the receipt of the success response, so work a wrapping
- * backend does after it shortens the copy instead of restarting its clock
- * (API-103). With a receipt instant the bound is the shorter of `ttl` and
- * `freshFor`; without one it is `freshFor` from now, or undefined when the
- * backend reported neither, and the copy keeps the TTL from its L1 write.
- * A `freshFor` that is not a non-negative number (a custom backend's bug)
- * fails closed, as `0`: NaN would otherwise slip past every bound check and
- * keep the L1 copy forever. A `receivedAt` that is not a finite instant at or
- * before now is ignored, so it can never lengthen the copy.
+ * seconds must stop serving (API-103): from `receivedAt`, the shorter of
+ * `ttl` and `freshFor`; without it, `freshFor` from now, or undefined when
+ * neither was reported. A `freshFor` that is not a non-negative number fails
+ * closed, as `0` (NaN would keep the copy forever). A `receivedAt` that is
+ * not a finite instant at or before now is ignored, so it never lengthens it.
  */
 function freshUntil(result: SetResult | void, ttl: number): number | undefined {
   if (!result) return undefined;
@@ -201,7 +196,7 @@ function freshUntil(result: SetResult | void, ttl: number): number | undefined {
   const ttlBound = received !== undefined && ttl > 0 ? received + ttl * 1000 : undefined;
   if (freshFor === undefined) return ttlBound;
   const freshBound = typeof freshFor === 'number' && freshFor >= 0 ? from + freshFor * 1000 : from;
-  return ttlBound === undefined ? freshBound : Math.min(ttlBound, freshBound);
+  return Math.min(freshBound, ttlBound ?? Infinity);
 }
 
 /**
@@ -1454,7 +1449,8 @@ export class CacheImpl implements SecureCache {
     // The L2 write, under retry, the breaker and degradation; the stale
     // window rides it on a stale-grace wrap. It resolves to when the writer's
     // L1 copy must stop serving (L1Write.freshUntil), counted from receipt of
-    // the success response, or undefined when the backend reported no bound.
+    // the success response, or undefined when the backend reported neither a
+    // `freshFor` nor a valid `receivedAt`.
     const writeL2 = async (): Promise<number | undefined> =>
       freshUntil(
         staleTtl > 0
