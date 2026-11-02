@@ -1,16 +1,14 @@
 # @cachekit-io/cachekit
 
-Backend-agnostic caching for TypeScript/Node.js — works with Redis, Memcached, File, Workers KV, or CachekitIO. Hybrid TypeScript-Rust design with L1 in-memory cache, SWR, circuit breaker, and optional zero-knowledge encryption.
+Backend-agnostic caching for TypeScript/Node.js — works with Redis, Memcached, File, Workers KV, or CacheKit Cloud. Hybrid TypeScript-Rust design with L1 in-memory cache, SWR, circuit breaker, and optional zero-knowledge encryption.
 
 > **Status: beta** — CacheKit is in closed beta ahead of 1.0. APIs are stabilising; minor breaking changes may still occur between 0.x releases.
 >
-> **Version note**: install 0.2.1 or later. 0.2.0 is on npm but does not install: it pins `@cachekit-io/cachekit-core-ts` 0.1.3, which was never published. 0.2.1 is the same code, pinned to published core packages.
->
-> **Upgrading from 0.1.x**: 0.2 has breaking changes, listed in the [0.2.0 changelog](https://github.com/cachekit-io/cachekit-ts/blob/main/packages/cachekit/CHANGELOG.md#020-2026-10-16). Two of them make 0.1.x entries unreadable on an encrypted cache (`secure`, `io` with `encryption`, or `createCache()` with `encryption`) that has no `tenantId` or whose backend sets a `keyPrefix` that you keep across the upgrade. Once no 0.1.x instance is still writing, delete the entries 0.1.x wrote, or move to a fresh `keyPrefix` where your backend takes one. Do not rely on the TTL: until such an entry expires or is overwritten, every read of it is a miss (an `EncryptionError` where graceful degradation is off), and an entry without a TTL never expires.
+> **Upgrading**: breaking changes are in the [changelog](https://github.com/cachekit-io/cachekit-ts/blob/main/packages/cachekit/CHANGELOG.md). Entries an older release wrote to an encrypted cache (`secure`, `io` with `encryption`, or `createCache()` with `encryption`) that has no `tenantId`, or whose backend keeps a non-empty `keyPrefix`, no longer authenticate. Once no old instance is still writing, delete those entries, or move to a fresh `keyPrefix` where your backend takes one. Do not wait out the TTL: until such an entry expires or is overwritten, every read of it is a miss (an `EncryptionError` where graceful degradation is off), and an entry without a TTL never expires.
 
 ## Features
 
-- **Dual-layer caching**: L1 in-memory + pluggable L2 (Redis, CachekitIO, Memcached, Workers KV, local File); see [Performance](#performance) for what a hit costs
+- **Dual-layer caching**: L1 in-memory + pluggable L2 (Redis, CacheKit Cloud, Memcached, Workers KV, local File); see [Performance](#performance) for what a hit costs
 - **Stale-while-revalidate**: Serve stale data while refreshing in background
 - **Stampede protection**: Cold-miss single-flight per process (always on) + opt-in cross-process distributed locks
 - **Zero-knowledge encryption**: Optional AES-256-GCM client-side encryption
@@ -78,7 +76,7 @@ const encrypted = createCache.secure({
   masterKey: process.env.CACHEKIT_MASTER_KEY!, // or set CACHEKIT_MASTER_KEY env var
 });
 
-// SaaS backend — zero infrastructure via cachekit.io
+// CacheKit Cloud — zero infrastructure, hosted for you
 const managed = createCache.io({
   apiKey: process.env.CACHEKIT_API_KEY!, // or set CACHEKIT_API_KEY env var
   ttl: 3600,
@@ -87,12 +85,12 @@ const managed = createCache.io({
 
 Each intent pre-configures the full stack with sensible defaults:
 
-| Intent       | Backend     | Circuit Breaker   | Retry | Degradation            | L1 SWR | Encryption  | Default TTL |
-| ------------ | ----------- | ----------------- | ----- | ---------------------- | ------ | ----------- | ----------- |
-| `minimal`    | Redis       | Off               | Off   | Off — errors propagate | Off    | No          | 300s        |
-| `production` | Redis       | On (threshold: 5) | On    | On                     | On     | No          | 600s        |
-| `secure`     | Redis       | On (threshold: 5) | On    | On                     | On     | AES-256-GCM | 600s        |
-| `io`         | cachekit.io | On (threshold: 5) | On    | On                     | On     | Optional    | 3600s       |
+| Intent       | Backend        | Circuit Breaker   | Retry | Degradation            | L1 SWR | Encryption  | Default TTL |
+| ------------ | -------------- | ----------------- | ----- | ---------------------- | ------ | ----------- | ----------- |
+| `minimal`    | Redis          | Off               | Off   | Off — errors propagate | Off    | No          | 300s        |
+| `production` | Redis          | On (threshold: 5) | On    | On                     | On     | No          | 600s        |
+| `secure`     | Redis          | On (threshold: 5) | On    | On                     | On     | AES-256-GCM | 600s        |
+| `io`         | CacheKit Cloud | On (threshold: 5) | On    | On                     | On     | Optional    | 3600s       |
 
 Every intent takes `ttl`, `l1`, `serializer`, `compression` and `invalidation`;
 `production`, `secure` and `io` also take `reliability` and `metrics`
@@ -126,7 +124,7 @@ The original `createCache(options)` API is still available for full control:
 
 ```typescript
 const cache = createCache({
-  // Required: Redis backend
+  // Required: a backend. Redis here; Memcached, File and CacheKit Cloud also work (see Backends)
   backend: {
     url: 'redis://localhost:6379',
     keyPrefix: 'myapp:',
@@ -249,7 +247,7 @@ key, hash the key with blake2b (16-byte output, hex). This is the same digest
 the File backend uses as its on-disk filename, so on that backend a logged
 `keyHash` names the entry's cache file directly. (Backends have their own hard
 ceilings too: Workers KV values cap at 25 MiB, Memcached items at 1 MiB
-server-side, CachekitIO per plan.)
+server-side, CacheKit Cloud per plan.)
 
 ### Binary values
 
@@ -343,7 +341,7 @@ see the [key rotation runbook](https://docs.cachekit.io/concepts/key-rotation/).
 ## Stampede Protection
 
 A cold cache key hit by N concurrent callers would normally execute the wrapped
-function N times and issue N backend reads — on the metered-misses SaaS backend
+function N times and issue N backend reads — on CacheKit Cloud
 that is N billed misses for one key.
 
 **In-process single-flight is always on**: concurrent `wrap()` calls for the
@@ -362,19 +360,19 @@ lock-endpoint failures degrade to an unlocked compute.
 
 An uncontended miss skips the double-check: when the first lock request wins
 right after a clean L2 miss, nobody held the lock when we asked, so the read
-would almost always miss again (and be billed as a miss). On CachekitIO that cuts a
+would almost always miss again (and be billed as a miss). On CacheKit Cloud that cuts a
 locked miss to `GET`, lock `POST`, `PUT` on the caller's path. A fill that
 lands between the miss and the lock grant is recomputed and written again;
 last write wins. After a waited grant, or a first read that failed rather
 than missed, the double-check still runs. cachekit-py makes the same skip on
-its CachekitIO backend only, so on a Redis lock shared by Python and
+its `CachekitIOBackend` only, so on a Redis lock shared by Python and
 TypeScript processes only the TypeScript side skips it. The release is sent in the
 background; under `withExecutionContext()` on Workers it is registered with
 `ctx.waitUntil`, so the platform does not cancel it when the response returns.
 
 ```typescript
 const cache = createCache({
-  backend: { url: 'redis://localhost:6379' }, // Redis and CachekitIO backends support locks
+  backend: { url: 'redis://localhost:6379' }, // Redis and CacheKit Cloud backends support locks
   stampede: {
     distributedLock: true, // default false
     lockTimeoutMs: 30000, // lock lease; size at/above expected recompute time
@@ -384,7 +382,7 @@ const cache = createCache({
 });
 ```
 
-Requires a lock-capable backend: Redis, a `CachekitIOBackendConfig` (the SaaS
+Requires a lock-capable backend: Redis, a `CachekitIOBackendConfig` (the CacheKit Cloud
 lock endpoint is selected automatically), `cachekitioWithLocking()`, or
 `cachekitioFull()`. `createCache` throws `ConfigurationError` if
 `distributedLock` is requested on a backend without `acquireLock`/`releaseLock`.
@@ -401,10 +399,10 @@ failure mode it prevents.
 
 ## Write-Behind
 
-`writeBehind: true` is an opt-in per wrapped function, off by default and set
+**Unreleased.** `writeBehind: true` is an opt-in per wrapped function, off by default and set
 by no preset, matching cachekit-py's `write_behind`. A cold miss returns once
 the value is encoded (and encrypted) and in L1; its L2 write finishes in the
-background. On CachekitIO that takes the miss from `GET`, `PUT` on the
+background. On CacheKit Cloud that takes the miss from `GET`, `PUT` on the
 caller's path to `GET` alone. The server still confirms the write; only the
 caller stops waiting for it.
 
@@ -417,7 +415,7 @@ const getUser = cache.wrap(async (id: number) => fetchUser(id), {
 ```
 
 The cost is visibility. Until the write lands, **another process misses the
-key** and recomputes it (on the metered-misses backend, a billed miss), and so
+key** and recomputes it (on CacheKit Cloud, a billed miss), and so
 does this process when L1 is off. Another process's `invalidate` or `delete` is
 not ordered against this process's pending write, so a value computed before
 that invalidation can be written after it, with its full TTL.
@@ -477,9 +475,9 @@ digest of the key and the error's class (never its text), and counts as `operati
 > instance) loses them. A lost write is only a later miss: the value is
 > recomputed.
 
-## Server stale-grace (CachekitIO)
+## Server stale-grace (CacheKit Cloud)
 
-Off by default. A function wrapped with `staleTtl` asks the CachekitIO server to
+**Unreleased.** Off by default. A function wrapped with `staleTtl` asks the CacheKit Cloud server to
 keep each entry for `staleTtl` seconds past its `ttl` and to serve it labelled
 `stale` in that window. A `wrap()` call whose L2 read comes back stale returns
 that value at once and re-runs the function in the background, so a call at a
@@ -532,10 +530,10 @@ const getReport = cache.wrap(async (id: string) => buildReport(id), {
   and recomputed in the request.
 - `wrap()` throws `ConfigurationError` when `staleTtl` is set on an encrypted
   cache (a secure cache's TTL is often a revocation boundary), on a backend
-  other than CachekitIO, above 7,775,999 seconds, or when `ttl + staleTtl`
+  other than CacheKit Cloud, above 7,775,999 seconds, or when `ttl + staleTtl`
   exceeds 7,776,000 (90 days, the protocol's TTL range). Fractions round up;
   `0` turns it off. A window that does not fit the tenant's plan maximum TTL
-  is not an error: the server shortens it (see the CachekitIO TTL note
+  is not an error: the server shortens it (see the CacheKit Cloud TTL note
   below).
 
 > [!WARNING]
@@ -544,8 +542,8 @@ const getReport = cache.wrap(async (id: string) => buildReport(id), {
 > back as an ordinary hit, where without the window it would have missed. In
 > this SDK that is `cache.get()` and every `wrap()` without `staleTtl`: they
 > return the value without revalidating it, and never cache it in L1. Readers
-> that do not check the server's freshness label (cachekit-ts before 0.2.0,
-> cachekit-rs today) also cache it locally as fresh. Do not set `staleTtl` on
+> that do not check the server's freshness label (older cachekit-ts releases)
+> also cache it locally as fresh. Do not set `staleTtl` on
 > keys whose readers rely on hard expiry, including interop keys. The protocol states this rule
 > ([`saas-api.md` § Stale-While-Revalidate](https://github.com/cachekit-io/protocol/blob/main/spec/saas-api.md#stale-while-revalidate)).
 
@@ -576,16 +574,16 @@ as the normative reference. Both win over this README on any conflict.
 
 Four backends implement the same `Backend` interface (raw bytes in/out) and plug into `createCache({ backend })` interchangeably:
 
-| Backend           | Import                                                      | Runtime       | Notes                                                                                                                                                                                 |
-| ----------------- | ----------------------------------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Redis             | `redis` from `@cachekit-io/cachekit`                        | Node          | ioredis; TTL inspection + distributed locking                                                                                                                                         |
-| CachekitIO (SaaS) | `cachekitio` from `@cachekit-io/cachekit`                   | Node, Workers | fetch-based; TTL + locking variants; accepts finite TTLs > 0 up to 7,776,000 s (90 days), fractional values round up; invalid values throw `ConfigurationError` per the protocol spec |
-| Memcached         | `memcached` from `@cachekit-io/cachekit/backends/memcached` | Node          | memjs (binary protocol, multi-server); requires the optional `memjs` peer dependency                                                                                                  |
-| File              | `file` from `@cachekit-io/cachekit/backends/file`           | Node          | local disk, on-disk format shared with cachekit-py                                                                                                                                    |
+| Backend        | Import                                                      | Runtime       | Notes                                                                                                                                                                                                                                          |
+| -------------- | ----------------------------------------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Redis          | `redis` from `@cachekit-io/cachekit`                        | Node          | ioredis; TTL inspection + distributed locking                                                                                                                                                                                                  |
+| CacheKit Cloud | `cachekitio` from `@cachekit-io/cachekit`                   | Node, Workers | fetch-based; TTL + locking variants; accepts finite TTLs > 0 up to 2,592,000 s (30 days) in the latest release; Unreleased: 7,776,000 s (90 days), fractional values round up; invalid values throw `ConfigurationError` per the protocol spec |
+| Memcached      | `memcached` from `@cachekit-io/cachekit/backends/memcached` | Node          | memjs (binary protocol, multi-server); requires the optional `memjs` peer dependency                                                                                                                                                           |
+| File           | `file` from `@cachekit-io/cachekit/backends/file`           | Node          | local disk, on-disk format shared with cachekit-py                                                                                                                                                                                             |
 
 The Memcached and File backends are **Node-runtime only** and live behind subpath exports, so the root entry never loads `memjs` or the File backend. The root entry is itself **Node-only**: it loads `node:crypto` and the NAPI core, whose loader requires `node:fs`. ioredis loads when the app creates a Redis backend, not when it imports the package, so an app that never uses Redis never loads it; commands issued before the load finishes wait for it. Bundlers follow that load, so a bundle that uses Redis carries ioredis. ioredis is CommonJS and requires Node builtins, so an esbuild ESM bundle for Node needs `require` defined (the usual `createRequire` banner). Edge code uses the `workerd` export condition or the `@cachekit-io/cachekit/workers` subpath. Bun resolves the root to the Node entry and runs it, NAPI core included (checked on Bun 1.3.8); the `/workers` subpath does not load on Bun. No entry targets Deno, Deno Deploy or Vercel/Next edge.
 
-**CachekitIO TTL and the plan maximum.** The TTL range is 1 to 7,776,000
+**CacheKit Cloud TTL and the plan maximum (Unreleased).** The TTL range is 1 to 7,776,000
 seconds (90 days); the SDK rejects anything outside it before any request.
 Each plan also has a maximum TTL: Free 86,400 s (24 hours), Startup
 2,592,000 s (30 days), Professional 7,776,000 s (90 days), Enterprise none.
@@ -599,27 +597,27 @@ malformed or `0` value keeps no L1 copy. A write whose error degradation
 absorbed (a timeout, say) got no response, and keeps its L1 copy for `ttl`.
 `refreshTTL` (`PATCH /ttl`) never changes how long an L1 copy is served.
 This SDK always sends a TTL (`defaultTtl`, one hour unless set), so it never
-stores a CachekitIO entry without an expiry.
+stores a CacheKit Cloud entry without an expiry.
 
 **L1 freshness across processes.** When a plain `get()` hits L2, the value is
 re-populated into this process's L1. On backends that surface the entry's
 remaining TTL in the same read (`Backend.getWithTtl` — Redis via a pipelined
 `GET`+`TTL`, the Workers Cache API via response freshness headers), that L1
 copy is capped at the entry's **remaining lifetime**, so it can never outlive
-the L2 entry it came from. CachekitIO reads the server's freshness headers
+the L2 entry it came from. The CacheKit Cloud backend reads the server's freshness headers
 from the same `GET`: a read whose `X-CacheKit-Freshness` is anything other
 than exactly `fresh`, or one with `X-CacheKit-Fresh-For: 0`, is returned to the caller but never re-populates L1,
 and any other L1 copy expires after `min(declared TTL or defaultTtl,
 X-CacheKit-Fresh-For)` seconds and is not served after that, SWR included.
 The cost is deliberate: reads of stale or nearly expired keys go to L2 instead
-of L1. A CachekitIO response without the header keeps the declared lifetime.
+of L1. A CacheKit Cloud response without the header keeps the declared lifetime.
 On backends without the capability (KV, Memcached, File, custom backends that
 only implement `get`), the L1 copy is
 bounded by `defaultTtl` — if you rely on TTLs for correctness across processes
 there, set a small `defaultTtl`, disable L1 (`l1: { enabled: false }`), or
 implement `getWithTtl` on your custom backend.
 
-How fresh a cachekit.io read is, and how long a deleted project's data stays readable: [Consistency and Deletion](https://docs.cachekit.io/concepts/consistency/).
+How fresh a CacheKit Cloud read is, and how long a deleted project's data stays readable: [Consistency and Deletion](https://docs.cachekit.io/concepts/consistency/).
 
 ### Memcached
 
@@ -680,7 +678,7 @@ await cache.set('key', value, { ttl: 60, namespace: 'custom' });
 
 ### cache.delete(key)
 
-Delete a key. Returns `true` if the key existed and was deleted. CachekitIO returns `true` on every successful delete, whether or not the key existed: the server does not report existence on `DELETE`.
+Delete a key. Returns `true` if the key existed and was deleted. CacheKit Cloud returns `true` on every successful delete, whether or not the key existed: the server does not report existence on `DELETE`.
 
 ### cache.wrap(fn, options)
 
@@ -693,8 +691,8 @@ const cachedFn = cache.wrap(async (id: number) => fetchData(id), {
 });
 ```
 
-Options: `namespace`, `ttl`, `skipL1`, `writeBehind` ([Write-Behind](#write-behind)),
-`staleTtl` ([Server stale-grace](#server-stale-grace-cachekitio)), and the
+Options: `namespace`, `ttl`, `skipL1`, `writeBehind` ([Write-Behind](#write-behind), Unreleased),
+`staleTtl` ([Server stale-grace](#server-stale-grace-cachekit-cloud), Unreleased), and the
 `interop` / `interopArity` pair ([Cross-SDK interop mode](#cross-sdk-interop-mode)).
 
 `skipL1: true` makes a call neither read nor fill L1: it reads the backend even
@@ -703,8 +701,8 @@ scan does not evict the entries L1 keeps hot. An entry L1 already holds stays
 there. A call that arrives while another call in this process resolves the same
 key's miss still shares that one read and compute
 ([Stampede Protection](#stampede-protection)), and the call that started the
-flight decides whether L1 is filled. Before 0.3.0, a `skipL1` call skipped only
-the first L1 lookup: on a miss it still read and filled L1.
+flight decides whether L1 is filled. This is Unreleased: in the latest release a `skipL1` call
+skips only the first L1 lookup, and on a miss still reads and fills L1.
 
 ### cache.invalidate(level, options?)
 
@@ -771,9 +769,9 @@ try {
 Every `BackendError` carries a `classification`. `transient` and `timeout`
 errors (a dropped connection, a 5xx, a 408 or 429) are retried with backoff and
 count toward opening the circuit breaker, and so is a `TimeoutError`, which is
-how a cachekit.io request timeout surfaces. `permanent` and `authentication`
+how a CacheKit Cloud request timeout surfaces. `permanent` and `authentication`
 errors are attempted once and never count toward the breaker, because retrying
-cannot fix them and they are not an outage signal. From cachekit.io these are
+cannot fix them and they are not an outage signal. From CacheKit Cloud these are
 401 and 403 (a bad or revoked API key) and every other 4xx, for example 400
 (a key the service rejects), 409 and 413. The built-in backends also raise them
 for client-side validation failures (a value over the File or Memcached size
@@ -828,7 +826,7 @@ cannot make a `permanent` or `authentication` error retry.
 
 ### Timeouts and the retry deadline
 
-A cachekit.io request times out after 5 s per attempt by default, the
+A CacheKit Cloud request times out after 5 s per attempt by default, the
 protocol's `CACHEKIT_TIMEOUT` default and the same as cachekit-py. Change it
 with `timeout` on `createCache.io()` or `cachekitio()`. Under `production`,
 `secure` and `io`, all attempts of one operation also share a 5 s
@@ -840,7 +838,7 @@ dropped connection) still get all three attempts. The deadline bounds when an
 attempt may start, not how long it runs, and it cannot cancel an attempt in
 flight. The worst case is the deadline plus one per-attempt timeout, a bound
 that holds only when the backend enforces a per-attempt timeout. The
-cachekit.io, Redis and Memcached backends do. The `Backend` interface does not
+CacheKit Cloud, Redis and Memcached backends do. The `Backend` interface does not
 require one, so a custom backend must time out its own operations: one that
 never settles holds the caller indefinitely, whatever the deadline. Override
 the deadline with `reliability: { retry: { deadline } }`; a retry policy you
@@ -904,12 +902,12 @@ The logger may be `async`. If it throws or its promise rejects, the SDK reports
 that failure, with the original message, to `console.error`; it never reaches
 the cache operation and never surfaces as an unhandled rejection.
 
-### Telemetry (CachekitIO only)
+### Telemetry (CacheKit Cloud only)
 
-Only the CachekitIO backend sends telemetry, and only to the API it is
-configured with; Redis, Memcached, File, Workers KV, the Cache API and an
-L1-only cache send nothing anywhere. While telemetry is on, the default during
-the closed beta, each CachekitIO request carries these optional headers:
+Only the CacheKit Cloud backend sends telemetry, and only to the API it is
+configured with; Redis, Memcached, File, Workers KV and the Cache API send
+nothing anywhere. While telemetry is on, the default during
+the closed beta, each CacheKit Cloud request carries these optional headers:
 
 - the session headers: `X-CacheKit-Session-ID` and `-Session-Start`, and the
   cache's hit and miss counters `X-CacheKit-L1-Hits`, `-L2-Hits`, `-Misses`
@@ -960,7 +958,7 @@ The counters are wired automatically when the backend is given as a config
 as `backend` gets them only from its own `metricsProvider`, and the Workers
 entry wires none. The latency report needs no wiring: it works in both forms.
 
-Turn telemetry off (unreleased) with `telemetry: false` in the CachekitIO
+Turn telemetry off (unreleased) with `telemetry: false` in the CacheKit Cloud
 backend config or `createCache.io` options, or with the environment variable
 `CACHEKIT_TELEMETRY` set to `false`, `0`, `off` or `no` (case-insensitive;
 `true`, `1`, `on` and `yes` mean on, and any other value means off, with one
@@ -987,7 +985,7 @@ also counts one outcome: an L1 or L2 hit by the layer that served its value
 hit), or one miss when it runs the function. A call that fails before either,
 such as a caller whose joined flight rejects, counts nothing. The reads inside
 the call, such as the double-check under the distributed lock, count nothing
-themselves. Every CachekitIO request
+themselves. Every CacheKit Cloud request
 also sends `User-Agent: cachekit-ts/<version> (<runtime>)`, where the runtime is
 `node`, `bun`, `deno`, `workerd`, or `unknown` anywhere else, so the service can tell SDK releases and
 runtimes apart.
@@ -999,8 +997,8 @@ crypto backend picks its implementation independently, so use it to explain
 needed, and returns `null` (unknown) when the installed binding predates the
 accessor, and always on Cloudflare Workers: there AES-GCM runs through the
 runtime's WebCrypto, and an isolate cannot see whether that uses the host's
-AES instructions. On Node the per-architecture semantics are core's — as of
-cachekit-core 0.7.0 a runtime AES-NI probe on x86/x86_64, and a runtime probe
+AES instructions. On Node the per-architecture semantics are cachekit-core's: a
+runtime AES-NI probe on x86/x86_64, and a runtime probe
 for the Armv8 Crypto Extension's AES instructions on aarch64 (a Raspberry Pi 4,
 a Cortex-A72 without the Crypto Extension, reports `false`).
 
@@ -1067,7 +1065,7 @@ export default {
 
 ### Native edge storage: Workers KV and the Cache API
 
-Beyond CachekitIO, two Cloudflare-native backends keep cache state in the
+Beyond CacheKit Cloud, two Cloudflare-native backends keep cache state in the
 edge itself — no round-trip to api.cachekit.io. Both store the same opaque
 ByteStorage payloads as every other backend, so encryption and the wire
 envelope are unchanged (secure caches store only ciphertext), and both plug
@@ -1092,7 +1090,7 @@ popCache ??= createCache.minimal({
 });
 ```
 
-TTL and consistency semantics differ from Redis/CachekitIO — pick by workload:
+TTL and consistency semantics differ from Redis and CacheKit Cloud — pick by workload:
 
 |                          | Workers KV (`workersKV`)                                                            | Cache API (`workersCacheAPI`)                                     |
 | ------------------------ | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
@@ -1129,11 +1127,11 @@ reported through the library logger by key digest.
 > (`workersCacheAPI({ cacheName })`) or use `createCache.secure(...)`
 > (ciphertext at rest). And because the Cache API re-encodes keys onto
 > synthetic URLs (a key transform, not a prefix), it does **not** support
-> cross-SDK **interop** mode — use Workers KV or CachekitIO for interop caches.
+> cross-SDK **interop** mode — use Workers KV or CacheKit Cloud for interop caches.
 
 **Workers surface (deltas vs Node):**
 
-- **Backends**: CachekitIO (`createCache.io` / `backend: { apiKey }`),
+- **Backends**: CacheKit Cloud (`createCache.io` / `backend: { apiKey }`),
   Workers KV (`workersKV`), the Cache API (`workersCacheAPI`), or a custom
   `Backend` instance. The Redis-URL intents (`minimal`, `production`,
   `secure` with `url`) throw `ConfigurationError` — ioredis is TCP and
@@ -1181,7 +1179,7 @@ What one call costs in the client, on an in-memory backend, so no figure include
 - **`wrap()` L1 hit**: the hit returns the stored object as it is, so the value's size barely matters. A wrapped function remembers the key of each call whose arguments are all strings, numbers, booleans, `null` or `undefined`, and the L1 entry that call was last served from. A repeat call is served from that entry on one check, with no key generation and no lookup by key, while L1 still holds the entry and it is short of its stale-while-revalidate point (the top of that point's ±10% jitter band); once L1 evicts or expires it, or it reaches that band, the call looks its key up in L1 again. `delete()`, `invalidate()` and an invalidation event empty the memo too, so the next call generates its key first, and after `close()` every call is rejected. It remembers a call only if it has at most 8 arguments, no `NaN`, and strings whose `length` adds up to 256 or less. Every other call generates its key, which adds about the cost of the key generation row: an object, array, `Date`, `Map`, `Set` or binary argument, a call past those limits, a call with `skipL1` or under `ttl: 0`, every `interop` call, and every call on a cache that encrypts or has L1 off, or on Cloudflare Workers.
 - **Key memo**: a wrapped function remembers at most 1,024 keys and starts again when full: about 160 KiB when each call passes one number, and at most about 1 MiB. It holds copies of the arguments, so a cache that encrypts keeps no memo, and `delete()`, `invalidate()`, `close()` and, with `invalidation` configured, an invalidation event from another instance empty every memo of the cache. A timer also empties a memo one second after its first key, or one `ttl` after it if that is sooner, even if the function is not called again, so it is set to drop an argument no later than L1 stops serving a value stored with that `ttl`. The timer can run late, for example when the event loop is busy or the process is suspended, and the memo keeps its arguments until it runs. A call that comes one `ttl` or more after the first key, before the timer has run, empties the memo first. The call that stores the first key sets that timer, which keeps the call's async context, `AsyncLocalStorage` stores included, until it runs: one second or less after it was set, unless it runs late. So a function called again and again with the same arguments generates their key about once a second, or once per `ttl` if that is shorter. Wrap a function once, at module scope: a function wrapped inside each request keeps that request's async context and its memo until the memo's timer runs, one second later or one `ttl` later if that is sooner. With a `ttl` of a second or more, at 1,000 requests a second with a 16 KiB store, that is about 16 MB. A wrap under `ttl: 0`, which never expires, keeps no memo, and nor does a Worker, where a timer can be cancelled when its request ends.
 - **Encrypted L1 hit**: L1 holds the same ciphertext as L2, so every hit also generates the key, decrypts, verifies the AAD and decodes the value. That cost grows with the value. A read from L2 also walks the document to check its nesting depth, before the decode and again after it. So does the first hit on an entry, which then keeps its own copy of the ciphertext in L1; later hits on that copy skip the walks (an `interop` entry keeps the check after the decode).
-- **L2 hit and `set`**: L1 is off, so each call reads or writes the backend and decodes or encodes the value. A real backend adds its round trip, which for Redis or cachekit.io is a network call.
+- **L2 hit and `set`**: L1 is off, so each call reads or writes the backend and decodes or encodes the value. A real backend adds its round trip, which for Redis or CacheKit Cloud is a network call.
 
 To print this table for your own machine, run `pnpm install` and `pnpm build`, then `node packages/cachekit/bench/readme.mjs`, from a clone of the repository, or run the **Bench** workflow from its Actions tab. Across 11 runs on this CPU model, the 100 B hit took 290-360 ns, 320 ns at the median, and every other cell agreed within 10%. The encrypted L1 hit row is the median of four later runs on this CPU model, which read 9.0-9.7 µs and 119-125 µs. Hosted runners also come with other CPU models, on which the 100 B hit took from 160 ns (an EPYC 9V45) to 330 ns (an Intel Xeon Platinum 8370C or 8573C) in the same batch of runs, and other machines give other figures.
 

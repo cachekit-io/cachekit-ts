@@ -139,7 +139,7 @@ These practices come from measured changes in this repo and in the sibling SDKs.
     - The A/A floor does not capture code-layout differences between two builds, which can move AES-GCM by about 0.2% on their own ([#264](https://github.com/cachekit-io/cachekit-ts/pull/264)).
     - Instruction counts are not the whole story. In [#171](https://github.com/cachekit-io/cachekit-ts/pull/171), the 64 KB secure hit's instructions rose 31.6% while its wall time fell 53%. Time large payloads with paired, interleaved runs.
 
-**Sibling paths.** A fix applied to one path tends to leave its siblings slow. When a perf PR changes a hot path, its description lists the sibling paths and says which it changed: NAPI and wasm, Node.js and Workers, plaintext and encrypted, L1-only and backed, `wrap()` and direct `get`/`set`, auto and interop mode, store and retrieve, the ESM and CommonJS entries, and the same path in the other SDKs.
+**Sibling paths.** A fix applied to one path tends to leave its siblings slow. When a perf PR changes a hot path, its description lists the sibling paths and says which it changed: NAPI and wasm, Node.js and Workers, plaintext and encrypted, an L1 hit and a backend read, `wrap()` and direct `get`/`set`, auto and interop mode, store and retrieve, the ESM and CommonJS entries, and the same path in the other SDKs.
 
 ## Measuring performance
 
