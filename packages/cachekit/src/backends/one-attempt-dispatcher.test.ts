@@ -5,12 +5,19 @@
  * undici Node bundles, which global slot it reads, which Agents it accepts,
  * and what each attempt is handed.
  */
+import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { oneAttemptDispatcher } from './one-attempt-dispatcher.js';
 import { npmUndici } from '../../test/fixtures/npm-undici.js';
 
 const LEGACY = Symbol.for('undici.globalDispatcher.1');
 const CURRENT = Symbol.for('undici.globalDispatcher.2');
+const PKG_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const run = promisify(execFile);
 let saved: unknown[] = [];
 
 /** Put dispatchers in undici's two global slots, as undici 6 to 8 fill them. */
@@ -40,14 +47,19 @@ type Log = { name: string; read: unknown; held: unknown; idempotent?: boolean }[
 const OPTIONS = Symbol('options');
 const FACTORY = Symbol('factory');
 
-/** Shaped like undici's own Agent as `new Agent()` builds it. */
-class Agent {
+/** The class undici's Agent extends. */
+class DispatcherBase {}
+
+/** Shaped like an Agent built with defaults: `new Agent()`. */
+class Agent extends DispatcherBase {
   [OPTIONS] = { maxOrigins: Infinity, connect: undefined, tls: undefined };
   [FACTORY] = function defaultFactory(): void {};
   constructor(
     private readonly name: string,
     private readonly log: Log
-  ) {}
+  ) {
+    super();
+  }
   dispatch(options: { headers?: unknown; idempotent?: boolean }): boolean {
     this.log.push({
       name: this.name,
@@ -100,7 +112,7 @@ describe('oneAttemptDispatcher', () => {
   });
 
   it.each([UNDICI_8, UNDICI_7])(
-    'makes none, and the report waits, unless the slot fetch reads holds undici’s Agent ($version)',
+    'makes none, and the report waits, unless the slot fetch reads holds an Agent built with defaults ($version)',
     ({ version }) => {
       const log: Log = [];
       install(new RetryAgent('legacy', log), new RetryAgent('current', log));
@@ -114,7 +126,7 @@ describe('oneAttemptDispatcher', () => {
   });
 
   it.each([
-    ['undici’s Agent: with the report', Agent, HEADERS],
+    ['an Agent built with defaults: with the report', Agent, HEADERS],
     ['anything else: without it', RetryAgent, WITHOUT_REPORT],
   ])("sends another fetch's handler to the slot that fetch reads, holding %s", (_, Kind, sent) => {
     // npm undici's fetch, of another major than Node's, on a global slot of its own.
@@ -125,9 +137,28 @@ describe('oneAttemptDispatcher', () => {
   });
 
   describe('only an Agent built with defaults gets a report', () => {
-    it("accepts this Node's own default dispatcher", () => {
-      expect(oneAttemptDispatcher()).toBeDefined();
-    });
+    // In a child process: here the npm undici above loaded first, and its
+    // Agent fills both slots before Node's own undici loads.
+    it("accepts this Node's own default, and refuses Node's own Agent with any option set", async () => {
+      const dist = join(PKG_DIR, 'dist', 'backends', 'one-attempt-dispatcher.js');
+      if (!existsSync(dist)) throw new Error(`${dist} is missing: run \`pnpm build\` first`);
+      const probe = join(PKG_DIR, 'test', 'node-entry', 'default-dispatcher-probe.mjs');
+      const { stdout } = await run(process.execPath, [probe, dist], { timeout: 20_000 });
+      const { undici, ...accepted } = JSON.parse(stdout) as Record<string, unknown>;
+      expect(accepted).toEqual({
+        'the default': true,
+        'new Agent()': true,
+        allowH2: false,
+        'connect.allowH2': false,
+        'a connect function': false,
+        'a factory': false,
+        pipelining: false,
+        'a CA only': false,
+        // Undici 6 keeps it apart from the options; fetch dispatches with 0.
+        maxRedirections: undici === 6,
+        'a subclass named Agent': false,
+      });
+    }, 30_000);
 
     it.each([UNDICI_8, UNDICI_7])('accepts a genuine `new Agent()` ($version)', ({ version }) => {
       const agent = new npmUndici.Agent();
@@ -147,6 +178,13 @@ describe('oneAttemptDispatcher', () => {
       ['a CA only', { connect: { ca: 'x' } }],
     ])('refuses a genuine Agent created with %s, on either slot', (_, options) => {
       const agent = new npmUndici.Agent(options);
+      install(agent, agent);
+      expect(oneAttemptDispatcher(UNDICI_8.version)).toBeUndefined();
+      expect(oneAttemptDispatcher(UNDICI_7.version)).toBeUndefined();
+    });
+
+    it('refuses a subclass of a genuine Agent named Agent, whose own code could resend', () => {
+      const agent = new (class Agent extends npmUndici.Agent {})();
       install(agent, agent);
       expect(oneAttemptDispatcher(UNDICI_8.version)).toBeUndefined();
       expect(oneAttemptDispatcher(UNDICI_7.version)).toBeUndefined();

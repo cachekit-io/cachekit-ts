@@ -914,12 +914,20 @@ the closed beta, each CachekitIO request carries these optional headers:
   request on its own after a `421`. A report is sent only through an `Agent`
   exactly as `new Agent()` builds it, which Node's own default dispatcher is:
   with any other global dispatcher (`setGlobalDispatcher`), such as a
-  `RetryAgent`, a `MockAgent`, a proxy, an `Agent` composed with
-  interceptors, or an `Agent` created with any option set, the SDK cannot
-  rule out a resend, so the report waits and no latency headers are sent.
+  `RetryAgent`, a `MockAgent`, a proxy, a subclass of `Agent`, an `Agent`
+  composed with interceptors, or an `Agent` created with any option set, the
+  SDK cannot rule out a resend, so the report waits and no latency headers
+  are sent. One option is the exception: the undici 6 that Node.js 22 bundles
+  keeps `maxRedirections` apart from an `Agent`'s other options, so an
+  `Agent` created with only that one still gets a report. That is harmless,
+  because `fetch` dispatches every request with `maxRedirections: 0`.
   A report can be lost:
   - when the global dispatcher, or the one an npm undici `fetch` of another
     major than Node's reads, is anything but an `Agent` built with defaults;
+  - when npm undici 8 is loaded on Node.js 22, or on Node.js 24 before the
+    process first uses `fetch` or one of its classes: undici 8 then installs
+    its own global dispatcher, wrapped in an adapter where Node's `fetch`
+    reads it, so no report is sent;
   - when the `Agent` has to queue the request: on Node.js 26, whose undici
     probes an `https:` API for HTTP/2, requests made while a new connection
     is being set up queue, so reports go missing more often around a cold

@@ -1193,8 +1193,11 @@ export class CacheImpl implements SecureCache {
           if (probe) probe.servedBy = 'l1';
           else this.recordHit('l1');
           // Stopped here even for a wrap() read, whose hit wrapRead counts once
-          // this returns: this is the step that produces the value.
-          if (timedFrom !== undefined) this.stopL1Timer(timedFrom);
+          // this returns: this is the step that produces the value. Not for a
+          // wrap() read of a cached null, which wrapRead takes for a miss.
+          if (timedFrom !== undefined && (decoded.value !== null || !probe)) {
+            this.stopL1Timer(timedFrom);
+          }
           return decoded.value;
         }
       }

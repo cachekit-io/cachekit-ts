@@ -23,7 +23,7 @@ import {
 } from './telemetry.js';
 import { ConfigurationError } from '../errors.js';
 import { setLogger } from '../logger.js';
-import { npmUndici, type Closable } from '../../test/fixtures/npm-undici.js';
+import { npmUndici as undici, type Closable } from '../../test/fixtures/npm-undici.js';
 
 const API_URL = 'https://api.test.cachekit.io';
 const API_KEY = 'ck_test_fake-not-a-secret'; // pragma: allowlist secret
@@ -49,7 +49,6 @@ const COUNTERS = { l1Hits: 3, l2Hits: 1, misses: 1, l1Enabled: true };
 let fetchSpy: ReturnType<typeof vi.fn>;
 const nodeFetch = globalThis.fetch;
 
-const undici = npmUndici;
 const RETRY_ONCE = { maxRetries: 1, minTimeout: 1, maxTimeout: 1 };
 const DISPATCHER_SLOTS = [
   Symbol.for('undici.globalDispatcher.1'),
@@ -475,7 +474,7 @@ describe('latency report on the wire (API-84 to API-86)', () => {
       expect(seen).toHaveLength(statuses.length);
       for (const attempt of seen)
         expect(attempt).toEqual({ sumNs: undefined, authorization: auth });
-      // Not taken: it rides a later request, through undici's Agent.
+      // Not taken: it rides a later request, through an Agent built with defaults.
       expect(backend.l1Latency!.take()?.['X-CacheKit-L1-Latency-Sum-Ns']).toBe('300');
     });
 
@@ -507,7 +506,7 @@ describe('latency report on the wire (API-84 to API-86)', () => {
         body instanceof Uint8Array ? new TextDecoder().decode(body) : String(body)
       );
       expect(new Set(decoded)).toEqual(new Set(['payload']));
-      // Not undici's Agent: the report is not taken, and waits.
+      // Not an Agent built with defaults: the report is not taken, and waits.
       expect(backend.l1Latency!.take()?.['X-CacheKit-L1-Latency-Sum-Ns']).toBe('300');
     });
 

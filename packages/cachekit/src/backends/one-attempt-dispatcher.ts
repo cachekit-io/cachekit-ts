@@ -12,14 +12,19 @@
  * default factory. Such an Agent neither retries nor pipelines; over HTTP/2,
  * which only undici 8 turns on by default, it replays only a stream the
  * server refused or, after GOAWAY, never processed, which the spec allows.
- * Any other dispatcher, and an Agent with any option set, leaves the report
- * waiting: a report may be lost, never sent twice.
+ * Any other dispatcher, a subclass of Agent among them, and an Agent with
+ * any option set leave the report waiting: a report may be lost, never sent
+ * twice.
  *
- * The report rides only the first attempt fetch dispatches, marked not
- * idempotent so that no client could pipeline it, and in a copy of the
- * headers from which it is removed as soon as dispatch returns. Any later
- * attempt gets the request without it. What this cannot see, such as a fetch
- * wrapper that retries, is in the README's Telemetry section.
+ * The report rides only the first attempt fetch dispatches, in a copy of the
+ * headers; any later attempt gets the request without it. Two more guards are
+ * defence in depth, against what an Agent built with defaults does not do
+ * today: the attempt is marked not idempotent, against a future default that
+ * pipelines more than one request, and the report is removed from the copy as
+ * soon as dispatch returns, against a layer that keeps the options to resend
+ * them. That removal is also what drops the report of a request a full pool
+ * queues. What this cannot see, such as a fetch wrapper that retries, is in
+ * the README's Telemetry section.
  *
  * Node keeps undici's global dispatcher under the symbols undici registers it
  * with. The fetch of undici 6 and 7 reads the first and passes handlers of the
@@ -63,13 +68,17 @@ function privateField(agent: object, name: string): unknown {
 }
 
 /**
- * Exactly as `new Agent()` builds it. The class is undici's Agent, and its
- * dispatch is its prototype's: not a RetryAgent or a MockAgent, nor the proxy
- * that compose() returns in undici 7 and 8 (undici 6's is a ComposedDispatcher).
+ * Exactly as `new Agent()` builds it. The class is undici's Agent, which
+ * extends undici's DispatcherBase directly (Node 22, 24 and 26), so a
+ * subclass of it named Agent fails: its code could resend. Its dispatch is
+ * its prototype's: not a RetryAgent or a MockAgent, nor the proxy that
+ * compose() returns in undici 7 and 8 (undici 6's is a ComposedDispatcher).
  * Its options, under the symbol described 'options', are all undefined but
  * `maxOrigins: Infinity` (undici 7 and 8), and its factory, under 'factory',
  * is undici's `defaultFactory`. Any option set fails this, an HTTP/2 or
- * pipelining one among them, as does undici moving either field.
+ * pipelining one among them, but undici 6's `maxRedirections`, which it keeps
+ * apart: harmless, as fetch dispatches with `maxRedirections: 0`. Undici
+ * moving any of these fails it too.
  */
 function deliversOnce(dispatcher: Dispatcher): boolean {
   const prototype: unknown = Object.getPrototypeOf(dispatcher);
@@ -79,6 +88,7 @@ function deliversOnce(dispatcher: Dispatcher): boolean {
     dispatcher.constructor?.name === 'Agent' &&
     typeof prototype === 'object' &&
     prototype !== null &&
+    Object.getPrototypeOf(prototype)?.constructor?.name === 'DispatcherBase' &&
     Reflect.get(dispatcher, 'dispatch') === Reflect.get(prototype, 'dispatch') &&
     typeof factory === 'function' &&
     factory.name === 'defaultFactory' &&
@@ -141,10 +151,11 @@ export function oneAttemptDispatcher(
         return to.dispatch({ ...options, headers: dropReport(headers) }, handler);
       }
       try {
+        // Defence in depth: an Agent built with defaults pipelines no request.
         return to.dispatch({ ...options, headers, idempotent: false }, handler);
       } finally {
-        // The attempt has read them by now, or, if a full pool queued it,
-        // will go without the report.
+        // The attempt has read them by now, unless a full pool queued it: then
+        // this is what drops its report. Otherwise defence in depth.
         dropReport(headers);
       }
     },

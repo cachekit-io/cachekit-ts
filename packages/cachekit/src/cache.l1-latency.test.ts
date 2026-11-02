@@ -4,6 +4,7 @@
  * reach the CachekitIO backend's next request. The clock is faked; each test
  * names the requirement it pins.
  */
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createCache } from './index.js';
 import { cachekitio } from './backends/cachekitio-factory.js';
@@ -206,6 +207,30 @@ describe('what is timed (API-79)', () => {
     const report = await nextReport(cache);
     expect(report.buckets).toEqual(only(1, 1));
     expect(report.sum).toBe(String(STEP));
+  });
+
+  it('adds nothing for a wrap() call whose cold-path read finds a cached null, a miss', async () => {
+    // Encrypted, so L1 holds the null as ciphertext and a read of it is a hit.
+    const masterKey = createHash('sha256').update('cachekit L1 latency test fixture').digest('hex');
+    const cache = track(
+      timeEveryCall(
+        createCache({
+          backend: BACKEND,
+          metrics: false,
+          encryption: { masterKey, tenantId: 'l1-latency' },
+          stampede: { distributedLock: true, lockWaitMs: 40, lockPollMs: 10 },
+        })
+      )
+    );
+    const compute = vi.fn(async (id: number) => ({ id }));
+    const fn = cache.wrap(compute, OPTIONS);
+    const call = fn(7);
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    // The call's re-check finds this null in L1, and wrap() computes: a miss.
+    await cache.set(generateKey(OPTIONS.namespace, [7]), null);
+    expect(await call).toEqual({ id: 7 });
+    expect(compute).toHaveBeenCalledOnce();
+    expect((await nextReport(cache)).sum).toBeUndefined();
   });
 
   it('draws before the outcome is known, and discards a timed miss or L2 hit (API-81)', async () => {
