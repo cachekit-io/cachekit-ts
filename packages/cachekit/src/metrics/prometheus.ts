@@ -604,10 +604,11 @@ export class CacheMetrics implements MetricsCollector {
   /**
    * Publish the circuit-breaker state after an op, without a promise once
    * prom-client has loaded. It stays a set() per op rather than a value read
-   * at scrape: caches sharing a registry share the gauge, which reads the
-   * state of whichever finished an op last, and only prom-client's own set()
-   * keeps that order against every other writer (the other build of this
-   * package, an older copy, the application) and matches its label handling.
+   * at scrape: caches sharing a registry, prefix and label values share one
+   * gauge series, which reads the state of whichever of them finished an op
+   * last, and only prom-client's own set() keeps that order against every
+   * other writer (the other build of this package, an older copy, the
+   * application) and matches its label handling.
    */
   setCircuitBreakerState(state: 'closed' | 'open' | 'half-open'): void {
     if (this.isReady) {

@@ -864,9 +864,10 @@ const cache = createCache({
 Hits, misses and backend operations are counted in plain fields and added to
 their counters when the registry is scraped, so a cache hit does no prom-client
 work. A backend operation observes its duration and, when the cache has a
-circuit breaker, sets the circuit-breaker gauge. Caches sharing a registry
-share that gauge, which reads the state of whichever cache finished an
-operation last.
+circuit breaker, sets the circuit-breaker gauge. Caches that share a registry,
+prefix and `defaultLabels` values share one gauge series, which reads the state
+of whichever of them finished an operation last; caches with different label
+values report separate series.
 
 prom-client loads in the background, starting on the event-loop turn after the
 cache is created, and no cache operation waits for it. Metrics recorded while it
