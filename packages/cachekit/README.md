@@ -1173,4 +1173,3 @@ To print this table for your own machine, run `pnpm install` and `pnpm build`, t
 ## License
 
 MIT
-<!-- temporary: makes the build hashes differ so the gate measures this PR; reverted before merge -->
