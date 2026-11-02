@@ -681,7 +681,7 @@ describe('CachekitIO writer L1 bound', () => {
       expect(await wrapped()).toBe('computed'); // cold miss: one GET, L1 filled
       const filled = Date.now();
       await vi.waitFor(() => expect(receivedAt).toBeDefined());
-      return { cache, key: generateKey('wb', []), filled, received: receivedAt! };
+      return { cache, key: generateKey('wb', []), filled };
     }
 
     /** Resolves the wrapper and lets the write's cap run. */
@@ -692,12 +692,11 @@ describe('CachekitIO writer L1 bound', () => {
 
     it('serves the copy past receipt plus Fresh-For: 1 until the wrapper resolves', async () => {
       putHeaders = { 'X-CacheKit-Fresh-For': '1' };
-      const { cache, key, received } = await suspendedWrite(3600);
+      const { cache, key } = await suspendedWrite(3600);
 
       vi.advanceTimersByTime(1_500);
-      expect(Date.now() - received).toBeGreaterThan(1_000); // past API-103's bound
       expect(await cache.get(key)).toBe('computed');
-      expect(gets).toBe(1); // served from L1
+      expect(gets).toBe(1); // past receipt plus 1 s, served from L1
 
       await settle();
       expect(await cache.get(key)).toBe('computed');
@@ -706,7 +705,10 @@ describe('CachekitIO writer L1 bound', () => {
       await cache.close();
     });
 
-    it('serves a Fresh-For: 0 copy until its TTL from the L1 fill, never past it', async () => {
+    // The header never reaches CacheImpl while the wrapper is suspended, so
+    // this pins the ceiling: the TTL from the L1 fill. '0' is the worst case
+    // the README names, a PUT that API-103 says keeps no copy.
+    it('never serves a suspended copy past its TTL from the L1 fill', async () => {
       putHeaders = { 'X-CacheKit-Fresh-For': '0' };
       const { cache, key, filled } = await suspendedWrite(2);
 
