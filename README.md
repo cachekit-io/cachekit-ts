@@ -1,6 +1,6 @@
 # cachekit-ts
 
-TypeScript SDK for CacheKit — backend-agnostic caching with L1 in-memory, SWR, circuit breaker, and optional zero-knowledge encryption. Works with Redis, Memcached, File, Workers KV, or CachekitIO.
+TypeScript SDK for CacheKit — backend-agnostic caching with L1 in-memory, SWR, circuit breaker, and optional zero-knowledge encryption. Works with Redis, Memcached, File, Workers KV, or CacheKit Cloud.
 
 > **Status: beta** — CacheKit is in closed beta ahead of 1.0. APIs are stabilising; minor breaking changes may still occur between 0.x releases.
 
