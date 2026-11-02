@@ -72,6 +72,23 @@ class GatedBackend implements Backend {
   }
 }
 
+/**
+ * Every set() waits for its own release, in any order, so a test can answer
+ * two PUTs of one key out of send order. The log records each send and each
+ * landing.
+ */
+class HeldBackend extends GatedBackend {
+  held: Array<() => void> = [];
+
+  override async set(key: string, value: Uint8Array): Promise<void> {
+    this.setKeys.push(key);
+    this.log.push('send');
+    await new Promise<void>((resolve) => this.held.push(resolve));
+    this.store.set(key, value);
+    this.log.push('set');
+  }
+}
+
 class GatedLockableBackend extends GatedBackend implements LockableBackend {
   async acquireLock(): Promise<string | null> {
     this.log.push('acquire');
@@ -312,7 +329,8 @@ describe('write-behind', () => {
       const explicit = cache.set(key, 99, { ttl: 3600 }); // in flight on an idle key
       const second = wrapped(1); // misses: computes call 2, written on the caller's path
       await settle();
-      expect(backend.setKeys.filter((k) => k === key)).toHaveLength(3); // both writes sent
+      // On Workers both writes are sent; on Node call 2's waits for the set's.
+      expect(backend.setKeys.filter((k) => k === key)).toHaveLength(workersLike ? 3 : 2);
 
       backend.open(); // the set lands first, then call 2's write
       await explicit;
@@ -322,6 +340,44 @@ describe('write-behind', () => {
       await expect(cache.get(key)).resolves.toEqual({ id: 1, call: 2 }); // L2, decoded
     }
   );
+
+  it('on Node, a set() of a key with a set() in flight is sent after it settles, and L1 ends on L2’s value', async () => {
+    const backend = new HeldBackend();
+    const cache = make({ backend });
+    const first = cache.set('wb:race', 'A', { ttl: 60 }); // in flight on an idle key
+    await settle();
+    const second = cache.set('wb:race', 'B', { ttl: 60 });
+    await settle();
+    for (const release of backend.held.slice(1)) release(); // B's PUT, if sent, answers first
+    await settle();
+    backend.held[0](); // A's PUT answers
+    await first;
+    await settle();
+    for (const release of backend.held) release(); // B's PUT, if it waited for A's
+    await second;
+    const writes = [...backend.log];
+
+    await expect(cache.get('wb:race')).resolves.toBe('B'); // L1, or L2 if L1 is empty
+    await cache.invalidate('global');
+    await expect(cache.get('wb:race')).resolves.toBe('B'); // L2
+    expect(writes).toEqual(['send', 'set', 'send', 'set']); // B sent after A settled
+  });
+
+  it('on Node, a delete() of a key with a set() in flight waits for it', async () => {
+    const backend = new HeldBackend();
+    const cache = make({ backend });
+    const written = cache.set('wb:race', 'A', { ttl: 60 });
+    await settle();
+    const removed = cache.delete('wb:race');
+    await settle();
+    expect(backend.log).toEqual(['send']); // the delete has not overtaken the PUT
+
+    backend.held[0]();
+    await written;
+    await expect(removed).resolves.toBe(true);
+    expect(backend.log).toEqual(['send', 'set', 'delete']);
+    await expect(cache.get('wb:race')).resolves.toBeNull(); // neither level resurrects A
+  });
 
   it.each([0, 1, 2, 3, 4, 5, 6, 8, 12])(
     "a write-behind admitted between a set()'s L2 write and its L1 fill does not leave L1 older (origin resolves %i microtasks after the set lands)",

@@ -1344,10 +1344,54 @@ describe('Cache Integration', () => {
       await swrCache.close();
     });
 
-    it('an explicit set() during an in-flight refresh wins in L1 (refresh L1 write discarded)', async () => {
-      // Gate the refresh's L2 persist (2nd backend set: 1st = cold miss,
-      // 2nd = refresh, 3rd = the explicit set) so the explicit write can
-      // interleave between the refresh's L2 write and its L1 completion.
+    it('an explicit set() during a refresh’s compute wins in L1 (refresh L1 write discarded)', async () => {
+      // Gate the refresh's compute (call 2) so the explicit write lands in L1
+      // between the refresh's start and its completeRefresh.
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const swrCache = createCache({
+        backend: new InMemoryBackend(),
+        defaultTtl: 60,
+        l1: { swrEnabled: true, swrThresholdRatio: 2 },
+      });
+
+      let calls = 0;
+      const fn = swrCache.wrap(
+        async () => {
+          calls++;
+          if (calls === 2) await gate;
+          return { gen: calls };
+        },
+        { namespace: 'swr:race', ttl: 60 }
+      );
+      const cacheKey = generateKey('swr:race', []);
+
+      expect(await fn()).toEqual({ gen: 1 }); // cold miss
+      expect(await fn()).toEqual({ gen: 1 }); // stale hit → refresh parks in its compute
+      await vi.waitFor(() => {
+        expect(calls).toBe(2);
+      });
+
+      // Explicit write lands while the refresh is in flight — bumps the L1
+      // version token. Pre-#84, setEntry's unconditional L1 write on the
+      // refresh path would clobber this with the stale-computed value.
+      await swrCache.set(cacheKey, { gen: 999 }, { ttl: 60, namespace: 'swr:race' });
+
+      release();
+
+      // The refresh finishes: its completeRefresh sees the bumped version
+      // and discards — the explicit write stays authoritative in L1.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(await swrCache.get(cacheKey)).toEqual({ gen: 999 });
+
+      await swrCache.close();
+    });
+
+    it('on Node, an explicit set() during a refresh’s L2 write lands after it, in L1 and L2', async () => {
+      // Gate the refresh's L2 write (2nd backend set: 1st = cold miss,
+      // 2nd = refresh, 3rd = the explicit set).
       let release!: () => void;
       const gate = new Promise<void>((resolve) => {
         release = resolve;
@@ -1365,29 +1409,27 @@ describe('Cache Integration', () => {
           calls++;
           return { gen: calls };
         },
-        { namespace: 'swr:race', ttl: 60 }
+        { namespace: 'swr:race-put', ttl: 60 }
       );
-      const cacheKey = generateKey('swr:race', []);
+      const cacheKey = generateKey('swr:race-put', []);
 
       expect(await fn()).toEqual({ gen: 1 }); // cold miss (set #1)
       expect(await fn()).toEqual({ gen: 1 }); // stale hit → refresh blocks in set #2
-
       await vi.waitFor(() => {
         expect(gatedBackend.setCount).toBe(2); // refresh is parked in its L2 write
       });
 
-      // Explicit write lands while the refresh is in flight — bumps the L1
-      // version token. Pre-#84, setEntry's unconditional L1 write on the
-      // refresh path would clobber this with the stale-computed value.
-      await swrCache.set(cacheKey, { gen: 999 }, { ttl: 60, namespace: 'swr:race' });
+      const explicit = swrCache.set(cacheKey, { gen: 999 }, { ttl: 60, namespace: 'swr:race-put' });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(gatedBackend.setCount).toBe(2); // queued behind the refresh's PUT
 
       release();
-
-      // The refresh finishes: its completeRefresh sees the bumped version
-      // and discards — the explicit write stays authoritative in L1.
+      await explicit;
       await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(await swrCache.get(cacheKey)).toEqual({ gen: 999 });
-
+      expect(await swrCache.get(cacheKey)).toEqual({ gen: 999 }); // L1
+      const l2View = createCache({ backend: gatedBackend, defaultTtl: 60, l1: { enabled: false } });
+      expect(await l2View.get(cacheKey)).toEqual({ gen: 999 }); // L2
+      await l2View.close();
       await swrCache.close();
     });
 

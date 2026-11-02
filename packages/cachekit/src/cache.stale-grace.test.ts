@@ -849,6 +849,65 @@ describe('stale-grace revalidation write through the per-key write queue', () =>
     expect(backend.log).toEqual(['write:done', 'write:start', 'write:done', 'release']);
   });
 
+  it('on Node, waits for a set() in flight on the key, so a later set() cannot overtake that set()', async () => {
+    /** Every write waits for its own release, in any order. */
+    class EachHeldBackend extends StaleGraceBackend {
+      held: Array<() => void> = [];
+      hold = false;
+
+      private gate(): Promise<void> {
+        if (!this.hold) return Promise.resolve();
+        return new Promise<void>((resolve) => this.held.push(resolve));
+      }
+
+      async set(key: string, value: Uint8Array, ttl?: number): Promise<void> {
+        await this.gate();
+        await super.set(key, value, ttl);
+      }
+
+      async setWithStaleTtl(key: string, value: Uint8Array, ttl: number, staleTtl: number) {
+        await this.gate();
+        await super.setWithStaleTtl(key, value, ttl, staleTtl);
+      }
+    }
+    const backend = new EachHeldBackend();
+    await make(backend).wrap(async () => 'v1', WRAP)();
+    backend.expire();
+    const [key] = backend.store.keys();
+    const cache = make(backend);
+    let computed!: () => void;
+    const computing = new Promise<void>((resolve) => {
+      computed = resolve;
+    });
+    const wrapped = cache.wrap(async () => {
+      await computing;
+      return 'v2';
+    }, WRAP);
+    expect(await wrapped()).toBe('v1'); // served stale; the revalidation is computing
+
+    backend.hold = true;
+    const first = cache.set(key, 'first', { ttl: 60 }); // in flight on an idle key
+    await sleep(10);
+    computed();
+    await sleep(10);
+    expect(backend.held).toHaveLength(1); // the revalidation's write waits for the set
+    const second = cache.set(key, 'second', { ttl: 60 });
+    await sleep(10);
+    expect(backend.held).toHaveLength(1); // and the second set waits for both
+
+    backend.held[0](); // the first set lands
+    await first;
+    await vi.waitFor(() => expect(backend.held).toHaveLength(2));
+    backend.held[1](); // the revalidation lands
+    await vi.waitFor(() => expect(backend.held).toHaveLength(3));
+    backend.held[2](); // the second set lands last
+    await second;
+
+    expect(await cache.get(key)).toBe('second'); // L1
+    await cache.invalidate('global');
+    expect(await cache.get(key)).toBe('second'); // L2
+  });
+
   it('on Workers, a revalidation write is never a key tail, so a later op does not wait on it', async () => {
     const backend = new HeldWritesBackend();
     await make(backend).wrap(async () => 'v1', WRAP)();
