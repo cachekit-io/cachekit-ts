@@ -332,7 +332,11 @@ export const WORKLOADS = {
   'plaintext-set-10kb': plaintextSet(320, 1_000),
   // 1,300 warm-up ops, not 2,000: V8 has finished compiling the set() path
   // around it by ~960 ops, and 2,000 made one process run ~9 minutes in CI.
-  'plaintext-set-100kb': plaintextSet(3_200, 1_000, 1_300),
+  // 400 ops, not 1,000: one run of this workload is the longest in the suite,
+  // and a shard's base and head runs each wait for it, so it sets the gate's
+  // floor. At 1,000 one run took 566 s in CI; 400 reads the same Ir/op within
+  // 0.01% and repeats within 0.01%.
+  'plaintext-set-100kb': plaintextSet(3_200, 400, 1_300),
   // the ends of the object-heavy write range: one 64 B object, and 1,005,035 B
   // in 96 groups of 320 rows, so no collection nears the 10,000-element bound
   // and the whole stays under the 1 MiB encode limit. 20 warm-up ops for 1 MB:
