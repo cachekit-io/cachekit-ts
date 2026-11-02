@@ -1451,8 +1451,10 @@ export class CacheImpl implements SecureCache {
     // The L2 write, under retry, the breaker and degradation; the stale
     // window rides it on a stale-grace wrap. It resolves to when the writer's
     // L1 copy must stop serving (L1Write.freshUntil), counted from receipt of
-    // the success response, or undefined when the backend reported no
-    // `freshFor` and either no valid `receivedAt` or `ttl` is 0 or less.
+    // the success response; without a valid `receivedAt`, the `freshFor`
+    // alone, counted from when set resolved. Undefined when the backend
+    // reported no `freshFor` and either no valid `receivedAt` or `ttl` is 0
+    // or less.
     const writeL2 = async (): Promise<number | undefined> =>
       freshUntil(
         staleTtl > 0
