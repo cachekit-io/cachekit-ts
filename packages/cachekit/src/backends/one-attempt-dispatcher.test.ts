@@ -20,6 +20,26 @@ const PKG_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const run = promisify(execFile);
 let saved: unknown[] = [];
 
+/** The built `dist/backends/<name>.js`, refused while missing or older than its source. */
+function built(name: string): string {
+  const dist = join(PKG_DIR, 'dist', 'backends', `${name}.js`);
+  const source = join(PKG_DIR, 'src', 'backends', `${name}.ts`);
+  if (!existsSync(dist) || statSync(dist).mtimeMs < statSync(source).mtimeMs) {
+    throw new Error(`${dist} is missing or older than its source: run \`pnpm build\` first`);
+  }
+  return dist;
+}
+
+/** Run a probe from test/node-entry in this Node, and parse what it prints. */
+async function probe(file: string, dist: string): Promise<unknown> {
+  const path = join(PKG_DIR, 'test', 'node-entry', file);
+  const { stdout } = await run(process.execPath, [path, dist], { timeout: 20_000 });
+  return JSON.parse(stdout);
+}
+
+// The child runs this same Node, so it bundles this undici.
+const NODE_UNDICI = Number.parseInt(process.versions.undici ?? '', 10);
+
 /** Put dispatchers in undici's two global slots, as undici 6 to 8 fill them. */
 function install(legacy: unknown, current: unknown): void {
   Reflect.set(globalThis, LEGACY, legacy);
@@ -43,9 +63,12 @@ const UNDICI_7 = { version: '7.30.1', handler: { onConnect() {} }, slot: 'legacy
  */
 type Log = { name: string; read: unknown; held: unknown; idempotent?: boolean }[];
 
-// Where undici 6 to 8 keep an Agent's options and factory.
+// Where undici 6 to 8 keep an Agent's options and factory, and undici 6 its
+// interceptors and the dispatch it composes from them on its first.
 const OPTIONS = Symbol('options');
 const FACTORY = Symbol('factory');
+const INTERCEPTORS = Symbol('dispatch interceptors');
+const COMPOSED = Symbol('Intercepted Dispatch');
 
 /** The class undici's Agent extends. */
 class DispatcherBase {}
@@ -54,6 +77,12 @@ class DispatcherBase {}
 class Agent extends DispatcherBase {
   [OPTIONS] = { maxOrigins: Infinity, connect: undefined, tls: undefined };
   [FACTORY] = function defaultFactory(): void {};
+  [INTERCEPTORS] = [
+    (dispatch: () => boolean) =>
+      function Intercept(): boolean {
+        return dispatch();
+      },
+  ];
   constructor(
     private readonly name: string,
     private readonly log: Log
@@ -140,17 +169,9 @@ describe('oneAttemptDispatcher', () => {
     // In a child process: here the npm undici above loaded first, and its
     // Agent fills both slots before Node's own undici loads.
     it("accepts this Node's own default, and refuses Node's own Agent with any option set", async () => {
-      const dist = join(PKG_DIR, 'dist', 'backends', 'one-attempt-dispatcher.js');
-      const source = join(PKG_DIR, 'src', 'backends', 'one-attempt-dispatcher.ts');
-      if (!existsSync(dist) || statSync(dist).mtimeMs < statSync(source).mtimeMs) {
-        throw new Error(`${dist} is missing or older than its source: run \`pnpm build\` first`);
-      }
-      const probe = join(PKG_DIR, 'test', 'node-entry', 'default-dispatcher-probe.mjs');
-      const { stdout } = await run(process.execPath, [probe, dist], { timeout: 20_000 });
-      // The child runs this same Node, so it bundles this undici.
-      const undici = Number.parseInt(process.versions.undici ?? '', 10);
-      expect(JSON.parse(stdout)).toEqual({
-        undici,
+      const accepted = await probe('default-dispatcher-probe.mjs', built('one-attempt-dispatcher'));
+      expect(accepted).toEqual({
+        undici: NODE_UNDICI,
         'the default': true,
         'new Agent()': true,
         allowH2: false,
@@ -160,11 +181,65 @@ describe('oneAttemptDispatcher', () => {
         pipelining: false,
         'a CA only': false,
         // Undici 6 keeps it apart from the options; fetch dispatches with 0.
-        maxRedirections: undici === 6,
+        maxRedirections: NODE_UNDICI === 6,
         'a subclass named Agent': false,
         'a subclass named Agent, through a class named DispatcherBase': false,
       });
     }, 30_000);
+
+    // On the wire, in a child process for the same reason. Only undici 6 has
+    // the setter; on later majors the probe changes nothing, and the report
+    // rides the one request.
+    it('sends no report through an undici 6 Agent whose interceptors were replaced', async () => {
+      built('one-attempt-dispatcher');
+      // Each attempt's X-CacheKit-L1-Latency-Sum-Ns, and whether the report waits.
+      expect(await probe('legacy-interceptors-probe.mjs', built('cachekitio'))).toEqual(
+        NODE_UNDICI === 6
+          ? { undici: 6, seen: [null, null], waits: '300' }
+          : { undici: NODE_UNDICI, seen: ['300'], waits: null }
+      );
+    }, 30_000);
+
+    describe('undici 6 interceptors', () => {
+      it('accepts an Agent that has composed the interceptor it was built with', () => {
+        const agent = new Agent('current', []);
+        Reflect.set(
+          agent,
+          COMPOSED,
+          agent[INTERCEPTORS][0](() => true)
+        );
+        install(agent, agent);
+        expect(oneAttemptDispatcher(UNDICI_7.version)).toBeDefined();
+      });
+
+      it.each([
+        ['replaced', INTERCEPTORS, [(dispatch: unknown) => dispatch]],
+        ['removed', INTERCEPTORS, null],
+        ['composed from others', COMPOSED, (): boolean => false],
+      ])('refuses an Agent whose interceptors were %s', (_, field, value) => {
+        const agent = new Agent('current', []);
+        Reflect.set(agent, field, value);
+        install(agent, agent);
+        expect(oneAttemptDispatcher(UNDICI_7.version)).toBeUndefined();
+      });
+
+      it('refuses a composed dispatch on an Agent whose class is built without interceptors', () => {
+        const agent = new npmUndici.Agent();
+        Reflect.set(agent, COMPOSED, (): boolean => false);
+        install(agent, agent);
+        expect(oneAttemptDispatcher(UNDICI_7.version)).toBeUndefined();
+      });
+
+      it('refuses an Agent of a class it cannot build afresh to compare with', () => {
+        const agent = Object.assign(new Agent('current', []), {
+          constructor: function Agent(): never {
+            throw new Error('not built');
+          },
+        });
+        install(agent, agent);
+        expect(oneAttemptDispatcher(UNDICI_7.version)).toBeUndefined();
+      });
+    });
 
     it.each([UNDICI_8, UNDICI_7])('accepts a genuine `new Agent()` ($version)', ({ version }) => {
       const agent = new npmUndici.Agent();

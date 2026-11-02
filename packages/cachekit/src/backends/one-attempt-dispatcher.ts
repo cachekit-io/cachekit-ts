@@ -12,9 +12,9 @@
  * default factory. Such an Agent neither retries nor pipelines; over HTTP/2,
  * which only undici 8 turns on by default, it replays only a stream the
  * server refused or, after GOAWAY, never processed, which the spec allows.
- * Any other dispatcher, a subclass of Agent among them, and an Agent with
- * any option set leave the report waiting: a report may be lost, never sent
- * twice.
+ * Any other dispatcher, a subclass of Agent among them, an Agent with any
+ * option set, and an undici 6 Agent whose interceptors were replaced leave
+ * the report waiting: a report may be lost, never sent twice.
  *
  * The report rides only the first attempt fetch dispatches, in a copy of the
  * headers; any later attempt gets the request without it. Two more guards are
@@ -79,6 +79,54 @@ function superclasses(prototype: object): string[] {
   return names;
 }
 
+/** A function's source text, read without calling anything it overrides. */
+function sourceOf(value: unknown): string | undefined {
+  return typeof value === 'function' ? Function.prototype.toString.call(value) : undefined;
+}
+
+/** Per Agent class, the source of the one interceptor its undici 6 constructor makes. */
+const builtInterceptor = new WeakMap<object, string | undefined>();
+
+function builtInterceptorOf(agent: object): string | undefined {
+  const Agent = agent.constructor;
+  if (!builtInterceptor.has(Agent)) {
+    let source: string | undefined;
+    try {
+      // What a constructor returns is always an object.
+      const interceptors = privateField(Reflect.construct(Agent, []), 'dispatch interceptors');
+      source = Array.isArray(interceptors) ? sourceOf(interceptors[0]) : undefined;
+    } catch {
+      source = undefined; // not a class undici builds: no report
+    }
+    builtInterceptor.set(Agent, source);
+  }
+  return builtInterceptor.get(Agent);
+}
+
+/**
+ * Undici 6 composes an Agent's dispatch, on its first, from the interceptors
+ * under the symbol described 'dispatch interceptors', and keeps the result
+ * under 'Intercepted Dispatch'. Its public `interceptors` setter replaces them
+ * without touching the options, and one that resends from a copy of the
+ * headers would send the report twice. An Agent built with defaults holds one:
+ * the redirect interceptor its constructor makes, the same code for every
+ * Agent of the class, and has composed no other. Undici 7 and 8 keep neither.
+ */
+function interceptorsAsBuilt(agent: object): boolean {
+  const interceptors = privateField(agent, 'dispatch interceptors');
+  const composed = sourceOf(privateField(agent, 'Intercepted Dispatch'));
+  if (interceptors === undefined && composed === undefined) return true;
+  const built = builtInterceptorOf(agent);
+  return (
+    built !== undefined &&
+    Array.isArray(interceptors) &&
+    interceptors.length === 1 &&
+    sourceOf(interceptors[0]) === built &&
+    // What the redirect interceptor returns is a function in its own source.
+    (composed === undefined || built.includes(composed))
+  );
+}
+
 /**
  * Exactly as `new Agent()` builds it. The class is undici's Agent, which
  * extends undici's DispatcherBase directly (Node 22, 24 and 26), and no class
@@ -90,8 +138,9 @@ function superclasses(prototype: object): string[] {
  * `maxOrigins: Infinity` (undici 7 and 8), and its factory, under 'factory',
  * is undici's `defaultFactory`. Any option set fails this, an HTTP/2 or
  * pipelining one among them, but undici 6's `maxRedirections`, which it keeps
- * apart: harmless, as fetch dispatches with `maxRedirections: 0`. Undici
- * moving any of these fails it too.
+ * apart: harmless, as fetch dispatches with `maxRedirections: 0`. So do
+ * undici 6 interceptors other than those it was built with (see
+ * interceptorsAsBuilt). Undici moving any of these fails it too.
  */
 function deliversOnce(dispatcher: Dispatcher): boolean {
   const prototype: unknown = Object.getPrototypeOf(dispatcher);
@@ -110,7 +159,8 @@ function deliversOnce(dispatcher: Dispatcher): boolean {
     options !== null &&
     Object.entries(options).every(
       ([name, value]) => value === undefined || (name === 'maxOrigins' && value === Infinity)
-    )
+    ) &&
+    interceptorsAsBuilt(dispatcher)
   );
 }
 

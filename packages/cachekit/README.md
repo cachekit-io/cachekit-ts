@@ -915,9 +915,10 @@ the closed beta, each CachekitIO request carries these optional headers:
   exactly as `new Agent()` builds it, which Node's own default dispatcher is:
   with any other global dispatcher (`setGlobalDispatcher`), such as a
   `RetryAgent`, a `MockAgent`, a proxy, a subclass of `Agent`, an `Agent`
-  composed with interceptors, or an `Agent` created with any option set, the
-  SDK cannot rule out a resend, so the report waits and no latency headers
-  are sent. One option is the exception: the undici 6 that Node.js 22 bundles
+  composed with interceptors, an `Agent` created with any option set, or, on
+  Node.js 22, an `Agent` whose `interceptors` were replaced after it was
+  built, the SDK cannot rule out a resend, so the report waits and no latency
+  headers are sent. One option is the exception: the undici 6 that Node.js 22 bundles
   keeps `maxRedirections` apart from an `Agent`'s other options, so an
   `Agent` created with only that one still gets a report. That is harmless,
   because `fetch` dispatches every request with `maxRedirections: 0`.
