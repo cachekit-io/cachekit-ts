@@ -265,10 +265,11 @@ export interface GetWithTtlResult {
  * CacheImpl learns the bound only when the wrapper resolves, though: a
  * write-behind copy, filled in L1 before the request is sent, keeps serving
  * until then, even past the bound, so a wrapper should resolve as soon as the
- * inner set does and do any further work after that. A wrapper that rebuilds the result from `freshFor` alone restarts the bound
- * when set resolves. One that resolves to nothing hides the bound: the copy
- * keeps the full TTL from its L1 write, and a `freshFor` is lost (protocol
- * spec/saas-api.md § Remaining Freshness, API-103).
+ * inner set does and do any further work after that. A wrapper that rebuilds
+ * the result from `freshFor` alone restarts the bound when set resolves. One
+ * that resolves to nothing hides the bound: the copy keeps the full TTL from
+ * its L1 write, and a `freshFor` is lost (protocol spec/saas-api.md
+ * § Remaining Freshness, API-103).
  */
 export interface SetResult {
   /**
@@ -285,11 +286,12 @@ export interface SetResult {
   freshFor?: number;
   /**
    * When (`Date.now()` ms) the write's success response arrived (CachekitIO:
-   * the `PUT` 2xx). CacheImpl counts its L1 copy's lifetime from here, the
-   * shorter of the TTL and `freshFor`, not from when set resolved. Omitted =
-   * the bound is counted from when set resolved, and without `freshFor` the
-   * copy keeps the TTL from its L1 write. A value that is not a finite
-   * instant at or before now is ignored.
+   * the `PUT` 2xx). CacheImpl stops serving its L1 copy no later than
+   * `receivedAt` plus the shorter of the TTL and `freshFor`, except a
+   * write-behind copy, which serves until set resolves when that is later
+   * (see SetResult). Omitted = the bound is counted from when set resolved,
+   * and without `freshFor` the copy keeps the TTL from its L1 write. A value
+   * that is not a finite instant at or before now is ignored.
    */
   receivedAt?: number;
 }
