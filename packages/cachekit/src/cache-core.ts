@@ -180,9 +180,10 @@ const WASM_RUNTIME_ERROR = (globalThis as { WebAssembly?: { RuntimeError?: Error
  * When (Date.now() ms) the writer's L1 copy of a write made with `ttl`
  * seconds must stop serving (API-103): from `receivedAt`, the shorter of
  * `ttl` and `freshFor`; without it, `freshFor` from now, or undefined when
- * neither was reported. A `freshFor` that is not a non-negative number fails
- * closed, as `0` (NaN would keep the copy forever). A `receivedAt` that is
- * not a finite instant at or before now is ignored, so it never lengthens it.
+ * neither was reported. A `freshFor` that is not a finite non-negative
+ * number fails closed, as `0` (NaN would keep the copy forever). A
+ * `receivedAt` that is not a finite instant at or before now is ignored, so
+ * it never lengthens the copy.
  */
 function freshUntil(result: SetResult | void, ttl: number): number | undefined {
   if (!result) return undefined;
@@ -195,7 +196,7 @@ function freshUntil(result: SetResult | void, ttl: number): number | undefined {
   const from = received ?? now;
   const ttlBound = received !== undefined && ttl > 0 ? received + ttl * 1000 : undefined;
   if (freshFor === undefined) return ttlBound;
-  const freshBound = typeof freshFor === 'number' && freshFor >= 0 ? from + freshFor * 1000 : from;
+  const freshBound = Number.isFinite(freshFor) && freshFor >= 0 ? from + freshFor * 1000 : from;
   return Math.min(freshBound, ttlBound ?? Infinity);
 }
 

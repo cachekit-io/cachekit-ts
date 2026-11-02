@@ -685,7 +685,7 @@ describe('a custom backend reporting a bound', () => {
     async close() {}
   }
 
-  it.each([NaN, -1, '60'])(
+  it.each([NaN, -1, Infinity, '60'])(
     'keeps no L1 copy for a freshFor of %j (fails closed)',
     async (freshFor) => {
       const backend = new ReportingBackend({ freshFor });
