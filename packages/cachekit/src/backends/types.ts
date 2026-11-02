@@ -261,8 +261,11 @@ export interface GetWithTtlResult {
  * A backend that wraps another must resolve to the inner result as it is,
  * `receivedAt` included (`return inner.set(...)`, or forward the object it
  * resolved to). The writer's L1 bound then runs from receipt of the store's
- * response, and any work the wrapper does after it shortens the L1 copy. A
- * wrapper that rebuilds the result from `freshFor` alone restarts the bound
+ * response, and any work the wrapper does after it shortens the L1 copy.
+ * CacheImpl learns the bound only when the wrapper resolves, though: a
+ * write-behind copy, filled in L1 before the request is sent, keeps serving
+ * until then, even past the bound, so a wrapper should resolve as soon as the
+ * inner set does and do any further work after that. A wrapper that rebuilds the result from `freshFor` alone restarts the bound
  * when set resolves. One that resolves to nothing hides the bound: the copy
  * keeps the full TTL from its L1 write, and a `freshFor` is lost (protocol
  * spec/saas-api.md § Remaining Freshness, API-103).

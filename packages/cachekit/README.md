@@ -597,6 +597,9 @@ malformed or `0` value keeps no L1 copy. A custom backend that wraps the
 CacheKit Cloud backend must return the inner `set` result unchanged: it
 carries the instant the response arrived (`SetResult.receivedAt`), so work
 the wrapper does afterwards shortens the L1 copy instead of restarting it.
+The SDK learns that instant only when the wrapper resolves, so a
+write-behind copy, which is in L1 before the request is sent, keeps serving
+until then. A wrapper should resolve as soon as the inner `set` does.
 A write whose error degradation
 absorbed (a timeout, say) got no response, and keeps its L1 copy for `ttl`.
 `refreshTTL` (`PATCH /ttl`) never changes how long an L1 copy is served.
