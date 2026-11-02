@@ -644,8 +644,9 @@ describe('CachekitIO writer L1 bound', () => {
   // PUT 2xx withholds receipt, so the copy serves past receipt plus Fresh-For
   // until the wrapper resolves, but never past its own TTL from the L1 fill:
   // the receipt-delay excess (protocol spec/saas-api.md § Remaining
-  // Freshness, API-108). Reads go through get(), which never waits on the
-  // pending write.
+  // Freshness, API-103). Reads go through get(), which never waits on the
+  // pending write. A Fresh-For: 0 copy's drop once the wrapper resolves is
+  // the write-behind Fresh-For: 0 test above.
   describe('behind a wrapper still suspended after the PUT 2xx', () => {
     /** Date.now() as the inner set resolved: receipt of the PUT 2xx. */
     let receivedAt: number | undefined;
@@ -678,8 +679,9 @@ describe('CachekitIO writer L1 bound', () => {
         writeBehind: true,
       });
       expect(await wrapped()).toBe('computed'); // cold miss: one GET, L1 filled
+      const filled = Date.now();
       await vi.waitFor(() => expect(receivedAt).toBeDefined());
-      return { cache, key: generateKey('wb', []), received: receivedAt! };
+      return { cache, key: generateKey('wb', []), filled, received: receivedAt! };
     }
 
     /** Resolves the wrapper and lets the write's cap run. */
@@ -704,26 +706,15 @@ describe('CachekitIO writer L1 bound', () => {
       await cache.close();
     });
 
-    it('serves a copy whose PUT said Fresh-For: 0 until the wrapper resolves', async () => {
+    it('serves a Fresh-For: 0 copy until its TTL from the L1 fill, never past it', async () => {
       putHeaders = { 'X-CacheKit-Fresh-For': '0' };
-      const { cache, key } = await suspendedWrite(3600);
+      const { cache, key, filled } = await suspendedWrite(2);
 
-      vi.advanceTimersByTime(60_000);
+      vi.advanceTimersByTime(filled + 1_999 - Date.now());
       expect(await cache.get(key)).toBe('computed');
       expect(gets).toBe(1); // API-103 keeps no copy; L1 still serves it
 
-      await settle();
-      expect(await cache.get(key)).toBe('computed');
-      expect(gets).toBe(2);
-
-      await cache.close();
-    });
-
-    it('never serves the copy past its TTL from the L1 fill', async () => {
-      putHeaders = { 'X-CacheKit-Fresh-For': '0' };
-      const { cache, key } = await suspendedWrite(2);
-
-      vi.advanceTimersByTime(2_000);
+      vi.advanceTimersByTime(1);
       expect(await cache.get(key)).toBe('computed');
       expect(gets).toBe(2); // expired at fill plus ttl, wrapper still suspended
 
