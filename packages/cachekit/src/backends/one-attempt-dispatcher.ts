@@ -67,12 +67,25 @@ function privateField(agent: object, name: string): unknown {
   return key === undefined ? undefined : Reflect.get(agent, key);
 }
 
+/** The names of the classes `prototype`'s class extends, nearest first. */
+function superclasses(prototype: object): string[] {
+  const names: string[] = [];
+  let above: unknown = Object.getPrototypeOf(prototype);
+  while (typeof above === 'object' && above !== null) {
+    const constructor: unknown = Reflect.get(above, 'constructor');
+    names.push(typeof constructor === 'function' ? constructor.name : '');
+    above = Object.getPrototypeOf(above);
+  }
+  return names;
+}
+
 /**
  * Exactly as `new Agent()` builds it. The class is undici's Agent, which
- * extends undici's DispatcherBase directly (Node 22, 24 and 26), so a
- * subclass of it named Agent fails: its code could resend. Its dispatch is
- * its prototype's: not a RetryAgent or a MockAgent, nor the proxy that
- * compose() returns in undici 7 and 8 (undici 6's is a ComposedDispatcher).
+ * extends undici's DispatcherBase directly (Node 22, 24 and 26), and no class
+ * above it is named Agent: a subclass of a genuine Agent, whatever the names
+ * between, has undici's Agent above it, and its code could resend. Its
+ * dispatch is its prototype's: not a RetryAgent or a MockAgent, nor the proxy
+ * that compose() returns in undici 7 and 8 (undici 6's is a ComposedDispatcher).
  * Its options, under the symbol described 'options', are all undefined but
  * `maxOrigins: Infinity` (undici 7 and 8), and its factory, under 'factory',
  * is undici's `defaultFactory`. Any option set fails this, an HTTP/2 or
@@ -84,11 +97,12 @@ function deliversOnce(dispatcher: Dispatcher): boolean {
   const prototype: unknown = Object.getPrototypeOf(dispatcher);
   const options = privateField(dispatcher, 'options');
   const factory = privateField(dispatcher, 'factory');
+  if (typeof prototype !== 'object' || prototype === null) return false;
+  const above = superclasses(prototype);
   return (
     dispatcher.constructor?.name === 'Agent' &&
-    typeof prototype === 'object' &&
-    prototype !== null &&
-    Object.getPrototypeOf(prototype)?.constructor?.name === 'DispatcherBase' &&
+    above[0] === 'DispatcherBase' &&
+    !above.includes('Agent') &&
     Reflect.get(dispatcher, 'dispatch') === Reflect.get(prototype, 'dispatch') &&
     typeof factory === 'function' &&
     factory.name === 'defaultFactory' &&

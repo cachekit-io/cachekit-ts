@@ -6,7 +6,7 @@
  * and what each attempt is handed.
  */
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -141,7 +141,10 @@ describe('oneAttemptDispatcher', () => {
     // Agent fills both slots before Node's own undici loads.
     it("accepts this Node's own default, and refuses Node's own Agent with any option set", async () => {
       const dist = join(PKG_DIR, 'dist', 'backends', 'one-attempt-dispatcher.js');
-      if (!existsSync(dist)) throw new Error(`${dist} is missing: run \`pnpm build\` first`);
+      const source = join(PKG_DIR, 'src', 'backends', 'one-attempt-dispatcher.ts');
+      if (!existsSync(dist) || statSync(dist).mtimeMs < statSync(source).mtimeMs) {
+        throw new Error(`${dist} is missing or older than its source: run \`pnpm build\` first`);
+      }
       const probe = join(PKG_DIR, 'test', 'node-entry', 'default-dispatcher-probe.mjs');
       const { stdout } = await run(process.execPath, [probe, dist], { timeout: 20_000 });
       // The child runs this same Node, so it bundles this undici.
@@ -159,6 +162,7 @@ describe('oneAttemptDispatcher', () => {
         // Undici 6 keeps it apart from the options; fetch dispatches with 0.
         maxRedirections: undici === 6,
         'a subclass named Agent': false,
+        'a subclass named Agent, through a class named DispatcherBase': false,
       });
     }, 30_000);
 
@@ -185,8 +189,17 @@ describe('oneAttemptDispatcher', () => {
       expect(oneAttemptDispatcher(UNDICI_7.version)).toBeUndefined();
     });
 
-    it('refuses a subclass of a genuine Agent named Agent, whose own code could resend', () => {
-      const agent = new (class Agent extends npmUndici.Agent {})();
+    // A class between named DispatcherBase, whose dispatch could resend.
+    const Between = class DispatcherBase extends npmUndici.Agent {
+      dispatch(): boolean {
+        return true;
+      }
+    };
+    it.each([
+      ['directly', () => new (class Agent extends npmUndici.Agent {})()],
+      ['through a class named DispatcherBase', () => new (class Agent extends Between {})()],
+    ])('refuses a subclass named Agent of a genuine Agent, %s', (_, make) => {
+      const agent = make();
       install(agent, agent);
       expect(oneAttemptDispatcher(UNDICI_8.version)).toBeUndefined();
       expect(oneAttemptDispatcher(UNDICI_7.version)).toBeUndefined();

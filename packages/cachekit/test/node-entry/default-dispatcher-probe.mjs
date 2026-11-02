@@ -35,5 +35,8 @@ console.log(
     'a CA only': accepts(new NodeAgent({ connect: { ca: 'x' } })),
     maxRedirections: accepts(new NodeAgent({ maxRedirections: 1 })),
     'a subclass named Agent': accepts(new (class Agent extends NodeAgent {})()),
+    'a subclass named Agent, through a class named DispatcherBase': accepts(
+      new (class Agent extends class DispatcherBase extends NodeAgent {} {})()
+    ),
   })
 );

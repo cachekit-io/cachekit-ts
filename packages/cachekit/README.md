@@ -924,10 +924,11 @@ the closed beta, each CachekitIO request carries these optional headers:
   A report can be lost:
   - when the global dispatcher, or the one an npm undici `fetch` of another
     major than Node's reads, is anything but an `Agent` built with defaults;
-  - when npm undici 8 is loaded on Node.js 22, or on Node.js 24 before the
-    process first uses `fetch` or one of its classes: undici 8 then installs
-    its own global dispatcher, wrapped in an adapter where Node's `fetch`
-    reads it, so no report is sent;
+  - when npm undici 8 is loaded on Node.js 22 or on a Node.js 24 before
+    24.17.0, at any time, or on Node.js 24.17.0 or later before the process
+    first uses `fetch` or one of its classes: undici 8 then installs its own
+    global dispatcher, wrapped in an adapter where Node's `fetch` reads it, so
+    no report is sent;
   - when the `Agent` has to queue the request: on Node.js 26, whose undici
     probes an `https:` API for HTTP/2, requests made while a new connection
     is being set up queue, so reports go missing more often around a cold

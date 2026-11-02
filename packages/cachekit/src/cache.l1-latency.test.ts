@@ -212,22 +212,38 @@ describe('what is timed (API-79)', () => {
   it('adds nothing for a wrap() call whose cold-path read finds a cached null, a miss', async () => {
     // Encrypted, so L1 holds the null as ciphertext and a read of it is a hit.
     const masterKey = createHash('sha256').update('cachekit L1 latency test fixture').digest('hex');
+    // The lock request is held until the null is in L1, then refused. With no
+    // wait left, the call re-checks at once, and finds the null.
+    let lockAsked!: () => void;
+    const asked = new Promise<void>((resolve) => (lockAsked = resolve));
+    let releaseLock!: () => void;
+    const released = new Promise<void>((resolve) => (releaseLock = resolve));
+    const server = fakeServer();
+    fetchSpy = server;
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      if (new URL(url).pathname.endsWith('/lock')) {
+        lockAsked();
+        await released;
+      }
+      return server(url, init);
+    });
     const cache = track(
       timeEveryCall(
         createCache({
           backend: BACKEND,
           metrics: false,
           encryption: { masterKey, tenantId: 'l1-latency' },
-          stampede: { distributedLock: true, lockWaitMs: 40, lockPollMs: 10 },
+          stampede: { distributedLock: true, lockWaitMs: 1, lockPollMs: 10 },
         })
       )
     );
     const compute = vi.fn(async (id: number) => ({ id }));
     const fn = cache.wrap(compute, OPTIONS);
     const call = fn(7);
-    await new Promise((resolve) => setTimeout(resolve, 15));
+    await asked;
     // The call's re-check finds this null in L1, and wrap() computes: a miss.
     await cache.set(generateKey(OPTIONS.namespace, [7]), null);
+    releaseLock();
     expect(await call).toEqual({ id: 7 });
     expect(compute).toHaveBeenCalledOnce();
     expect((await nextReport(cache)).sum).toBeUndefined();
