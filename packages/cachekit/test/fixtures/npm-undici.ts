@@ -15,7 +15,7 @@ interface Composable extends Closable {
   compose(interceptor: unknown): Closable;
 }
 
-export interface NpmUndici {
+interface NpmUndici {
   Agent: new (options?: object) => Composable;
   RetryAgent: new (agent: Closable, options: object) => Closable;
   Pool: new (origin: string, options: object) => Composable;

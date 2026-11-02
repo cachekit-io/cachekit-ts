@@ -442,7 +442,7 @@ export class CachekitIOCore implements Backend {
    * Undefined, leaving the report in place, while there is nothing to report
    * (API-85) or no such dispatcher: on any runtime but Node, which alone
    * times L1 hits, and on Node while its global dispatcher is anything but
-   * undici's own Agent, which might resend the request.
+   * an Agent built with defaults: any other might resend the request.
    */
   private takeLatencyReport(): { headers: Record<string, string>; dispatcher: object } | undefined {
     const report = this.l1Latency;

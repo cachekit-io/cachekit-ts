@@ -12,14 +12,19 @@
  * default factory. Such an Agent neither retries nor pipelines; over HTTP/2,
  * which only undici 8 turns on by default, it replays only a stream the
  * server refused or, after GOAWAY, never processed, which the spec allows.
- * Any other dispatcher, and an Agent with any option set, leaves the report
- * waiting: a report may be lost, never sent twice.
+ * Any other dispatcher, a subclass of Agent among them, an Agent with any
+ * option set, and an undici 6 Agent whose interceptors were replaced leave
+ * the report waiting: a report may be lost, never sent twice.
  *
- * The report rides only the first attempt fetch dispatches, marked not
- * idempotent so that no client could pipeline it, and in a copy of the
- * headers from which it is removed as soon as dispatch returns. Any later
- * attempt gets the request without it. What this cannot see, such as a fetch
- * wrapper that retries, is in the README's Telemetry section.
+ * The report rides only the first attempt fetch dispatches, in a copy of the
+ * headers; any later attempt gets the request without it. Two more guards are
+ * defence in depth, against what an Agent built with defaults does not do
+ * today: the attempt is marked not idempotent, against a future default that
+ * pipelines more than one request, and the report is removed from the copy as
+ * soon as dispatch returns, against a layer that keeps the options to resend
+ * them. That removal is also what drops the report of a request a full pool
+ * queues. What this cannot see, such as a fetch wrapper that retries, is in
+ * the README's Telemetry section.
  *
  * Node keeps undici's global dispatcher under the symbols undici registers it
  * with. The fetch of undici 6 and 7 reads the first and passes handlers of the
@@ -27,6 +32,7 @@
  * handlers, and its first holds an adapter for the older API. Elsewhere there
  * is no undici, and nothing here is used: only Node times L1 hits.
  */
+import { logError } from '../logger.js';
 
 /** The part of undici's Dispatcher that fetch uses. */
 interface Dispatcher {
@@ -62,23 +68,113 @@ function privateField(agent: object, name: string): unknown {
   return key === undefined ? undefined : Reflect.get(agent, key);
 }
 
+/** The names of the classes `prototype`'s class extends, nearest first. */
+function superclasses(prototype: object): string[] {
+  const names: string[] = [];
+  let above: unknown = Object.getPrototypeOf(prototype);
+  while (typeof above === 'object' && above !== null) {
+    const constructor: unknown = Reflect.get(above, 'constructor');
+    names.push(typeof constructor === 'function' ? constructor.name : '');
+    above = Object.getPrototypeOf(above);
+  }
+  return names;
+}
+
+/** A function's source text, read without calling anything it overrides. */
+function sourceOf(value: unknown): string | undefined {
+  return typeof value === 'function' ? Function.prototype.toString.call(value) : undefined;
+}
+
+/** What a fresh `new Agent()` of an Agent class holds that a name cannot vouch for. */
+interface FreshAgent {
+  /** Undici's own `defaultFactory`: one function, shared by every Agent built with it. */
+  factory: unknown;
+  /** Undici 6 only: the source of the one interceptor its constructor makes. */
+  interceptor: string | undefined;
+}
+
+/** Per Agent class, built once; undefined when the class cannot be built. */
+const freshAgents = new WeakMap<object, FreshAgent | undefined>();
+
+function freshAgentOf(agent: object): FreshAgent | undefined {
+  const Agent = agent.constructor;
+  if (!freshAgents.has(Agent)) {
+    let fresh: FreshAgent | undefined;
+    try {
+      // What a constructor returns is always an object.
+      const built: object = Reflect.construct(Agent, []);
+      const interceptors = privateField(built, 'dispatch interceptors');
+      fresh = {
+        factory: privateField(built, 'factory'),
+        interceptor: Array.isArray(interceptors) ? sourceOf(interceptors[0]) : undefined,
+      };
+    } catch (error) {
+      // Once per class: every Agent of it is refused, and its reports wait.
+      logError(
+        `[cachekit] cannot build a fresh ${Agent.name} to check an Agent against: ` +
+          'no latency report is sent through it',
+        error
+      );
+      fresh = undefined;
+    }
+    freshAgents.set(Agent, fresh);
+  }
+  return freshAgents.get(Agent);
+}
+
 /**
- * Exactly as `new Agent()` builds it. The class is undici's Agent, and its
+ * What only a fresh Agent of the same class can vouch for. Its factory is
+ * that Agent's, undici's own `defaultFactory`, and not a function that only
+ * shares the name: one that returns a pool which resends from a copy of the
+ * headers would send the report twice. And undici 6 composes an Agent's
+ * dispatch, on its first, from the interceptors under the symbol described
+ * 'dispatch interceptors', and keeps the result under 'Intercepted Dispatch'.
+ * Its public `interceptors` setter replaces them without touching the
+ * options, so an Agent built with defaults must still hold the one its
+ * constructor made, the redirect interceptor (the same code for every Agent
+ * of the class), and have composed no other. Undici 7 and 8 keep neither.
+ */
+function matchesFreshAgent(agent: object, factory: unknown): boolean {
+  const fresh = freshAgentOf(agent);
+  if (fresh === undefined || factory !== fresh.factory) return false;
+  const interceptors = privateField(agent, 'dispatch interceptors');
+  const composed = sourceOf(privateField(agent, 'Intercepted Dispatch'));
+  if (interceptors === undefined && composed === undefined) return true;
+  return (
+    fresh.interceptor !== undefined &&
+    Array.isArray(interceptors) &&
+    interceptors.length === 1 &&
+    sourceOf(interceptors[0]) === fresh.interceptor &&
+    // What the redirect interceptor returns is a function in its own source.
+    (composed === undefined || fresh.interceptor.includes(composed))
+  );
+}
+
+/**
+ * Exactly as `new Agent()` builds it. The class is undici's Agent, which
+ * extends undici's DispatcherBase directly (Node 22, 24 and 26), and no class
+ * above it is named Agent: a subclass of a genuine Agent, whatever the names
+ * between, has undici's Agent above it, and its code could resend. Its
  * dispatch is its prototype's: not a RetryAgent or a MockAgent, nor the proxy
  * that compose() returns in undici 7 and 8 (undici 6's is a ComposedDispatcher).
  * Its options, under the symbol described 'options', are all undefined but
  * `maxOrigins: Infinity` (undici 7 and 8), and its factory, under 'factory',
- * is undici's `defaultFactory`. Any option set fails this, an HTTP/2 or
- * pipelining one among them, as does undici moving either field.
+ * is undici's `defaultFactory` itself. Any option set fails this, an HTTP/2
+ * or pipelining one among them, but undici 6's `maxRedirections`, which it
+ * keeps apart: harmless, as fetch dispatches with `maxRedirections: 0`. So do
+ * undici 6 interceptors other than those it was built with (see
+ * matchesFreshAgent). Undici moving any of these fails it too.
  */
 function deliversOnce(dispatcher: Dispatcher): boolean {
   const prototype: unknown = Object.getPrototypeOf(dispatcher);
   const options = privateField(dispatcher, 'options');
   const factory = privateField(dispatcher, 'factory');
+  if (typeof prototype !== 'object' || prototype === null) return false;
+  const above = superclasses(prototype);
   return (
     dispatcher.constructor?.name === 'Agent' &&
-    typeof prototype === 'object' &&
-    prototype !== null &&
+    above[0] === 'DispatcherBase' &&
+    !above.includes('Agent') &&
     Reflect.get(dispatcher, 'dispatch') === Reflect.get(prototype, 'dispatch') &&
     typeof factory === 'function' &&
     factory.name === 'defaultFactory' &&
@@ -86,7 +182,8 @@ function deliversOnce(dispatcher: Dispatcher): boolean {
     options !== null &&
     Object.entries(options).every(
       ([name, value]) => value === undefined || (name === 'maxOrigins' && value === Infinity)
-    )
+    ) &&
+    matchesFreshAgent(dispatcher, factory)
   );
 }
 
@@ -141,10 +238,11 @@ export function oneAttemptDispatcher(
         return to.dispatch({ ...options, headers: dropReport(headers) }, handler);
       }
       try {
+        // Defence in depth: an Agent built with defaults pipelines no request.
         return to.dispatch({ ...options, headers, idempotent: false }, handler);
       } finally {
-        // The attempt has read them by now, or, if a full pool queued it,
-        // will go without the report.
+        // The attempt has read them by now, unless a full pool queued it: then
+        // this is what drops its report. Otherwise defence in depth.
         dropReport(headers);
       }
     },
