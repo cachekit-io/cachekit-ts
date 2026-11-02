@@ -61,8 +61,8 @@ export interface Backend {
    * {@link SetResult} reporting that bound, and CacheImpl caps the L1 copy of
    * the value it wrote with it. Every other backend resolves to nothing.
    *
-   * Delegating wrappers MUST return the inner backend's result, or they hide
-   * the bound from CacheImpl.
+   * Delegating wrappers MUST return the inner backend's result unchanged, or
+   * they hide the bound, or the instant it starts, from CacheImpl.
    *
    * @param key - Cache key
    * @param value - Raw bytes to store
@@ -254,6 +254,14 @@ export interface GetWithTtlResult {
 /**
  * Result of a {@link Backend.set} (or `setWithStaleTtl`) whose store reported
  * the bound it applied to the write.
+ *
+ * A backend that wraps another must resolve to the inner result as it is,
+ * `receivedAt` included (`return inner.set(...)`, or forward the object it
+ * resolved to). The writer's L1 bound then runs from receipt of the store's
+ * response, and any work the wrapper does after it shortens the L1 copy. A
+ * wrapper that rebuilds the result from `freshFor` alone, or resolves to
+ * nothing, restarts the bound when it resolves (protocol spec/saas-api.md
+ * § Remaining Freshness, API-103).
  */
 export interface SetResult {
   /**
@@ -261,12 +269,21 @@ export interface SetResult {
    * reported it on the write's success response (CachekitIO
    * `X-CacheKit-Fresh-For` on the `PUT` 2xx, read with the same grammar as
    * on a `GET`). CacheImpl stops serving its L1 copy of the value once this
-   * many seconds have passed since it received the response, whatever the
-   * TTL; `0` (a malformed header included) means L1 keeps no copy (protocol
-   * spec/saas-api.md § Remaining Freshness, API-103). Omitted = the store
-   * applied the TTL it was given, and the L1 copy keeps its usual lifetime.
+   * many seconds have passed since `receivedAt` (or, without it, since set
+   * resolved), whatever the TTL; `0` (a malformed header included) means L1
+   * keeps no copy (protocol spec/saas-api.md § Remaining Freshness, API-103).
+   * Omitted = the store applied the TTL it was given, and the L1 copy keeps
+   * the TTL.
    */
   freshFor?: number;
+  /**
+   * When (`Date.now()` ms) the write's success response arrived (CachekitIO:
+   * the `PUT` 2xx). CacheImpl counts its L1 copy's lifetime from here, the
+   * shorter of the TTL and `freshFor`, not from when set resolved. Omitted =
+   * the bound is counted from when set resolved, and without `freshFor` the
+   * copy keeps the TTL from its L1 write. A value later than now is ignored.
+   */
+  receivedAt?: number;
 }
 
 /**

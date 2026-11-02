@@ -34,10 +34,11 @@ export interface L1Write {
   /** Heap objects and values in the value, counted as it was serialized (see L1Cache.set). */
   readonly count?: ObjectCount;
   /**
-   * When (Date.now() ms) the store's bound on the write ends: the receipt of
-   * its success response plus the `freshFor` it reported (Backend.set's
-   * SetResult). Unset when the store reported none, or the write never got a
-   * success response. See boundedL1TtlMs.
+   * When (Date.now() ms) the writer's copy must stop serving: the receipt of
+   * the write's success response plus the shorter of the TTL and the
+   * `freshFor` it reported (Backend.set's SetResult). Unset when the backend
+   * reported no bound, or the write never got a success response. See
+   * boundedL1TtlMs.
    */
   readonly freshUntil?: number;
 }

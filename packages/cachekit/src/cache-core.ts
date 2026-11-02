@@ -177,19 +177,31 @@ const WASM_RUNTIME_ERROR = (globalThis as { WebAssembly?: { RuntimeError?: Error
   .WebAssembly?.RuntimeError;
 
 /**
- * When (Date.now() ms) the store's bound on a write ends, read off what
- * Backend.set resolved to at receipt of its success response: `freshFor`
- * seconds from now, or undefined when the backend reported none. A value
- * that is not a non-negative number (a custom backend's bug) fails closed,
- * as `0`: NaN would otherwise slip past every bound check and keep the L1
- * copy forever.
+ * When (Date.now() ms) the writer's L1 copy of a write made with `ttl`
+ * seconds must stop serving, read off what Backend.set resolved to: counted
+ * from `receivedAt`, the receipt of the success response, so work a wrapping
+ * backend does after it shortens the copy instead of restarting its clock
+ * (API-103). With a receipt instant the bound is the shorter of `ttl` and
+ * `freshFor`; without one it is `freshFor` from now, or undefined when the
+ * backend reported neither, and the copy keeps the TTL from its L1 write.
+ * A `freshFor` that is not a non-negative number (a custom backend's bug)
+ * fails closed, as `0`: NaN would otherwise slip past every bound check and
+ * keep the L1 copy forever. A `receivedAt` that is not a finite instant at or
+ * before now is ignored, so it can never lengthen the copy.
  */
-function freshUntil(result: SetResult | void): number | undefined {
+function freshUntil(result: SetResult | void, ttl: number): number | undefined {
   if (!result) return undefined;
-  const { freshFor } = result;
-  if (freshFor === undefined) return undefined;
+  const { freshFor, receivedAt } = result;
   const now = Date.now();
-  return typeof freshFor === 'number' && freshFor >= 0 ? now + freshFor * 1000 : now;
+  const received =
+    receivedAt !== undefined && Number.isFinite(receivedAt) && receivedAt <= now
+      ? receivedAt
+      : undefined;
+  const from = received ?? now;
+  const ttlBound = received !== undefined && ttl > 0 ? received + ttl * 1000 : undefined;
+  if (freshFor === undefined) return ttlBound;
+  const freshBound = typeof freshFor === 'number' && freshFor >= 0 ? from + freshFor * 1000 : from;
+  return ttlBound === undefined ? freshBound : Math.min(ttlBound, freshBound);
 }
 
 /**
@@ -1440,14 +1452,15 @@ export class CacheImpl implements SecureCache {
     };
 
     // The L2 write, under retry, the breaker and degradation; the stale
-    // window rides it on a stale-grace wrap. It resolves to when the store's
-    // bound on the write ends (L1Write.freshUntil), counted from receipt of
-    // the success response, or undefined when the store reported none.
+    // window rides it on a stale-grace wrap. It resolves to when the writer's
+    // L1 copy must stop serving (L1Write.freshUntil), counted from receipt of
+    // the success response, or undefined when the backend reported no bound.
     const writeL2 = async (): Promise<number | undefined> =>
       freshUntil(
         staleTtl > 0
           ? await this.backend.setWithStaleTtl!(key, data, ttl, staleTtl)
-          : await this.backend.set(key, data, ttl)
+          : await this.backend.set(key, data, ttl),
+        ttl
       );
 
     // A stale-grace revalidation never fills L1 (its l1Mode is skip), and may

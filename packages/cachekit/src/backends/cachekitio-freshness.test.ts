@@ -699,6 +699,32 @@ describe('a custom backend reporting a bound', () => {
     }
   );
 
+  it('counts the TTL from a reported receipt instant', async () => {
+    const backend = new ReportingBackend({ receivedAt: Date.now() - 2_000 });
+    const cache = createCache({ backend, defaultTtl: 3600 });
+    await cache.set('ns:k', 'v1', { ttl: 1 });
+
+    expect(await cache.get('ns:k')).toBe('v1');
+    expect(backend.gets).toBe(1); // receipt + 1 s has passed: no L1 copy
+
+    await cache.close();
+  });
+
+  // Honoured, a future or NaN instant would lengthen the copy past Fresh-For: 0.
+  it.each([() => Date.now() + 3_600_000, () => NaN])(
+    'ignores a receipt instant that is not a past instant (%#)',
+    async (receivedAt) => {
+      const backend = new ReportingBackend({ receivedAt: receivedAt(), freshFor: 0 });
+      const cache = createCache({ backend, defaultTtl: 3600 });
+      await cache.set('ns:k', 'v1');
+
+      expect(await cache.get('ns:k')).toBe('v1');
+      expect(backend.gets).toBe(1);
+
+      await cache.close();
+    }
+  );
+
   it('keeps the TTL for a backend that resolves to nothing', async () => {
     const backend = new ReportingBackend(undefined);
     const cache = createCache({ backend, defaultTtl: 3600 });
