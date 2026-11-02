@@ -144,8 +144,10 @@ describe('oneAttemptDispatcher', () => {
       if (!existsSync(dist)) throw new Error(`${dist} is missing: run \`pnpm build\` first`);
       const probe = join(PKG_DIR, 'test', 'node-entry', 'default-dispatcher-probe.mjs');
       const { stdout } = await run(process.execPath, [probe, dist], { timeout: 20_000 });
-      const { undici, ...accepted } = JSON.parse(stdout) as Record<string, unknown>;
-      expect(accepted).toEqual({
+      // The child runs this same Node, so it bundles this undici.
+      const undici = Number.parseInt(process.versions.undici ?? '', 10);
+      expect(JSON.parse(stdout)).toEqual({
+        undici,
         'the default': true,
         'new Agent()': true,
         allowH2: false,
