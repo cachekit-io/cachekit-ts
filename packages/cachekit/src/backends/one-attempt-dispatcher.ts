@@ -85,52 +85,68 @@ function sourceOf(value: unknown): string | undefined {
   return typeof value === 'function' ? Function.prototype.toString.call(value) : undefined;
 }
 
-/** Per Agent class, the source of the one interceptor its undici 6 constructor makes. */
-const builtInterceptor = new WeakMap<object, string | undefined>();
+/** What a fresh `new Agent()` of an Agent class holds that a name cannot vouch for. */
+interface FreshAgent {
+  /** Undici's own `defaultFactory`: one function, shared by every Agent built with it. */
+  factory: unknown;
+  /** Undici 6 only: the source of the one interceptor its constructor makes. */
+  interceptor: string | undefined;
+}
 
-function builtInterceptorOf(agent: object): string | undefined {
+/** Per Agent class, built once; undefined when the class cannot be built. */
+const freshAgents = new WeakMap<object, FreshAgent | undefined>();
+
+function freshAgentOf(agent: object): FreshAgent | undefined {
   const Agent = agent.constructor;
-  if (!builtInterceptor.has(Agent)) {
-    let source: string | undefined;
+  if (!freshAgents.has(Agent)) {
+    let fresh: FreshAgent | undefined;
     try {
       // What a constructor returns is always an object.
-      const interceptors = privateField(Reflect.construct(Agent, []), 'dispatch interceptors');
-      source = Array.isArray(interceptors) ? sourceOf(interceptors[0]) : undefined;
+      const built: object = Reflect.construct(Agent, []);
+      const interceptors = privateField(built, 'dispatch interceptors');
+      fresh = {
+        factory: privateField(built, 'factory'),
+        interceptor: Array.isArray(interceptors) ? sourceOf(interceptors[0]) : undefined,
+      };
     } catch (error) {
       // Once per class: every Agent of it is refused, and its reports wait.
       logError(
-        `[cachekit] cannot build a fresh ${Agent.name} to check an Agent's interceptors against: ` +
+        `[cachekit] cannot build a fresh ${Agent.name} to check an Agent against: ` +
           'no latency report is sent through it',
         error
       );
-      source = undefined;
+      fresh = undefined;
     }
-    builtInterceptor.set(Agent, source);
+    freshAgents.set(Agent, fresh);
   }
-  return builtInterceptor.get(Agent);
+  return freshAgents.get(Agent);
 }
 
 /**
- * Undici 6 composes an Agent's dispatch, on its first, from the interceptors
- * under the symbol described 'dispatch interceptors', and keeps the result
- * under 'Intercepted Dispatch'. Its public `interceptors` setter replaces them
- * without touching the options, and one that resends from a copy of the
- * headers would send the report twice. An Agent built with defaults holds one:
- * the redirect interceptor its constructor makes, the same code for every
- * Agent of the class, and has composed no other. Undici 7 and 8 keep neither.
+ * What only a fresh Agent of the same class can vouch for. Its factory is
+ * that Agent's, undici's own `defaultFactory`, and not a function that only
+ * shares the name: one that returns a pool which resends from a copy of the
+ * headers would send the report twice. And undici 6 composes an Agent's
+ * dispatch, on its first, from the interceptors under the symbol described
+ * 'dispatch interceptors', and keeps the result under 'Intercepted Dispatch'.
+ * Its public `interceptors` setter replaces them without touching the
+ * options, so an Agent built with defaults must still hold the one its
+ * constructor made, the redirect interceptor (the same code for every Agent
+ * of the class), and have composed no other. Undici 7 and 8 keep neither.
  */
-function interceptorsAsBuilt(agent: object): boolean {
+function matchesFreshAgent(agent: object, factory: unknown): boolean {
+  const fresh = freshAgentOf(agent);
+  if (fresh === undefined || factory !== fresh.factory) return false;
   const interceptors = privateField(agent, 'dispatch interceptors');
   const composed = sourceOf(privateField(agent, 'Intercepted Dispatch'));
   if (interceptors === undefined && composed === undefined) return true;
-  const built = builtInterceptorOf(agent);
   return (
-    built !== undefined &&
+    fresh.interceptor !== undefined &&
     Array.isArray(interceptors) &&
     interceptors.length === 1 &&
-    sourceOf(interceptors[0]) === built &&
+    sourceOf(interceptors[0]) === fresh.interceptor &&
     // What the redirect interceptor returns is a function in its own source.
-    (composed === undefined || built.includes(composed))
+    (composed === undefined || fresh.interceptor.includes(composed))
   );
 }
 
@@ -143,11 +159,11 @@ function interceptorsAsBuilt(agent: object): boolean {
  * that compose() returns in undici 7 and 8 (undici 6's is a ComposedDispatcher).
  * Its options, under the symbol described 'options', are all undefined but
  * `maxOrigins: Infinity` (undici 7 and 8), and its factory, under 'factory',
- * is undici's `defaultFactory`. Any option set fails this, an HTTP/2 or
- * pipelining one among them, but undici 6's `maxRedirections`, which it keeps
- * apart: harmless, as fetch dispatches with `maxRedirections: 0`. So do
+ * is undici's `defaultFactory` itself. Any option set fails this, an HTTP/2
+ * or pipelining one among them, but undici 6's `maxRedirections`, which it
+ * keeps apart: harmless, as fetch dispatches with `maxRedirections: 0`. So do
  * undici 6 interceptors other than those it was built with (see
- * interceptorsAsBuilt). Undici moving any of these fails it too.
+ * matchesFreshAgent). Undici moving any of these fails it too.
  */
 function deliversOnce(dispatcher: Dispatcher): boolean {
   const prototype: unknown = Object.getPrototypeOf(dispatcher);
@@ -167,7 +183,7 @@ function deliversOnce(dispatcher: Dispatcher): boolean {
     Object.entries(options).every(
       ([name, value]) => value === undefined || (name === 'maxOrigins' && value === Infinity)
     ) &&
-    interceptorsAsBuilt(dispatcher)
+    matchesFreshAgent(dispatcher, factory)
   );
 }
 

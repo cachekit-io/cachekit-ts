@@ -32,9 +32,9 @@ function built(name: string): string {
 }
 
 /** Run a probe from test/node-entry in this Node, and parse what it prints. */
-async function probe(file: string, dist: string): Promise<unknown> {
+async function probe(file: string, ...args: string[]): Promise<unknown> {
   const path = join(PKG_DIR, 'test', 'node-entry', file);
-  const { stdout } = await run(process.execPath, [path, dist], { timeout: 20_000 });
+  const { stdout } = await run(process.execPath, [path, ...args], { timeout: 20_000 });
   return JSON.parse(stdout);
 }
 
@@ -74,10 +74,13 @@ const COMPOSED = Symbol('Intercepted Dispatch');
 /** The class undici's Agent extends. */
 class DispatcherBase {}
 
+/** Undici's own factory: one function, which every Agent built with defaults holds. */
+function defaultFactory(): void {}
+
 /** Shaped like an Agent built with defaults: `new Agent()`. */
 class Agent extends DispatcherBase {
   [OPTIONS] = { maxOrigins: Infinity, connect: undefined, tls: undefined };
-  [FACTORY] = function defaultFactory(): void {};
+  [FACTORY] = defaultFactory;
   [INTERCEPTORS] = [
     (dispatch: () => boolean) =>
       function Intercept(): boolean {
@@ -179,6 +182,7 @@ describe('oneAttemptDispatcher', () => {
         'connect.allowH2': false,
         'a connect function': false,
         'a factory': false,
+        'a factory named defaultFactory': false,
         pipelining: false,
         'a CA only': false,
         // Undici 6 keeps it apart from the options; fetch dispatches with 0.
@@ -188,18 +192,29 @@ describe('oneAttemptDispatcher', () => {
       });
     }, 30_000);
 
-    // On the wire, in a child process for the same reason. Only undici 6 has
-    // the setter; on later majors the probe changes nothing, and the report
-    // rides the one request.
-    it('sends no report through an undici 6 Agent whose interceptors were replaced', async () => {
-      built('one-attempt-dispatcher');
-      // Each attempt's X-CacheKit-L1-Latency-Sum-Ns, and whether the report waits.
-      expect(await probe('legacy-interceptors-probe.mjs', built('cachekitio'))).toEqual(
-        NODE_UNDICI === 6
-          ? { undici: 6, seen: [null, null], waits: '300' }
-          : { undici: NODE_UNDICI, seen: ['300'], waits: null }
-      );
-    }, 30_000);
+    // On the wire, in a child process for the same reason: Node's own Agent
+    // sends every request twice, each from its own copy of the headers. Each
+    // attempt's X-CacheKit-L1-Latency-Sum-Ns, and whether the report waits.
+    const resent = { undici: NODE_UNDICI, seen: [null, null], waits: '300' };
+    it.each([
+      // Only undici 6 has the setter; on later majors the probe changes
+      // nothing, and the report rides the one request.
+      [
+        'whose interceptors were replaced (undici 6)',
+        'interceptors',
+        NODE_UNDICI === 6 ? resent : { undici: NODE_UNDICI, seen: ['300'], waits: null },
+      ],
+      ['whose factory only shares the name defaultFactory', 'factory', resent],
+    ])(
+      'sends no report through an Agent %s',
+      async (_, how, expected) => {
+        built('one-attempt-dispatcher');
+        expect(await probe('resending-agent-probe.mjs', built('cachekitio'), how)).toEqual(
+          expected
+        );
+      },
+      30_000
+    );
 
     describe('undici 6 interceptors', () => {
       it('accepts an Agent that has composed the interceptor it was built with', () => {
@@ -265,6 +280,14 @@ describe('oneAttemptDispatcher', () => {
       [
         'a factory',
         { factory: (origin: string, options: object) => new npmUndici.Pool(origin, options) },
+      ],
+      [
+        'a factory that only shares the name defaultFactory',
+        {
+          factory: function defaultFactory(origin: string, options: object) {
+            return new npmUndici.Pool(origin, options);
+          },
+        },
       ],
       ['pipelining', { pipelining: 2 }],
       ['a CA only', { connect: { ca: 'x' } }],

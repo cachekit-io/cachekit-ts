@@ -31,6 +31,9 @@ console.log(
     'connect.allowH2': accepts(new NodeAgent({ connect: { allowH2: true } })),
     'a connect function': accepts(new NodeAgent({ connect: () => undefined })),
     'a factory': accepts(new NodeAgent({ factory: () => undefined })),
+    'a factory named defaultFactory': accepts(
+      new NodeAgent({ factory: function defaultFactory() {} })
+    ),
     pipelining: accepts(new NodeAgent({ pipelining: 2 })),
     'a CA only': accepts(new NodeAgent({ connect: { ca: 'x' } })),
     maxRedirections: accepts(new NodeAgent({ maxRedirections: 1 })),
