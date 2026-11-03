@@ -36,9 +36,11 @@ export interface L1Write {
   /**
    * When (Date.now() ms) the writer's copy must stop serving: the receipt of
    * the write's success response plus the shorter of the TTL and the
-   * `freshFor` it reported (Backend.set's SetResult). Unset when the backend
-   * reported neither a `freshFor` nor a valid `receivedAt`, or the write
-   * never got a success response. See boundedL1TtlMs.
+   * `freshFor` it reported (Backend.set's SetResult). Without a valid
+   * `receivedAt`, the `freshFor` alone, counted from when set resolved. Unset
+   * when the backend reported no `freshFor` and either no valid `receivedAt`
+   * or the TTL is 0 or less, or the write never got a success response. See
+   * boundedL1TtlMs.
    */
   readonly freshUntil?: number;
 }

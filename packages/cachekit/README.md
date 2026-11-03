@@ -599,9 +599,10 @@ carries the instant the response arrived (`SetResult.receivedAt`), so work
 the wrapper does afterwards shortens the L1 copy instead of restarting it.
 The SDK learns that instant only when the wrapper resolves, so a
 write-behind copy, which is in L1 before the request is sent, keeps serving
-until then. A wrapper should resolve as soon as the inner `set` does.
-A write whose error degradation
-absorbed (a timeout, say) got no response, and keeps its L1 copy for `ttl`.
+until then. A wrapper should resolve as soon as the inner `set` does. One
+that resolves to nothing drops `X-CacheKit-Fresh-For`, and the L1 copy keeps
+the full `ttl` from its L1 write. A write whose error degradation absorbed (a
+timeout, say) got no response, and keeps its L1 copy for `ttl`.
 `refreshTTL` (`PATCH /ttl`) never changes how long an L1 copy is served.
 This SDK always sends a TTL (`defaultTtl`, one hour unless set), so it never
 stores a CacheKit Cloud entry without an expiry.
