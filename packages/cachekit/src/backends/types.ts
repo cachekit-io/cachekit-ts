@@ -264,12 +264,13 @@ export interface GetWithTtlResult {
  * response, and any work the wrapper does after it shortens the L1 copy.
  * CacheImpl learns the bound only when the wrapper resolves, though: a
  * write-behind copy, filled in L1 before the request is sent, keeps serving
- * until then, even past the bound, so a wrapper should resolve as soon as the
- * inner set does and do any further work after that. A wrapper that rebuilds
- * the result from `freshFor` alone restarts the bound when set resolves. One
- * that resolves to nothing hides the bound: the copy keeps the full TTL from
- * its L1 write, and a `freshFor` is lost (protocol spec/saas-api.md
- * § Remaining Freshness, API-103).
+ * until then, even past the bound or when `freshFor` was `0`, though never
+ * past the TTL from its L1 fill (the receipt-delay excess). So a wrapper
+ * should resolve as soon as the inner set does and do any further work after
+ * that. A wrapper that rebuilds the result from `freshFor` alone restarts the
+ * bound when set resolves. One that resolves to nothing hides the bound: the
+ * copy keeps the full TTL from its L1 write, and a `freshFor` is lost
+ * (protocol spec/saas-api.md § Remaining Freshness, API-103).
  */
 export interface SetResult {
   /**
