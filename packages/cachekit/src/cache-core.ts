@@ -179,8 +179,9 @@ const WASM_RUNTIME_ERROR = (globalThis as { WebAssembly?: { RuntimeError?: Error
 /**
  * When (Date.now() ms) the writer's L1 copy of a write made with `ttl`
  * seconds must stop serving (API-103): from `receivedAt`, the shorter of
- * `ttl` and `freshFor`; without it, `freshFor` from now, or undefined when
- * neither was reported. A `freshFor` that is not a finite non-negative
+ * `ttl` and `freshFor`; without it, `freshFor` from now. Undefined when no
+ * `freshFor` was reported and either no valid `receivedAt` was or `ttl` is 0
+ * or less (no expiry). A `freshFor` that is not a finite non-negative
  * number fails closed, as `0` (NaN would keep the copy forever). A
  * `receivedAt` that is not a finite instant at or before now is ignored, so
  * it never lengthens the copy.
@@ -1450,8 +1451,10 @@ export class CacheImpl implements SecureCache {
     // The L2 write, under retry, the breaker and degradation; the stale
     // window rides it on a stale-grace wrap. It resolves to when the writer's
     // L1 copy must stop serving (L1Write.freshUntil), counted from receipt of
-    // the success response, or undefined when the backend reported neither a
-    // `freshFor` nor a valid `receivedAt`.
+    // the success response; without a valid `receivedAt`, the `freshFor`
+    // alone, counted from when set resolved. Undefined when the backend
+    // reported no `freshFor` and either no valid `receivedAt` or `ttl` is 0
+    // or less.
     const writeL2 = async (): Promise<number | undefined> =>
       freshUntil(
         staleTtl > 0

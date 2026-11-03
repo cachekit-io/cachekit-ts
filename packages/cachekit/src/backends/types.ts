@@ -287,11 +287,12 @@ export interface SetResult {
   freshFor?: number;
   /**
    * When (`Date.now()` ms) the write's success response arrived (CachekitIO:
-   * the `PUT` 2xx). CacheImpl counts its L1 copy's lifetime from here, the
-   * shorter of the TTL and `freshFor`, not from when set resolved. Omitted =
-   * the bound is counted from when set resolved, and without `freshFor` the
-   * copy keeps the TTL from its L1 write. A value that is not a finite
-   * instant at or before now is ignored.
+   * the `PUT` 2xx). CacheImpl stops serving its L1 copy no later than
+   * `receivedAt` plus the shorter of the TTL and `freshFor`, except a
+   * write-behind copy, which serves until set resolves when that is later
+   * (see SetResult). Omitted = the bound is counted from when set resolved,
+   * and without `freshFor` the copy keeps the TTL from its L1 write. A value
+   * that is not a finite instant at or before now is ignored.
    */
   receivedAt?: number;
 }
