@@ -1196,7 +1196,7 @@ To print this table for your own machine, run `pnpm install` and `pnpm build`, t
 
 ## Requirements
 
-- Node.js 22+ (Node entrypoint) or Cloudflare Workers (workerd)
+- Node.js 22+ (Node entrypoint) or Cloudflare Workers (workerd). The CommonJS build (`require()`) needs Node.js 22.12+, because it loads the ESM-only `@noble/hashes` through `require(esm)`
 - Redis 6+ (Node Redis backends)
 
 ## License
