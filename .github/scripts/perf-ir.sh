@@ -11,8 +11,14 @@
 # $OUT/same-build when both builds hash alike, and exits with ir.mjs's code.
 # CI restores the Rust cache into the trees between the two.
 #
-#   BASE_SHA=<sha> OUT=<dir> bash .github/scripts/perf-ir.sh trees
+#   BASE_SHA=<sha> [BASE_PACKAGE=<path>] OUT=<dir> bash .github/scripts/perf-ir.sh trees
 #   OUT=<dir> [IR_ARGS='--shard 1/4'] bash .github/scripts/perf-ir.sh measure
+#
+# With BASE_PACKAGE (a core's release PR, from perf-ir-base.sh), the base is
+# the head with only that package checked out at BASE_SHA, its files the
+# release lacks removed. The head's pnpm-lock.yaml must still match that
+# package's package.json: if the core's dependencies changed since its tag,
+# the base's frozen install fails, and the gate reads INCOMPLETE, never PASS.
 #
 # IR_ARGS goes to both ir.mjs runs after --jobs 4, word-split: --shard, or
 # --only, --repeats and a larger --jobs for a quick local try.
@@ -48,7 +54,12 @@ if [[ ${1:-} == trees ]]; then
   git cat-file -e "$BASE_SHA^{commit}" 2> /dev/null ||
     git fetch --quiet --no-tags --depth=1 origin "$BASE_SHA"
   git worktree add --quiet --detach "$root/head" HEAD
-  git worktree add --quiet --detach "$root/base" "$BASE_SHA"
+  if [[ -n ${BASE_PACKAGE:-} ]]; then
+    git worktree add --quiet --detach "$root/base" HEAD
+    git -C "$root/base" checkout --quiet --no-overlay "$BASE_SHA" -- "$BASE_PACKAGE"
+  else
+    git worktree add --quiet --detach "$root/base" "$BASE_SHA"
+  fi
   # Listed before the head's bench/ replaces the base's.
   workloads "$root/base" > "$OUT/base-workloads.txt"
   workloads "$root/head" > "$OUT/head-workloads.txt"

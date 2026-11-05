@@ -23,7 +23,9 @@ jobs:
         run: bash .github/scripts/verify-tarball-selftest.sh
 
       # The instruction-count gate skips measuring when base and head hash
-      # alike: the hash must move when any file a workload loads changes.
+      # alike: the hash must move when any file a workload loads changes. And
+      # each kind of PR must get its base: on a core's release PR, the SDK's
+      # drift since the core's tag must hash alike, and the core's must not.
       - name: Instruction-count build hash self-test
         run: bash .github/scripts/perf-ir-hash-selftest.sh
 

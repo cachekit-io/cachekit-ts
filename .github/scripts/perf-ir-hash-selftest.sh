@@ -4,9 +4,17 @@
 # match, so a file the workloads load that the hash misses lets a regression
 # pass unmeasured. The hash must move when a shipped file of any package or
 # the lockfile changes, stay put when an unshipped file changes, and not
-# depend on where the tree sits. Needs node; no build, no valgrind.
+# depend on where the tree sits.
+#
+# Then the base the gate builds (perf-ir-base.sh, then perf-ir.sh trees), on a
+# synthetic repo of that tree. On a core's release PR, SDK drift since the
+# core's tag must hash alike on both trees, so it cannot fail the gate, and the
+# core's own drift must hash apart, measured against the tagged core. The SDK's
+# release PR and a feature PR keep their bases: the SDK's tag, and HEAD^1.
+# Needs node and git; no build, no valgrind.
 set -euo pipefail
-src=$(cd "$(dirname "$0")/../../packages/cachekit/bench" && pwd)
+scripts=$(cd "$(dirname "$0")" && pwd)
+src=$(cd "$scripts/../../packages/cachekit/bench" && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "${work:?}"' EXIT
 
@@ -74,5 +82,102 @@ if hash "$work/a" > /dev/null 2>&1; then
   fail=1
 else
   echo "ok: a files glob that matches nothing fails the run"
+fi
+
+g() { git -C "$1" -c user.name=selftest -c user.email=selftest@example.invalid -c commit.gpgsign=false \
+  -c core.hooksPath=/dev/null "${@:2}"; }
+# The released repo: both tags on one commit, as if every package had just
+# released.
+origin=$work/origin
+tree "$origin"
+cp "$scripts/../../release-please-config.json" "$scripts/../../.release-please-manifest.json" "$origin/"
+manifest=$(jq -r '.["packages/cachekit"] as $s | .["packages/cachekit-core-wasm"] as $w | "\($s) \($w)"' \
+  "$origin/.release-please-manifest.json")
+g "$origin" init -q -b main
+g "$origin" add -A
+g "$origin" commit -q -m release
+g "$origin" tag "cachekit-v${manifest% *}"
+g "$origin" tag "cachekit-core-wasm-v${manifest#* }"
+
+# pick <scenario> <PR head branch> <file>...: append to each file on main after
+# the release, check out the PR's merge commit (its own change touches only an
+# unshipped changelog), and pick and build the base trees as CI does.
+pick() {
+  local repo=$work/$1
+  git clone -q --no-tags "file://$origin" "$repo"
+  for f in "${@:3}"; do echo '// drift' >> "$repo/$f"; done
+  g "$repo" add -A
+  g "$repo" commit -q -m drift
+  g "$repo" switch -q -c pr
+  echo 'changelog' >> "$repo/packages/cachekit-core-wasm/CHANGELOG.md"
+  g "$repo" add -A
+  g "$repo" commit -q -m 'the PR'
+  g "$repo" switch -q --detach main
+  g "$repo" merge -q --no-ff -m merge pr
+  mkdir -p "$work/$1-out"
+  (cd "$repo" && HEAD_REF=$2 GITHUB_OUTPUT=$work/$1-out/base bash "$scripts/perf-ir-base.sh" > /dev/null)
+  local sha package
+  sha=$(sed -n 's/^sha=//p' "$work/$1-out/base")
+  package=$(sed -n 's/^package=//p' "$work/$1-out/base")
+  (cd "$repo" && BASE_SHA=$sha BASE_PACKAGE=$package OUT=$work/$1-out IR_ROOT=$work/$1-ir \
+    bash "$scripts/perf-ir.sh" trees)
+}
+check() { # check <scenario> same|differs <label>
+  local base head
+  base=$(hash "$work/$1-ir/base")
+  head=$(hash "$work/$1-ir/head")
+  if [[ ($2 == same && $base != "$head") || ($2 == differs && $base == "$head") ]]; then
+    echo "FAIL: $3: expected the base and head hashes to read '$2', got $base and $head"
+    fail=1
+  else
+    echo "ok: $3"
+  fi
+}
+# file <scenario> <path> <expected source>: the base tree's file must match
+# the release (tag) or the PR (head), or be absent from the base (none).
+file() {
+  local want ok=1
+  case $3 in
+    tag) want=$(g "$origin" show "cachekit-v${manifest% *}:$2") ;; # both tags name one commit
+    head) want=$(cat "$work/$1-ir/head/$2") ;;
+  esac
+  if [[ $3 == none ]]; then
+    [[ ! -e $work/$1-ir/base/$2 ]] || ok=
+  else
+    [[ -f $work/$1-ir/base/$2 && $(cat "$work/$1-ir/base/$2") == "$want" ]] || ok=
+  fi
+  local what="the $3's"
+  [[ $3 != none ]] || what=absent
+  if [[ -n $ok ]]; then echo "ok: $1: the base's $2 is $what"; else
+    echo "FAIL: $1: the base's $2 is not $what"
+    fail=1
+  fi
+}
+rp=release-please--branches--main--components--
+sdk=packages/cachekit/dist/index.js glue=packages/cachekit-core-wasm/pkg/glue.js
+added=packages/cachekit-core-wasm/pkg/added.js
+
+pick core-sdk-drift "${rp}cachekit-core-wasm" "$sdk"
+check core-sdk-drift same 'core release PR: SDK drift since the core tag hashes alike'
+file core-sdk-drift "$sdk" head
+
+pick core-drift "${rp}cachekit-core-wasm" "$sdk" "$glue" "$added"
+check core-drift differs "core release PR: the core's drift since its tag hashes apart"
+file core-drift "$glue" tag
+file core-drift "$added" none
+file core-drift "$sdk" head
+
+pick sdk-release "${rp}cachekit" "$sdk" "$glue"
+check sdk-release differs 'SDK release PR: drift since the SDK tag hashes apart'
+file sdk-release "$sdk" tag
+file sdk-release "$glue" tag
+
+pick feature feature/x "$sdk"
+if [[ $(sed -n 's/^sha=//p' "$work/feature-out/base") == $(g "$work/feature" rev-parse HEAD^1) &&
+  -z $(sed -n 's/^package=//p' "$work/feature-out/base") ]]; then
+  echo 'ok: feature PR: the base is HEAD^1, whole'
+else
+  echo 'FAIL: feature PR: the base is not HEAD^1, whole'
+  fail=1
 fi
 exit "$fail"
