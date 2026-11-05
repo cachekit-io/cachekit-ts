@@ -1310,9 +1310,10 @@ export function encodeCounted<T>(
  * for good as a cheap post-decode backstop for the hand-rolled pre-scan: if the
  * walker ever under-counts depth, this still catches it before the value is
  * returned. It runs on every auto-mode decode of backend bytes; interop
- * decodes never call it, and decodeTrusted skips it.
+ * decodes never call it, and decodeTrusted skips it. Package-internal:
+ * exported for its tests, which the pre-scan keeps from reaching it.
  */
-function validateDepth(value: unknown, depth: number, maxDepth: number): void {
+export function validateDepth(value: unknown, depth: number, maxDepth: number): void {
   if (depth > maxDepth) {
     throw new SerializationError(`Deserialized object exceeds max depth of ${maxDepth}`);
   }
@@ -1323,8 +1324,13 @@ function validateDepth(value: unknown, depth: number, maxDepth: number): void {
     }
   } else if (value !== null && typeof value === 'object' && !ArrayBuffer.isView(value)) {
     // bin decodes to a Uint8Array: its elements are bytes, not children.
-    for (const v of Object.values(value)) {
-      validateDepth(v, depth + 1, maxDepth);
+    // Object.keys, not Object.values: V8 runs Object.values in its fast builtin
+    // only on an object whose map has an enum cache, which only Object.keys and
+    // for-in fill. The decoder's maps have none unless this process enumerated
+    // an object of the same shape, so every Object.values here went to the
+    // runtime, about 1,000 instructions per object.
+    for (const key of Object.keys(value)) {
+      validateDepth((value as Record<string, unknown>)[key], depth + 1, maxDepth);
     }
   }
 }

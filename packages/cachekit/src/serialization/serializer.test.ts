@@ -14,6 +14,7 @@ import {
   decodeTrusted,
   encodeCounted,
   resolveSerializerConfig,
+  validateDepth,
 } from './serializer.js';
 import { ConfigurationError, ValueTooLargeError, SerializationError } from '../errors.js';
 import { decodeInteropValue } from './interop.js';
@@ -279,6 +280,28 @@ describe('MessagePackSerializer', () => {
         for (let i = 0; i < maxDepth; i++) value = [value];
         expect(() => encodeCounted(value, config)).toThrow(SerializationError);
         expect(() => encodeCounted(value, config)).toThrow(`Max depth of ${maxDepth} exceeded`);
+      });
+    });
+
+    // The post-decode backstop. decode never reaches its throw, because the
+    // pre-scan rejects over-depth bytes first, so it is called directly.
+    describe('validateDepth', () => {
+      const tooDeep = 'Deserialized object exceeds max depth of 32';
+
+      it.each([false, true])('passes a leaf at depth 32 (arrays: %s)', (array) => {
+        expect(() => validateDepth(nest(32, array), 0, 32)).not.toThrow();
+      });
+
+      it.each([false, true])('rejects a leaf at depth 33 (arrays: %s)', (array) => {
+        expect(() => validateDepth(nest(33, array), 0, 32)).toThrow(tooDeep);
+      });
+
+      it("walks every key of an object, not only the first's", () => {
+        expect(() => validateDepth({ a: 1, b: 'x', c: nest(32) }, 0, 32)).toThrow(tooDeep);
+      });
+
+      it("never walks a Uint8Array's bytes", () => {
+        expect(() => validateDepth({ bin: new Uint8Array(4) }, 31, 32)).not.toThrow();
       });
     });
   });
