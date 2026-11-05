@@ -178,6 +178,15 @@ class MemoryBackend {
 // this capacity.
 const l1AtCapacity = (entries, n) => ({
   n,
+  // Collect before the window what setup and the warm-up left. Otherwise V8
+  // finished collecting the filled L1 inside the window: at 100,000 entries
+  // two thirds of its instructions, a share that moved with what the build
+  // allocated at load, so a build that only grew a module the window never
+  // runs read up to 7% more. Collecting at the end of setup instead still
+  // left up to 4.7% between such builds. Here four of them read within 1.1%:
+  // what is left moves with how often the op's old-generation allocations
+  // need a fresh area, which follows the free space the collection leaves.
+  gc: true,
   // runs: the n this run executes, which may differ from the default above.
   setup: async (runs) => {
     const { L1Cache } = await load('l1/lru-cache.js');
@@ -323,10 +332,10 @@ export const WORKLOADS = {
   },
   'l1-set-at-capacity-1k': l1AtCapacity(1_000, 200_000),
   'l1-set-at-capacity-10k': l1AtCapacity(10_000, 4_000),
-  // 20,000 ops: 100,000 live entries keep V8 marking the old generation
-  // through the window, and over 2,000 ops the share of that marking in the
-  // window differed between runs by up to 1.9%; over 20,000 it repeats within
-  // 0.01%.
+  // 20,000 ops, set while V8 still marked the 100,000 live entries through
+  // the window (l1AtCapacity now collects them first): over 2,000 ops the
+  // share of that marking in the window differed between runs by up to 1.9%;
+  // over 20,000 it repeated within 0.01%.
   'l1-set-at-capacity-100k': l1AtCapacity(100_000, 20_000),
   'plaintext-set-1kb': plaintextSet(32, 5_000),
   'plaintext-set-10kb': plaintextSet(320, 1_000),
@@ -612,6 +621,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 
   const op = await WORKLOADS[name].setup(n);
   await repeat(op, WORKLOADS[name].warmup ?? WARMUP);
+  // ir.mjs passes --expose-gc; a --wall run has no gc().
+  if (WORKLOADS[name].gc) globalThis.gc?.();
   process.cpuUsage(); // window start: callgrind dump 1
   const t0 = process.hrtime.bigint();
   await repeat(op, n);

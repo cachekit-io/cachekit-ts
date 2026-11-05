@@ -23,6 +23,11 @@
 //   workload's warm-up runs past it. It barely moves the steady state: after
 //   a 60,000-op warm-up, six workloads read within 0.32% of the default
 //   threshold's count.
+// - Setup's garbage, which also moves Ir between builds: a workload that
+//   builds a large heap before the window can leave V8 collecting it inside
+//   the window, and how much of that lands there moves with what the build
+//   allocates at load. --expose-gc lets such a workload collect before the
+//   window (l1AtCapacity in ir-workload.mjs).
 // On Node 22 and 24 every workload then repeats within 0.01%. On Node 26 the
 // workloads that cross into the NAPI or wasm core keep a residual of
 // 0.1-0.3%, and napi-encrypted an occasional run about 1% low; neither ASLR
@@ -87,6 +92,7 @@ const V8_FLAGS = [
   '--no-liftoff',
   '--predictable-gc-schedule',
   '--invocation-count-for-turbofan=150',
+  '--expose-gc',
 ];
 const N = Object.fromEntries(Object.entries(WORKLOADS).map(([name, w]) => [name, w.n]));
 const AA_LIMIT = 0.004;
