@@ -16,11 +16,11 @@ Instead, use [GitHub's private vulnerability reporting](https://github.com/cache
 
 ## Cache-Key Path Encoding (CWE-22)
 
-The CachekitIO backend transmits cache keys as a single URL path segment (`/v1/cache/{key}`, `…/{key}/ttl`, `…/{key}/lock`). Keys are percent-encoded with `encodeURIComponent`; a key that is empty or exactly `.`, `..`, `health`, `ttl` or `lock` is rejected with a `ConfigurationError` before any request is built ([protocol `spec/saas-api.md` § Cache-Key Path Encoding](https://github.com/cachekit-io/protocol/blob/main/spec/saas-api.md#cache-key-path-encoding), rule 2): an empty key is an empty segment, so `/v1/cache/{key}` becomes `/v1/cache/` and `/v1/cache/{key}/ttl` becomes `/v1/cache//ttl`, neither of which addresses a stored entry; the WHATWG URL parser behind `fetch` removes literal and percent-encoded (`%2E`) dot segments before the request reaches the wire; and the other three words are live route tokens at that path level. Every other key — including `a:..` and every canonical `ns:…` key — is sent percent-encoded as a single path segment and decodes once server-side to the original key.
+The CacheKit Cloud backend transmits cache keys as a single URL path segment (`/v1/cache/{key}`, `…/{key}/ttl`, `…/{key}/lock`). Keys are percent-encoded with `encodeURIComponent`; a key that is empty or exactly `.`, `..`, `health`, `ttl` or `lock` is rejected with a `ConfigurationError` before any request is built ([protocol `spec/saas-api.md` § Cache-Key Path Encoding](https://github.com/cachekit-io/protocol/blob/main/spec/saas-api.md#cache-key-path-encoding), rule 2): an empty key is an empty segment, so `/v1/cache/{key}` becomes `/v1/cache/` and `/v1/cache/{key}/ttl` becomes `/v1/cache//ttl`, neither of which addresses a stored entry; the WHATWG URL parser behind `fetch` removes literal and percent-encoded (`%2E`) dot segments before the request reaches the wire; and the other three words are live route tokens at that path level. Every other key — including `a:..` and every canonical `ns:…` key — is sent percent-encoded as a single path segment and decodes once server-side to the original key.
 
 ## Scope
 
-This policy covers the `@cachekit-io/cachekit` and `@cachekit-io/cachekit-core-ts` packages. For issues with the CacheKit SaaS platform (api.cachekit.io), contact security@cachekit.io.
+This policy covers the `@cachekit-io/cachekit` and `@cachekit-io/cachekit-core-ts` packages. For issues with CacheKit Cloud (api.cachekit.io), contact security@cachekit.io.
 
 ## Bounded decompression
 
