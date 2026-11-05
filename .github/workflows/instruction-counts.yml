@@ -7,7 +7,8 @@ name: Instruction counts
 # compared against a figure recorded elsewhere. A release-please PR is
 # measured against that package's last release tag instead
 # (.github/scripts/perf-ir-base.sh); a core's release PR takes only that
-# core's package from the tag, so SDK drift it does not ship cannot fail it.
+# core's package from the tag, so it measures the core's code, not SDK drift
+# (two exceptions: .github/scripts/perf-ir.sh).
 # The verdict per workload goes to one PR comment, edited in place.
 #
 # The shards split the workloads (balanced on bench/ir-seconds.json), each

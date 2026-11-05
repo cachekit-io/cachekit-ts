@@ -17,8 +17,10 @@
 # core's release ships only that core's package, so its base is the PR's own
 # tree with only that package taken from the tag (perf-ir.sh trees): every
 # workload, the SDK ones that run through the core included, then measures the
-# core's drift alone. SDK drift since the core's tag is the SDK's own release's
-# to gate, against the SDK's tag. Anyone can name a branch, so a PR gets that
+# core's code since its tag, with the two exceptions perf-ir.sh's header names
+# (dependency drift, and SDK imports of core exports the tag lacks). SDK drift
+# since the core's tag is the SDK's own release's to gate, against the SDK's
+# tag. Anyone can name a branch, so a PR gets that
 # base only when it changes nothing outside the core's package and the
 # manifest; any other PR on such a branch gets the whole tagged tree.
 #

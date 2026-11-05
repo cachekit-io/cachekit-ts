@@ -8,9 +8,10 @@
 # depend on where the tree sits.
 #
 # Then the base the gate builds (perf-ir-base.sh, then perf-ir.sh trees), on a
-# synthetic repo of that tree. On a core's release PR, SDK drift since the
-# core's tag must hash alike on both trees, so it cannot fail the gate, and the
-# core's own drift must hash apart, measured against the tagged core. A PR on a
+# synthetic repo of that tree. On a core's release PR, the base must be the
+# PR's own tree outside the core's package, so SDK drift since the core's tag
+# cannot fail the gate, and the core's own drift must hash apart, measured
+# against the tagged core. A PR on a
 # core's release branch that changes the SDK, the SDK's release PR and a
 # feature PR keep the whole-tree bases: the tag, and HEAD^1.
 # Needs node, git and jq; no build, no valgrind.
@@ -135,7 +136,7 @@ pick() {
   mkdir -p "$work/$1-out"
   (cd "$repo" && HEAD_REF=$2 GITHUB_OUTPUT=$work/$1-out/base bash "$scripts/perf-ir-base.sh" > /dev/null)
   (cd "$repo" && BASE_SHA=$(out "$1" sha) BASE_PACKAGE=$(out "$1" package) OUT=$work/$1-out IR_ROOT=$work/$1-ir \
-    bash "$scripts/perf-ir.sh" trees 2> /dev/null)
+    bash "$scripts/perf-ir.sh" trees > "$work/$1-out/trees.log")
 }
 # A core change since its tag that the SDK's bench relies on: a dependency
 # bump and a workload the tagged core may not run.
@@ -150,16 +151,18 @@ assert() { # assert <label> <command>...: passes when the command succeeds
     fail=1
   fi
 }
-# The base tree is a checkout of the head with the core swapped in, so its
-# status lists every file it does not take from the head.
-head_outside_core() { [[ -n $(out "$1" package) && -z $(git -C "$work/$1-ir/base" status --porcelain -- . ":!$wasm/") ]]; }
+head_outside_core() { # the base's files outside the core are the PR merge commit's
+  [[ -n $(out "$1" package) ]] && git -C "$work/$1-ir/base" diff --quiet "$(g "$work/$1" rev-parse HEAD)" -- . ":!$wasm/"
+}
+warned() { grep -q "dependencies changed since its tag" "$work/$1-out/trees.log"; }
+not_warned() { ! warned "$1"; }
 other_hash() { [[ $(hash "$work/$1-ir/base") != "$(hash "$work/$1-ir/head")" ]]; }
 from_tag() { [[ $(cat "$work/$1-ir/base/$3") == "$(g "$origin" show "$2:$3")" ]]; }
 absent() { [[ ! -e $work/$1-ir/base/$2 ]]; }
 # The base's core package.json: the head's dependency fields, the rest the tag's.
 manifest_mix() {
-  local deps='{dependencies, devDependencies, optionalDependencies, peerDependencies}'
-  local rest='del(.dependencies, .devDependencies, .optionalDependencies, .peerDependencies)'
+  local fields='["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]'
+  local deps="with_entries(select(.key | IN(${fields}[])))" rest="with_entries(select(.key | IN(${fields}[]) | not))"
   local base=$work/$1-ir/base/$wasm/package.json head=$work/$1-ir/head/$wasm/package.json
   [[ $(jq -c "$deps" "$base") == "$(jq -c "$deps" "$head")" &&
     $(jq -c "$rest" "$base") == "$(g "$origin" show "$wasm_tag:$wasm/package.json" | jq -c "$rest")" ]]
@@ -171,12 +174,14 @@ rp=release-please--branches--main--components--
 
 pick core-sdk-drift "${rp}cachekit-core-wasm" - "$sdk"
 assert "core release PR: outside the core's package, the base is the head" head_outside_core core-sdk-drift
+assert 'core release PR: no dependency warning when the dependencies are unchanged' not_warned core-sdk-drift
 
 DRIFT=core_api pick core-drift "${rp}cachekit-core-wasm" - "$sdk" "$glue" "$added"
 assert "core release PR: the core's drift since its tag hashes apart" other_hash core-drift
 assert "core release PR: the base's core file is the core tag's" from_tag core-drift "$wasm_tag" "$glue"
 assert 'core release PR: a core file added since the tag is absent from the base' absent core-drift "$added"
 assert "core release PR: the base's core package.json is the tag's with the head's dependencies" manifest_mix core-drift
+assert 'core release PR: a dependency change since the tag is warned about' warned core-drift
 assert 'core release PR: a workload added since the tag reads new' new_on_base core-drift added-since-tag
 
 pick sdk-change "${rp}cachekit-core-wasm" "$sdk" "$sdk"

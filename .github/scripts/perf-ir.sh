@@ -61,7 +61,8 @@ if [[ ${1:-} == trees ]]; then
     git fetch --quiet --no-tags --depth=1 origin "$BASE_SHA"
   git worktree add --quiet --detach "$root/head" HEAD
   git worktree add --quiet --detach "$root/base" "$BASE_SHA"
-  # Listed before the head's bench/ replaces the base's.
+  # Listed from BASE_SHA itself, before the core swap below and before the
+  # head's bench/ replaces the base's.
   workloads "$root/base" > "$OUT/base-workloads.txt"
   workloads "$root/head" > "$OUT/head-workloads.txt"
   if [[ -n ${BASE_PACKAGE:-} ]]; then
@@ -91,7 +92,7 @@ new=$(comm -13 <(sort "$OUT/base-workloads.txt") <(sort "$OUT/head-workloads.txt
 # A failed base build leaves no report, and the comment then reads only that
 # the shard left none; say why while the log still shows it.
 [[ -z ${BASE_PACKAGE:-} ]] ||
-  trap 'echo "::error::the base build failed: the base is this PR with $BASE_PACKAGE at its last tag, so a core export the SDK imports by name that the tag lacks fails it"' EXIT
+  trap 'echo "::error::the base (this PR with $BASE_PACKAGE at its last tag) failed to install or build; one known cause: the SDK imports by name a core export the tag lacks"' EXIT
 for tree in base head; do
   echo "::group::Build the $tree"
   (
