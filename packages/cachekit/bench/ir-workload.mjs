@@ -327,7 +327,13 @@ export const WORKLOADS = {
   // move with heap layout, 4,422-4,428 or 4,528-4,533 Ir/op (2.4% apart) by
   // build and checkout path length, where without one it read 4,158 on every
   // layout.
-  // 1k reads flat either way.
+  // 1k is not layout-proof without one either: on Node 24.22.1 and valgrind
+  // 3.26.0 it read 6,361-6,366 Ir/op at eight checkout path lengths, but on
+  // valgrind 3.22.0 two builds that differ only in code the window never runs
+  // read 1.03% apart at one path length and 0.00% at one 112 characters longer.
+  // That is past ir.mjs's warn line (half the fail limit), not its fail line:
+  // re-run a lone 1k warn from a checkout at another path length before
+  // reading it as a cost.
   'l1-set-at-capacity-1k': l1AtCapacity(1_000, 200_000),
   'l1-set-at-capacity-10k': l1AtCapacity(10_000, 4_000),
   // Collects before the window. Otherwise V8 finished collecting the filled
