@@ -18,16 +18,18 @@
 # tree with only that package taken from the tag (perf-ir.sh trees): every
 # workload, the SDK ones that run through the core included, then measures the
 # core's drift alone. SDK drift since the core's tag is the SDK's own release's
-# to gate, against the SDK's tag.
+# to gate, against the SDK's tag. Anyone can name a branch, so a PR gets that
+# base only when it changes nothing outside the core's package and the
+# manifest; any other PR on such a branch gets the whole tagged tree.
 #
 #   CI:    HEAD_REF=${{ github.head_ref }} bash .github/scripts/perf-ir-base.sh
 #   Local: HEAD_REF=release-please--branches--main--components--cachekit \
 #            GITHUB_OUTPUT=/dev/stdout bash .github/scripts/perf-ir-base.sh
 set -euo pipefail
 
+package=
 if [[ ${HEAD_REF:-} != release-please--*--components--* ]]; then
   sha=$(git rev-parse HEAD^1)
-  package=
   label=$sha
 else
   component=${HEAD_REF##*--components--}
@@ -46,12 +48,13 @@ else
     exit 1
   }
   sha=$(git rev-parse "$tag^{commit}")
-  if [[ $path == packages/cachekit ]]; then
-    package=
-    label="$tag ($(git rev-parse --short=7 "$sha")), last release"
-  else
+  label="$tag ($(git rev-parse --short=7 "$sha")), last release"
+  outside=$(git diff --name-only HEAD^1 HEAD -- . ":!$path/" ':!.release-please-manifest.json')
+  if [[ $path != packages/cachekit && -z $outside ]]; then
     package=$path
-    label="this PR with $path at $tag ($(git rev-parse --short=7 "$sha")), last release"
+    label="this PR with $path at $label"
+  elif [[ $path != packages/cachekit ]]; then
+    echo "::notice::release PR changes files outside $path, so it is measured against the whole $tag tree"
   fi
 fi
 echo "Base: $label"
