@@ -27,7 +27,9 @@
 //   builds a large heap before the window can leave V8 collecting it inside
 //   the window, and how much of that lands there moves with what the build
 //   allocates at load. --expose-gc lets such a workload collect before the
-//   window (l1AtCapacity in ir-workload.mjs).
+//   window (l1-set-at-capacity-100k in ir-workload.mjs). Collect only where
+//   that happens: elsewhere a collection can itself move the count with heap
+//   layout (l1-set-at-capacity-10k, 2.4%).
 // On Node 22 and 24 every workload then repeats within 0.01%. On Node 26 the
 // workloads that cross into the NAPI or wasm core keep a residual of
 // 0.1-0.3%, and napi-encrypted an occasional run about 1% low; neither ASLR
