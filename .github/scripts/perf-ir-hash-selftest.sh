@@ -88,32 +88,46 @@ fi
 
 g() { git -C "$1" -c user.name=selftest -c user.email=selftest@example.invalid -c commit.gpgsign=false \
   -c core.hooksPath=/dev/null "${@:2}"; }
-# The released repo: the SDK's and core-wasm's tags on one commit, as if both
-# had just released.
+# The released repo: core-wasm's release, then a later SDK release that also
+# changed the core, so each tag names a tree of its own.
 origin=$work/origin
 tree "$origin"
 cp "$scripts/../../release-please-config.json" "$scripts/../../.release-please-manifest.json" "$origin/"
-sdk_version=$(jq -r '.["packages/cachekit"]' "$origin/.release-please-manifest.json")
-wasm_version=$(jq -r '.["packages/cachekit-core-wasm"]' "$origin/.release-please-manifest.json")
+sdk_tag=cachekit-v$(jq -r '.["packages/cachekit"]' "$origin/.release-please-manifest.json")
+wasm_tag=cachekit-core-wasm-v$(jq -r '.["packages/cachekit-core-wasm"]' "$origin/.release-please-manifest.json")
+sdk=packages/cachekit/dist/index.js glue=packages/cachekit-core-wasm/pkg/glue.js
+added=packages/cachekit-core-wasm/pkg/added.js wasm=packages/cachekit-core-wasm
 g "$origin" init -q -b main
 g "$origin" add -A
-g "$origin" commit -q -m release
-g "$origin" tag "cachekit-v$sdk_version"
-g "$origin" tag "cachekit-core-wasm-v$wasm_version"
+g "$origin" commit -q -m 'core-wasm release'
+g "$origin" tag "$wasm_tag"
+echo '// SDK release' | tee -a "$origin/$sdk" >> "$origin/$glue"
+g "$origin" commit -q -am 'SDK release'
+g "$origin" tag "$sdk_tag"
 
-# pick <scenario> <PR head branch> <PR file> <file>...: append to each <file>
-# on main after the release (and run $DRIFT on the repo, if set), then open
-# the PR, which appends to <PR file>. Check out its merge commit, and pick and
-# build the base trees as CI does.
+# set_json <file> <jq filter>
+set_json() { jq "$2" "$1" > "$1.new" && mv "$1.new" "$1"; }
+# pick <scenario> <PR head branch> <PR file|-> <file>...: append to each <file>
+# on main after the releases (and run $DRIFT on the repo, if set), then open
+# the PR. A release PR edits what release-please edits: the package's version,
+# its CHANGELOG.md and its manifest entry. The PR also appends to <PR file>.
+# Check out its merge commit, and pick and build the base trees as CI does.
 pick() {
-  local repo=$work/$1
+  local repo=$work/$1 path
   git clone -q --no-tags "file://$origin" "$repo"
   for f in "${@:4}"; do echo '// drift' >> "$repo/$f"; done
   [[ -z ${DRIFT:-} ]] || "$DRIFT" "$repo"
   g "$repo" add -A
   g "$repo" commit -q -m drift
   g "$repo" switch -q -c pr
-  echo '// the PR' >> "$repo/$3"
+  if [[ $2 == *--components--* ]]; then
+    path=$(jq -r --arg c "${2##*--components--}" \
+      '.packages | to_entries[] | select(.value.component == $c) | .key' "$repo/release-please-config.json")
+    set_json "$repo/$path/package.json" '.version = "9.9.9"'
+    set_json "$repo/.release-please-manifest.json" ".[\"$path\"] = \"9.9.9\""
+    echo 'release notes' >> "$repo/$path/CHANGELOG.md"
+  fi
+  [[ $3 == - ]] || echo '// the PR' >> "$repo/$3"
   g "$repo" add -A
   g "$repo" commit -q -m 'the PR'
   g "$repo" switch -q --detach main
@@ -121,13 +135,12 @@ pick() {
   mkdir -p "$work/$1-out"
   (cd "$repo" && HEAD_REF=$2 GITHUB_OUTPUT=$work/$1-out/base bash "$scripts/perf-ir-base.sh" > /dev/null)
   (cd "$repo" && BASE_SHA=$(out "$1" sha) BASE_PACKAGE=$(out "$1" package) OUT=$work/$1-out IR_ROOT=$work/$1-ir \
-    bash "$scripts/perf-ir.sh" trees)
+    bash "$scripts/perf-ir.sh" trees 2> /dev/null)
 }
 # A core change since its tag that the SDK's bench relies on: a dependency
 # bump and a workload the tagged core may not run.
 core_api() {
-  jq '.devDependencies = {"x": "^2.0.0"}' "$1/packages/cachekit-core-wasm/package.json" > "$1/package.json.new"
-  mv "$1/package.json.new" "$1/packages/cachekit-core-wasm/package.json"
+  set_json "$1/$wasm/package.json" '.devDependencies = {"x": "^2.0.0"}'
   echo "WORKLOADS['added-since-tag'] = WORKLOADS.keygen;" >> "$1/packages/cachekit/bench/ir-workload.mjs"
 }
 out() { sed -n "s/^$2=//p" "$work/$1-out/base"; }
@@ -137,38 +150,42 @@ assert() { # assert <label> <command>...: passes when the command succeeds
     fail=1
   fi
 }
-same_hash() { [[ $(hash "$work/$1-ir/base") == "$(hash "$work/$1-ir/head")" ]]; }
-other_hash() { ! same_hash "$1"; }
-from_tag() { [[ $(cat "$work/$1-ir/base/$2") == "$(g "$origin" show "cachekit-v$sdk_version:$2")" ]]; }
+# The base tree is a checkout of the head with the core swapped in, so its
+# status lists every file it does not take from the head.
+head_outside_core() { [[ -n $(out "$1" package) && -z $(git -C "$work/$1-ir/base" status --porcelain -- . ":!$wasm/") ]]; }
+other_hash() { [[ $(hash "$work/$1-ir/base") != "$(hash "$work/$1-ir/head")" ]]; }
+from_tag() { [[ $(cat "$work/$1-ir/base/$3") == "$(g "$origin" show "$2:$3")" ]]; }
 absent() { [[ ! -e $work/$1-ir/base/$2 ]]; }
-head_deps() {
-  local manifest=packages/cachekit-core-wasm/package.json
-  [[ $(jq -c .devDependencies "$work/$1-ir/base/$manifest") == "$(jq -c .devDependencies "$work/$1-ir/head/$manifest")" ]]
+# The base's core package.json: the head's dependency fields, the rest the tag's.
+manifest_mix() {
+  local deps='{dependencies, devDependencies, optionalDependencies, peerDependencies}'
+  local rest='del(.dependencies, .devDependencies, .optionalDependencies, .peerDependencies)'
+  local base=$work/$1-ir/base/$wasm/package.json head=$work/$1-ir/head/$wasm/package.json
+  [[ $(jq -c "$deps" "$base") == "$(jq -c "$deps" "$head")" &&
+    $(jq -c "$rest" "$base") == "$(g "$origin" show "$wasm_tag:$wasm/package.json" | jq -c "$rest")" ]]
 }
 new_on_base() { ! grep -qx "$2" "$work/$1-out/base-workloads.txt" && grep -qx "$2" "$work/$1-out/head-workloads.txt"; }
-whole_tag() { [[ -z $(out "$1" package) ]] && from_tag "$1" "$2"; }
+whole_tag() { [[ -z $(out "$1" package) && $(out "$1" sha) == "$(g "$origin" rev-parse "$2^{commit}")" ]] && from_tag "$@"; }
 first_parent() { [[ $(out "$1" sha) == "$(g "$work/$1" rev-parse HEAD^1)" && -z $(out "$1" package) ]]; }
 rp=release-please--branches--main--components--
-sdk=packages/cachekit/dist/index.js glue=packages/cachekit-core-wasm/pkg/glue.js
-changelog=packages/cachekit-core-wasm/CHANGELOG.md added=packages/cachekit-core-wasm/pkg/added.js
 
-pick core-sdk-drift "${rp}cachekit-core-wasm" "$changelog" "$sdk"
-assert 'core release PR: SDK drift since the core tag hashes alike' same_hash core-sdk-drift
+pick core-sdk-drift "${rp}cachekit-core-wasm" - "$sdk"
+assert "core release PR: outside the core's package, the base is the head" head_outside_core core-sdk-drift
 
-DRIFT=core_api pick core-drift "${rp}cachekit-core-wasm" "$changelog" "$sdk" "$glue" "$added"
+DRIFT=core_api pick core-drift "${rp}cachekit-core-wasm" - "$sdk" "$glue" "$added"
 assert "core release PR: the core's drift since its tag hashes apart" other_hash core-drift
-assert "core release PR: the base's core file is the tag's" from_tag core-drift "$glue"
+assert "core release PR: the base's core file is the core tag's" from_tag core-drift "$wasm_tag" "$glue"
 assert 'core release PR: a core file added since the tag is absent from the base' absent core-drift "$added"
-assert "core release PR: the base keeps the head's core dependencies" head_deps core-drift
+assert "core release PR: the base's core package.json is the tag's with the head's dependencies" manifest_mix core-drift
 assert 'core release PR: a workload added since the tag reads new' new_on_base core-drift added-since-tag
 
 pick sdk-change "${rp}cachekit-core-wasm" "$sdk" "$sdk"
-assert "a core release branch's PR that changes the SDK: the base is the whole tag tree" whole_tag sdk-change "$sdk"
+assert "a core release branch's PR that changes the SDK: the base is the whole core tag tree" \
+  whole_tag sdk-change "$wasm_tag" "$sdk"
 
-pick sdk-release "${rp}cachekit" "$changelog" "$sdk" "$glue"
-assert 'SDK release PR: the base is the whole tag tree' whole_tag sdk-release "$sdk"
-assert "SDK release PR: the base's core file is the tag's" from_tag sdk-release "$glue"
+pick sdk-release "${rp}cachekit" - "$sdk" "$glue"
+assert 'SDK release PR: the base is the whole SDK tag tree' whole_tag sdk-release "$sdk_tag" "$sdk"
 
-pick feature feature/x "$changelog" "$sdk"
+pick feature feature/x "$sdk" "$sdk"
 assert 'feature PR: the base is HEAD^1, whole' first_parent feature
 exit "$fail"

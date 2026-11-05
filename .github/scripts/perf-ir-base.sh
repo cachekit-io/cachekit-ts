@@ -49,12 +49,15 @@ else
   }
   sha=$(git rev-parse "$tag^{commit}")
   label="$tag ($(git rev-parse --short=7 "$sha")), last release"
-  outside=$(git diff --name-only HEAD^1 HEAD -- . ":!$path/" ':!.release-please-manifest.json')
-  if [[ $path != packages/cachekit && -z $outside ]]; then
-    package=$path
-    label="this PR with $path at $label"
-  elif [[ $path != packages/cachekit ]]; then
-    echo "::notice::release PR changes files outside $path, so it is measured against the whole $tag tree"
+  if [[ $path != packages/cachekit ]]; then
+    outside=$(git diff --name-only HEAD^1 HEAD -- . ":!$path/" ':!.release-please-manifest.json' | paste -sd, -)
+    if [[ -z $outside ]]; then
+      package=$path
+      label="this PR with $path at $label"
+    else
+      echo "::notice::release PR changes files outside $path ($outside), so it is measured against the whole $tag tree"
+      label="$label, whole tree: the PR changes files outside $path"
+    fi
   fi
 fi
 echo "Base: $label"

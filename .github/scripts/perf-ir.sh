@@ -12,15 +12,19 @@
 # CI restores the Rust cache into the trees between the two.
 #
 #   BASE_SHA=<sha> [BASE_PACKAGE=<path>] OUT=<dir> bash .github/scripts/perf-ir.sh trees
-#   OUT=<dir> [IR_ARGS='--shard 1/4'] bash .github/scripts/perf-ir.sh measure
+#   OUT=<dir> [BASE_PACKAGE=<path>] [IR_ARGS='--shard 1/4'] bash .github/scripts/perf-ir.sh measure
 #
 # With BASE_PACKAGE (a core's release PR, from perf-ir-base.sh), the base is
 # the head with only that package checked out at BASE_SHA, its files the
 # release lacks removed. Its package.json keeps the head's dependency fields,
 # which the head's pnpm-lock.yaml resolves, so a bump since the tag does not
-# fail the base's frozen install. The base's workload list still comes from
-# BASE_SHA's bench file, so a workload added since the tag reads `new` where
-# the tagged core cannot run it.
+# fail the base's frozen install; both trees then build the core with the
+# same dependencies, so that drift goes unmeasured here (the PR that bumped it
+# was measured). The base's workload list still comes from BASE_SHA's bench
+# file, so a workload added since the tag reads `new` where the tagged core
+# cannot run it. If the head's SDK imports a core export by name that the tag
+# lacks, the base's build fails and every workload reads INCOMPLETE: the SDK
+# reads a new core export off the module namespace instead.
 #
 # IR_ARGS goes to both ir.mjs runs after --jobs 4, word-split: --shard, or
 # --only, --repeats and a larger --jobs for a quick local try.
@@ -64,10 +68,11 @@ if [[ ${1:-} == trees ]]; then
     git -C "$root/base" checkout --quiet --detach "$(git rev-parse HEAD)"
     git -C "$root/base" checkout --quiet --no-overlay "$BASE_SHA" -- "$BASE_PACKAGE"
     manifest=$BASE_PACKAGE/package.json
-    deps='{dependencies, devDependencies, optionalDependencies, peerDependencies} | with_entries(select(.value))'
+    fields='["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]'
+    deps="with_entries(select(.key | IN(${fields}[])))"
     if [[ $(jq -c "$deps" "$root/base/$manifest") != "$(jq -c "$deps" "$root/head/$manifest")" ]]; then
-      jq --slurpfile head "$root/head/$manifest" \
-        "del(.dependencies, .devDependencies, .optionalDependencies, .peerDependencies) + (\$head[0] | $deps)" \
+      echo "::warning::$manifest's dependencies changed since its tag: the base builds the tagged core with the head's, so this PR does not measure that change"
+      jq --slurpfile head "$root/head/$manifest" "with_entries(select(.key | IN(${fields}[]) | not)) + (\$head[0] | $deps)" \
         "$root/base/$manifest" > "$OUT/package.json"
       mv "$OUT/package.json" "$root/base/$manifest"
     fi
@@ -83,6 +88,10 @@ fi
 read -ra extra <<< "${IR_ARGS:-}"
 new=$(comm -13 <(sort "$OUT/base-workloads.txt") <(sort "$OUT/head-workloads.txt") | paste -sd, -)
 
+# A failed base build leaves no report, and the comment then reads only that
+# the shard left none; say why while the log still shows it.
+[[ -z ${BASE_PACKAGE:-} ]] ||
+  trap 'echo "::error::the base build failed: the base is this PR with $BASE_PACKAGE at its last tag, so a core export the SDK imports by name that the tag lacks fails it"' EXIT
 for tree in base head; do
   echo "::group::Build the $tree"
   (
@@ -98,6 +107,7 @@ for tree in base head; do
     pnpm --filter @cachekit-io/cachekit-core-wasm build:wasm
   )
   echo "::endgroup::"
+  trap - EXIT
 done
 
 ir() { (cd "$root/$1/packages/cachekit" && node bench/ir.mjs "${@:2}"); }
