@@ -331,6 +331,8 @@ export class EncryptionManagerCore {
     }
   }
 
+  // encryptNow() repeats this method's binding call and error mapping rather
+  // than sharing them, for the reason decrypt() gives.
   /**
    * Encrypt data with AAD binding to cache key.
    *
@@ -347,8 +349,6 @@ export class EncryptionManagerCore {
   async encrypt(data: Uint8Array, cacheKey: string, compressed = false): Promise<Uint8Array> {
     await this.ensureInitialized();
 
-    // encryptNow() repeats this body rather than sharing it, for the reason
-    // decrypt() gives.
     try {
       const aad = this.buildAAD(cacheKey, compressed);
       const result = this.native!.encryptWithTenantKeys(data, aad, this.tenantKeys!);
