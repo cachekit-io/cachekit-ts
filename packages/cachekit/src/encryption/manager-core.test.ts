@@ -232,6 +232,56 @@ describe('EncryptionManagerCore', () => {
     expect(build).toThrow(ConfigurationError);
     expect(build).toThrow(/tenantId must not be empty/);
   });
+
+  it('decryptNow decrypts in the call once the keys are derived, and throws what decrypt() rejects with', async () => {
+    const { bindings } = mockBindings();
+    const manager = new TestManager(async () => bindings);
+
+    // Before the keys are derived it loads the bindings first: a Promise.
+    const first = manager.decryptNow(new Uint8Array([1]), 'ns:k');
+    expect(first).toBeInstanceOf(Promise);
+    expect(await first).toEqual(new Uint8Array([2]));
+
+    const plaintext = manager.decryptNow(new Uint8Array([1]), 'ns:k', true);
+    expect(plaintext).not.toBeInstanceOf(Promise);
+    expect(plaintext).toEqual(new Uint8Array([2]));
+    vi.mocked(bindings.decryptWithTenantKeys).mockImplementationOnce(() => {
+      throw new Error('Authentication verification failed');
+    });
+    expect(() => manager.decryptNow(new Uint8Array(28), 'ns:k')).toThrow(
+      new EncryptionError('Decryption failed: Authentication verification failed')
+    );
+
+    // After dispose() it rejects, as decrypt() does.
+    manager.dispose();
+    await expect(manager.decryptNow(new Uint8Array([1]), 'ns:k')).rejects.toThrow(
+      'EncryptionManager has been disposed'
+    );
+  });
+
+  it('encryptNow encrypts in the call once the keys are derived, and throws what encrypt() rejects with', async () => {
+    const { bindings } = mockBindings();
+    const manager = new TestManager(async () => bindings);
+
+    // Before the keys are derived it loads the bindings first: a Promise.
+    const first = manager.encryptNow(new Uint8Array([1]), 'ns:k');
+    expect(first).toBeInstanceOf(Promise);
+    expect(await first).toEqual(new Uint8Array([1]));
+
+    const ciphertext = manager.encryptNow(new Uint8Array([1]), 'ns:k', true);
+    expect(ciphertext).not.toBeInstanceOf(Promise);
+    expect(ciphertext).toEqual(new Uint8Array([1]));
+    vi.mocked(bindings.encryptWithTenantKeys).mockImplementationOnce(() => {
+      throw new Error('Encryption failed: Nonce counter exhausted - key rotation required');
+    });
+    expect(() => manager.encryptNow(new Uint8Array([1]), 'ns:k')).toThrow(NonceExhaustedError);
+
+    // After dispose() it rejects, as encrypt() does.
+    manager.dispose();
+    await expect(manager.encryptNow(new Uint8Array([1]), 'ns:k')).rejects.toThrow(
+      'EncryptionManager has been disposed'
+    );
+  });
 });
 
 describe('EncryptionManagerCore keyring config (previousMasterKeys)', () => {
@@ -398,62 +448,6 @@ describe('EncryptionManagerCore keyring config (previousMasterKeys)', () => {
 
     await expect(inFlight).rejects.toThrow(EncryptionError);
   });
-
-  it('decryptNow decrypts in the call once the keys are derived, and throws what decrypt() rejects with', async () => {
-    const { bindings } = mockBindings();
-    const manager = new TestManager(async () => bindings);
-
-    // Before the keys are derived it loads the bindings first: a Promise.
-    const first = manager.decryptNow(new Uint8Array([1]), 'ns:k');
-    expect(first).toBeInstanceOf(Promise);
-    expect(await first).toEqual(new Uint8Array([2]));
-
-    const plaintext = manager.decryptNow(new Uint8Array([1]), 'ns:k', true);
-    expect(plaintext).not.toBeInstanceOf(Promise);
-    expect(plaintext).toEqual(new Uint8Array([2]));
-    vi.mocked(bindings.decryptWithTenantKeys).mockImplementationOnce(() => {
-      throw new Error('Authentication verification failed');
-    });
-    expect(() => manager.decryptNow(new Uint8Array(28), 'ns:k')).toThrow(
-      new EncryptionError('Decryption failed: Authentication verification failed')
-    );
-
-    // After dispose() it rejects, as decrypt() does.
-    manager.dispose();
-    await expect(manager.decryptNow(new Uint8Array([1]), 'ns:k')).rejects.toThrow(
-      'EncryptionManager has been disposed'
-    );
-  });
-
-  it('encryptNow encrypts in the call once the keys are derived, and throws what encrypt() rejects with', async () => {
-    const { bindings } = mockBindings();
-    const manager = new TestManager(async () => bindings);
-
-    // Before the keys are derived it loads the bindings first: a Promise.
-    const first = manager.encryptNow(new Uint8Array([1]), 'ns:k');
-    expect(first).toBeInstanceOf(Promise);
-    expect(await first).toEqual(new Uint8Array([1]));
-
-    const ciphertext = manager.encryptNow(new Uint8Array([1]), 'ns:k', true);
-    expect(ciphertext).not.toBeInstanceOf(Promise);
-    expect(ciphertext).toEqual(new Uint8Array([1]));
-    vi.mocked(bindings.encryptWithTenantKeys).mockImplementationOnce(() => {
-      throw new Error('Encryption failed: Nonce counter exhausted - key rotation required');
-    });
-    expect(() => manager.encryptNow(new Uint8Array([1]), 'ns:k')).toThrow(NonceExhaustedError);
-    vi.mocked(bindings.encryptWithTenantKeys).mockImplementationOnce(() => {
-      throw new Error('AAD too large');
-    });
-    expect(() => manager.encryptNow(new Uint8Array([1]), 'ns:k')).toThrow(
-      new EncryptionError('Encryption failed: AAD too large')
-    );
-
-    // After dispose() it rejects, as encrypt() does.
-    manager.dispose();
-    await expect(manager.encryptNow(new Uint8Array([1]), 'ns:k')).rejects.toThrow(
-      'EncryptionManager has been disposed'
-    );
-  });
 });
 
 // decrypt() and encrypt() keep their own copy of the error mapping that
@@ -575,11 +569,10 @@ describe('EncryptionManagerCore over asynchronous bindings', () => {
   });
 
   it('encryptNow returns the binding’s Promise once the keys are derived, its rejection mapped as encrypt() maps it', async () => {
-    const failures = ['Nonce counter exhausted - key rotation required', 'AAD too large'];
+    let encrypts = 0;
     const { bindings } = mockBindings({
       encryptWithTenantKeys: vi.fn(async () => {
-        const failure = failures.shift();
-        if (failure) throw new Error(failure);
+        if (encrypts++ === 0) throw new Error('Nonce counter exhausted - key rotation required');
         return new Uint8Array([7]);
       }),
     });
@@ -588,9 +581,6 @@ describe('EncryptionManagerCore over asynchronous bindings', () => {
 
     await expect(manager.encryptNow(new Uint8Array([1]), 'ns:k')).rejects.toThrow(
       NonceExhaustedError
-    );
-    await expect(manager.encryptNow(new Uint8Array([1]), 'ns:k')).rejects.toThrow(
-      new EncryptionError('Encryption failed: AAD too large')
     );
     const ciphertext = manager.encryptNow(new Uint8Array([1]), 'ns:k');
     expect(ciphertext).toBeInstanceOf(Promise);

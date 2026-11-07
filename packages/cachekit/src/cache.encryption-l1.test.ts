@@ -374,11 +374,12 @@ describe('L1 zero-knowledge for encrypted caches', () => {
   });
 });
 
-// On Node.js the decrypt is a synchronous NAPI call, so once the keys are
-// derived an encrypted L1 hit has nothing to await, and awaiting even a
-// settled value costs the hit a microtask turn: the promise it hands back
-// must already be settled. On Workers WebCrypto decrypts asynchronously, so
-// there the hit awaits the decrypt.
+// On Node.js the decrypt and the encrypt are synchronous NAPI calls, so once
+// the keys are derived an encrypted L1 hit has nothing to await, and awaiting
+// even a settled value costs the hit a microtask turn: the promise it hands
+// back must already be settled. A set still awaits its backend write, so it
+// must take as many turns as a plaintext set. On Workers WebCrypto decrypts
+// and encrypts asynchronously, so there the hit and the set await it.
 describe('an encrypted L1 hit or set awaits only a decrypt or encrypt that suspends', () => {
   const caches: SecureCache[] = [];
 
@@ -501,7 +502,7 @@ describe('an encrypted L1 hit or set awaits only a decrypt or encrypt that suspe
     expect(backend.gets).toBe(reads);
   });
 
-  // Before its keys are derived a cache decrypts through an async function,
+  // Before its keys are derived a cache decrypts and encrypts through an async function,
   // whose Promise is the engine's own: `instanceof` against a replaced global
   // Promise misses it, and a Promise taken for a value is never awaited.
   async function withReplacedPromise<T>(op: () => Promise<T>): Promise<T> {
@@ -604,8 +605,8 @@ describe('an encrypted L1 hit or set awaits only a decrypt or encrypt that suspe
     }
   );
 
-  /** Microtask turns a plaintext set() takes, on a cache configured as makeCache's. */
-  async function plaintextSetTurns(key: string, value: unknown): Promise<number> {
+  /** Microtask turns a plaintext set() of VALUE takes, on a cache configured as makeCache's. */
+  async function plaintextSetTurns(): Promise<number> {
     const plaintext = createCache({
       backend: new InMemoryBackend(),
       defaultTtl: 3600,
@@ -613,7 +614,7 @@ describe('an encrypted L1 hit or set awaits only a decrypt or encrypt that suspe
       metrics: false,
     });
     try {
-      return await turnsToSettle(plaintext.set(key, value));
+      return await turnsToSettle(plaintext.set(KEY, VALUE));
     } finally {
       await plaintext.close();
     }
@@ -622,7 +623,7 @@ describe('an encrypted L1 hit or set awaits only a decrypt or encrypt that suspe
   it('on Node.js, an encrypted set() takes as many turns as a plaintext one once the keys are derived', async () => {
     const backend = new InMemoryBackend();
     const cache = makeCache(backend);
-    const plaintextTurns = await plaintextSetTurns('users:1', VALUE);
+    const plaintextTurns = await plaintextSetTurns();
 
     // The first set derives the keys through encrypt(), which suspends.
     expect(await turnsToSettle(cache.set('users:1', VALUE))).toBeGreaterThan(plaintextTurns);
@@ -639,7 +640,7 @@ describe('an encrypted L1 hit or set awaits only a decrypt or encrypt that suspe
     await cache.set('users:1', VALUE); // derives the keys
 
     expect(await turnsToSettle(cache.set('users:2', VALUE))).toBeGreaterThan(
-      await plaintextSetTurns('users:2', VALUE)
+      await plaintextSetTurns()
     );
     expectCiphertext(l1Entry(cache, 'users:2'), backend.store.get('users:2'));
     expect(await makeCache(backend).get('users:2')).toEqual(VALUE);

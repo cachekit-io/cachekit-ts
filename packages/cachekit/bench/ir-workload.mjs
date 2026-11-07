@@ -452,11 +452,9 @@ export const WORKLOADS = {
   },
   // an encrypted set() on Node, L1 on: encode 100 B of msgpack, the AAD-size
   // pre-flight, encrypt through the NAPI core, the L1 fill with the
-  // ciphertext and the backend write. Setup's set derives the keys. 4,000
-  // warm-up ops, as for secure-set-get.
+  // ciphertext and the backend write. Setup's set derives the keys.
   'secure-set-100b': {
     n: 20_000,
-    warmup: 4_000,
     setup: async () => {
       const { createCache } = await load('index.js');
       const cache = createCache({

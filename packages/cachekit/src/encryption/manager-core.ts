@@ -95,7 +95,7 @@ export interface EncryptionTenantKeys {
  * encrypt() and encryptNow() classify that substring into NonceExhaustedError
  * so rotation alerting works. Both bindings inherit the string from the same
  * core crate; a core wording change must update this contract and both
- * classifiers below (encrypt()'s catch and encryptionFailed()).
+ * classifiers: encrypt()'s catch and encryptionFailed().
  */
 export interface EncryptionBindings {
   /**
