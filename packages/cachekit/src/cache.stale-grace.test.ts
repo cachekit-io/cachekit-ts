@@ -741,11 +741,11 @@ describe('stale-grace revalidation write through the per-key write queue', () =>
     backend.expire();
     const reader = make(backend);
     backend.log = []; // drop the seed write's entries
-    const recordOperation = vi.fn(async (_op: string, _status: string) => {});
+    const countOperation = vi.fn((_op: string, _status: string) => {});
     const holder = reader as unknown as {
-      metrics: { recordOperation: (op: string, status: string) => Promise<void> };
+      metrics: { countOperation: (op: string, status: string) => void };
     };
-    holder.metrics = { ...holder.metrics, recordOperation };
+    holder.metrics = { ...holder.metrics, countOperation };
 
     // 64 write-behind writes held: the queue is full.
     backend.holdWrites();
@@ -762,7 +762,7 @@ describe('stale-grace revalidation write through the per-key write queue', () =>
     try {
       expect(await wrapped()).toBe('v1'); // served stale, not blocked
       await vi.waitFor(() =>
-        expect(recordOperation).toHaveBeenCalledWith('revalidate_dropped', 'error')
+        expect(countOperation).toHaveBeenCalledWith('revalidate_dropped', 'error')
       );
       expect(fn).not.toHaveBeenCalled(); // no origin call
       expect(backend.acquires).toBe(acquiresBefore); // and no lease taken
@@ -773,7 +773,7 @@ describe('stale-grace revalidation write through the per-key write queue', () =>
       // The key is held off, not retried on the next stale read.
       expect(await wrapped()).toBe('v1');
       await sleep(10);
-      expect(recordOperation.mock.calls.filter(([op]) => op === 'revalidate_dropped')).toHaveLength(
+      expect(countOperation.mock.calls.filter(([op]) => op === 'revalidate_dropped')).toHaveLength(
         1
       );
     } finally {

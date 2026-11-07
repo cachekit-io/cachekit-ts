@@ -679,6 +679,16 @@ export class L1Cache<T = unknown> {
     };
   }
 
+  /** stats.entries, without building the stats object. */
+  get entryCount(): number {
+    return this.cache.size;
+  }
+
+  /** stats.memoryUsed, without building the stats object. */
+  get memoryUsed(): number {
+    return this.currentMemory;
+  }
+
   /**
    * Get instance ID for invalidation events.
    */

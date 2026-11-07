@@ -233,6 +233,7 @@ const NOOP_METRICS: MetricsCollector = {
     return () => {};
   },
   async updateL1Stats() {},
+  setL1Stats() {},
   async updateCircuitBreakerState() {},
   countOperation() {},
   timeOperation() {
@@ -890,7 +891,7 @@ export class CacheImpl implements SecureCache {
     lastError: unknown,
     heldInL1: boolean
   ): void {
-    void this.metrics.recordOperation('write_behind', stored ? 'success' : 'error');
+    this.metrics.countOperation('write_behind', stored ? 'success' : 'error');
     if (stored) return;
     const now = Date.now();
     if (now - this.lastWriteBehindFailedWarnAt < WARN_INTERVAL_MS) return;
@@ -907,8 +908,7 @@ export class CacheImpl implements SecureCache {
 
   private publishL1Stats(): void {
     if (!this.l1) return;
-    const stats = this.l1.stats;
-    void this.metrics.updateL1Stats(stats.entries, stats.memoryUsed);
+    this.metrics.setL1Stats(this.l1.entryCount, this.l1.memoryUsed);
   }
 
   /**
@@ -1690,7 +1690,7 @@ export class CacheImpl implements SecureCache {
    * digest. Workers has no Prometheus, so the line is its only trace there.
    */
   private revalidationDropped(key: string): void {
-    void this.metrics.recordOperation('revalidate_dropped', 'error');
+    this.metrics.countOperation('revalidate_dropped', 'error');
     const now = Date.now();
     if (now - this.lastRevalidateDroppedWarnAt < WARN_INTERVAL_MS) return;
     this.lastRevalidateDroppedWarnAt = now;

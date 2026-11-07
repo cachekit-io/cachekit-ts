@@ -76,15 +76,18 @@ describe('CacheMetrics with prom-client missing', () => {
     const metrics = new CacheMetrics();
     const recordOperation = vi.spyOn(metrics, 'recordOperation');
     const updateState = vi.spyOn(metrics, 'updateCircuitBreakerState');
+    const updateL1Stats = vi.spyOn(metrics, 'updateL1Stats');
 
     metrics.countOperation('get', 'success');
     await vi.waitFor(() => expect(logs).toHaveLength(1));
     metrics.countOperation('get', 'error');
     metrics.setCircuitBreakerState('open');
+    metrics.setL1Stats(3, 300);
     expect(() => metrics.timeOperation('get')()).not.toThrow();
 
     expect(recordOperation).toHaveBeenCalledTimes(1);
     expect(updateState).not.toHaveBeenCalled();
+    expect(updateL1Stats).not.toHaveBeenCalled();
     expect(logs).toHaveLength(1);
   });
 

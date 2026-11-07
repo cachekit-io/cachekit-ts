@@ -112,12 +112,12 @@ function viewOf(cache: SecureCache, ctx: ExecutionContextLike): SecureCache {
   return cache.withExecutionContext(ctx);
 }
 
-/** Swap the cache's metrics collector for one whose recordOperation is a spy. */
-function spyRecordOperation(cache: SecureCache) {
-  const recordOperation = vi.fn(async () => {});
+/** Swap the cache's metrics collector for one whose countOperation is a spy. */
+function spyCountOperation(cache: SecureCache) {
+  const countOperation = vi.fn(() => {});
   const holder = cache as unknown as { metrics: MetricsCollector };
-  holder.metrics = { ...holder.metrics, recordOperation };
-  return recordOperation;
+  holder.metrics = { ...holder.metrics, countOperation };
+  return countOperation;
 }
 
 const outcomes = (cache: SecureCache): { l1Hits: number; l2Hits: number; misses: number } =>
@@ -810,13 +810,13 @@ describe('write-behind', () => {
         throw new BackendError('PUT refused', 'timeout');
       };
       const cache = make({ backend });
-      const recordOperation = spyRecordOperation(cache);
+      const countOperation = spyCountOperation(cache);
       const { wrapped } = counted(cache, true);
 
       await expect(wrapped(7)).resolves.toEqual({ id: 7, call: 1 });
       await settle();
 
-      expect(recordOperation).toHaveBeenCalledWith('write_behind', 'error');
+      expect(countOperation).toHaveBeenCalledWith('write_behind', 'error');
       const lines = logError.mock.calls.map((args) => args.join(' '));
       const line = lines.find((l) => l.includes('write-behind L2 write failed'));
       expect(line).toContain(': BackendError(timeout).'); // the cause's class, never its text
@@ -877,12 +877,12 @@ describe('write-behind', () => {
     it('a landed write is counted as a success', async () => {
       const backend = new GatedBackend();
       const cache = make({ backend });
-      const recordOperation = spyRecordOperation(cache);
+      const countOperation = spyCountOperation(cache);
       const { wrapped } = counted(cache, true);
 
       await wrapped(8);
       await settle();
-      expect(recordOperation).toHaveBeenCalledWith('write_behind', 'success');
+      expect(countOperation).toHaveBeenCalledWith('write_behind', 'success');
     });
   });
 

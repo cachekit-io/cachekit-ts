@@ -885,7 +885,9 @@ work. A backend operation observes its duration and, when the cache has a
 circuit breaker, sets the circuit-breaker gauge. Caches that share a registry,
 prefix and `defaultLabels` values share one gauge series, which reads the state
 of whichever of them finished an operation last; caches with different label
-values report separate series.
+values report separate series. Every L1 write (a set, an L2 hit copied into L1,
+a delete, an invalidation) sets the two L1 gauges the same way, so a shared
+series reads the L1 of whichever cache wrote last.
 
 prom-client loads in the background, starting on the event-loop turn after the
 cache is created, and no cache operation waits for it. Metrics recorded while it

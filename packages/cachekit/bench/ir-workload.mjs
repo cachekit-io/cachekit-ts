@@ -214,6 +214,37 @@ const rowsOf = (rows) => ({ rows: Array.from({ length: rows }, (_, i) => VALUE.r
 const plaintextSet = (rows, n, warmup) => plaintextSetOf(rowsOf(rows), n, warmup);
 
 /**
+ * prom-client loads on a later turn of the event loop, which a loop of awaited
+ * ops never yields: wait until a scrape of `registry` shows `line`.
+ */
+async function promClientCounted(registry, line, name) {
+  const deadline = Date.now() + 5_000;
+  while (!(await registry.metrics()).includes(line)) {
+    if (Date.now() > deadline) throw new Error(`${name}: prom-client did not count within 5 s`);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+}
+
+// plaintextSetOf with metrics on and L1 on: each set() also publishes the L1
+// gauges. 30,000 warm-up ops, as get-l2-hit-metrics: the window then opens
+// with the metrics path compiled.
+const plaintextSetMetricsOf = (value, n, name) => ({
+  n,
+  warmup: 30_000,
+  setup: async () => {
+    const { createCache } = await load('index.js');
+    const { Registry } = await import('prom-client');
+    const registry = new Registry();
+    const cache = createCache({ backend: new MemoryBackend(), metrics: { registry } });
+    await cache.set(KEY, value);
+    await promClientCounted(registry, 'operation="set",status="success"} 1', name);
+    return async () => {
+      await cache.set(KEY, value);
+    };
+  },
+});
+
+/**
  * generateKey(args) as wrap() runs it: after the Node entry has loaded, or, with
  * `wasmHash`, after Workers has instantiated its module. workers/runtime.js
  * imports the .wasm, which only workerd resolves, so this binds the wasm export
@@ -367,6 +398,16 @@ export const WORKLOADS = {
   'plaintext-set-64b': plaintextSetOf(
     { id: 7, name: 'item-7', score: 10.5, ok: true, tags: ['a', 'b'], owner: 'user-424242' },
     20_000
+  ),
+  'plaintext-set-64b-metrics': plaintextSetMetricsOf(
+    { id: 7, name: 'item-7', score: 10.5, ok: true, tags: ['a', 'b'], owner: 'user-424242' },
+    20_000,
+    'plaintext-set-64b-metrics'
+  ),
+  'plaintext-set-1kb-metrics': plaintextSetMetricsOf(
+    rowsOf(32),
+    5_000,
+    'plaintext-set-1kb-metrics'
   ),
   // Its own gate threshold (ir.mjs `fail`): 20 ops that each allocate
   // megabytes put several GCs in the window, whose cost follows the live heap.
@@ -535,6 +576,35 @@ export const WORKLOADS = {
       }
       return async () => {
         sink += (await cache.get(KEY)).rows.length;
+      };
+    },
+  },
+  // get-l2-hit-metrics with L1 on: two keys through a one-entry L1, so every
+  // get() misses L1, hits L2, and backfills L1 over the other key, publishing
+  // the L1 gauges
+  'get-l2-hit-l1-metrics': {
+    n: 10_000,
+    warmup: 30_000,
+    setup: async () => {
+      const { createCache } = await load('index.js');
+      const { Registry } = await import('prom-client');
+      const registry = new Registry();
+      const cache = createCache({
+        backend: new MemoryBackend(),
+        l1: { maxEntries: 1 },
+        reliability: { circuitBreaker: { failureThreshold: 5 } },
+        metrics: { registry },
+      });
+      const keys = [KEY, KEY + 'b'];
+      for (const key of keys) await cache.set(key, VALUE, { ttl: 3600 });
+      await promClientCounted(
+        registry,
+        'operation="set",status="success"} 2',
+        'get-l2-hit-l1-metrics'
+      );
+      let i = 0;
+      return async () => {
+        sink += (await cache.get(keys[i++ & 1])).rows.length;
       };
     },
   },

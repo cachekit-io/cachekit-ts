@@ -155,6 +155,11 @@ export interface MetricsCollector {
   recordError(errorType: string): Promise<void>;
   startTimer(operation: string): Promise<() => void>;
   updateL1Stats(entries: number, memoryBytes: number): Promise<void>;
+  /**
+   * Set the L1 entry and memory gauges after an L1 write, without a promise
+   * once prom-client has loaded, as setCircuitBreakerState().
+   */
+  setL1Stats(entries: number, memoryBytes: number): void;
   updateCircuitBreakerState(state: 'closed' | 'open' | 'half-open'): Promise<void>;
   /**
    * The cache's per-attempt path, without promises, as countHit(): count one
@@ -590,6 +595,25 @@ export class CacheMetrics implements MetricsCollector {
   }
 
   /**
+   * Publish the L1 gauges after an L1 write (a set, a backfill, a delete, an
+   * invalidation). Runs on every one, so once prom-client has loaded it calls
+   * set() directly. It stays a set() per write rather than a value read at
+   * scrape, for the reason setCircuitBreakerState() gives.
+   */
+  setL1Stats(entries: number, memoryBytes: number): void {
+    if (this.isReady) {
+      try {
+        this.l1EntriesGauge?.set(this.defaultLabels, entries);
+        this.l1MemoryGauge?.set(this.defaultLabels, memoryBytes);
+      } catch (error) {
+        this.handleError(error, 'setL1Stats');
+      }
+    } else if (!this.initFailed) {
+      void this.updateL1Stats(entries, memoryBytes);
+    }
+  }
+
+  /**
    * Update circuit breaker state.
    */
   async updateCircuitBreakerState(state: 'closed' | 'open' | 'half-open'): Promise<void> {
@@ -640,6 +664,7 @@ export class NoopMetrics implements MetricsCollector {
     return () => {};
   }
   async updateL1Stats(): Promise<void> {}
+  setL1Stats(): void {}
   async updateCircuitBreakerState(): Promise<void> {}
   countOperation(): void {}
   timeOperation(): () => void {
