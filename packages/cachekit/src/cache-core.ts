@@ -276,7 +276,12 @@ export interface ByteStorageLike {
 
 /** Encryption surface CacheImpl drives (see EncryptionManagerCore). */
 export interface EncryptionLike {
-  encrypt(data: Uint8Array, cacheKey: string, compressed?: boolean): Promise<Uint8Array>;
+  /** The ciphertext when the encrypt need not suspend (NAPI), else a Promise of it. */
+  encryptNow(
+    data: Uint8Array,
+    cacheKey: string,
+    compressed?: boolean
+  ): Uint8Array | Promise<Uint8Array>;
   /** The plaintext when the decrypt need not suspend (NAPI), else a Promise of it. */
   decryptNow(
     ciphertext: Uint8Array,
@@ -1502,8 +1507,12 @@ export class CacheImpl implements SecureCache {
     let data: Uint8Array;
     try {
       data = useEnvelope ? this.withEnvelopeCodec((codec) => codec.pack(serialized)) : serialized;
-      if (this.encryption)
-        data = await this.encryption.encrypt(data, this.aadKey(key), useEnvelope);
+      if (this.encryption) {
+        // On Node.js, once the keys are derived, the encrypt does not suspend,
+        // and awaiting its plain value would cost the set a microtask turn.
+        const encrypted = this.encryption.encryptNow(data, this.aadKey(key), useEnvelope);
+        data = isThenable(encrypted) ? await encrypted : encrypted;
+      }
     } catch (error) {
       this.recordFailure('set', error);
       if (!this.degradationEnabled) throw error;

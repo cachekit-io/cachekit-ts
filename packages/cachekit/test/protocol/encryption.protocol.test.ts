@@ -571,10 +571,10 @@ describe('encryption.json decrypted_container (protocol 1.5.0, ENC-3) — the co
 
 describe('encryption.json aad_hex — the shipped AAD builder', () => {
   // The Workers lane proves the builder only end to end, by decrypting; this
-  // pins its bytes. Mock bindings capture the AAD the manager hands encrypt,
-  // decrypt() and decryptNow() (the cache's read path once the keys are
-  // derived, which builds its own binding call), so no key material or native
-  // code is involved.
+  // pins its bytes. Mock bindings capture the AAD the manager hands encrypt(),
+  // encryptNow(), decrypt() and decryptNow() (the cache's write and read paths
+  // once the keys are derived, each of which builds its own binding call), so
+  // no key material or native code is involved.
   async function managerAad(
     tenantId: string | undefined,
     cacheKey: string,
@@ -597,6 +597,9 @@ describe('encryption.json aad_hex — the shipped AAD builder', () => {
     );
     try {
       await manager.encrypt(new Uint8Array([1]), cacheKey, compressed);
+      expect(manager.encryptNow(new Uint8Array([9]), cacheKey, compressed)).toEqual(
+        new Uint8Array([1])
+      );
       await manager.decrypt(new Uint8Array([1]), cacheKey, compressed);
       expect(manager.decryptNow(new Uint8Array([1]), cacheKey, compressed)).toEqual(
         new Uint8Array([2])
@@ -635,9 +638,10 @@ describe('encryption.json aad_hex — the shipped AAD builder', () => {
   });
 
   it.each(rows.map((v) => [v.name, v] as const))(
-    '%s: encrypt, decrypt() and decryptNow() hand the binding aad_hex',
+    '%s: encrypt(), encryptNow(), decrypt() and decryptNow() hand the binding aad_hex',
     async (_name, v) => {
       expect(await managerAad(v.tenantId, v.cache_key, v.compressed)).toEqual([
+        v.aad_hex,
         v.aad_hex,
         v.aad_hex,
         v.aad_hex,
@@ -671,6 +675,7 @@ describe('encryption.json aad_hex — the shipped AAD builder', () => {
     async ({ tenantId, cacheKey, compressed }) => {
       const expected = layoutHex(tenantId, cacheKey, compressed);
       expect(await managerAad(tenantId, cacheKey, compressed)).toEqual([
+        expected,
         expected,
         expected,
         expected,

@@ -491,6 +491,25 @@ export const WORKLOADS = {
       };
     },
   },
+  // an encrypted set() on Node, L1 on: encode 100 B of msgpack, the AAD-size
+  // pre-flight, encrypt through the NAPI core, the L1 fill with the
+  // ciphertext and the backend write. Setup's set derives the keys.
+  'secure-set-100b': {
+    n: 20_000,
+    setup: async () => {
+      const { createCache } = await load('index.js');
+      const cache = createCache({
+        backend: new MemoryBackend(),
+        encryption: { masterKey: MASTER_KEY },
+        metrics: false,
+      });
+      const value = rowsOf(3);
+      await cache.set(KEY, value);
+      return async () => {
+        await cache.set(KEY, value);
+      };
+    },
+  },
   // get() served from a plaintext L1, which holds the decoded value: the
   // lookup and the promises around it (l1-get-hit times L1Cache.get alone).
   // 4,000 warm-up ops: V8 compiles getEntry with TurboFan at ~2,200.

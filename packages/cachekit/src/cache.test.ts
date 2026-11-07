@@ -2065,7 +2065,7 @@ describe('Cache Integration', () => {
     });
 
     it('never calls encrypt for an over-limit key', async () => {
-      const encrypt = vi.spyOn(EncryptionManagerCore.prototype, 'encrypt');
+      const encrypt = vi.spyOn(EncryptionManagerCore.prototype, 'encryptNow');
       const c = secureCache(new InMemoryBackend());
 
       await expect(c.set(overLimitKey, 'v')).rejects.toThrow(ConfigurationError);
@@ -2232,7 +2232,7 @@ describe('Cache Integration', () => {
     ])(
       'keyPrefix $keyPrefix binds $bound at encrypt, decrypt and the AAD-size pre-flight',
       async ({ keyPrefix, bound }) => {
-        const encrypt = vi.spyOn(EncryptionManagerCore.prototype, 'encrypt');
+        const encrypt = vi.spyOn(EncryptionManagerCore.prototype, 'encryptNow');
         const decrypt = vi.spyOn(EncryptionManagerCore.prototype, 'decryptNow');
         const validateKey = vi.spyOn(EncryptionManagerCore.prototype, 'validateKey');
         const c = secureOver(new PrefixingBackend(keyPrefix, new Map()));
