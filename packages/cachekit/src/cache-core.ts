@@ -14,6 +14,7 @@ import type { InvalidationEvent } from './l1/types.js';
 import type { MetricsCollector, MetricsConfig } from './metrics/prometheus.js';
 import { checkDefaultLabels } from './metrics/labels.js';
 import { logError } from './logger.js';
+import { isThenable } from './utils/thenable.js';
 import { L1Cache, type L1Entry } from './l1/lru-cache.js';
 import { ReliabilityExecutor } from './reliability/executor.js';
 import {
@@ -115,6 +116,19 @@ type DeferredWrite =
  * completeRefresh's version check.
  */
 type L1Mode = 'fill' | 'skip' | 'refresh';
+
+/** A stored entry decoded (see decodeEntry). */
+interface DecodedEntry<T> {
+  value: T;
+  serializedSize: number;
+  count: ObjectCount;
+}
+
+/**
+ * An L1 entry decodeL1Entry served: wrapped, because a cached value may be
+ * null; null itself means the entry would not decode and was dropped.
+ */
+type L1Read<T> = { value: T } | null;
 
 /** A key's idle-key ops in flight (see keysInFlight). */
 interface InFlight {
@@ -262,7 +276,12 @@ export interface ByteStorageLike {
 /** Encryption surface CacheImpl drives (see EncryptionManagerCore). */
 export interface EncryptionLike {
   encrypt(data: Uint8Array, cacheKey: string, compressed?: boolean): Promise<Uint8Array>;
-  decrypt(ciphertext: Uint8Array, cacheKey: string, compressed?: boolean): Promise<Uint8Array>;
+  /** The plaintext when the decrypt need not suspend (NAPI), else a Promise of it. */
+  decryptNow(
+    ciphertext: Uint8Array,
+    cacheKey: string,
+    compressed?: boolean
+  ): Uint8Array | Promise<Uint8Array>;
   /** Throws ConfigurationError for a key encrypt/decrypt would reject for size. */
   validateKey(cacheKey: string, compressed?: boolean): void;
   dispose(): void;
@@ -1017,39 +1036,55 @@ export class CacheImpl implements SecureCache {
    *
    * `trusted` drops the depth pre-scan, and in auto mode validateDepth. Only
    * decodeL1Entry passes it, for a copy marked in trustedL1.
+   *
+   * Returns a Promise only when the decrypt suspends (see
+   * EncryptionLike.decryptNow): on Node.js, once the keys are derived, an
+   * entry decodes in this call, so an L1 hit awaits nothing. A failure throws,
+   * or rejects that Promise.
    */
-  private async decodeEntry<T>(
+  private decodeEntry<T>(
     bytes: Uint8Array,
     key: string,
     interop: boolean,
     trusted = false
-  ): Promise<{ value: T; serializedSize: number; count: ObjectCount }> {
+  ): DecodedEntry<T> | Promise<DecodedEntry<T>> {
     const useEnvelope = this.useEnvelope(interop);
+    if (!this.encryption) return this.decodePlaintext<T>(bytes, key, interop, useEnvelope, trusted);
 
-    let plaintext = bytes;
-    if (this.encryption) {
-      // Refuse ciphertext longer than any plaintext this cache would decode
-      // before the codec copies it in: junk of any length otherwise reaches
-      // decrypt, which allocates for all of it before the tag check fails.
-      // The AAD binds useEnvelope, so a compression-off entry that decrypts
-      // is a plain serialized value, which decode() caps at maxDecodedSize.
-      const maxPlaintext = interop
-        ? DEFAULT_MAX_DECODED_SIZE // decodeInteropValue's fixed input cap
-        : useEnvelope
-          ? maxEnvelopeInputSize(this.serializerConfig.maxDecodedSize)
-          : this.serializerConfig.maxDecodedSize;
-      if (plaintext.length > maxPlaintext + AEAD_OVERHEAD_BYTES) {
-        throw new ValueTooLargeError(
-          `Ciphertext size ${plaintext.length} exceeds max ${maxPlaintext + AEAD_OVERHEAD_BYTES}`
-        );
-      }
-      // The AAD binds useEnvelope (frozen v0x03 set, protocol#12), so an entry
-      // written under the other compression setting fails here — a loud,
-      // counted decrypt failure, never a silent wrong decode. We deliberately
-      // do NOT retry with the flipped flag: that would reintroduce exactly the
-      // envelope-mode ambiguity the AAD binding exists to rule out.
-      plaintext = await this.encryption.decrypt(plaintext, this.aadKey(key), useEnvelope);
+    // Refuse ciphertext longer than any plaintext this cache would decode
+    // before the codec copies it in: junk of any length otherwise reaches
+    // decrypt, which allocates for all of it before the tag check fails.
+    // The AAD binds useEnvelope, so a compression-off entry that decrypts
+    // is a plain serialized value, which decode() caps at maxDecodedSize.
+    const maxPlaintext = interop
+      ? DEFAULT_MAX_DECODED_SIZE // decodeInteropValue's fixed input cap
+      : useEnvelope
+        ? maxEnvelopeInputSize(this.serializerConfig.maxDecodedSize)
+        : this.serializerConfig.maxDecodedSize;
+    if (bytes.length > maxPlaintext + AEAD_OVERHEAD_BYTES) {
+      throw new ValueTooLargeError(
+        `Ciphertext size ${bytes.length} exceeds max ${maxPlaintext + AEAD_OVERHEAD_BYTES}`
+      );
     }
+    // The AAD binds useEnvelope (frozen v0x03 set, protocol#12), so an entry
+    // written under the other compression setting fails here — a loud,
+    // counted decrypt failure, never a silent wrong decode. We deliberately
+    // do NOT retry with the flipped flag: that would reintroduce exactly the
+    // envelope-mode ambiguity the AAD binding exists to rule out.
+    const plaintext = this.encryption.decryptNow(bytes, this.aadKey(key), useEnvelope);
+    return isThenable(plaintext)
+      ? plaintext.then((p) => this.decodePlaintext<T>(p, key, interop, useEnvelope, trusted))
+      : this.decodePlaintext<T>(plaintext, key, interop, useEnvelope, trusted);
+  }
+
+  /** decodeEntry after the decrypt: unpack the envelope, then deserialize. */
+  private decodePlaintext<T>(
+    plaintext: Uint8Array,
+    key: string,
+    interop: boolean,
+    useEnvelope: boolean,
+    trusted: boolean
+  ): DecodedEntry<T> {
     if (useEnvelope) {
       const verdict = envelopeVerdict(plaintext, this.serializerConfig.maxDecodedSize);
       if (verdict !== 'unpack') {
@@ -1107,7 +1142,8 @@ export class CacheImpl implements SecureCache {
    * the L2 path runs — an L1 hit is no longer free, which is the price of not
    * keeping plaintext resident. For a plaintext cache it is a cast, so the
    * hit paths call this only when the cache encrypts and use a plaintext L1
-   * value as it is: awaiting even a settled promise costs a hit a microtask.
+   * value as it is, which leaves the plaintext hit with no call and no
+   * thenable check.
    *
    * Verify once, on the first hit. The bytes a fill gives L1 can be a buffer
    * the backend still holds (the one it returned, or the one setEntry gave
@@ -1133,14 +1169,20 @@ export class CacheImpl implements SecureCache {
    * the failure and falls through to L2, degradation off rethrows so a tamper
    * signal reaches the caller. Either way it is counted and logged, never
    * silently swallowed.
+   *
+   * Returns a Promise only when the decrypt suspends (see decodeEntry), so on
+   * Node.js the hit paths await nothing; with degradation off a failure then
+   * throws rather than rejects.
    */
-  private async decodeL1Entry<T>(
+  private decodeL1Entry<T>(
     key: string,
     stored: unknown,
     interop: boolean
-  ): Promise<{ value: T } | null> {
+  ): L1Read<T> | Promise<L1Read<T>> {
     if (!this.encryption) return { value: stored as T };
 
+    let own: Uint8Array | null = null;
+    let decoded: DecodedEntry<T> | Promise<DecodedEntry<T>>;
     try {
       if (!(stored instanceof Uint8Array)) {
         throw new Error(
@@ -1148,25 +1190,55 @@ export class CacheImpl implements SecureCache {
         );
       }
       if (this.trustedL1.get(stored) === interop) {
-        return { value: (await this.decodeEntry<T>(stored, key, interop, true)).value };
+        decoded = this.decodeEntry<T>(stored, key, interop, true);
+      } else {
+        // Copied before the decode, so the copy holds exactly the bytes the walks pass.
+        own = new Uint8Array(stored);
+        decoded = this.decodeEntry<T>(own, key, interop);
       }
-      // Copied before the decode, so the copy holds exactly the bytes the walks pass.
-      const own = new Uint8Array(stored);
-      const { value } = await this.decodeEntry<T>(own, key, interop);
-      // A rewrite, refresh, invalidation or eviction since l1.get wins: then
-      // nothing is swapped and the copy is dropped.
-      if (this.l1?.replace(key, stored, own)) this.trustedL1.set(own, interop);
-      return { value };
+      if (!isThenable(decoded)) {
+        return this.trustL1Copy(key, stored, own, interop, decoded.value);
+      }
     } catch (error) {
-      this.l1?.invalidateByKey(key);
-      this.recordFailure('l1_decrypt', error);
-      logError(
-        '[cachekit] L1 decrypt failed — entry dropped:',
-        error instanceof Error ? error.message : 'Unknown error'
-      );
-      if (!this.degradationEnabled) throw error;
-      return null;
+      return this.failL1Read(key, error);
     }
+    // The same steps once the decrypt settles (WebCrypto on Workers).
+    return decoded
+      .then(({ value }) => this.trustL1Copy(key, stored, own, interop, value))
+      .catch((error: unknown) => this.failL1Read(key, error));
+  }
+
+  /**
+   * decodeL1Entry's result once the entry decoded, and the one place L1 trust
+   * is granted. `own` is the copy a first hit decoded: it is swapped into L1
+   * in place of `stored` and marked in trustedL1, unless a rewrite, refresh,
+   * invalidation or eviction since l1.get won, in which case nothing is
+   * swapped and the copy is dropped.
+   */
+  private trustL1Copy<T>(
+    key: string,
+    stored: Uint8Array,
+    own: Uint8Array | null,
+    interop: boolean,
+    value: T
+  ): { value: T } {
+    if (own !== null && this.l1?.replace(key, stored, own)) this.trustedL1.set(own, interop);
+    return { value };
+  }
+
+  /**
+   * decodeL1Entry's failure: drop the entry, count and log it, then apply the
+   * fail policy, rethrowing with degradation off and returning null with it on.
+   */
+  private failL1Read(key: string, error: unknown): null {
+    this.l1?.invalidateByKey(key);
+    this.recordFailure('l1_decrypt', error);
+    logError(
+      '[cachekit] L1 decrypt failed — entry dropped:',
+      error instanceof Error ? error.message : 'Unknown error'
+    );
+    if (!this.degradationEnabled) throw error;
+    return null;
   }
 
   /**
@@ -1203,9 +1275,13 @@ export class CacheImpl implements SecureCache {
     if (l1) {
       const l1Result = l1.get(key);
       if (l1Result !== null) {
-        const decoded = this.encryption
-          ? await this.decodeL1Entry<T>(key, l1Result, interop)
-          : { value: l1Result as T };
+        let decoded: L1Read<T>;
+        if (!this.encryption) decoded = { value: l1Result as T };
+        else {
+          // Awaited only when the decrypt suspends (see decodeL1Entry).
+          const read = this.decodeL1Entry<T>(key, l1Result, interop);
+          decoded = isThenable(read) ? await read : read;
+        }
         if (decoded !== null) {
           if (probe) probe.servedBy = 'l1';
           else this.recordHit('l1');
@@ -1850,12 +1926,17 @@ export class CacheImpl implements SecureCache {
     // cannot disagree, and so the poisoned entry is dropped here too.
     if (this.l1) {
       const l1Value = this.l1.get(key);
-      if (
-        l1Value !== null &&
-        (!this.encryption || (await this.decodeL1Entry(key, l1Value, false)) !== null)
-      ) {
-        this.recordHit('l1');
-        return true;
+      if (l1Value !== null) {
+        let present = true;
+        if (this.encryption) {
+          // Awaited only when the decrypt suspends (see decodeL1Entry).
+          const read = this.decodeL1Entry(key, l1Value, false);
+          present = (isThenable(read) ? await read : read) !== null;
+        }
+        if (present) {
+          this.recordHit('l1');
+          return true;
+        }
       }
     }
 
@@ -2039,9 +2120,13 @@ export class CacheImpl implements SecureCache {
         if (this.swrRequiresWaitUntil && !waitUntil) {
           const l1Value = this.l1.get(cacheKey);
           if (l1Value !== null) {
-            const decoded = this.encryption
-              ? await this.decodeL1Entry<TResult>(cacheKey, l1Value, interop)
-              : { value: l1Value as TResult };
+            let decoded: L1Read<TResult>;
+            if (!this.encryption) decoded = { value: l1Value as TResult };
+            else {
+              // Awaited only when the decrypt suspends (see decodeL1Entry).
+              const read = this.decodeL1Entry<TResult>(cacheKey, l1Value, interop);
+              decoded = isThenable(read) ? await read : read;
+            }
             if (decoded !== null) {
               this.recordHit('l1');
               if (timedFrom !== undefined) this.stopL1Timer(timedFrom);
@@ -2058,11 +2143,14 @@ export class CacheImpl implements SecureCache {
             // Decode before scheduling: an entry that will not decrypt is
             // already gone, so refreshing it would race the cold path that is
             // about to recompute the same key.
-            let decoded: { value: TResult } | null = null;
+            let decoded: L1Read<TResult> = null;
             try {
-              decoded = this.encryption
-                ? await this.decodeL1Entry<TResult>(cacheKey, swrResult.value, interop)
-                : { value: swrResult.value as TResult };
+              if (!this.encryption) decoded = { value: swrResult.value as TResult };
+              else {
+                // Awaited only when the decrypt suspends (see decodeL1Entry).
+                const read = this.decodeL1Entry<TResult>(cacheKey, swrResult.value, interop);
+                decoded = isThenable(read) ? await read : read;
+              }
             } finally {
               // Decode failed — by rethrow (degradation off) or by null
               // (degradation on) — so the entry is dropped either way, and the

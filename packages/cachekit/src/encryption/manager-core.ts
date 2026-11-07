@@ -6,6 +6,7 @@ import {
   MASTER_KEY_BYTES,
   MASTER_KEY_HEX_LENGTH,
 } from '../constants.js';
+import { isThenable } from '../utils/thenable.js';
 
 const utf8 = new TextEncoder();
 
@@ -18,12 +19,12 @@ function aadComponent(text: string): Uint8Array {
   return component;
 }
 
-/**
- * Whether a binding returned a Promise. The NAPI bindings return plain values,
- * and awaiting one would still cost a microtask hop on every Node operation.
- */
-function isThenable<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
-  return typeof (value as { then?: unknown }).then === 'function';
+/** The EncryptionError decrypt() builds for a binding failure, for decryptNow() to throw or reject with. */
+function decryptionFailed(error: unknown): EncryptionError {
+  return new EncryptionError(
+    `Decryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    { cause: error instanceof Error ? error : undefined }
+  );
 }
 
 function concatBytes(...parts: Uint8Array[]): Uint8Array {
@@ -375,6 +376,9 @@ export class EncryptionManagerCore {
   async decrypt(ciphertext: Uint8Array, cacheKey: string, compressed = false): Promise<Uint8Array> {
     await this.ensureInitialized();
 
+    // decryptNow() repeats this body rather than sharing it: routing decrypt()
+    // through a shared helper changed how V8 inlined a caller awaiting
+    // decrypt() and encrypt(), +5.6% instructions on bench:ir napi-encrypted.
     try {
       const aad = this.buildAAD(cacheKey, compressed);
       const result = this.native!.decryptWithTenantKeys(ciphertext, aad, this.tenantKeys!);
@@ -385,6 +389,35 @@ export class EncryptionManagerCore {
         { cause: error instanceof Error ? error : undefined }
       );
     }
+  }
+
+  /**
+   * decrypt() without its awaits, for the cache's read path. Once the keys are
+   * derived, a binding that returns a plain value (NAPI on Node.js) decrypts
+   * in this call: it returns the plaintext, or throws the EncryptionError
+   * decrypt() would reject with. Awaiting even a settled value would cost an
+   * L1 hit a microtask turn. Otherwise it returns a Promise: decrypt()'s
+   * before the keys are derived or after dispose(), and the binding's on
+   * Workers, where WebCrypto decrypts asynchronously. Package-internal.
+   * @internal
+   */
+  decryptNow(
+    ciphertext: Uint8Array,
+    cacheKey: string,
+    compressed = false
+  ): Uint8Array | Promise<Uint8Array> {
+    if (!this.tenantKeys) return this.decrypt(ciphertext, cacheKey, compressed);
+    let result: Uint8Array | Promise<Uint8Array>;
+    try {
+      const aad = this.buildAAD(cacheKey, compressed);
+      result = this.native!.decryptWithTenantKeys(ciphertext, aad, this.tenantKeys);
+    } catch (error) {
+      throw decryptionFailed(error);
+    }
+    if (!isThenable(result)) return result;
+    return Promise.resolve(result).catch((error: unknown) => {
+      throw decryptionFailed(error);
+    });
   }
 
   /**

@@ -17,11 +17,20 @@
 
 import { createHash } from 'node:crypto';
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { ByteStorage } from '@cachekit-io/cachekit-core-ts';
+import {
+  ByteStorage,
+  decryptWithTenantKeys,
+  deriveTenantKeys,
+  encryptWithTenantKeys,
+  type TenantKeys,
+} from '@cachekit-io/cachekit-core-ts';
 import { createCache } from './cache.js';
 import { CacheImpl, type CacheRuntime } from './cache-core.js';
 import { EncryptionManager } from './encryption/manager.js';
+import { EncryptionManagerCore } from './encryption/manager-core.js';
+import { EncryptionError } from './errors.js';
 import { generateKey } from './serialization/key-generator.js';
+import { turnsToSettle } from '../test/fixtures/settle.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
 import type { L1Cache } from './l1/lru-cache.js';
@@ -363,4 +372,235 @@ describe('L1 zero-knowledge for encrypted caches', () => {
     await load(9);
     expect(l1Entry(cache, generateKey('items', [9]))).toEqual({ plain: true });
   });
+});
+
+// On Node.js the decrypt is a synchronous NAPI call, so once the keys are
+// derived an encrypted L1 hit has nothing to await, and awaiting even a
+// settled value costs the hit a microtask turn: the promise it hands back
+// must already be settled. On Workers WebCrypto decrypts asynchronously, so
+// there the hit awaits the decrypt.
+describe('an encrypted L1 hit awaits only a decrypt that suspends', () => {
+  const caches: SecureCache[] = [];
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await Promise.all(caches.splice(0).map((c) => c.close()));
+  });
+
+  /**
+   * An encrypted cache with L1 on. `suspends` gives it bindings that answer
+   * with Promises, as the Workers bindings do, over the NAPI core, so the
+   * bytes are the real ones.
+   */
+  function makeCache(
+    backend: InMemoryBackend,
+    { suspends = false, degradation = true, swrRequiresWaitUntil = false } = {}
+  ): SecureCache {
+    const runtime: CacheRuntime = {
+      resolveBackend: () => backend,
+      createByteStorage: () => new ByteStorage(),
+      createEncryption: (config) =>
+        suspends
+          ? new EncryptionManagerCore(config.masterKey, config.tenantId, async () => ({
+              deriveTenantKeys,
+              encryptWithTenantKeys: async (plaintext, aad, keys: TenantKeys) =>
+                encryptWithTenantKeys(plaintext, aad, keys),
+              decryptWithTenantKeys: async (ciphertext, aad, keys: TenantKeys) =>
+                decryptWithTenantKeys(ciphertext, aad, keys),
+            }))
+          : new EncryptionManager(config.masterKey, config.tenantId),
+      swrRequiresWaitUntil,
+    };
+    const cache = new CacheImpl(
+      {
+        backend,
+        defaultTtl: 3600,
+        l1: { enabled: true, maxEntries: 100 },
+        encryption: { masterKey: MASTER_KEY, tenantId: TENANT },
+        metrics: false,
+        reliability: { degradation },
+      },
+      runtime
+    );
+    caches.push(cache);
+    return cache;
+  }
+
+  it('on Node.js, get() and exists() hand back a settled promise, on the first hit and on later ones', async () => {
+    const backend = new InMemoryBackend();
+    const cache = makeCache(backend);
+    await cache.set('users:1', { ssn: LEAK_CANARY });
+    await cache.set('users:2', { ssn: LEAK_CANARY });
+    const alreadySettled = await turnsToSettle(Promise.resolve());
+    const reads = backend.gets;
+
+    // Each key's first hit walks a copy and swaps it into L1; the second
+    // trusts that copy.
+    for (const read of [
+      () => cache.get('users:1'),
+      () => cache.get('users:1'),
+      () => cache.exists('users:2'),
+      () => cache.exists('users:2'),
+    ]) {
+      expect(await turnsToSettle(read())).toBe(alreadySettled);
+    }
+    expect(l1Entry(cache, 'users:1')).not.toBe(backend.store.get('users:1'));
+    expect(await cache.get('users:1')).toEqual({ ssn: LEAK_CANARY });
+    expect(await cache.exists('users:2')).toBe(true);
+    expect(backend.gets).toBe(reads);
+  });
+
+  it.each([
+    ['with SWR', false],
+    ['on a runtime whose SWR needs waitUntil, with none bound', true],
+  ])(
+    'on Node.js, wrap() hands back a settled promise %s, on the first hit and on later ones',
+    async (_, swrRequiresWaitUntil) => {
+      const backend = new InMemoryBackend();
+      const cache = makeCache(backend, { swrRequiresWaitUntil });
+      const fn = vi.fn(async (id: number) => ({ ssn: LEAK_CANARY, id }));
+      const load = cache.wrap(fn, { namespace: 'users', ttl: 3600 });
+      await load(1);
+      const alreadySettled = await turnsToSettle(Promise.resolve());
+      const reads = backend.gets;
+
+      for (let i = 0; i < 2; i++) {
+        const hit = load(1);
+        expect(await turnsToSettle(hit)).toBe(alreadySettled);
+        expect(await hit).toEqual({ ssn: LEAK_CANARY, id: 1 });
+      }
+      expect(fn).toHaveBeenCalledTimes(1);
+      expect(backend.gets).toBe(reads);
+    }
+  );
+
+  it('a decrypt that suspends, as on Workers, is awaited, and the first hit still swaps in its copy', async () => {
+    const backend = new InMemoryBackend();
+    const cache = makeCache(backend, { suspends: true });
+    await cache.set('users:1', { ssn: LEAK_CANARY });
+    const load = cache.wrap(async (id: number) => ({ id }), { namespace: 'users', ttl: 3600 });
+    await load(1);
+    const alreadySettled = await turnsToSettle(Promise.resolve());
+    const reads = backend.gets;
+    expect(l1Entry(cache, 'users:1')).toBe(backend.store.get('users:1'));
+
+    for (const [read, value] of [
+      [() => cache.get('users:1'), { ssn: LEAK_CANARY }],
+      [() => cache.get('users:1'), { ssn: LEAK_CANARY }],
+      [() => cache.exists('users:1'), true],
+      [() => load(1), { id: 1 }],
+      [() => load(1), { id: 1 }],
+    ] as const) {
+      const hit = read();
+      expect(await turnsToSettle(hit)).toBeGreaterThan(alreadySettled);
+      expect(await hit).toEqual(value);
+    }
+    const copy = l1Entry(cache, 'users:1');
+    expect(copy).not.toBe(backend.store.get('users:1'));
+    expect(copy).toEqual(backend.store.get('users:1'));
+    expect(backend.gets).toBe(reads);
+  });
+
+  // Before its keys are derived a cache decrypts through an async function,
+  // whose Promise is the engine's own: `instanceof` against a replaced global
+  // Promise misses it, and a Promise taken for a value is never awaited.
+  async function withReplacedPromise<T>(op: () => Promise<T>): Promise<T> {
+    const NativePromise = globalThis.Promise;
+    class ReplacedPromise<U> extends NativePromise<U> {}
+    globalThis.Promise = ReplacedPromise as PromiseConstructor;
+    try {
+      return await op();
+    } finally {
+      globalThis.Promise = NativePromise;
+    }
+  }
+
+  const VALUE = { ssn: LEAK_CANARY, id: 1 };
+  type Read = (cache: SecureCache, load: (id: number) => Promise<unknown>) => Promise<unknown>;
+  const KEY = generateKey('users', [1]);
+  const getKey: Read = (cache) => cache.get(KEY);
+  const wrapped: Read = (_, load) => load(1);
+  // exists() would report present off an unawaited Promise too, so the test
+  // after this one pins it with an entry that must not decode.
+  it.each([
+    ['get() from L1', getKey, true, false],
+    ['get() from L2', getKey, false, false],
+    ['wrap() with SWR from L1', wrapped, true, false],
+    ['wrap() with no waitUntil bound from L1', wrapped, true, true],
+  ] as const)(
+    '%s decodes when a library has replaced the global Promise, as zone.js does',
+    async (_, read, fromL1, noWaitUntil) => {
+      const backend = new InMemoryBackend();
+      await makeCache(backend).set(KEY, VALUE);
+      const fresh = makeCache(backend, { swrRequiresWaitUntil: noWaitUntil });
+      if (fromL1) l1Of(fresh).set(KEY, backend.store.get(KEY)!, 3600_000, 'users');
+      const load = fresh.wrap(async (id: number) => ({ ssn: 'computed', id }), {
+        namespace: 'users',
+        ttl: 3600,
+      });
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      expect(await withReplacedPromise(() => read(fresh, load))).toEqual(VALUE);
+      expect(consoleSpy).not.toHaveBeenCalled();
+    }
+  );
+
+  it('exists() drops a substituted L1 entry when a library has replaced the global Promise', async () => {
+    const backend = new InMemoryBackend();
+    const writer = makeCache(backend);
+    await writer.set(KEY, VALUE);
+    await writer.set('users:other', { other: true });
+    const fresh = makeCache(backend);
+    l1Of(fresh).set(KEY, backend.store.get('users:other')!, 3600_000, 'users');
+    backend.store.delete(KEY);
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(await withReplacedPromise(() => fresh.exists(KEY))).toBe(false);
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '[cachekit] L1 decrypt failed — entry dropped:',
+      expect.stringContaining('Authentication verification failed')
+    );
+  });
+
+  it.each([
+    { suspends: false, degradation: true },
+    { suspends: false, degradation: false },
+    { suspends: true, degradation: true },
+    { suspends: true, degradation: false },
+  ])(
+    'a substituted entry is dropped and logged, under degradation $degradation, when the decrypt suspends: $suspends',
+    async ({ suspends, degradation }) => {
+      const backend = new InMemoryBackend();
+      const cache = makeCache(backend, { suspends, degradation });
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const fn = vi.fn(async (id: number) => ({ ssn: LEAK_CANARY, id }));
+      const load = cache.wrap(fn, { namespace: 'users', ttl: 3600 });
+      await load(1);
+      await load(2);
+      const victim = generateKey('users', [1]);
+      // A valid ciphertext sealed under another key: the AAD binds the key.
+      const stolen = backend.store.get(generateKey('users', [2]))!;
+
+      for (const [read, value] of [
+        [() => cache.get(victim), { ssn: LEAK_CANARY, id: 1 }],
+        [() => cache.exists(victim), true],
+        [() => load(1), { ssn: LEAK_CANARY, id: 1 }],
+      ] as const) {
+        l1Of(cache).set(victim, stolen, 3600_000, 'users');
+        if (degradation) {
+          // Dropped, then served from L2 (get() and wrap() refill L1 from it).
+          expect(await read()).toEqual(value);
+          expect(l1Entry(cache, victim)).not.toBe(stolen);
+        } else {
+          await expect(read()).rejects.toThrow(EncryptionError);
+          expect(l1Entry(cache, victim)).toBeNull();
+        }
+      }
+      expect(consoleSpy).toHaveBeenCalledTimes(3);
+      expect(consoleSpy).toHaveBeenCalledWith(
+        '[cachekit] L1 decrypt failed — entry dropped:',
+        expect.stringContaining('Authentication verification failed')
+      );
+      expect(fn).toHaveBeenCalledTimes(2);
+    }
+  );
 });

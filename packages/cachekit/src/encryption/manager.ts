@@ -33,8 +33,8 @@ async function loadNapiBindings(): Promise<EncryptionBindings> {
  * @example
  * ```typescript
  * const manager = new EncryptionManager(process.env.CACHEKIT_MASTER_KEY!, 'tenant-123');
- * const ciphertext = manager.encrypt(data, 'cache:my-key');
- * const plaintext = manager.decrypt(ciphertext, 'cache:my-key');
+ * const ciphertext = await manager.encrypt(data, 'cache:my-key');
+ * const plaintext = await manager.decrypt(ciphertext, 'cache:my-key');
  * manager.dispose(); // Clean up when done
  * ```
  */

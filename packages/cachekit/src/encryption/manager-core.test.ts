@@ -398,6 +398,32 @@ describe('EncryptionManagerCore keyring config (previousMasterKeys)', () => {
 
     await expect(inFlight).rejects.toThrow(EncryptionError);
   });
+
+  it('decryptNow decrypts in the call once the keys are derived, and throws what decrypt() rejects with', async () => {
+    const { bindings } = mockBindings();
+    const manager = new TestManager(async () => bindings);
+
+    // Before the keys are derived it loads the bindings first: a Promise.
+    const first = manager.decryptNow(new Uint8Array([1]), 'ns:k');
+    expect(first).toBeInstanceOf(Promise);
+    expect(await first).toEqual(new Uint8Array([2]));
+
+    const plaintext = manager.decryptNow(new Uint8Array([1]), 'ns:k', true);
+    expect(plaintext).not.toBeInstanceOf(Promise);
+    expect(plaintext).toEqual(new Uint8Array([2]));
+    vi.mocked(bindings.decryptWithTenantKeys).mockImplementationOnce(() => {
+      throw new Error('Authentication verification failed');
+    });
+    expect(() => manager.decryptNow(new Uint8Array(28), 'ns:k')).toThrow(
+      new EncryptionError('Decryption failed: Authentication verification failed')
+    );
+
+    // After dispose() it rejects, as decrypt() does.
+    manager.dispose();
+    await expect(manager.decryptNow(new Uint8Array([1]), 'ns:k')).rejects.toThrow(
+      'EncryptionManager has been disposed'
+    );
+  });
 });
 
 // The Workers bindings are asynchronous (WebCrypto); the seam accepts a
@@ -437,6 +463,26 @@ describe('EncryptionManagerCore over asynchronous bindings', () => {
     const manager = new TestManager(async () => bindings);
 
     await expect(manager.decrypt(new Uint8Array(28), 'ns:k')).rejects.toThrow(EncryptionError);
+    manager.dispose();
+  });
+
+  it('decryptNow returns the binding’s Promise once the keys are derived, its rejection mapped to EncryptionError', async () => {
+    let decrypts = 0;
+    const { bindings } = mockBindings({
+      decryptWithTenantKeys: vi.fn(async () => {
+        if (decrypts++ > 0) throw new Error('Authentication verification failed');
+        return new Uint8Array([8]);
+      }),
+    });
+    const manager = new TestManager(async () => bindings);
+    await manager.encrypt(new Uint8Array([1]), 'ns:k'); // derives the keys
+
+    const plaintext = manager.decryptNow(new Uint8Array([1]), 'ns:k');
+    expect(plaintext).toBeInstanceOf(Promise);
+    expect(await plaintext).toEqual(new Uint8Array([8]));
+    await expect(manager.decryptNow(new Uint8Array(28), 'ns:k')).rejects.toThrow(
+      new EncryptionError('Decryption failed: Authentication verification failed')
+    );
     manager.dispose();
   });
 

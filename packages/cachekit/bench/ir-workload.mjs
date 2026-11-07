@@ -465,6 +465,28 @@ export const WORKLOADS = {
       };
     },
   },
+  // get() served from an encrypted L1, which holds ciphertext: the lookup,
+  // then decrypt, unpack and decode of 100 B of msgpack, with no key
+  // generation, unlike secure-wrap-l1-hit-100b. Setup checks the get is served
+  // by L1. 4,000 warm-up ops, as for get-l1-hit and secure-wrap-l1-hit-100b.
+  'secure-get-l1-hit': {
+    n: 20_000,
+    warmup: 4_000,
+    setup: async () => {
+      const { createCache } = await load('index.js');
+      const backend = new MemoryBackend();
+      const cache = createCache({ backend, encryption: { masterKey: MASTER_KEY }, metrics: false });
+      let reads = 0;
+      const read = backend.get.bind(backend);
+      backend.get = (key) => (reads++, read(key));
+      await cache.set(KEY, rowsOf(3), { ttl: 3600 });
+      sink += (await cache.get(KEY)).rows.length;
+      if (reads !== 0) throw new Error('the get read L2: L1 did not keep the entry');
+      return async () => {
+        sink += (await cache.get(KEY)).rows.length;
+      };
+    },
+  },
   // wrap() with an object among the arguments, which the key memo does not
   // keep: keygen + L1 lookup, where a plaintext L1 holds the decoded value
   'wrap-l1-hit': {

@@ -16,6 +16,7 @@ import {
   ValueTooLargeError,
 } from './errors.js';
 import { forgedEnvelope } from '../test/fixtures/forged-envelope.js';
+import { turnsToSettle } from '../test/fixtures/settle.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
 import { EncryptionManagerCore } from './encryption/manager-core.js';
 import type { SecureCache, WrapOptionsBase } from './types/cache.js';
@@ -159,20 +160,6 @@ describe('Cache Integration', () => {
     // and awaiting even a settled promise costs the hit a microtask turn: the
     // promise a hit hands back must already be settled.
     describe('a plaintext L1 hit returns an already-settled promise', () => {
-      const turnsToSettle = async (promise: Promise<unknown>): Promise<number> => {
-        let settled = false;
-        promise.then(
-          () => (settled = true),
-          () => (settled = true)
-        );
-        let turns = 0;
-        while (!settled) {
-          await null;
-          turns++;
-        }
-        return turns;
-      };
-
       it('from get() and exists()', async () => {
         const alreadySettled = await turnsToSettle(Promise.resolve());
         await cache.set('test:settled', { data: 'value' });
@@ -911,11 +898,11 @@ describe('Cache Integration', () => {
               reliability: { degradation: false, retry: { maxAttempts: 1 } },
             });
             const impl = cache as unknown as {
-              encryption: { decrypt: (...args: unknown[]) => Promise<Uint8Array> };
+              encryption: { decryptNow: (...args: unknown[]) => Uint8Array | Promise<Uint8Array> };
             };
             let decrypts = 0;
-            const realDecrypt = impl.encryption.decrypt.bind(impl.encryption);
-            impl.encryption.decrypt = (...args) => {
+            const realDecrypt = impl.encryption.decryptNow.bind(impl.encryption);
+            impl.encryption.decryptNow = (...args) => {
               decrypts++;
               return realDecrypt(...args);
             };
@@ -2018,7 +2005,7 @@ describe('Cache Integration', () => {
       const c = secureCache(backend, KEY_A);
       await c.set('ns:k', 'v');
       const backendGet = vi.spyOn(backend, 'get');
-      vi.spyOn(EncryptionManagerCore.prototype, 'decrypt').mockRejectedValueOnce(
+      vi.spyOn(EncryptionManagerCore.prototype, 'decryptNow').mockRejectedValueOnce(
         new Error('native binding failed to load')
       );
 
@@ -2092,7 +2079,7 @@ describe('Cache Integration', () => {
       // Seeded, so a read that skipped the pre-flight would reach decrypt.
       await backend.set(overLimitKey, new Uint8Array([1]), 60);
       const backendGet = vi.spyOn(backend, 'get');
-      const decrypt = vi.spyOn(EncryptionManagerCore.prototype, 'decrypt');
+      const decrypt = vi.spyOn(EncryptionManagerCore.prototype, 'decryptNow');
       const c = secureCache(backend);
 
       await expect(c.get(overLimitKey)).rejects.toThrow(ConfigurationError);
@@ -2246,7 +2233,7 @@ describe('Cache Integration', () => {
       'keyPrefix $keyPrefix binds $bound at encrypt, decrypt and the AAD-size pre-flight',
       async ({ keyPrefix, bound }) => {
         const encrypt = vi.spyOn(EncryptionManagerCore.prototype, 'encrypt');
-        const decrypt = vi.spyOn(EncryptionManagerCore.prototype, 'decrypt');
+        const decrypt = vi.spyOn(EncryptionManagerCore.prototype, 'decryptNow');
         const validateKey = vi.spyOn(EncryptionManagerCore.prototype, 'validateKey');
         const c = secureOver(new PrefixingBackend(keyPrefix, new Map()));
 

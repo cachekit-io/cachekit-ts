@@ -466,11 +466,11 @@ describe('cache.wrap interop mode', () => {
     // Junk one byte past the fixed cap + AEAD overhead never reaches decrypt.
     const impl = cache as unknown as {
       getEntry: (key: string, interop: boolean) => Promise<unknown>;
-      encryption: { decrypt: (...args: unknown[]) => Promise<Uint8Array> };
+      encryption: { decryptNow: (...args: unknown[]) => Uint8Array | Promise<Uint8Array> };
     };
     let decrypts = 0;
-    const realDecrypt = impl.encryption.decrypt.bind(impl.encryption);
-    impl.encryption.decrypt = (...args) => {
+    const realDecrypt = impl.encryption.decryptNow.bind(impl.encryption);
+    impl.encryption.decryptNow = (...args) => {
       decrypts++;
       return realDecrypt(...args);
     };
