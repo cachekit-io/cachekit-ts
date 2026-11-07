@@ -403,10 +403,10 @@ describe('an encrypted L1 hit awaits only a decrypt that suspends', () => {
         suspends
           ? new EncryptionManagerCore(config.masterKey, config.tenantId, async () => ({
               deriveTenantKeys,
-              encryptWithTenantKeys: async (plaintext, aad, keys) =>
-                encryptWithTenantKeys(plaintext, aad, keys as TenantKeys),
-              decryptWithTenantKeys: async (ciphertext, aad, keys) =>
-                decryptWithTenantKeys(ciphertext, aad, keys as TenantKeys),
+              encryptWithTenantKeys: async (plaintext, aad, keys: TenantKeys) =>
+                encryptWithTenantKeys(plaintext, aad, keys),
+              decryptWithTenantKeys: async (ciphertext, aad, keys: TenantKeys) =>
+                decryptWithTenantKeys(ciphertext, aad, keys),
             }))
           : new EncryptionManager(config.masterKey, config.tenantId),
       swrRequiresWaitUntil,
