@@ -27,6 +27,20 @@ function decryptionFailed(error: unknown): EncryptionError {
   );
 }
 
+/**
+ * The error encrypt() builds for a binding failure, for encryptNow() to throw
+ * or reject with: NonceExhaustedError when the encryptor's nonce counter is
+ * spent, EncryptionError otherwise.
+ */
+function encryptionFailed(error: unknown): EncryptionError {
+  const message = error instanceof Error ? error.message : 'Unknown error';
+  const cause = error instanceof Error ? error : undefined;
+  if (message.includes('Nonce counter exhausted') || message.includes('NonceCounterExhausted')) {
+    return new NonceExhaustedError(undefined, { cause });
+  }
+  return new EncryptionError(`Encryption failed: ${message}`, { cause });
+}
+
 function concatBytes(...parts: Uint8Array[]): Uint8Array {
   const out = new Uint8Array(parts.reduce((sum, p) => sum + p.length, 0));
   let offset = 0;
@@ -78,9 +92,10 @@ export interface EncryptionTenantKeys {
  * Error contract: when the encryptor's nonce counter is exhausted,
  * encryptWithTenantKeys MUST throw an Error whose message contains
  * "Nonce counter exhausted" (cachekit-core's EncryptionError Display) —
- * encrypt() classifies that substring into NonceExhaustedError so rotation
- * alerting works. Both bindings inherit the string from the same core crate;
- * a core wording change must update this contract and the classifier below.
+ * encrypt() and encryptNow() classify that substring into NonceExhaustedError
+ * so rotation alerting works. Both bindings inherit the string from the same
+ * core crate; a core wording change must update this contract and both
+ * classifiers below (encrypt()'s catch and encryptionFailed()).
  */
 export interface EncryptionBindings {
   /**
@@ -354,6 +369,37 @@ export class EncryptionManagerCore {
         cause: error instanceof Error ? error : undefined,
       });
     }
+  }
+
+  /**
+   * encrypt() without its awaits, for the cache's write path. Once the keys are
+   * derived, a binding that returns a plain value (NAPI on Node.js) encrypts in
+   * this call: it returns the ciphertext, or throws the NonceExhaustedError or
+   * EncryptionError encrypt() would reject with. Otherwise it returns a
+   * Promise: encrypt()'s before the keys are derived or after dispose(), and
+   * the binding's on Workers, where WebCrypto encrypts asynchronously. Both
+   * bindings reserve the nonce inside their own call, before their first
+   * await. encrypt() keeps its own copy of the error classifier, for the
+   * reason decrypt() gives. Package-internal.
+   * @internal
+   */
+  encryptNow(
+    data: Uint8Array,
+    cacheKey: string,
+    compressed = false
+  ): Uint8Array | Promise<Uint8Array> {
+    if (!this.tenantKeys) return this.encrypt(data, cacheKey, compressed);
+    let result: Uint8Array | Promise<Uint8Array>;
+    try {
+      const aad = this.buildAAD(cacheKey, compressed);
+      result = this.native!.encryptWithTenantKeys(data, aad, this.tenantKeys);
+    } catch (error) {
+      throw encryptionFailed(error);
+    }
+    if (!isThenable(result)) return result;
+    return Promise.resolve(result).catch((error: unknown) => {
+      throw encryptionFailed(error);
+    });
   }
 
   /**
