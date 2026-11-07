@@ -61,17 +61,22 @@ function breakerOf(cache: AnyCache) {
   return reliabilityExecutor.getCircuitBreakerState();
 }
 
-/** Make the cache's envelope pack or its encrypt step fail with `error` on every call. */
+/**
+ * Make the cache's envelope pack or its encrypt step fail with `error` on every
+ * call. Both throw in the call, as the NAPI encrypt does on Node.js once the
+ * keys are derived.
+ */
 function failStep(cache: AnyCache, step: 'pack' | 'encrypt', error: Error) {
   const internals = cache as unknown as {
     byteStorage: { pack: (data: Uint8Array) => Uint8Array };
-    encryption: { encrypt: (data: Uint8Array) => Promise<Uint8Array> };
+    encryption: { encryptNow: (data: Uint8Array) => Uint8Array | Promise<Uint8Array> };
+  };
+  const fail = () => {
+    throw error;
   };
   return step === 'pack'
-    ? vi.spyOn(internals.byteStorage, 'pack').mockImplementation(() => {
-        throw error;
-      })
-    : vi.spyOn(internals.encryption, 'encrypt').mockRejectedValue(error);
+    ? vi.spyOn(internals.byteStorage, 'pack').mockImplementation(fail)
+    : vi.spyOn(internals.encryption, 'encryptNow').mockImplementation(fail);
 }
 
 const caches: AnyCache[] = [];
@@ -159,13 +164,14 @@ describe('a failed L2 write still fills L1', () => {
     expect(await cache.get('users:1')).toEqual({ ssn: CANARY });
   });
 
-  it('on an encrypted cache L1 holds nothing when encryption itself threw', async () => {
+  // A rejected Promise, as from the Workers bindings; failStep covers a throw.
+  it('on an encrypted cache L1 holds nothing when encryption itself rejected', async () => {
     setLogger(() => {});
     const { backend, calls } = rejectingBackend('authentication');
     const cache = makeCache(backend, { encrypted: true });
-    const encryption = (cache as unknown as { encryption: { encrypt: () => Promise<never> } })
+    const encryption = (cache as unknown as { encryption: { encryptNow: () => Promise<never> } })
       .encryption;
-    vi.spyOn(encryption, 'encrypt').mockRejectedValue(new Error('encrypt failed'));
+    vi.spyOn(encryption, 'encryptNow').mockRejectedValue(new Error('encrypt failed'));
 
     await cache.set('users:1', { ssn: CANARY });
 
