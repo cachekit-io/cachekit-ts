@@ -597,7 +597,7 @@ describe('encryption.json aad_hex — the shipped AAD builder', () => {
     );
     try {
       await manager.encrypt(new Uint8Array([1]), cacheKey, compressed);
-      expect(manager.encryptNow(new Uint8Array([1]), cacheKey, compressed)).toEqual(
+      expect(manager.encryptNow(new Uint8Array([9]), cacheKey, compressed)).toEqual(
         new Uint8Array([1])
       );
       await manager.decrypt(new Uint8Array([1]), cacheKey, compressed);

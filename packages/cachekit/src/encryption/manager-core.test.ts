@@ -264,11 +264,11 @@ describe('EncryptionManagerCore', () => {
     const manager = new TestManager(async () => bindings);
 
     // Before the keys are derived it loads the bindings first: a Promise.
-    const first = manager.encryptNow(new Uint8Array([1]), 'ns:k');
+    const first = manager.encryptNow(new Uint8Array([9]), 'ns:k');
     expect(first).toBeInstanceOf(Promise);
     expect(await first).toEqual(new Uint8Array([1]));
 
-    const ciphertext = manager.encryptNow(new Uint8Array([1]), 'ns:k', true);
+    const ciphertext = manager.encryptNow(new Uint8Array([9]), 'ns:k', true);
     expect(ciphertext).not.toBeInstanceOf(Promise);
     expect(ciphertext).toEqual(new Uint8Array([1]));
     vi.mocked(bindings.encryptWithTenantKeys).mockImplementationOnce(() => {
@@ -570,12 +570,11 @@ describe('EncryptionManagerCore over asynchronous bindings', () => {
   });
 
   it('encryptNow returns the binding’s Promise once the keys are derived, its rejection mapped as encrypt() maps it', async () => {
-    let encrypts = 0;
     const { bindings } = mockBindings({
-      encryptWithTenantKeys: vi.fn(async () => {
-        if (encrypts++ === 0) throw new Error('Nonce counter exhausted - key rotation required');
-        return new Uint8Array([7]);
-      }),
+      encryptWithTenantKeys: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('Nonce counter exhausted - key rotation required'))
+        .mockResolvedValue(new Uint8Array([7])),
     });
     const manager = new TestManager(async () => bindings);
     await manager.isHardwareAccelerated(); // derives the keys

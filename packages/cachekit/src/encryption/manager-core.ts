@@ -347,6 +347,8 @@ export class EncryptionManagerCore {
   async encrypt(data: Uint8Array, cacheKey: string, compressed = false): Promise<Uint8Array> {
     await this.ensureInitialized();
 
+    // encryptNow() repeats this body rather than sharing it, for the reason
+    // decrypt() gives.
     try {
       const aad = this.buildAAD(cacheKey, compressed);
       const result = this.native!.encryptWithTenantKeys(data, aad, this.tenantKeys!);
