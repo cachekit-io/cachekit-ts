@@ -3,6 +3,7 @@ import { Counter, Gauge, Registry } from 'prom-client';
 import { createCache } from './cache.js';
 import { ConfigurationError } from './errors.js';
 import { CacheMetrics } from './metrics/prometheus.js';
+import { setLogger } from './logger.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
 import { InMemoryBackend, metricValue } from '../test/fixtures/metrics.js';
@@ -29,6 +30,14 @@ class FailingBackend implements Backend {
   async close(): Promise<void> {}
 }
 
+/** An Error whose message getter throws. */
+const unreadableError = (): Error =>
+  Object.defineProperty(new Error(), 'message', {
+    get() {
+      throw new Error('message getter threw');
+    },
+  });
+
 describe('Cache metrics wiring', () => {
   const caches: SecureCache[] = [];
 
@@ -49,6 +58,7 @@ describe('Cache metrics wiring', () => {
 
   afterEach(async () => {
     await Promise.all(caches.splice(0).map((c) => c.close()));
+    setLogger(null);
   });
 
   it('records misses and get operations', async () => {
@@ -291,6 +301,133 @@ describe('Cache metrics wiring', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(await metricValue(registry, 'cachekit_l1_entries')).toBe(0);
     expect(await metricValue(registry, 'cachekit_l1_memory_bytes')).toBe(0);
+  });
+
+  // The same for the circuit-breaker gauge: a state set in the turn
+  // prom-client finishes registering lands after every state set before load.
+  it('a breaker state set as prom-client finishes loading is not overwritten by earlier ones', async () => {
+    let setAfterLoad = false;
+    class ObservedRegistry extends Registry {
+      override registerMetric(metric: Parameters<Registry['registerMetric']>[0]): void {
+        super.registerMetric(metric);
+        if ((metric as unknown as { name: string }).name === 'cachekit_circuit_breaker_state')
+          queueMicrotask(() => {
+            metrics.setCircuitBreakerState('closed');
+            setAfterLoad = true;
+          });
+      }
+    }
+    const registry = new ObservedRegistry();
+    const metrics = new CacheMetrics({ registry });
+    metrics.setCircuitBreakerState('open');
+    expect(registry.getSingleMetric('cachekit_circuit_breaker_state')).toBeUndefined();
+    await vi.waitFor(() => expect(setAfterLoad).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await metricValue(registry, 'cachekit_circuit_breaker_state')).toBe(0);
+  });
+
+  // A breaker gauge that rejects the write (here registered by the application
+  // without the default label) is reported, whether initialize() publishes the
+  // pre-load state or a state is set after load, and leaves the load succeeded.
+  it('a breaker gauge error is reported and does not fail the load', async () => {
+    const registry = new Registry();
+    new Gauge({ name: 'cachekit_circuit_breaker_state', help: 'app-owned', registers: [registry] });
+    const errors: Error[] = [];
+    const metrics = new CacheMetrics({
+      registry,
+      defaultLabels: { service: 'api' },
+      onError: (err) => errors.push(err),
+    });
+    metrics.setCircuitBreakerState('open');
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
+    metrics.setCircuitBreakerState('closed');
+    expect(errors).toHaveLength(2);
+    expect(errors.map((e) => e.message)).toEqual([
+      expect.stringContaining('"service"'),
+      expect.stringContaining('"service"'),
+    ]);
+    await metrics.recordError('timeout');
+    expect(await metricValue(registry, 'cachekit_errors_total', { error_type: 'timeout' })).toBe(1);
+  });
+
+  // String() throws on a null-prototype object, and instanceof on a Proxy whose
+  // getPrototypeOf trap throws, so reporting either must not.
+  it('a breaker gauge throwing a value no Error can wrap is reported and fails nothing', async () => {
+    const registry = new Registry();
+    const gauge = new Gauge({
+      name: 'cachekit_circuit_breaker_state',
+      help: 'app-owned',
+      registers: [registry],
+    });
+    const thrown: unknown[] = [
+      Object.create(null),
+      new Proxy(
+        {},
+        {
+          getPrototypeOf: () => {
+            throw new Error('trap');
+          },
+        }
+      ),
+    ];
+    gauge.set = () => {
+      throw thrown.shift();
+    };
+    const errors: Error[] = [];
+    const metrics = new CacheMetrics({ registry, onError: (err) => errors.push(err) });
+    metrics.setCircuitBreakerState('open');
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
+    expect(() => metrics.setCircuitBreakerState('closed')).not.toThrow();
+    expect(thrown).toEqual([]);
+    expect(errors.map((e) => e.message)).toEqual([
+      'a thrown value could not be converted to an Error',
+      'a thrown value could not be converted to an Error',
+    ]);
+    await metrics.recordError('timeout');
+    expect(await metricValue(registry, 'cachekit_errors_total', { error_type: 'timeout' })).toBe(1);
+  });
+
+  // With no onError the library logger gets the error's message, and reading
+  // it can throw too, so neither report may let that escape.
+  it('a breaker gauge throwing an Error whose message getter throws is logged and fails nothing', async () => {
+    const logs: unknown[][] = [];
+    setLogger((message, error) => logs.push([message, error]));
+    const registry = new Registry();
+    const gauge = new Gauge({
+      name: 'cachekit_circuit_breaker_state',
+      help: 'app-owned',
+      registers: [registry],
+    });
+    gauge.set = () => {
+      throw unreadableError();
+    };
+    const metrics = new CacheMetrics({ registry });
+    metrics.setCircuitBreakerState('open');
+    await vi.waitFor(() => expect(logs).toHaveLength(1));
+    expect(() => metrics.setCircuitBreakerState('closed')).not.toThrow();
+    expect(logs).toEqual([
+      ['[cachekit] Metrics error (setCircuitBreakerState):', 'the error message could not be read'],
+      ['[cachekit] Metrics error (setCircuitBreakerState):', 'the error message could not be read'],
+    ]);
+    await metrics.recordError('timeout');
+    expect(await metricValue(registry, 'cachekit_errors_total', { error_type: 'timeout' })).toBe(1);
+  });
+
+  it('a load failing with an Error whose message getter throws is logged once and rejects nothing', async () => {
+    const logs: unknown[][] = [];
+    setLogger((message, error) => logs.push([message, error]));
+    class FailingRegistry extends Registry {
+      override registerMetric(): void {
+        throw unreadableError();
+      }
+    }
+    const metrics = new CacheMetrics({ registry: new FailingRegistry() });
+    metrics.setCircuitBreakerState('open');
+    await vi.waitFor(() => expect(logs).toHaveLength(1));
+    await expect(metrics.recordMiss()).resolves.toBeUndefined();
+    expect(logs).toEqual([
+      [expect.stringContaining('failed to initialize'), 'the error message could not be read'],
+    ]);
   });
 
   it('records hits and misses through wrap(), including the L1 SWR path', async () => {

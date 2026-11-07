@@ -245,6 +245,8 @@ export class CacheMetrics implements MetricsCollector {
   private initFailed = false;
   /** The latest L1 stats set before prom-client loaded, published by initialize(). */
   private pendingL1: [entries: number, memoryBytes: number] | null = null;
+  /** The latest breaker state set before prom-client loaded, published by initialize(). */
+  private pendingBreaker: 'closed' | 'open' | 'half-open' | null = null;
 
   constructor(config: MetricsConfig = {}) {
     this.prefix = config.prefix ?? 'cachekit';
@@ -380,10 +382,12 @@ export class CacheMetrics implements MetricsCollector {
 
       this.isReady = true;
       if (this.pendingL1) this.writeL1Gauges(...this.pendingL1);
+      if (this.pendingBreaker) this.writeBreakerGauge(this.pendingBreaker);
       this.pendingL1 = null;
+      this.pendingBreaker = null;
       return true;
     } catch (error) {
-      this.initError = error instanceof Error ? error : new Error(String(error));
+      this.initError = toError(error);
       return false;
     }
   }
@@ -404,7 +408,7 @@ export class CacheMetrics implements MetricsCollector {
         logError(
           '[cachekit] metrics are enabled but failed to initialize — install the optional ' +
             '`prom-client` peer dependency or set `metrics: false`:',
-          err.message
+          messageOf(err)
         );
       }
     }
@@ -433,10 +437,10 @@ export class CacheMetrics implements MetricsCollector {
    * Proper error handling instead of silent failures.
    */
   private handleError(error: unknown, context: string): void {
-    const err = error instanceof Error ? error : new Error(String(error));
+    const err = toError(error);
 
     if (!this.invokeErrorHandler(err)) {
-      logError(`[cachekit] Metrics error (${context}):`, err.message);
+      logError(`[cachekit] Metrics error (${context}):`, messageOf(err));
     }
   }
 
@@ -649,19 +653,46 @@ export class CacheMetrics implements MetricsCollector {
    */
   setCircuitBreakerState(state: 'closed' | 'open' | 'half-open'): void {
     if (this.isReady) {
-      try {
-        this.circuitBreakerGauge?.set(this.defaultLabels, breakerValue(state));
-      } catch (error) {
-        this.handleError(error, 'setCircuitBreakerState');
-      }
+      this.writeBreakerGauge(state);
     } else if (!this.initFailed) {
-      void this.updateCircuitBreakerState(state);
+      // Before load only the latest state matters, as in setL1Stats().
+      if (this.pendingBreaker === null) void this.whenReady();
+      this.pendingBreaker = state;
+    }
+  }
+
+  private writeBreakerGauge(state: 'closed' | 'open' | 'half-open'): void {
+    try {
+      this.circuitBreakerGauge?.set(this.defaultLabels, breakerValue(state));
+    } catch (error) {
+      this.handleError(error, 'setCircuitBreakerState');
     }
   }
 }
 
 const breakerValue = (state: 'closed' | 'open' | 'half-open'): number =>
   state === 'closed' ? 0 : state === 'half-open' ? 0.5 : 1;
+
+/** Wrap a thrown value as an Error without throwing: String() throws on a
+ * null-prototype object, and instanceof on a Proxy whose getPrototypeOf trap
+ * throws. Every caller is an error path that must not escape. */
+function toError(error: unknown): Error {
+  try {
+    return error instanceof Error ? error : new Error(String(error));
+  } catch {
+    return new Error('a thrown value could not be converted to an Error');
+  }
+}
+
+/** Read an Error's message without throwing: toError() passes an Error
+ * through unchanged, and its message getter can throw too. */
+function messageOf(err: Error): string {
+  try {
+    return err.message;
+  } catch {
+    return 'the error message could not be read';
+  }
+}
 
 /**
  * No-op metrics implementation for when metrics are disabled.
