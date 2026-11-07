@@ -267,6 +267,32 @@ describe('Cache metrics wiring', () => {
     expect(await gauges()).toEqual({ entries: 0, memoryUsed: 0 });
   });
 
+  // An L1 write in the turn prom-client finishes registering (here queued
+  // from the registry's own registration hook) lands after every write made
+  // before load, never under one.
+  it('an L1 write as prom-client finishes loading is not overwritten by earlier ones', async () => {
+    let invalidated: Promise<void> | undefined;
+    class ObservedRegistry extends Registry {
+      override registerMetric(metric: Parameters<Registry['registerMetric']>[0]): void {
+        super.registerMetric(metric);
+        if ((metric as unknown as { name: string }).name === 'cachekit_circuit_breaker_state')
+          queueMicrotask(() => {
+            invalidated = cache.invalidate('global');
+          });
+      }
+    }
+    const registry = new ObservedRegistry();
+    const cache = makeCache(registry);
+    await cache.set('ns:a', 'a');
+    await cache.set('ns:b', 'bb');
+    expect(registry.getSingleMetric('cachekit_l1_entries')).toBeUndefined();
+    await vi.waitFor(() => expect(invalidated).toBeDefined());
+    await invalidated;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await metricValue(registry, 'cachekit_l1_entries')).toBe(0);
+    expect(await metricValue(registry, 'cachekit_l1_memory_bytes')).toBe(0);
+  });
+
   it('records hits and misses through wrap(), including the L1 SWR path', async () => {
     const registry = new Registry();
     const cache = makeCache(registry);

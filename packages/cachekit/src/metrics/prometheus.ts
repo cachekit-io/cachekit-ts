@@ -243,6 +243,8 @@ export class CacheMetrics implements MetricsCollector {
   private initError: Error | null = null;
   /** Initialization failed and has been reported: every metric is a no-op. */
   private initFailed = false;
+  /** The latest L1 stats set before prom-client loaded, published by initialize(). */
+  private pendingL1: [entries: number, memoryBytes: number] | null = null;
 
   constructor(config: MetricsConfig = {}) {
     this.prefix = config.prefix ?? 'cachekit';
@@ -377,6 +379,8 @@ export class CacheMetrics implements MetricsCollector {
       this.misses = pendingCount(misses, this.defaultLabels);
 
       this.isReady = true;
+      if (this.pendingL1) this.writeL1Gauges(...this.pendingL1);
+      this.pendingL1 = null;
       return true;
     } catch (error) {
       this.initError = error instanceof Error ? error : new Error(String(error));
@@ -602,14 +606,23 @@ export class CacheMetrics implements MetricsCollector {
    */
   setL1Stats(entries: number, memoryBytes: number): void {
     if (this.isReady) {
-      try {
-        this.l1EntriesGauge?.set(this.defaultLabels, entries);
-        this.l1MemoryGauge?.set(this.defaultLabels, memoryBytes);
-      } catch (error) {
-        this.handleError(error, 'setL1Stats');
-      }
+      this.writeL1Gauges(entries, memoryBytes);
     } else if (!this.initFailed) {
-      void this.updateL1Stats(entries, memoryBytes);
+      // Before load only the latest write matters. initialize() publishes it
+      // in the same turn that sets isReady, so no write made after load can
+      // be overwritten by one made before it. The first write waits on the
+      // load, as every other metric does, so a failure still gets reported.
+      if (this.pendingL1 === null) void this.whenReady();
+      this.pendingL1 = [entries, memoryBytes];
+    }
+  }
+
+  private writeL1Gauges(entries: number, memoryBytes: number): void {
+    try {
+      this.l1EntriesGauge?.set(this.defaultLabels, entries);
+      this.l1MemoryGauge?.set(this.defaultLabels, memoryBytes);
+    } catch (error) {
+      this.handleError(error, 'setL1Stats');
     }
   }
 
