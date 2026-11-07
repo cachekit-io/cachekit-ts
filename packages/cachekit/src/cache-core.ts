@@ -1275,11 +1275,13 @@ export class CacheImpl implements SecureCache {
     if (l1) {
       const l1Result = l1.get(key);
       if (l1Result !== null) {
-        // Awaited only when the decrypt suspends (see decodeL1Entry).
-        const read = this.encryption
-          ? this.decodeL1Entry<T>(key, l1Result, interop)
-          : { value: l1Result as T };
-        const decoded = isThenable(read) ? await read : read;
+        let decoded: L1Read<T>;
+        if (!this.encryption) decoded = { value: l1Result as T };
+        else {
+          // Awaited only when the decrypt suspends (see decodeL1Entry).
+          const read = this.decodeL1Entry<T>(key, l1Result, interop);
+          decoded = isThenable(read) ? await read : read;
+        }
         if (decoded !== null) {
           if (probe) probe.servedBy = 'l1';
           else this.recordHit('l1');
@@ -2118,11 +2120,13 @@ export class CacheImpl implements SecureCache {
         if (this.swrRequiresWaitUntil && !waitUntil) {
           const l1Value = this.l1.get(cacheKey);
           if (l1Value !== null) {
-            // Awaited only when the decrypt suspends (see decodeL1Entry).
-            const read = this.encryption
-              ? this.decodeL1Entry<TResult>(cacheKey, l1Value, interop)
-              : { value: l1Value as TResult };
-            const decoded = isThenable(read) ? await read : read;
+            let decoded: L1Read<TResult>;
+            if (!this.encryption) decoded = { value: l1Value as TResult };
+            else {
+              // Awaited only when the decrypt suspends (see decodeL1Entry).
+              const read = this.decodeL1Entry<TResult>(cacheKey, l1Value, interop);
+              decoded = isThenable(read) ? await read : read;
+            }
             if (decoded !== null) {
               this.recordHit('l1');
               if (timedFrom !== undefined) this.stopL1Timer(timedFrom);
@@ -2141,11 +2145,12 @@ export class CacheImpl implements SecureCache {
             // about to recompute the same key.
             let decoded: L1Read<TResult> = null;
             try {
-              // Awaited only when the decrypt suspends (see decodeL1Entry).
-              const read = this.encryption
-                ? this.decodeL1Entry<TResult>(cacheKey, swrResult.value, interop)
-                : { value: swrResult.value as TResult };
-              decoded = isThenable(read) ? await read : read;
+              if (!this.encryption) decoded = { value: swrResult.value as TResult };
+              else {
+                // Awaited only when the decrypt suspends (see decodeL1Entry).
+                const read = this.decodeL1Entry<TResult>(cacheKey, swrResult.value, interop);
+                decoded = isThenable(read) ? await read : read;
+              }
             } finally {
               // Decode failed — by rethrow (degradation off) or by null
               // (degradation on) — so the entry is dropped either way, and the
