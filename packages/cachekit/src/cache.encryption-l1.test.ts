@@ -519,17 +519,17 @@ describe('an encrypted L1 hit awaits only a decrypt that suspends', () => {
   type Read = (cache: SecureCache, load: (id: number) => Promise<unknown>) => Promise<unknown>;
   const KEY = generateKey('users', [1]);
   const getKey: Read = (cache) => cache.get(KEY);
-  const existsKey: Read = (cache) => cache.exists(KEY);
   const wrapped: Read = (_, load) => load(1);
+  // exists() would report present off an unawaited Promise too, so the test
+  // after this one pins it with an entry that must not decode.
   it.each([
-    ['get() from L1', getKey, VALUE, true, false],
-    ['get() from L2', getKey, VALUE, false, false],
-    ['exists() from L1', existsKey, true, true, false],
-    ['wrap() with SWR from L1', wrapped, VALUE, true, false],
-    ['wrap() with no waitUntil bound from L1', wrapped, VALUE, true, true],
+    ['get() from L1', getKey, true, false],
+    ['get() from L2', getKey, false, false],
+    ['wrap() with SWR from L1', wrapped, true, false],
+    ['wrap() with no waitUntil bound from L1', wrapped, true, true],
   ] as const)(
     '%s decodes when a library has replaced the global Promise, as zone.js does',
-    async (_, read, expected, fromL1, noWaitUntil) => {
+    async (_, read, fromL1, noWaitUntil) => {
       const backend = new InMemoryBackend();
       await makeCache(backend).set(KEY, VALUE);
       const fresh = makeCache(backend, { swrRequiresWaitUntil: noWaitUntil });
@@ -539,7 +539,7 @@ describe('an encrypted L1 hit awaits only a decrypt that suspends', () => {
         ttl: 3600,
       });
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      expect(await withReplacedPromise(() => read(fresh, load))).toEqual(expected);
+      expect(await withReplacedPromise(() => read(fresh, load))).toEqual(VALUE);
       expect(consoleSpy).not.toHaveBeenCalled();
     }
   );
