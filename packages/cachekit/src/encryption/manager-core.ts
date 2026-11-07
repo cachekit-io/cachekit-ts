@@ -26,6 +26,14 @@ function isThenable<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
   return typeof (value as { then?: unknown }).then === 'function';
 }
 
+/** decrypt()'s error for a binding failure, thrown or rejected. */
+function decryptionFailed(error: unknown): EncryptionError {
+  return new EncryptionError(
+    `Decryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    { cause: error instanceof Error ? error : undefined }
+  );
+}
+
 function concatBytes(...parts: Uint8Array[]): Uint8Array {
   const out = new Uint8Array(parts.reduce((sum, p) => sum + p.length, 0));
   let offset = 0;
@@ -374,17 +382,46 @@ export class EncryptionManagerCore {
    */
   async decrypt(ciphertext: Uint8Array, cacheKey: string, compressed = false): Promise<Uint8Array> {
     await this.ensureInitialized();
+    return this.decryptWithKeys(ciphertext, cacheKey, compressed);
+  }
 
+  /**
+   * decrypt() without its awaits, for the cache's read path. Once the keys are
+   * derived, a binding that returns a plain value (NAPI on Node.js) decrypts
+   * in this call: it returns the plaintext, or throws the EncryptionError
+   * decrypt() would reject with. Awaiting even a settled value would cost an
+   * L1 hit a microtask turn. Otherwise it returns a Promise: decrypt()'s
+   * before the keys are derived or after dispose(), and the binding's on
+   * Workers, where WebCrypto decrypts asynchronously. Package-internal.
+   * @internal
+   */
+  decryptNow(
+    ciphertext: Uint8Array,
+    cacheKey: string,
+    compressed = false
+  ): Uint8Array | Promise<Uint8Array> {
+    return this.tenantKeys
+      ? this.decryptWithKeys(ciphertext, cacheKey, compressed)
+      : this.decrypt(ciphertext, cacheKey, compressed);
+  }
+
+  /** decrypt() once the keys are derived: a failure throws, or rejects if the binding's Promise does. */
+  private decryptWithKeys(
+    ciphertext: Uint8Array,
+    cacheKey: string,
+    compressed: boolean
+  ): Uint8Array | Promise<Uint8Array> {
+    let result: Uint8Array | Promise<Uint8Array>;
     try {
       const aad = this.buildAAD(cacheKey, compressed);
-      const result = this.native!.decryptWithTenantKeys(ciphertext, aad, this.tenantKeys!);
-      return isThenable(result) ? await result : result;
+      result = this.native!.decryptWithTenantKeys(ciphertext, aad, this.tenantKeys!);
     } catch (error) {
-      throw new EncryptionError(
-        `Decryption failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        { cause: error instanceof Error ? error : undefined }
-      );
+      throw decryptionFailed(error);
     }
+    if (!isThenable(result)) return result;
+    return Promise.resolve(result).catch((error: unknown) => {
+      throw decryptionFailed(error);
+    });
   }
 
   /**

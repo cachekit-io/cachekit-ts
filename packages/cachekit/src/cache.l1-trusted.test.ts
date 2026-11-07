@@ -13,8 +13,9 @@
  */
 
 import { createHash } from 'node:crypto';
-import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, onTestFinished, vi } from 'vitest';
 import { createCache } from './cache.js';
+import { EncryptionManagerCore } from './encryption/manager-core.js';
 import { generateKey } from './serialization/key-generator.js';
 import { generateInteropKey } from './serialization/interop.js';
 import { decodeCounted, decodeTrusted } from './serialization/serializer.js';
@@ -206,9 +207,19 @@ describe('encrypted L1 hits: walk once, on a copy L1 keeps', () => {
     const rewritten = other.store.get('users:5')!;
     vi.clearAllMocks();
 
-    // The hit copies and starts decrypting before it yields; the rewrite
-    // lands while it decodes.
+    // On Node.js the hit decodes inside the get() call, which leaves no room
+    // for a race. A decrypt that suspends, as WebCrypto's does on Workers,
+    // does: the hit copies and starts decrypting before it yields, and the
+    // rewrite lands while it decodes.
+    const decryptNow = EncryptionManagerCore.prototype.decryptNow;
+    const suspends = vi
+      .spyOn(EncryptionManagerCore.prototype, 'decryptNow')
+      .mockImplementationOnce(async function (this: EncryptionManagerCore, ...args) {
+        return decryptNow.apply(this, args);
+      });
+    onTestFinished(() => suspends.mockRestore());
     const hit = cache.get('users:5');
+    expect(suspends).toHaveBeenCalledTimes(1);
     l1Of(cache).set('users:5', rewritten, 3600_000, 'users');
     expect(await hit).toEqual({ id: 5 });
 
