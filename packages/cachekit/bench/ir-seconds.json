@@ -26,7 +26,6 @@
   "wasm-encrypted-64kb": 124,
   "secure-set-get": 71,
   "get-l1-hit": 14,
-  "secure-get-l1-hit": 35,
   "wrap-l1-hit": 18,
   "wrap-l1-hit-metrics": 22,
   "get-l2-hit-metrics": 62,

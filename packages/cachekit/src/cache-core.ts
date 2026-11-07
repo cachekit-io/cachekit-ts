@@ -14,6 +14,7 @@ import type { InvalidationEvent } from './l1/types.js';
 import type { MetricsCollector, MetricsConfig } from './metrics/prometheus.js';
 import { checkDefaultLabels } from './metrics/labels.js';
 import { logError } from './logger.js';
+import { isThenable } from './utils/thenable.js';
 import { L1Cache, type L1Entry } from './l1/lru-cache.js';
 import { ReliabilityExecutor } from './reliability/executor.js';
 import {
@@ -1037,8 +1038,9 @@ export class CacheImpl implements SecureCache {
    * decodeL1Entry passes it, for a copy marked in trustedL1.
    *
    * Returns a Promise only when the decrypt suspends (see
-   * EncryptionLike.decryptNow): on Node.js an entry decodes in this call, so
-   * an L1 hit awaits nothing. A failure throws, or rejects that Promise.
+   * EncryptionLike.decryptNow): on Node.js, once the keys are derived, an
+   * entry decodes in this call, so an L1 hit awaits nothing. A failure throws,
+   * or rejects that Promise.
    */
   private decodeEntry<T>(
     bytes: Uint8Array,
@@ -1070,7 +1072,7 @@ export class CacheImpl implements SecureCache {
     // do NOT retry with the flipped flag: that would reintroduce exactly the
     // envelope-mode ambiguity the AAD binding exists to rule out.
     const plaintext = this.encryption.decryptNow(bytes, this.aadKey(key), useEnvelope);
-    return plaintext instanceof Promise
+    return isThenable(plaintext)
       ? plaintext.then((p) => this.decodePlaintext<T>(p, key, interop, useEnvelope, trusted))
       : this.decodePlaintext<T>(plaintext, key, interop, useEnvelope, trusted);
   }
@@ -1140,7 +1142,8 @@ export class CacheImpl implements SecureCache {
    * the L2 path runs — an L1 hit is no longer free, which is the price of not
    * keeping plaintext resident. For a plaintext cache it is a cast, so the
    * hit paths call this only when the cache encrypts and use a plaintext L1
-   * value as it is: awaiting even a settled promise costs a hit a microtask.
+   * value as it is, which leaves the plaintext hit with no call and no
+   * thenable check.
    *
    * Verify once, on the first hit. The bytes a fill gives L1 can be a buffer
    * the backend still holds (the one it returned, or the one setEntry gave
@@ -1193,25 +1196,26 @@ export class CacheImpl implements SecureCache {
         own = new Uint8Array(stored);
         decoded = this.decodeEntry<T>(own, key, interop);
       }
-      if (!(decoded instanceof Promise)) {
-        return this.servedFromL1(key, stored, own, interop, decoded.value);
+      if (!isThenable(decoded)) {
+        return this.trustL1Copy(key, stored, own, interop, decoded.value);
       }
     } catch (error) {
-      return this.dropL1Entry(key, error);
+      return this.failL1Read(key, error);
     }
     // The same steps once the decrypt settles (WebCrypto on Workers).
     return decoded
-      .then(({ value }) => this.servedFromL1(key, stored, own, interop, value))
-      .catch((error: unknown) => this.dropL1Entry(key, error));
+      .then(({ value }) => this.trustL1Copy(key, stored, own, interop, value))
+      .catch((error: unknown) => this.failL1Read(key, error));
   }
 
   /**
-   * decodeL1Entry's result once the entry decoded. `own` is the copy a first
-   * hit decoded: it is swapped into L1 in place of `stored` and marked in
-   * trustedL1, unless a rewrite, refresh, invalidation or eviction since
-   * l1.get won, in which case nothing is swapped and the copy is dropped.
+   * decodeL1Entry's result once the entry decoded, and the one place L1 trust
+   * is granted. `own` is the copy a first hit decoded: it is swapped into L1
+   * in place of `stored` and marked in trustedL1, unless a rewrite, refresh,
+   * invalidation or eviction since l1.get won, in which case nothing is
+   * swapped and the copy is dropped.
    */
-  private servedFromL1<T>(
+  private trustL1Copy<T>(
     key: string,
     stored: Uint8Array,
     own: Uint8Array | null,
@@ -1222,8 +1226,11 @@ export class CacheImpl implements SecureCache {
     return { value };
   }
 
-  /** decodeL1Entry's failure: drop the entry, count and log it, then apply the fail policy. */
-  private dropL1Entry(key: string, error: unknown): null {
+  /**
+   * decodeL1Entry's failure: drop the entry, count and log it, then apply the
+   * fail policy, rethrowing with degradation off and returning null with it on.
+   */
+  private failL1Read(key: string, error: unknown): null {
     this.l1?.invalidateByKey(key);
     this.recordFailure('l1_decrypt', error);
     logError(
@@ -1272,7 +1279,7 @@ export class CacheImpl implements SecureCache {
         const read = this.encryption
           ? this.decodeL1Entry<T>(key, l1Result, interop)
           : { value: l1Result as T };
-        const decoded = read instanceof Promise ? await read : read;
+        const decoded = isThenable(read) ? await read : read;
         if (decoded !== null) {
           if (probe) probe.servedBy = 'l1';
           else this.recordHit('l1');
@@ -1922,7 +1929,7 @@ export class CacheImpl implements SecureCache {
         if (this.encryption) {
           // Awaited only when the decrypt suspends (see decodeL1Entry).
           const read = this.decodeL1Entry(key, l1Value, false);
-          present = (read instanceof Promise ? await read : read) !== null;
+          present = (isThenable(read) ? await read : read) !== null;
         }
         if (present) {
           this.recordHit('l1');
@@ -2115,7 +2122,7 @@ export class CacheImpl implements SecureCache {
             const read = this.encryption
               ? this.decodeL1Entry<TResult>(cacheKey, l1Value, interop)
               : { value: l1Value as TResult };
-            const decoded = read instanceof Promise ? await read : read;
+            const decoded = isThenable(read) ? await read : read;
             if (decoded !== null) {
               this.recordHit('l1');
               if (timedFrom !== undefined) this.stopL1Timer(timedFrom);
@@ -2138,7 +2145,7 @@ export class CacheImpl implements SecureCache {
               const read = this.encryption
                 ? this.decodeL1Entry<TResult>(cacheKey, swrResult.value, interop)
                 : { value: swrResult.value as TResult };
-              decoded = read instanceof Promise ? await read : read;
+              decoded = isThenable(read) ? await read : read;
             } finally {
               // Decode failed — by rethrow (degradation off) or by null
               // (degradation on) — so the entry is dropped either way, and the

@@ -6,6 +6,7 @@ import {
   MASTER_KEY_BYTES,
   MASTER_KEY_HEX_LENGTH,
 } from '../constants.js';
+import { isThenable } from '../utils/thenable.js';
 
 const utf8 = new TextEncoder();
 
@@ -16,14 +17,6 @@ function aadComponent(text: string): Uint8Array {
   new DataView(component.buffer).setUint32(0, bytes.length, false);
   component.set(bytes, 4);
   return component;
-}
-
-/**
- * Whether a binding returned a Promise. The NAPI bindings return plain values,
- * and awaiting one would still cost a microtask hop on every Node operation.
- */
-function isThenable<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
-  return typeof (value as { then?: unknown }).then === 'function';
 }
 
 /** The EncryptionError decrypt() builds for a binding failure, for decryptNow() to throw or reject with. */

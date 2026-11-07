@@ -16,6 +16,7 @@ import {
   ValueTooLargeError,
 } from './errors.js';
 import { forgedEnvelope } from '../test/fixtures/forged-envelope.js';
+import { turnsToSettle } from '../test/fixtures/settle.js';
 import { MessagePackSerializer } from './serialization/serializer.js';
 import { EncryptionManagerCore } from './encryption/manager-core.js';
 import type { SecureCache, WrapOptionsBase } from './types/cache.js';
@@ -159,20 +160,6 @@ describe('Cache Integration', () => {
     // and awaiting even a settled promise costs the hit a microtask turn: the
     // promise a hit hands back must already be settled.
     describe('a plaintext L1 hit returns an already-settled promise', () => {
-      const turnsToSettle = async (promise: Promise<unknown>): Promise<number> => {
-        let settled = false;
-        promise.then(
-          () => (settled = true),
-          () => (settled = true)
-        );
-        let turns = 0;
-        while (!settled) {
-          await null;
-          turns++;
-        }
-        return turns;
-      };
-
       it('from get() and exists()', async () => {
         const alreadySettled = await turnsToSettle(Promise.resolve());
         await cache.set('test:settled', { data: 'value' });

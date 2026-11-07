@@ -30,6 +30,7 @@ import { EncryptionManager } from './encryption/manager.js';
 import { EncryptionManagerCore } from './encryption/manager-core.js';
 import { EncryptionError } from './errors.js';
 import { generateKey } from './serialization/key-generator.js';
+import { turnsToSettle } from '../test/fixtures/settle.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
 import type { L1Cache } from './l1/lru-cache.js';
@@ -386,20 +387,6 @@ describe('an encrypted L1 hit awaits only a decrypt that suspends', () => {
     await Promise.all(caches.splice(0).map((c) => c.close()));
   });
 
-  async function turnsToSettle(promise: Promise<unknown>): Promise<number> {
-    let settled = false;
-    promise.then(
-      () => (settled = true),
-      () => (settled = true)
-    );
-    let turns = 0;
-    while (!settled) {
-      await null;
-      turns++;
-    }
-    return turns;
-  }
-
   /**
    * An encrypted cache with L1 on. `suspends` gives it bindings that answer
    * with Promises, as the Workers bindings do, over the NAPI core, so the
@@ -512,6 +499,66 @@ describe('an encrypted L1 hit awaits only a decrypt that suspends', () => {
     expect(copy).not.toBe(backend.store.get('users:1'));
     expect(copy).toEqual(backend.store.get('users:1'));
     expect(backend.gets).toBe(reads);
+  });
+
+  // Before its keys are derived a cache decrypts through an async function,
+  // whose Promise is the engine's own: `instanceof` against a replaced global
+  // Promise misses it, and a Promise taken for a value is never awaited.
+  async function withReplacedPromise<T>(op: () => Promise<T>): Promise<T> {
+    const NativePromise = globalThis.Promise;
+    class ReplacedPromise<U> extends NativePromise<U> {}
+    globalThis.Promise = ReplacedPromise as PromiseConstructor;
+    try {
+      return await op();
+    } finally {
+      globalThis.Promise = NativePromise;
+    }
+  }
+
+  const VALUE = { ssn: LEAK_CANARY, id: 1 };
+  type Read = (cache: SecureCache, load: (id: number) => Promise<unknown>) => Promise<unknown>;
+  const KEY = generateKey('users', [1]);
+  const getKey: Read = (cache) => cache.get(KEY);
+  const existsKey: Read = (cache) => cache.exists(KEY);
+  const wrapped: Read = (_, load) => load(1);
+  it.each([
+    ['get() from L1', getKey, VALUE, true, false],
+    ['get() from L2', getKey, VALUE, false, false],
+    ['exists() from L1', existsKey, true, true, false],
+    ['wrap() with SWR from L1', wrapped, VALUE, true, false],
+    ['wrap() with no waitUntil bound from L1', wrapped, VALUE, true, true],
+  ] as const)(
+    '%s decodes when a library has replaced the global Promise, as zone.js does',
+    async (_, read, expected, fromL1, noWaitUntil) => {
+      const backend = new InMemoryBackend();
+      await makeCache(backend).set(KEY, VALUE);
+      const fresh = makeCache(backend, { swrRequiresWaitUntil: noWaitUntil });
+      if (fromL1) l1Of(fresh).set(KEY, backend.store.get(KEY)!, 3600_000, 'users');
+      const load = fresh.wrap(async (id: number) => ({ ssn: 'computed', id }), {
+        namespace: 'users',
+        ttl: 3600,
+      });
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      expect(await withReplacedPromise(() => read(fresh, load))).toEqual(expected);
+      expect(consoleSpy).not.toHaveBeenCalled();
+    }
+  );
+
+  it('exists() drops a substituted L1 entry when a library has replaced the global Promise', async () => {
+    const backend = new InMemoryBackend();
+    const writer = makeCache(backend);
+    await writer.set(KEY, VALUE);
+    await writer.set('users:other', { other: true });
+    const fresh = makeCache(backend);
+    l1Of(fresh).set(KEY, backend.store.get('users:other')!, 3600_000, 'users');
+    backend.store.delete(KEY);
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(await withReplacedPromise(() => fresh.exists(KEY))).toBe(false);
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '[cachekit] L1 decrypt failed — entry dropped:',
+      expect.stringContaining('Authentication verification failed')
+    );
   });
 
   it.each([
