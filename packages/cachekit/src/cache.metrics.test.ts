@@ -316,6 +316,30 @@ describe('Cache metrics wiring', () => {
     expect(await metricValue(registry, 'cachekit_circuit_breaker_state')).toBe(0);
   });
 
+  // A breaker gauge that rejects the write (here registered by the application
+  // without the default label) is reported, whether initialize() publishes the
+  // pre-load state or a state is set after load, and leaves the load succeeded.
+  it('a breaker gauge error is reported and does not fail the load', async () => {
+    const registry = new Registry();
+    new Gauge({ name: 'cachekit_circuit_breaker_state', help: 'app-owned', registers: [registry] });
+    const errors: Error[] = [];
+    const metrics = new CacheMetrics({
+      registry,
+      defaultLabels: { service: 'api' },
+      onError: (err) => errors.push(err),
+    });
+    metrics.setCircuitBreakerState('open');
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
+    metrics.setCircuitBreakerState('closed');
+    expect(errors).toHaveLength(2);
+    expect(errors.map((e) => e.message)).toEqual([
+      expect.stringContaining('"service"'),
+      expect.stringContaining('"service"'),
+    ]);
+    await metrics.recordError('timeout');
+    expect(await metricValue(registry, 'cachekit_errors_total', { error_type: 'timeout' })).toBe(1);
+  });
+
   it('records hits and misses through wrap(), including the L1 SWR path', async () => {
     const registry = new Registry();
     const cache = makeCache(registry);
