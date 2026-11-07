@@ -673,15 +673,14 @@ export class CacheMetrics implements MetricsCollector {
 const breakerValue = (state: 'closed' | 'open' | 'half-open'): number =>
   state === 'closed' ? 0 : state === 'half-open' ? 0.5 : 1;
 
-/** Wrap a thrown value as an Error without throwing: String() itself throws on
- * some values (a null-prototype object), and every caller is an error path
- * that must not escape. */
+/** Wrap a thrown value as an Error without throwing: String() throws on a
+ * null-prototype object, and instanceof on a Proxy whose getPrototypeOf trap
+ * throws. Every caller is an error path that must not escape. */
 function toError(error: unknown): Error {
-  if (error instanceof Error) return error;
   try {
-    return new Error(String(error));
+    return error instanceof Error ? error : new Error(String(error));
   } catch {
-    return new Error('a value that cannot be converted to a string was thrown');
+    return new Error('a thrown value could not be converted to an Error');
   }
 }
 

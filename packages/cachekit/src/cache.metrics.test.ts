@@ -340,25 +340,38 @@ describe('Cache metrics wiring', () => {
     expect(await metricValue(registry, 'cachekit_errors_total', { error_type: 'timeout' })).toBe(1);
   });
 
-  // String() throws on a null-prototype object, so reporting one must not.
-  it('a breaker gauge throwing a value String() rejects is reported and fails nothing', async () => {
+  // String() throws on a null-prototype object, and instanceof on a Proxy whose
+  // getPrototypeOf trap throws, so reporting either must not.
+  it('a breaker gauge throwing a value no Error can wrap is reported and fails nothing', async () => {
     const registry = new Registry();
     const gauge = new Gauge({
       name: 'cachekit_circuit_breaker_state',
       help: 'app-owned',
       registers: [registry],
     });
+    const thrown: unknown[] = [
+      Object.create(null),
+      new Proxy(
+        {},
+        {
+          getPrototypeOf: () => {
+            throw new Error('trap');
+          },
+        }
+      ),
+    ];
     gauge.set = () => {
-      throw Object.create(null);
+      throw thrown.shift();
     };
     const errors: Error[] = [];
     const metrics = new CacheMetrics({ registry, onError: (err) => errors.push(err) });
     metrics.setCircuitBreakerState('open');
     await vi.waitFor(() => expect(errors).toHaveLength(1));
     expect(() => metrics.setCircuitBreakerState('closed')).not.toThrow();
+    expect(thrown).toEqual([]);
     expect(errors.map((e) => e.message)).toEqual([
-      'a value that cannot be converted to a string was thrown',
-      'a value that cannot be converted to a string was thrown',
+      'a thrown value could not be converted to an Error',
+      'a thrown value could not be converted to an Error',
     ]);
     await metrics.recordError('timeout');
     expect(await metricValue(registry, 'cachekit_errors_total', { error_type: 'timeout' })).toBe(1);
