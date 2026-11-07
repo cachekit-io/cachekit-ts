@@ -387,7 +387,7 @@ export class CacheMetrics implements MetricsCollector {
       this.pendingBreaker = null;
       return true;
     } catch (error) {
-      this.initError = error instanceof Error ? error : new Error(String(error));
+      this.initError = toError(error);
       return false;
     }
   }
@@ -437,7 +437,7 @@ export class CacheMetrics implements MetricsCollector {
    * Proper error handling instead of silent failures.
    */
   private handleError(error: unknown, context: string): void {
-    const err = error instanceof Error ? error : new Error(String(error));
+    const err = toError(error);
 
     if (!this.invokeErrorHandler(err)) {
       logError(`[cachekit] Metrics error (${context}):`, err.message);
@@ -672,6 +672,18 @@ export class CacheMetrics implements MetricsCollector {
 
 const breakerValue = (state: 'closed' | 'open' | 'half-open'): number =>
   state === 'closed' ? 0 : state === 'half-open' ? 0.5 : 1;
+
+/** Wrap a thrown value as an Error without throwing: String() itself throws on
+ * some values (a null-prototype object), and every caller is an error path
+ * that must not escape. */
+function toError(error: unknown): Error {
+  if (error instanceof Error) return error;
+  try {
+    return new Error(String(error));
+  } catch {
+    return new Error('a value that cannot be converted to a string was thrown');
+  }
+}
 
 /**
  * No-op metrics implementation for when metrics are disabled.

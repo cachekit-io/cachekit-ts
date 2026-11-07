@@ -340,6 +340,30 @@ describe('Cache metrics wiring', () => {
     expect(await metricValue(registry, 'cachekit_errors_total', { error_type: 'timeout' })).toBe(1);
   });
 
+  // String() throws on a null-prototype object, so reporting one must not.
+  it('a breaker gauge throwing a value String() rejects is reported and fails nothing', async () => {
+    const registry = new Registry();
+    const gauge = new Gauge({
+      name: 'cachekit_circuit_breaker_state',
+      help: 'app-owned',
+      registers: [registry],
+    });
+    gauge.set = () => {
+      throw Object.create(null);
+    };
+    const errors: Error[] = [];
+    const metrics = new CacheMetrics({ registry, onError: (err) => errors.push(err) });
+    metrics.setCircuitBreakerState('open');
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
+    expect(() => metrics.setCircuitBreakerState('closed')).not.toThrow();
+    expect(errors.map((e) => e.message)).toEqual([
+      'a value that cannot be converted to a string was thrown',
+      'a value that cannot be converted to a string was thrown',
+    ]);
+    await metrics.recordError('timeout');
+    expect(await metricValue(registry, 'cachekit_errors_total', { error_type: 'timeout' })).toBe(1);
+  });
+
   it('records hits and misses through wrap(), including the L1 SWR path', async () => {
     const registry = new Registry();
     const cache = makeCache(registry);
