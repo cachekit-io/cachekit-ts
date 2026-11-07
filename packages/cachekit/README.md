@@ -886,13 +886,17 @@ circuit breaker, sets the circuit-breaker gauge. Caches that share a registry,
 prefix and `defaultLabels` values share one gauge series, which reads the state
 of whichever of them finished an operation last; caches with different label
 values report separate series. Every L1 write (a set, an L2 hit copied into L1,
-a delete, an invalidation) sets the two L1 gauges the same way, so a shared
-series reads the L1 of whichever cache wrote last.
+a delete, an invalidation) sets the two L1 gauges the same way, so once
+prom-client has loaded, a shared series reads the L1 of whichever cache wrote
+last.
 
 prom-client loads in the background, starting on the event-loop turn after the
 cache is created, and no cache operation waits for it. Metrics recorded while it
 loads, including the first operations' durations, are recorded once it has
-loaded.
+loaded. For the L1 gauges, each cache publishes only its latest L1 state, when
+its own load finishes. Caches sharing a series finish loading in the order they
+were created, so until the next L1 write after loading, the series reads the
+last-created cache's L1, not necessarily the last cache to write.
 
 If `metrics` is enabled but `prom-client` is not installed, the SDK reports the
 failure once through the library logger and metrics degrade to no-ops — never
