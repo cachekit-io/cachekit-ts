@@ -3,6 +3,7 @@ import { Counter, Gauge, Registry } from 'prom-client';
 import { createCache } from './cache.js';
 import { ConfigurationError } from './errors.js';
 import { CacheMetrics } from './metrics/prometheus.js';
+import { setLogger } from './logger.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
 import { InMemoryBackend, metricValue } from '../test/fixtures/metrics.js';
@@ -29,6 +30,14 @@ class FailingBackend implements Backend {
   async close(): Promise<void> {}
 }
 
+/** An Error whose message getter throws. */
+const unreadableError = (): Error =>
+  Object.defineProperty(new Error(), 'message', {
+    get() {
+      throw new Error('message getter threw');
+    },
+  });
+
 describe('Cache metrics wiring', () => {
   const caches: SecureCache[] = [];
 
@@ -49,6 +58,7 @@ describe('Cache metrics wiring', () => {
 
   afterEach(async () => {
     await Promise.all(caches.splice(0).map((c) => c.close()));
+    setLogger(null);
   });
 
   it('records misses and get operations', async () => {
@@ -375,6 +385,49 @@ describe('Cache metrics wiring', () => {
     ]);
     await metrics.recordError('timeout');
     expect(await metricValue(registry, 'cachekit_errors_total', { error_type: 'timeout' })).toBe(1);
+  });
+
+  // With no onError the library logger gets the error's message, and reading
+  // it can throw too, so neither report may let that escape.
+  it('a breaker gauge throwing an Error whose message getter throws is logged and fails nothing', async () => {
+    const logs: unknown[][] = [];
+    setLogger((message, error) => logs.push([message, error]));
+    const registry = new Registry();
+    const gauge = new Gauge({
+      name: 'cachekit_circuit_breaker_state',
+      help: 'app-owned',
+      registers: [registry],
+    });
+    gauge.set = () => {
+      throw unreadableError();
+    };
+    const metrics = new CacheMetrics({ registry });
+    metrics.setCircuitBreakerState('open');
+    await vi.waitFor(() => expect(logs).toHaveLength(1));
+    expect(() => metrics.setCircuitBreakerState('closed')).not.toThrow();
+    expect(logs).toEqual([
+      ['[cachekit] Metrics error (setCircuitBreakerState):', 'the error message could not be read'],
+      ['[cachekit] Metrics error (setCircuitBreakerState):', 'the error message could not be read'],
+    ]);
+    await metrics.recordError('timeout');
+    expect(await metricValue(registry, 'cachekit_errors_total', { error_type: 'timeout' })).toBe(1);
+  });
+
+  it('a load failing with an Error whose message getter throws is logged once and rejects nothing', async () => {
+    const logs: unknown[][] = [];
+    setLogger((message, error) => logs.push([message, error]));
+    class FailingRegistry extends Registry {
+      override registerMetric(): void {
+        throw unreadableError();
+      }
+    }
+    const metrics = new CacheMetrics({ registry: new FailingRegistry() });
+    metrics.setCircuitBreakerState('open');
+    await vi.waitFor(() => expect(logs).toHaveLength(1));
+    await expect(metrics.recordMiss()).resolves.toBeUndefined();
+    expect(logs).toEqual([
+      [expect.stringContaining('failed to initialize'), 'the error message could not be read'],
+    ]);
   });
 
   it('records hits and misses through wrap(), including the L1 SWR path', async () => {

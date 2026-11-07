@@ -408,7 +408,7 @@ export class CacheMetrics implements MetricsCollector {
         logError(
           '[cachekit] metrics are enabled but failed to initialize — install the optional ' +
             '`prom-client` peer dependency or set `metrics: false`:',
-          err.message
+          messageOf(err)
         );
       }
     }
@@ -440,7 +440,7 @@ export class CacheMetrics implements MetricsCollector {
     const err = toError(error);
 
     if (!this.invokeErrorHandler(err)) {
-      logError(`[cachekit] Metrics error (${context}):`, err.message);
+      logError(`[cachekit] Metrics error (${context}):`, messageOf(err));
     }
   }
 
@@ -681,6 +681,16 @@ function toError(error: unknown): Error {
     return error instanceof Error ? error : new Error(String(error));
   } catch {
     return new Error('a thrown value could not be converted to an Error');
+  }
+}
+
+/** Read an Error's message without throwing: toError() passes an Error
+ * through unchanged, and its message getter can throw too. */
+function messageOf(err: Error): string {
+  try {
+    return err.message;
+  } catch {
+    return 'the error message could not be read';
   }
 }
 
