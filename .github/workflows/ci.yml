@@ -23,8 +23,9 @@ jobs:
         run: bash .github/scripts/verify-tarball-selftest.sh
 
       # The instruction-count gate skips measuring when base and head hash
-      # alike: the hash must move when any file a workload loads changes.
-      - name: Instruction-count build hash self-test
+      # alike: the hash must move when any file a workload loads changes, and
+      # each kind of PR must get its base.
+      - name: Instruction-count build hash and base self-test
         run: bash .github/scripts/perf-ir-hash-selftest.sh
 
       # The release-order gate, run against a stubbed GitHub API: it must
