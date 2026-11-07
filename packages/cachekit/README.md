@@ -893,10 +893,10 @@ last.
 prom-client loads in the background, starting on the event-loop turn after the
 cache is created, and no cache operation waits for it. Metrics recorded while it
 loads, including the first operations' durations, are recorded once it has
-loaded. For the L1 gauges, each cache publishes only its latest L1 state, when
-its own load finishes. Caches sharing a series finish loading in the order they
-were created, so until the next L1 write after loading, the series reads the
-last-created cache's L1, not necessarily the last cache to write.
+loaded. For the L1 gauges, a cache that wrote to L1 while loading publishes only
+its latest L1 state, when its own load finishes. Until the next L1 write after
+loading, a shared series can therefore read a cache other than the last one to
+write.
 
 If `metrics` is enabled but `prom-client` is not installed, the SDK reports the
 failure once through the library logger and metrics degrade to no-ops — never
