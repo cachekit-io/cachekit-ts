@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { Counter, Gauge, Registry } from 'prom-client';
 import { createCache } from './cache.js';
 import { ConfigurationError } from './errors.js';
+import { CacheMetrics } from './metrics/prometheus.js';
 import type { SecureCache } from './types/cache.js';
 import type { Backend } from './backends/types.js';
 import { InMemoryBackend, metricValue } from '../test/fixtures/metrics.js';
@@ -162,6 +163,134 @@ describe('Cache metrics wiring', () => {
       expect(cb).toBeDefined();
       expect(cb?.values[0]?.value).toBe(0);
     });
+  });
+
+  // Once prom-client has loaded, every L1 write sets the two gauges directly:
+  // none goes through the awaiting updateL1Stats(), and the write-behind
+  // settle count goes through countOperation(), not recordOperation().
+  it('L1 writes set the L1 gauges without the async path once loaded', async () => {
+    const registry = new Registry();
+    const backend = new InMemoryBackend();
+    const cache = makeCache(registry, { backend });
+    const filler = makeCache(registry, { backend, l1: { enabled: false } });
+    await cache.get('ns:warm');
+    await vi.waitFor(async () => {
+      expect(await metricValue(registry, 'cachekit_misses_total')).toBe(1);
+    });
+    const updateL1Stats = vi.spyOn(CacheMetrics.prototype, 'updateL1Stats');
+    const recordOperation = vi.spyOn(CacheMetrics.prototype, 'recordOperation');
+    const entries = () => metricValue(registry, 'cachekit_l1_entries');
+    try {
+      await cache.set('ns:a', 'value'); // set
+      expect(await entries()).toBe(1);
+      await filler.set('ns:b', 'value');
+      expect(await cache.get('ns:b')).toBe('value'); // L2 hit backfills L1
+      expect(await entries()).toBe(2);
+      await cache.delete('ns:a'); // delete
+      expect(await entries()).toBe(1);
+      await cache.set('ns:a', 'value');
+      await cache.invalidate('params', { key: 'ns:a' }); // invalidate
+      expect(await entries()).toBe(1);
+      await cache.invalidate('global');
+      expect(await entries()).toBe(0);
+      expect(await metricValue(registry, 'cachekit_l1_memory_bytes')).toBe(0);
+
+      const wrapped = cache.wrap(async (id: number) => ({ id }), {
+        namespace: 'wb:fn',
+        ttl: 60,
+        writeBehind: true,
+      });
+      await wrapped(1); // write-behind fill, then its settle count
+      await vi.waitFor(async () => {
+        expect(
+          await metricValue(registry, 'cachekit_operations_total', {
+            operation: 'write_behind',
+            status: 'success',
+          })
+        ).toBe(1);
+      });
+      expect(await entries()).toBe(1);
+
+      expect(updateL1Stats).not.toHaveBeenCalled();
+      expect(recordOperation).not.toHaveBeenCalled();
+    } finally {
+      updateL1Stats.mockRestore();
+      recordOperation.mockRestore();
+    }
+  });
+
+  // The gauges hold whatever the last L1 write on either cache published, as
+  // they did when every write went through updateL1Stats(): writes made
+  // before prom-client loads land once it has, in order, and writes after it
+  // overwrite them. The expected values are the writing cache's own stats.
+  it('scrapes the L1 gauges of the last cache to write, before and after load', async () => {
+    const registry = new Registry();
+    const backend = new InMemoryBackend();
+    const a = makeCache(registry, { backend });
+    const b = makeCache(registry, { backend });
+    const statsOf = (cache: SecureCache) =>
+      (cache as unknown as { l1: { stats: { entries: number; memoryUsed: number } } }).l1.stats;
+    const gauges = async () => ({
+      entries: await metricValue(registry, 'cachekit_l1_entries'),
+      memoryUsed: await metricValue(registry, 'cachekit_l1_memory_bytes'),
+    });
+    // A turn of the event loop first, so the base's awaiting path has
+    // settled too and the test reads the same on either side of the change.
+    const expectLastWriter = async (cache: SecureCache) => {
+      await new Promise((resolve) => setImmediate(resolve));
+      const { entries, memoryUsed } = statsOf(cache);
+      expect(await gauges()).toEqual({ entries, memoryUsed });
+    };
+
+    // Before load: no turn of the event loop passes, so prom-client has not
+    // registered the gauges yet.
+    await a.set('ns:a1', 'a-value-1');
+    await a.set('ns:a2', 'a-value-two');
+    await b.set('ns:b1', 'b');
+    expect(registry.getSingleMetric('cachekit_l1_entries')).toBeUndefined();
+    await vi.waitFor(async () => {
+      expect((await gauges()).entries).toBe(1);
+    });
+    await expectLastWriter(b);
+
+    // After load.
+    await a.set('ns:a3', 'a-value-three');
+    await expectLastWriter(a);
+    expect(await b.get('ns:a3')).toBe('a-value-three'); // backfill into b
+    await expectLastWriter(b);
+    await a.delete('ns:a1');
+    await expectLastWriter(a);
+    await b.invalidate('params', { key: 'ns:b1' });
+    await expectLastWriter(b);
+    await a.invalidate('global');
+    await expectLastWriter(a);
+    expect(await gauges()).toEqual({ entries: 0, memoryUsed: 0 });
+  });
+
+  // An L1 write in the turn prom-client finishes registering (here queued
+  // from the registry's own registration hook) lands after every write made
+  // before load, never under one.
+  it('an L1 write as prom-client finishes loading is not overwritten by earlier ones', async () => {
+    let invalidated: Promise<void> | undefined;
+    class ObservedRegistry extends Registry {
+      override registerMetric(metric: Parameters<Registry['registerMetric']>[0]): void {
+        super.registerMetric(metric);
+        if ((metric as unknown as { name: string }).name === 'cachekit_circuit_breaker_state')
+          queueMicrotask(() => {
+            invalidated = cache.invalidate('global');
+          });
+      }
+    }
+    const registry = new ObservedRegistry();
+    const cache = makeCache(registry);
+    await cache.set('ns:a', 'a');
+    await cache.set('ns:b', 'bb');
+    expect(registry.getSingleMetric('cachekit_l1_entries')).toBeUndefined();
+    await vi.waitFor(() => expect(invalidated).toBeDefined());
+    await invalidated;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await metricValue(registry, 'cachekit_l1_entries')).toBe(0);
+    expect(await metricValue(registry, 'cachekit_l1_memory_bytes')).toBe(0);
   });
 
   it('records hits and misses through wrap(), including the L1 SWR path', async () => {
