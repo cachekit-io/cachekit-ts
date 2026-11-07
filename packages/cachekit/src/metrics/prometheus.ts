@@ -245,6 +245,8 @@ export class CacheMetrics implements MetricsCollector {
   private initFailed = false;
   /** The latest L1 stats set before prom-client loaded, published by initialize(). */
   private pendingL1: [entries: number, memoryBytes: number] | null = null;
+  /** The latest breaker state set before prom-client loaded, published by initialize(). */
+  private pendingBreaker: 'closed' | 'open' | 'half-open' | null = null;
 
   constructor(config: MetricsConfig = {}) {
     this.prefix = config.prefix ?? 'cachekit';
@@ -380,7 +382,9 @@ export class CacheMetrics implements MetricsCollector {
 
       this.isReady = true;
       if (this.pendingL1) this.writeL1Gauges(...this.pendingL1);
+      if (this.pendingBreaker) this.writeBreakerGauge(this.pendingBreaker);
       this.pendingL1 = null;
+      this.pendingBreaker = null;
       return true;
     } catch (error) {
       this.initError = error instanceof Error ? error : new Error(String(error));
@@ -649,13 +653,19 @@ export class CacheMetrics implements MetricsCollector {
    */
   setCircuitBreakerState(state: 'closed' | 'open' | 'half-open'): void {
     if (this.isReady) {
-      try {
-        this.circuitBreakerGauge?.set(this.defaultLabels, breakerValue(state));
-      } catch (error) {
-        this.handleError(error, 'setCircuitBreakerState');
-      }
+      this.writeBreakerGauge(state);
     } else if (!this.initFailed) {
-      void this.updateCircuitBreakerState(state);
+      // Before load only the latest state matters, as in setL1Stats().
+      if (this.pendingBreaker === null) void this.whenReady();
+      this.pendingBreaker = state;
+    }
+  }
+
+  private writeBreakerGauge(state: 'closed' | 'open' | 'half-open'): void {
+    try {
+      this.circuitBreakerGauge?.set(this.defaultLabels, breakerValue(state));
+    } catch (error) {
+      this.handleError(error, 'setCircuitBreakerState');
     }
   }
 }
