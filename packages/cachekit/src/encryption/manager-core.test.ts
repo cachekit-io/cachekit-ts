@@ -455,12 +455,13 @@ describe('EncryptionManagerCore keyring config (previousMasterKeys)', () => {
 // a caller of the public methods (see decrypt()). One failing binding run
 // through both must give the same error.
 describe('decryptNow() and encryptNow() fail as decrypt() and encrypt() do', () => {
-  /** What `call` threw or rejected with. */
+  /** The Error `call` threw or rejected with. The manager never fails with anything else. */
   async function failureOf(call: () => unknown): Promise<Error> {
     try {
       await call();
     } catch (error) {
-      return error as Error;
+      if (error instanceof Error) return error;
+      throw new Error('the call failed with a non-Error', { cause: error });
     }
     throw new Error('the call succeeded');
   }
