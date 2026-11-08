@@ -16,8 +16,9 @@
 #
 # With BASE_PACKAGE (a core's release PR, from perf-ir-base.sh), the base is
 # the head with only that package checked out at BASE_SHA, its files the
-# release lacks removed. Its package.json keeps the head's dependency fields,
-# which the head's pnpm-lock.yaml resolves, so a bump since the tag does not
+# release lacks removed. Its package.json keeps the head's dependency fields
+# and dependenciesMeta, which the head's pnpm-lock.yaml records and the frozen
+# install checks, so a bump since the tag does not
 # fail the base's frozen install; both trees then build the core with the
 # same dependencies, so that drift goes unmeasured here (the PR that bumped it
 # was measured). The base's workload list still comes from BASE_SHA's bench
@@ -69,7 +70,7 @@ if [[ ${1:-} == trees ]]; then
     git -C "$root/base" checkout --quiet --detach "$(git rev-parse HEAD)"
     git -C "$root/base" checkout --quiet --no-overlay "$BASE_SHA" -- "$BASE_PACKAGE"
     manifest=$BASE_PACKAGE/package.json
-    fields='["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]'
+    fields='["dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "dependenciesMeta"]'
     deps="with_entries(select(.key | IN(${fields}[])))"
     if [[ $(jq -c "$deps" "$root/base/$manifest") != "$(jq -c "$deps" "$root/head/$manifest")" ]]; then
       echo "::warning::$manifest's dependencies changed since its tag: the base builds the tagged core with the head's, so this PR does not measure that change"
