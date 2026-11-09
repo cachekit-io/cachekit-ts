@@ -6,8 +6,10 @@ name: Instruction counts
 # Instruction counts move with the machine, Node and valgrind, so nothing is
 # compared against a figure recorded elsewhere. A release-please PR is
 # measured against that package's last release tag instead
-# (.github/scripts/perf-ir-base.sh). The verdict per workload goes to one PR
-# comment, edited in place.
+# (.github/scripts/perf-ir-base.sh); a core's release PR takes only that
+# core's package from the tag, so it measures the core's code, not SDK drift
+# (two exceptions: .github/scripts/perf-ir.sh).
+# The verdict per workload goes to one PR comment, edited in place.
 #
 # The shards split the workloads (balanced on bench/ir-seconds.json), each
 # building both trees, so the check finishes inside 30 minutes. The base job picks the base once, so every
@@ -40,6 +42,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       sha: ${{ steps.base.outputs.sha }}
+      package: ${{ steps.base.outputs.package }}
       label: ${{ steps.base.outputs.label }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -79,6 +82,7 @@ jobs:
       - name: Check out the base and head trees
         env:
           BASE_SHA: ${{ needs.base.outputs.sha }}
+          BASE_PACKAGE: ${{ needs.base.outputs.package }}
         run: bash .github/scripts/perf-ir.sh trees
 
       - name: Setup Rust
@@ -126,6 +130,7 @@ jobs:
       # 0.03%, far under the 0.4% A/A limit.
       - name: Gate the PR against its base
         env:
+          BASE_PACKAGE: ${{ needs.base.outputs.package }}
           IR_ARGS: --shard ${{ matrix.shard }}/${{ env.SHARDS }} --repeats 3
         run: bash .github/scripts/perf-ir.sh measure
 
