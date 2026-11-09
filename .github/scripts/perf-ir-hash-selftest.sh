@@ -144,6 +144,9 @@ core_api() {
   set_json "$1/$wasm/package.json" '.devDependencies = {"x": "^2.0.0"}'
   echo "WORKLOADS['added-since-tag'] = WORKLOADS.keygen;" >> "$1/packages/cachekit/bench/ir-workload.mjs"
 }
+# A core change since its tag to dependenciesMeta alone, which the head's
+# lockfile records like the dependency fields.
+core_meta() { set_json "$1/$wasm/package.json" '.dependenciesMeta = {"x": {"injected": true}}'; }
 out() { sed -n "s/^$2=//p" "$work/$1-out/base"; }
 assert() { # assert <label> <command>...: passes when the command succeeds
   if "${@:2}"; then echo "ok: $1"; else
@@ -161,7 +164,7 @@ from_tag() { [[ $(cat "$work/$1-ir/base/$3") == "$(g "$origin" show "$2:$3")" ]]
 absent() { [[ ! -e $work/$1-ir/base/$2 ]]; }
 # The base's core package.json: the head's dependency fields, the rest the tag's.
 manifest_mix() {
-  local fields='["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]'
+  local fields='["dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "dependenciesMeta"]'
   local deps="with_entries(select(.key | IN(${fields}[])))" rest="with_entries(select(.key | IN(${fields}[]) | not))"
   local base=$work/$1-ir/base/$wasm/package.json head=$work/$1-ir/head/$wasm/package.json
   [[ $(jq -c "$deps" "$base") == "$(jq -c "$deps" "$head")" &&
@@ -183,6 +186,10 @@ assert 'core release PR: a core file added since the tag is absent from the base
 assert "core release PR: the base's core package.json is the tag's with the head's dependencies" manifest_mix core-drift
 assert 'core release PR: a dependency change since the tag is warned about' warned core-drift
 assert 'core release PR: a workload added since the tag reads new' new_on_base core-drift added-since-tag
+
+DRIFT=core_meta pick core-meta "${rp}cachekit-core-wasm" - "$sdk"
+assert "core release PR: the base's core package.json carries the head's dependenciesMeta" manifest_mix core-meta
+assert 'core release PR: a dependenciesMeta change since the tag is warned about' warned core-meta
 
 pick sdk-change "${rp}cachekit-core-wasm" "$sdk" "$sdk"
 assert "a core release branch's PR that changes the SDK: the base is the whole core tag tree" \

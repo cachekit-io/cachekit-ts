@@ -18,10 +18,9 @@
 # the head with only that package checked out at BASE_SHA, its files the
 # release lacks removed. Its package.json keeps the head's dependency fields
 # and dependenciesMeta, which the head's pnpm-lock.yaml records and the frozen
-# install checks, so a bump since the tag does not
-# fail the base's frozen install; both trees then build the core with the
-# same dependencies, so that drift goes unmeasured here (the PR that bumped it
-# was measured). The base's workload list still comes from BASE_SHA's bench
+# install checks, so a bump since the tag does not fail the base's frozen
+# install; both trees then build the core with the same dependencies, so that
+# drift goes unmeasured here (the PR that bumped it was measured). The base's workload list still comes from BASE_SHA's bench
 # file, so a workload added since the tag reads `new` where the tagged core
 # cannot run it. If the head's SDK imports a core export by name that the tag
 # lacks, the base's build fails and every workload reads INCOMPLETE: the SDK
