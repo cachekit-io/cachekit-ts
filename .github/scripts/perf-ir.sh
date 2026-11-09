@@ -21,10 +21,12 @@
 # install checks, so a bump since the tag does not fail the base's frozen
 # install; both trees then build the core with the same dependencies, so that
 # drift goes unmeasured here. The PR that bumped it was measured, as every PR
-# to main is; a release PR that bumps it also changes pnpm-lock.yaml, so
-# perf-ir-base.sh measures it against the whole tagged tree. The base's
-# workload list still comes from BASE_SHA's bench file, so a workload added
-# since the tag reads `new` where the tagged core cannot run it. If the
+# to main is. A release PR that changes what the core installs also changes
+# pnpm-lock.yaml, so perf-ir-base.sh measures it against the whole tagged
+# tree; a change the lockfile does not record, such as a peer range the core
+# also takes as a devDependency, installs the same tree on both sides. The
+# base's workload list still comes from BASE_SHA's bench file, so a workload
+# added since the tag reads `new` where the tagged core cannot run it. If the
 # head's SDK imports a core export by name that the tag lacks, the base's
 # build fails and every workload reads INCOMPLETE: the SDK reads a new core
 # export off the module namespace instead.
