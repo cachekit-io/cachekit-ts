@@ -201,6 +201,7 @@ assert "core release PR: the base's lockfile is the head's, which records that c
 DRIFT=core_meta_dropped pick core-meta-dropped "${rp}cachekit-core-wasm" - "$sdk"
 assert "core release PR: the base's core package.json drops the dependenciesMeta the head dropped" \
   manifest_mix core-meta-dropped
+assert 'core release PR: a dependenciesMeta removal since the tag is warned about' warned core-meta-dropped
 
 pick sdk-change "${rp}cachekit-core-wasm" "$sdk" "$sdk"
 assert "a core release branch's PR that changes the SDK: the base is the whole core tag tree" \
