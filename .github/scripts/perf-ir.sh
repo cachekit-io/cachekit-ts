@@ -20,11 +20,12 @@
 # and dependenciesMeta, which the head's pnpm-lock.yaml records and the frozen
 # install checks, so a bump since the tag does not fail the base's frozen
 # install; both trees then build the core with the same dependencies, so that
-# drift goes unmeasured here (the PR that bumped it was measured). The base's workload list still comes from BASE_SHA's bench
-# file, so a workload added since the tag reads `new` where the tagged core
-# cannot run it. If the head's SDK imports a core export by name that the tag
-# lacks, the base's build fails and every workload reads INCOMPLETE: the SDK
-# reads a new core export off the module namespace instead.
+# drift goes unmeasured here; the PR that bumped it was measured, as every PR
+# to main is. The base's workload list still comes from BASE_SHA's bench file,
+# so a workload added since the tag reads `new` where the tagged core cannot
+# run it. If the head's SDK imports a core export by name that the tag lacks,
+# the base's build fails and every workload reads INCOMPLETE: the SDK reads a
+# new core export off the module namespace instead.
 #
 # IR_ARGS goes to both ir.mjs runs after --jobs 4, word-split: --shard, or
 # --only, --repeats and a larger --jobs for a quick local try.
