@@ -996,7 +996,10 @@ createCache({ backend: { apiKey: process.env.CACHEKIT_API_KEY!, telemetry: false
 
 Pass your own `metricsProvider` in the backend config to override the counters. Those counters, and the
 Prometheus hit and miss counters, count one outcome per read: a plain `get()` or
-`exists()` counts a hit by the layer that served it, or a miss. A `wrap()` call
+`exists()` counts a hit by the layer that served it, or a miss. A plain read
+that fails counts nothing, even when degradation returns `null` (`false` from
+`exists()`) in its place: a backend failure, or an L2 entry that fails to
+decrypt or decode. A `wrap()` call
 also counts one outcome: an L1 or L2 hit by the layer that served its value
 (a caller that joined another in-process call for the same key counts an L1
 hit), or one miss when it runs the function. A call that fails before either,
