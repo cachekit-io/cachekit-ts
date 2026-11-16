@@ -7,8 +7,9 @@
  * invalidation-event decoder. Spec: protocol/spec/interop-mode.md#decode-bounds.
  * The bounds themselves are `assertDecodeDepth`. The
  * ByteStorage envelope is decoded in Rust instead: `unpack` reaches
- * cachekit-core's `ByteStorage::retrieve`, which pre-scans the envelope bytes
- * before decoding them (cachekit-core 0.7.0 and later). The envelope entry
+ * cachekit-core's `ByteStorage::retrieve_data`, which checks every length the
+ * envelope declares against its bytes before reading them, and pre-scans any
+ * envelope its one-pass decode declines (cachekit-core 0.7.5). The envelope entry
  * point is covered in both lanes: the NAPI `unpack` here, and the wasm
  * `unpack` inside workerd in test/workers/decode-bounds.workers.test.ts. Both
  * share their assertions through test/fixtures/decode-bounds-vectors.ts.

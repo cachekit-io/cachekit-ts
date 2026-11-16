@@ -160,9 +160,9 @@ impl ByteStorage {
         env: &'env Env,
         packed: Uint8Array,
     ) -> Result<Uint8ArraySlice<'env>> {
-        let (data, _format) = self
+        let data = self
             .inner
-            .retrieve(&packed)
+            .retrieve_data(&packed)
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
         copy_to_js(env, &data)
     }
