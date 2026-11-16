@@ -26,7 +26,7 @@ This policy covers the `@cachekit-io/cachekit` and `@cachekit-io/cachekit-core-t
 
 This SDK does not implement LZ4. `ByteStorage.unpack` in both bindings —
 `cachekit-core-ts` (NAPI, native) and `cachekit-core-wasm` (Workers) — is a thin
-wrapper over cachekit-core's `ByteStorage::retrieve` → `StorageEnvelope::extract`,
+wrapper over cachekit-core's `ByteStorage::retrieve_data` → `StorageEnvelope::extract`,
 which bounds the decompressed output at `min(512 MiB, 1000 × compressed_len)`
 _before_ decompressing. The envelope's self-declared `original_size` is not
 trusted, and the xxHash3-64 checksum is unkeyed so it does not gate a forging

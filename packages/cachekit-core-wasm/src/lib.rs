@@ -124,8 +124,7 @@ impl ByteStorage {
     /// Unpack data, verifying xxHash3-64 integrity and decompressing LZ4.
     pub fn unpack(&self, packed: &[u8]) -> Result<Vec<u8>, JsError> {
         self.inner
-            .retrieve(packed)
-            .map(|(data, _format)| data)
+            .retrieve_data(packed)
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
