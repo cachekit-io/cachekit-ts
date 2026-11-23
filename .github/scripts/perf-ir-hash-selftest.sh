@@ -89,8 +89,11 @@ fi
 
 g() { git -C "$1" -c user.name=selftest -c user.email=selftest@example.invalid -c commit.gpgsign=false \
   -c core.hooksPath=/dev/null "${@:2}"; }
+# set_json <file> <jq filter>
+set_json() { jq "$2" "$1" > "$1.new" && mv "$1.new" "$1"; }
 # The released repo: core-wasm's release, then a later SDK release that also
-# changed the core, so each tag names a tree of its own.
+# changed the core, so each tag names a tree of its own. The core's tag carries
+# a dependenciesMeta, so a scenario can change or drop it.
 origin=$work/origin
 tree "$origin"
 cp "$scripts/../../release-please-config.json" "$scripts/../../.release-please-manifest.json" "$origin/"
@@ -98,6 +101,7 @@ sdk_tag=cachekit-v$(jq -r '.["packages/cachekit"]' "$origin/.release-please-mani
 wasm_tag=cachekit-core-wasm-v$(jq -r '.["packages/cachekit-core-wasm"]' "$origin/.release-please-manifest.json")
 sdk=packages/cachekit/dist/index.js glue=packages/cachekit-core-wasm/pkg/glue.js
 added=packages/cachekit-core-wasm/pkg/added.js wasm=packages/cachekit-core-wasm
+set_json "$origin/$wasm/package.json" '.dependenciesMeta = {"y": {"injected": true}}'
 g "$origin" init -q -b main
 g "$origin" add -A
 g "$origin" commit -q -m 'core-wasm release'
@@ -106,8 +110,6 @@ echo '// SDK release' | tee -a "$origin/$sdk" >> "$origin/$glue"
 g "$origin" commit -q -am 'SDK release'
 g "$origin" tag "$sdk_tag"
 
-# set_json <file> <jq filter>
-set_json() { jq "$2" "$1" > "$1.new" && mv "$1.new" "$1"; }
 # pick <scenario> <PR head branch> <PR file|-> <file>...: append to each <file>
 # on main after the releases (and run $DRIFT on the repo, if set), then open
 # the PR. A release PR edits what release-please edits: the package's version,
@@ -144,6 +146,13 @@ core_api() {
   set_json "$1/$wasm/package.json" '.devDependencies = {"x": "^2.0.0"}'
   echo "WORKLOADS['added-since-tag'] = WORKLOADS.keygen;" >> "$1/packages/cachekit/bench/ir-workload.mjs"
 }
+# A core change since its tag to dependenciesMeta alone, which the head's
+# lockfile records like the dependency fields: changed, or dropped.
+core_meta() {
+  set_json "$1/$wasm/package.json" '.dependenciesMeta = {"x": {"injected": true}}'
+  echo '# dependenciesMeta' >> "$1/pnpm-lock.yaml"
+}
+core_meta_dropped() { set_json "$1/$wasm/package.json" 'del(.dependenciesMeta)'; }
 out() { sed -n "s/^$2=//p" "$work/$1-out/base"; }
 assert() { # assert <label> <command>...: passes when the command succeeds
   if "${@:2}"; then echo "ok: $1"; else
@@ -161,7 +170,7 @@ from_tag() { [[ $(cat "$work/$1-ir/base/$3") == "$(g "$origin" show "$2:$3")" ]]
 absent() { [[ ! -e $work/$1-ir/base/$2 ]]; }
 # The base's core package.json: the head's dependency fields, the rest the tag's.
 manifest_mix() {
-  local fields='["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]'
+  local fields='["dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "dependenciesMeta"]'
   local deps="with_entries(select(.key | IN(${fields}[])))" rest="with_entries(select(.key | IN(${fields}[]) | not))"
   local base=$work/$1-ir/base/$wasm/package.json head=$work/$1-ir/head/$wasm/package.json
   [[ $(jq -c "$deps" "$base") == "$(jq -c "$deps" "$head")" &&
@@ -183,6 +192,16 @@ assert 'core release PR: a core file added since the tag is absent from the base
 assert "core release PR: the base's core package.json is the tag's with the head's dependencies" manifest_mix core-drift
 assert 'core release PR: a dependency change since the tag is warned about' warned core-drift
 assert 'core release PR: a workload added since the tag reads new' new_on_base core-drift added-since-tag
+
+DRIFT=core_meta pick core-meta "${rp}cachekit-core-wasm" - "$sdk"
+assert "core release PR: the base's core package.json carries the head's dependenciesMeta" manifest_mix core-meta
+assert 'core release PR: a dependenciesMeta change since the tag is warned about' warned core-meta
+assert "core release PR: the base's lockfile is the head's, which records that change" head_outside_core core-meta
+
+DRIFT=core_meta_dropped pick core-meta-dropped "${rp}cachekit-core-wasm" - "$sdk"
+assert "core release PR: the base's core package.json drops the dependenciesMeta the head dropped" \
+  manifest_mix core-meta-dropped
+assert 'core release PR: a dependenciesMeta removal since the tag is warned about' warned core-meta-dropped
 
 pick sdk-change "${rp}cachekit-core-wasm" "$sdk" "$sdk"
 assert "a core release branch's PR that changes the SDK: the base is the whole core tag tree" \

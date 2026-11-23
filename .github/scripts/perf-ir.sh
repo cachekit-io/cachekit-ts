@@ -18,14 +18,18 @@
 # the head with only that package checked out at BASE_SHA, its files the
 # release lacks removed. Its package.json keeps the head's dependency fields
 # and dependenciesMeta, which the head's pnpm-lock.yaml records and the frozen
-# install checks, so a bump since the tag does not
-# fail the base's frozen install; both trees then build the core with the
-# same dependencies, so that drift goes unmeasured here (the PR that bumped it
-# was measured). The base's workload list still comes from BASE_SHA's bench
-# file, so a workload added since the tag reads `new` where the tagged core
-# cannot run it. If the head's SDK imports a core export by name that the tag
-# lacks, the base's build fails and every workload reads INCOMPLETE: the SDK
-# reads a new core export off the module namespace instead.
+# install checks, so a bump since the tag does not fail the base's frozen
+# install; both trees then build the core with the same dependencies, so that
+# drift goes unmeasured here. The PR that bumped it was measured, as every PR
+# to main is. A release PR that changes what the core installs also changes
+# pnpm-lock.yaml, so perf-ir-base.sh measures it against the whole tagged
+# tree; a change the lockfile does not record, such as a peer range the core
+# also takes as a devDependency, installs the same tree on both sides. The
+# base's workload list still comes from BASE_SHA's bench file, so a workload
+# added since the tag reads `new` where the tagged core cannot run it. If the
+# head's SDK imports a core export by name that the tag lacks, the base's
+# build fails and every workload reads INCOMPLETE: the SDK reads a new core
+# export off the module namespace instead.
 #
 # IR_ARGS goes to both ir.mjs runs after --jobs 4, word-split: --shard, or
 # --only, --repeats and a larger --jobs for a quick local try.
