@@ -1,5 +1,7 @@
 # @cachekit-io/cachekit
 
+**Caching for Python, TypeScript and Rust, with opt-in zero-knowledge encryption, circuit breakers and stampede protection.**
+
 Backend-agnostic caching for TypeScript/Node.js — works with Redis, Memcached, File, Workers KV, or CacheKit Cloud. Hybrid TypeScript-Rust design with L1 in-memory cache, SWR, circuit breaker, and optional zero-knowledge encryption.
 
 > **Status: beta** — CacheKit is in closed beta ahead of 1.0. APIs are stabilising; minor breaking changes may still occur between 0.x releases.
