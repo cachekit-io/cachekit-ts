@@ -407,7 +407,9 @@ const cache = createCache({ backend });
 
 The on-disk format is shared with cachekit-py's File backend — filenames are `blake2b(key, digestSize=16)` hex and each file carries the same 14-byte header (magic, version, flags, big-endian expiry), so Python and TypeScript processes can point at the same cache directory. Writes are atomic (write-to-temp, fsync, rename), expired or corrupt entries are unlinked on read, and symlinks are rejected (`O_NOFOLLOW`). Implements `TTLBackend` (`getTTL`/`refreshTTL` read and rewrite the on-disk expiry header). Unlike cachekit-py there is no LRU size eviction yet — cap growth with TTLs. The shared format is specified in [cachekit-io/protocol](https://github.com/cachekit-io/protocol/blob/main/spec/file-backend-format.md): version-1 writers set reserved and flags to zero, and this backend fails closed on a future nonzero value (misses without deleting or exposing the payload). An entry is expired once the clock reaches its stored expiry second. The protocol's `file-backend.json` vectors run in this package's tests. The stored expiry is the current second plus the TTL's whole seconds, so an N-second TTL lives between N − 1 and N seconds, and a positive TTL under one second is already expired when read back. A positive TTL never becomes the permanent-entry sentinel.
 
-## Master-key rotation
+## Encryption
+
+### Master-key rotation
 
 Rotate the encryption master key without invalidating existing entries:
 configure up to **3** decrypt-only previous keys for the grace window. Reads
@@ -447,65 +449,6 @@ authentication: a miss under the default graceful degradation, an
 
 Full choreography (three-phase zero-miss rotation, compromise response):
 see the [key rotation runbook](https://docs.cachekit.io/concepts/key-rotation/).
-
-## Stampede protection
-
-A cold cache key hit by N concurrent callers would normally execute the wrapped
-function N times and issue N backend reads — on CacheKit Cloud
-that is N billed misses for one key.
-
-**In-process single-flight is always on**: concurrent `wrap()` calls for the
-same cache key share one in-flight promise, so the herd costs one L2 read, one
-compute, and one write. If the flight fails, every waiting caller receives the
-same rejection and the next call retries fresh.
-
-**Cross-process locking is opt-in** via `stampede.distributedLock`, for fleets
-where many processes can go cold on the same key simultaneously. It mirrors
-cachekit-py's flow: acquire the backend lock, double-check L2, compute, write,
-release. Contested processes retry the lock on an interval (never polling
-`get()` — on metered-misses backends a poll against a still-cold key is itself
-a billed miss), read L2 once more after `lockWaitMs`, and compute if it is
-still empty; the lock is best-effort mitigation, never a correctness gate, so
-lock-endpoint failures degrade to an unlocked compute.
-
-An uncontended miss skips the double-check: when the first lock request wins
-right after a clean L2 miss, nobody held the lock when we asked, so the read
-would almost always miss again (and be billed as a miss). On CacheKit Cloud that cuts a
-locked miss to `GET`, lock `POST`, `PUT` on the caller's path. A fill that
-lands between the miss and the lock grant is recomputed and written again;
-last write wins. After a waited grant, or a first read that failed rather
-than missed, the double-check still runs. cachekit-py makes the same skip on
-its `CachekitIOBackend` only, so on a Redis lock shared by Python and
-TypeScript processes only the TypeScript side skips it. The release is sent in the
-background; under `withExecutionContext()` on Workers it is registered with
-`ctx.waitUntil`, so the platform does not cancel it when the response returns.
-
-```typescript
-const cache = createCache({
-  backend: { url: 'redis://localhost:6379' }, // Redis and CacheKit Cloud backends support locks
-  stampede: {
-    distributedLock: true, // default false
-    lockTimeoutMs: 30000, // lock lease; size at/above expected recompute time
-    lockWaitMs: 5000, // max wait for the lock holder before computing anyway
-    lockPollMs: 100, // lock retry interval while contested
-  },
-});
-```
-
-Requires a lock-capable backend: Redis, a `CachekitIOBackendConfig` (the CacheKit Cloud
-lock endpoint is selected automatically), `cachekitioWithLocking()`, or
-`cachekitioFull()`. `createCache` throws `ConfigurationError` if
-`distributedLock` is requested on a backend without `acquireLock`/`releaseLock`.
-
-With `writeBehind` on, a locked miss still waits for its `PUT`: the write
-stays inside the lock (see [Write-Behind](#write-behind)).
-
-There is deliberately no general admission-control cap beyond L1's
-`maxConcurrentRefreshes`: on Node's single-threaded event loop concurrent
-misses don't compete for threads, single-flight collapses the per-key herd,
-and distinct-key miss floods are already bounded by backend timeouts plus the
-circuit breaker. A global semaphore would add queueing latency without a
-failure mode it prevents.
 
 ## Write-behind
 
@@ -679,6 +622,67 @@ as the normative reference. Both win over this README on any conflict.
 > closed (`reliability.degradation: false` in this SDK) it also replaces
 > ciphertext it cannot decode. See
 > [Shared entries are a contract](https://docs.cachekit.io/concepts/using-interop-mode/#shared-entries-are-a-contract).
+
+## Reliability
+
+### Stampede protection
+
+A cold cache key hit by N concurrent callers would normally execute the wrapped
+function N times and issue N backend reads — on CacheKit Cloud
+that is N billed misses for one key.
+
+**In-process single-flight is always on**: concurrent `wrap()` calls for the
+same cache key share one in-flight promise, so the herd costs one L2 read, one
+compute, and one write. If the flight fails, every waiting caller receives the
+same rejection and the next call retries fresh.
+
+**Cross-process locking is opt-in** via `stampede.distributedLock`, for fleets
+where many processes can go cold on the same key simultaneously. It mirrors
+cachekit-py's flow: acquire the backend lock, double-check L2, compute, write,
+release. Contested processes retry the lock on an interval (never polling
+`get()` — on metered-misses backends a poll against a still-cold key is itself
+a billed miss), read L2 once more after `lockWaitMs`, and compute if it is
+still empty; the lock is best-effort mitigation, never a correctness gate, so
+lock-endpoint failures degrade to an unlocked compute.
+
+An uncontended miss skips the double-check: when the first lock request wins
+right after a clean L2 miss, nobody held the lock when we asked, so the read
+would almost always miss again (and be billed as a miss). On CacheKit Cloud that cuts a
+locked miss to `GET`, lock `POST`, `PUT` on the caller's path. A fill that
+lands between the miss and the lock grant is recomputed and written again;
+last write wins. After a waited grant, or a first read that failed rather
+than missed, the double-check still runs. cachekit-py makes the same skip on
+its `CachekitIOBackend` only, so on a Redis lock shared by Python and
+TypeScript processes only the TypeScript side skips it. The release is sent in the
+background; under `withExecutionContext()` on Workers it is registered with
+`ctx.waitUntil`, so the platform does not cancel it when the response returns.
+
+```typescript
+const cache = createCache({
+  backend: { url: 'redis://localhost:6379' }, // Redis and CacheKit Cloud backends support locks
+  stampede: {
+    distributedLock: true, // default false
+    lockTimeoutMs: 30000, // lock lease; size at/above expected recompute time
+    lockWaitMs: 5000, // max wait for the lock holder before computing anyway
+    lockPollMs: 100, // lock retry interval while contested
+  },
+});
+```
+
+Requires a lock-capable backend: Redis, a `CachekitIOBackendConfig` (the CacheKit Cloud
+lock endpoint is selected automatically), `cachekitioWithLocking()`, or
+`cachekitioFull()`. `createCache` throws `ConfigurationError` if
+`distributedLock` is requested on a backend without `acquireLock`/`releaseLock`.
+
+With `writeBehind` on, a locked miss still waits for its `PUT`: the write
+stays inside the lock (see [Write-Behind](#write-behind)).
+
+There is deliberately no general admission-control cap beyond L1's
+`maxConcurrentRefreshes`: on Node's single-threaded event loop concurrent
+misses don't compete for threads, single-flight collapses the per-key herd,
+and distinct-key miss floods are already bounded by backend timeouts plus the
+circuit breaker. A global semaphore would add queueing latency without a
+failure mode it prevents.
 
 ## API reference
 

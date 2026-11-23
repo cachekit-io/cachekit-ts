@@ -1,4 +1,4 @@
-# cachekit-ts
+# @cachekit-io/cachekit
 
 [![npm](https://img.shields.io/npm/v/@cachekit-io/cachekit.svg)](https://www.npmjs.com/package/@cachekit-io/cachekit) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
