@@ -1,5 +1,7 @@
 # @cachekit-io/cachekit
 
+**Caching for Python, TypeScript and Rust, with opt-in zero-knowledge encryption, circuit breakers and stampede protection.**
+
 [![npm](https://img.shields.io/npm/v/@cachekit-io/cachekit.svg)](https://www.npmjs.com/package/@cachekit-io/cachekit) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/cachekit-io/cachekit-ts/blob/main/packages/cachekit/LICENSE)
 
 Backend-agnostic caching for TypeScript/Node.js — works with Redis, Memcached, File, Workers KV, or CacheKit Cloud.
