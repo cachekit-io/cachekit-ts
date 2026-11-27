@@ -1,13 +1,21 @@
 # Contributing to cachekit-ts
 
-Thanks for your interest. This project is in pre-1.0 development — see the [README](README.md#status) for what that means for stability. Bug reports, fixes, and well-scoped features are all welcome.
+Thanks for your interest. This project is in pre-1.0 development — see the release status in the [README](README.md) for what that means for stability. Bug reports, fixes, and well-scoped features are all welcome.
 
 ## Quick setup
 
 ```bash
+# Install dependencies
 pnpm install
+
+# Build all packages
 pnpm build
+
+# Run tests
 pnpm test
+
+# Lint
+pnpm lint
 ```
 
 Requirements: Node.js 22+, pnpm 11.11+, Rust stable (`pnpm build` compiles the native binding in `packages/cachekit-core-ts/` when that package's build task cache misses).
