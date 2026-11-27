@@ -1,6 +1,6 @@
 {
   "name": "@cachekit-io/cachekit",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Caching for Python, TypeScript and Rust, with opt-in zero-knowledge encryption, circuit breakers and stampede protection.",
   "type": "module",
   "main": "./dist/cjs/index.js",
